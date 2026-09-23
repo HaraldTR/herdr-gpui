@@ -13,6 +13,7 @@ def base_names(version):
     return [f"Herdr-{version}-universal-apple-darwin.dmg",
             f"Herdr-{version}-x86_64-unknown-linux-gnu.tar.gz",
             f"Herdr-{version}-aarch64-unknown-linux-gnu.tar.gz",
+            f"Herdr-{version}-x86_64-pc-windows-msvc.zip",
             f"Herdr-{version}.cdx.json",
             f"herdr-gpui-{version}-macos-universal.app.tar.gz",
             f"herdr-gpui-{version}-x86_64-unknown-linux-gnu-update.tar.gz",

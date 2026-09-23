@@ -12,18 +12,17 @@ Transparent margins keep the rounded tile aligned with other macOS Dock icons.
 | --- | --- |
 | <img src="herdr-ui-icon-clean.png" width="128" height="128" alt="Rounded Herdr icon"> | <img src="herdr-icon-square-clean.png" width="128" height="128" alt="Square Herdr icon"> |
 
-`herdr-ui-icon-clean.svg` and `.png` are the supplied rounded tile artwork;
-`herdr-icon-square-clean.svg` and `.png` are the full-square variant.
-The rounded PNG is used unchanged by the README and unbundled macOS runs;
-Linux packages use the square PNG. On macOS, run `just icons` to regenerate
-`Herdr.icns` from the rounded PNG
-using Swift/CoreGraphics and Apple's `iconutil`, with high-quality downsampling
-for each iconset resolution. This preserves the supplied artwork without a
-custom SVG renderer or third-party tools. When changing
-the SVG, also replace its 1024x1024 transparent PNG export before running the
-generator. Assets are checked in, so ordinary builds do not require Swift.
+`herdr-ui-icon-clean.svg` is the rounded tile source artwork;
+`herdr-icon-square-clean.svg` is the full-square variant.
+Their generated 1024x1024 PNG exports serve the README and unbundled macOS runs
+(rounded), and Linux packages (square). On macOS, install the SVG renderer with
+`brew install librsvg`, then run `just icons` after changing either SVG.
+The generator uses `rsvg-convert` to rasterize the vector artwork directly at
+each iconset resolution, rather than downsampling a PNG, and Apple's `iconutil`
+to package `Herdr.icns`. It also regenerates the PNG exports.
+Assets are checked in, so ordinary builds do not require Swift or librsvg.
 
-The same generator uses CoreImage to map the supplied PNG's luminance to a red
+The same generator uses CoreImage to map each rendered image's luminance to a red
 palette, retaining transparency, producing `herdr-worktree-1024.png`,
 `herdr-square-worktree-1024.png`, and `Herdr-worktree.icns`.
 These derived assets identify linked-worktree builds;

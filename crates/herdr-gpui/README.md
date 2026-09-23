@@ -1,7 +1,8 @@
 # Herdr Native Shell
 
-A GPUI 0.2.2 client for a Local daemon and saved SSH hosts, with macOS support
-and experimental Linux x86_64/ARM64 builds.
+A GPUI 0.2.2 client for a Local daemon and saved SSH hosts, with macOS support,
+experimental Linux x86_64/ARM64 builds, and an experimental Windows build with
+headless CI coverage. See [Windows](#windows) for what is unavailable there.
 It starts an installed local `herdr server` when absent; explicit socket and
 development targets remain attach-only. It does not link or install Herdr, stop
 daemons, spawn a local PTY, or emulate a terminal. Herdr's remote bridge may start
@@ -33,6 +34,10 @@ GPUI panel through **app updates** in the sidebar menu or **Herdr > Check for
 Updates...**. Background offers change the status version label without taking
 focus. Download and **Install and Restart** are separate approvals; closing the
 panel does not cancel work. Explicit **Cancel** requests cancellation.
+The panel shows archive download progress and an animated bar for work without a
+known percentage. Homebrew-managed installs use `brew upgrade --cask herdr-gpui`;
+if the installed version is behind the offer, `brew update` refreshes metadata
+before one retry. Homebrew upgrades cannot be cancelled mid-install.
 The existing UI timer polls the updater mailbox; workers own blocking work, and
 the restart helper is dispatched before CLI parsing or GPUI startup.
 
@@ -44,12 +49,26 @@ GNU systems, not arbitrary packages or a claim of full Linux app support.
 **QA > Show app update available** and the sidebar's **preview app update** use
 independent synthetic version `9999.0.0`: Download becomes Ready and Install and
 Restart only dismisses the panel. No preview action reaches the updater service or quits.
+**QA > Show update download progress (50%)** displays a half-filled bar;
+**QA > Show Homebrew update progress** displays the animated activity bar.
+Both remain visible until dismissed and never run a real update.
 See [update setup and QA](../../docs/updating.md).
 The protected release workflow builds both macOS and both Linux architectures
 with the required public key. Linux manual `Herdr-VERSION-TARGET.tar.gz` archives
 include desktop integration and notices; updater-only
 `herdr-gpui-VERSION-TARGET-update.tar.gz` archives contain one executable.
 Native two-version update/restart QA remains pending.
+
+The macOS **QA** menu offers **Show NeedsAttention toast**, **Show Finished
+toast**, **Show UpdateInstalled toast**, and **Show Custom toast**. Each adds a
+synthetic in-app toast for the selected endpoint, even when disconnected. Each
+preview replaces the visible card immediately, bypassing disabled delivery,
+delay, active-target suppression, and agent evidence checks. It uses the configured
+corner, normal kind-specific lifetime, and dismiss button.
+NeedsAttention and Finished previews retain the current target,
+when available, so clicking them tests normal navigation; other previews are inert.
+Creating previews does not contact the daemon or updater. Close any in-app
+panel first: toasts remain hidden while a panel is open.
 
 Spaces lists Local first, then saved hosts in the upstream catalog's order.
 Enabled hosts connect in the background with inactive terminal surfaces; disabled
@@ -80,7 +99,8 @@ seconds and return to Local; returning to Local never waits on a remote release.
 Servers without surface-switching support remain usable as single targets.
 
 Default and named-session startup discovers Herdr on PATH or in standard
-Homebrew, Cargo, or `~/.local/bin` locations, then waits up to 20 seconds to
+Homebrew, Cargo, or `~/.local/bin` locations (`herdr.exe` on Windows, where the
+Homebrew paths are skipped), then waits up to 20 seconds to
 connect without blocking the UI. If Herdr cannot be found, an installation modal
 offers an **Install** button that opens [herdr.dev](https://herdr.dev/); it never
 downloads or runs an installer. After installing, choose Terminal > Reconnect.
@@ -90,8 +110,30 @@ and its terminals running.
 
 ## Configuration
 
-GUI settings live in `$XDG_CONFIG_HOME/herdr/config-gpui.toml`, falling back to
-`~/.config/herdr/config-gpui.toml`. See
+GUI settings live in `$XDG_CONFIG_HOME/herdr/`, falling back to
+`~/.config/herdr/` and, on Windows, to `%APPDATA%\herdr\`:
+
+- `config-gpui.toml` contains managed defaults and documentation. Its first line
+  warns **DO NOT EDIT -- WILL BE OVERWRITTEN**. Startup and GUI config reload
+  replace it with the current release's defaults, exposing newly added settings.
+- `config-gpui.local.toml` contains your persistent overrides. Edit this file;
+  omitted keys inherit the managed defaults, nested tables merge key by key,
+  and arrays replace rather than append. Theme-picker saves also go here.
+
+Close older GPUI versions before upgrading: they still write theme changes to
+the old managed path rather than the local override file.
+
+The files are created automatically. Existing pre-managed configs are copied
+verbatim into the local file before the original is replaced. This preserves
+comments and all explicitly set values, including old defaults; remove a local
+key to follow the current default again. If a different local file already
+exists, migration stops without overwriting either file and asks you to merge
+them. A sibling `config-gpui.lock` serializes application writes across windows
+and processes. Invalid local settings keep the current in-memory configuration
+on reload. Native overrides do not modify Herdr's shared config; the shared
+settings controls described below explicitly edit that separate file.
+
+See
 [`config-gpui.example.toml`](config-gpui.example.toml) for a complete example.
 Font sizes use logical pixels (finite 8..48), not typographic points. Restart the
 GUI or invoke GUI config reload after edits; daemon config reload is separate.
@@ -100,7 +142,8 @@ Preferences has **Theme, Indicators, Sound, Toasts, Integrations, Font, and Gene
 tabs on one row, horizontally scrollable in narrow windows. Tab/Shift-Tab
 switches sections and reveals the selected tab when a font field is not focused.
 Font family and size controls save each native font role independently, retaining
-configured fallbacks and unrelated settings. Esc leaves a font editor before
+configured fallbacks and unrelated settings in `config-gpui.local.toml`.
+Esc leaves a font editor before
 closing the modal.
 
 Theme, indicator style, sound, and toast delivery are **shared with the local
@@ -116,7 +159,9 @@ edits and unsafe paths, and run off the UI thread. Symlinked config files and
 user-controlled symlink ancestors are refused rather than replaced. Save success
 is separate from the local daemon reload request, which is reported as queued,
 not acknowledged. Opening Preferences, its Reload button, and the daemon's reload
-signal reread the local file; there is no filesystem watcher.
+signal reread the local file; there is no filesystem watcher. On Windows shared
+settings are readable, but shared-file writes are unsupported; native settings
+remain editable through the Windows-capable local override writer.
 
 Existing native theme selections remain overrides. Choose **Follow Herdr** to
 use the shared theme, all 18 upstream palettes, custom colors, and automatic
@@ -125,15 +170,14 @@ as in the TUI. Status indicators always use the shared indicator style and share
 status colors, independent of a native terminal theme override. Terminal/default
 reset colors are projected to opaque native colors.
 
-Sound respects the shared global and per-agent settings and custom local paths.
-On macOS it uses `afplay`; absent or unusable custom audio falls back to the OS
-Glass/Ping sounds, not Herdr's bundled MP3s. Herdr toasts render in-app, System
-uses macOS notifications (subject to OS permissions and Focus), and Terminal
-delivery is not executed in the native app. Native audio/system delivery is not
-implemented on Linux. Semantic events are bounded, target-validated, and fenced
-by connection/boot; external effects are coordinated across app windows to avoid
-duplicate sounds/system notifications. Clipboard feedback remains a separate TUI
-preference and does not authorize remote clipboard writes.
+Sound uses the dedicated Rodio backend, shared global/per-agent settings and
+custom local paths, with Herdr's bundled sounds as fallbacks. The Sound tab offers
+an explicit QA preview. Shared Herdr toast delivery enables in-app notifications;
+Terminal and System delivery are not executed by this native client. Per-field
+`[notifications]` settings in the native local override file take precedence.
+Semantic events are bounded, target-validated, and fenced by connection/boot.
+Clipboard feedback has its own shared defaults and native overrides and does not
+authorize remote clipboard writes.
 
 Integrations are managed on the **selected daemon's host** through advertised
 `integration.list`/`integration.install` methods. Installation is only triggered
@@ -142,13 +186,89 @@ host, and refreshes the list afterward. No uninstall action is offered because
 the upstream binary endpoint does not advertise it. Native GitHub sign-in remains
 separate from agent integrations.
 
+The terminal face can also be resized for the current session from the View menu,
+the in-app menu, the command palette, or `cmd-=` / `cmd--` / `cmd-0`. Adjustments
+are clamped to the same 8..48 range, apply to the terminal only, and are never
+written to disk, so a reload or a restart returns to the configured size.
+
 Set top-level `confirm_close_tab = false` to close tabs without confirmation
 (including their running processes), and `show_agents = false` to hide the Agents
 section and give Spaces the full sidebar height. Both default to `true`. Pane
 closures still ask for confirmation. Reload GUI config or restart after editing.
 
+`[notifications]` in `config-gpui.local.toml` overrides shared toast preferences
+for GUI-local in-app delivery, independently per key:
+
+```toml
+[notifications]
+enabled = false
+delay_seconds = 1
+position = "bottom-right"
+```
+
+Delivery defaults off, matching upstream. The delay accepts integer seconds from
+0 through 3600; Custom notifications always bypass the delay. Corners are
+`top-left`, `top-right`, `bottom-left`, and `bottom-right`; an explicit corner in
+the notification overrides this default. Preferences shows these values read-only,
+following the existing config-file settings pattern. Reload applies them without
+restarting: pending deadlines use the new delay relative to original arrival,
+disabling clears normal pending/queued/visible cards, and re-enabling does not
+replay discarded notifications. Enabling establishes an arrival cutoff, so events
+already waiting in a connection inbox from the disabled period are discarded too.
+Failed reloads preserve current settings. QA
+previews remain available regardless of delivery settings.
+
+Enable a TUI-like compact sidebar with a top-level setting in `config-gpui.local.toml`
+(before any table headers):
+
+```toml
+layout = "compact"
+```
+
+The default is `layout = "normal"`. Compact mode hides workspace branch lines and PR change
+counts, removes row padding above and below labels, and tightens horizontal and
+heading spacing in both Spaces and Agents. PR numbers, status indicators, tree
+guides, and agent-name lines remain visible; font sizes and terminal spacing are
+unchanged. Reload GUI config or restart to apply it; there is no UI toggle yet.
+
+To customize spacing too, use a `[layout]` table **instead of** the top-level
+string. Existing spacing-only tables remain supported and use normal mode:
+
+```toml
+[layout]
+mode = "compact"
+sidebar_gap = 8
+```
+
+`sidebar_gap` (finite 0..64 logical pixels,
+default `8`) is blank space between the sidebar and the terminal beside it, so
+the first column does not sit against the divider; `0` restores the flush edge.
+The terminal keeps the remaining width, so the daemon is resized to the columns
+it actually has, and the gap is ignored while the sidebar is hidden.
+
+The `[clipboard_toast]` table controls the `copied to clipboard` flash shown
+after a terminal selection is copied. It is the one GUI setting that starts from
+the daemon's own config: `[ui.toast.clipboard]` in `config.toml` (resolved like
+the sound settings below) answers it first, so setting it there covers both
+clients, and each key here overrides that answer on its own.
+
+```toml
+[clipboard_toast]
+enabled = true
+position = "bottom-center"
+```
+
+Positions are `top-left`, `top-center`, `top-right`, `bottom-left`,
+`bottom-center`, and `bottom-right`, measured against the terminal area rather
+than the window. Both keys default to herdr's own defaults, shown at the bottom
+center, and the example file leaves them commented out so an unedited GUI keeps
+following the daemon config. Only these two keys are read from that file, it is
+never written, and an unreadable, oversized, malformed, or unrecognized value
+leaves the defaults standing.
+
 The `src/config.rs` module exposes `Config::load()` and
-`Config::path()`, both returning the crate's typed `Result`. `Config::theme()` resolves
+`Config::path()` (managed defaults) and `Config::local_path()` (user overrides),
+all returning the crate's typed `Result`. `Config::theme()` resolves
 built-ins or Ghostty files into a `Theme` with packed 24-bit RGB colors and all
 256 palette entries. Theme resolution is a separate fallible step from loading
 and validating TOML. Font sections can override either family or size without
@@ -156,8 +276,13 @@ repeating the other field. `FontConfig::line_height()` returns `size * 20 / 14`.
 The `[features]` table holds opt-in behaviors as `Features`, with every flag off
 by default and unknown keys rejected like the other sections; Preferences lists
 each flag and its state read-only, since only the config file turns one on.
-Config and theme I/O is synchronous; startup and reload schedule it on the GPUI
-background executor and apply the validated pair together. Failed reloads retain
+First-frame config and theme loading is read-only: no config lock, migration,
+writes, or fsync delays window creation. It reads local overrides (or the legacy
+file before migration) so the first frame uses the configured layout, theme, and
+font sizes. Config maintenance, font fallback discovery, and subsequent reloads
+run on the GPUI background executor. External theme files still require disk I/O;
+startup appearance timing is recorded at debug level. Additional
+windows start from the last successfully loaded pair. Failed reloads retain
 current settings. Theme selection cancels pending reload application so a delayed
 load cannot overwrite the newer selection.
 
@@ -171,6 +296,73 @@ Updater workers and the restart helper use typed `UpdateError` variants, preserv
 sources and recovery context while keeping remote diagnostics out of display text.
 Active regression tests cover typed sources, redaction, and recovery failures;
 the standalone updater harness includes these tests without GPUI dependencies.
+
+## Notification Sounds
+
+Sounds share the **local TUI configuration**, not `config-gpui.toml` or a remote
+host's files: `HERDR_CONFIG_PATH` takes precedence, then
+`$XDG_CONFIG_HOME/herdr/config.toml`, then `~/.config/herdr/config.toml`.
+Debug GUI builds and `--dev` still use the production `herdr` sound settings.
+The GUI only reads this file. Daemon `ReloadSoundConfig` messages reload it
+asynchronously; invalid reloads retain the last valid settings.
+
+```toml
+[ui.sound]
+enabled = true
+# path = "sounds/all.mp3"
+# done_path = "sounds/done.mp3"
+# request_path = "sounds/request.mp3"
+
+[ui.sound.agents]
+droid = "off"
+# claude = "off"
+# open_code = "on"
+
+[ui.toast]
+delay_seconds = 1
+```
+
+Sound is enabled by default; Droid alone defaults to off. Agent values are
+`default`, `on`, or `off`; the global switch takes precedence. Per-sound paths
+override `path`, and relative paths resolve beside the local TUI config.
+`HERDR_DISABLE_SOUND` or `NEXTEST`, when present, disables playback entirely.
+
+**QA > Play Sound** explicitly tests Rodio playback with the built-in Done sound
+on the same background worker. No daemon or active pane is needed. This manual
+test bypasses notification mute (including `enabled = false`), agent filters,
+custom sound paths, delay, and focus suppression. Environment/test suppression
+still applies, as do the bounded queue, one-second queue expiry, and playback
+budget below. Closing the window cancels the test; endpoint disconnects do not.
+
+Semantic notifications from all connected endpoints use the TUI's timing:
+`delay_seconds` is 0..3600 (default 1), Custom is immediate, delayed attention
+requires a Blocked agent, and Finished requires projected Done state. Completion
+evidence may wait up to one second from receipt, rechecking every 50 ms. New
+notifications replace pending ones for the same endpoint/pane. Only Finished is
+suppressed for the selected endpoint's active tab while the native window is
+focused (workspace focus is the fallback for events without a tab).
+Legacy `Notify`, terminal BEL, and terminal escape sequences never play audio.
+
+Built-in Done and Request MP3s are the upstream Herdr sounds, attributed in
+[SOUND-NOTICE.md](SOUND-NOTICE.md). Rodio 0.22 uses CPAL native output and
+Symphonia MP3 decoding, with no external players or temporary audio files.
+Custom sounds must be MP3 regular files of at most 16 MiB; unreadable, oversized,
+or undecodable files fall back to the built-in sound. Other codecs are not enabled.
+Embedded bytes and bounded custom-file reads are decoded in memory. Configuration,
+file reads, device initialization, and playback waits stay off the UI thread.
+
+Delivery and pending queues are bounded to 32 events per endpoint; the playback
+worker queues at most eight jobs, dropping overflow and jobs waiting over one
+second rather than playing stale bursts. Each job has a 15-second wall-clock
+budget, checked between setup operations and every 25 ms during playback; sources
+are also limited to 15 seconds. OS file/device setup calls cannot be interrupted.
+The worker opens the current default device per job and releases it afterward.
+Device errors stop the job; later notifications try the current default again,
+without replaying failed audio. Cancellation and timeout never trigger fallback.
+Disconnect,
+reconnect, boot change, endpoint removal, and window closure cancel old sounds.
+Multiple GUI/TUI clients each play their own sounds; there is no cross-client
+audio deduplication. Native playback and device-switch/unplug behavior require manual QA.
 
 ## Title Bar
 
@@ -214,16 +406,171 @@ double-click preferences (zoom/minimize/do nothing), fullscreen transitions and
 auto-hidden controls, theme changes, and modal/focus/IME behavior. Windows/Linux
 native-frame appearance also remains unverified by these macOS tests.
 
+## Terminal Selection And Copy
+
+Mouse-aware applications receive clicks, button releases, drags, and pointer
+motion. Hold Shift to select/copy locally instead, or Shift-right-click for the
+GUI pane menu. In applications without mouse reporting, selection and the pane
+menu work without Shift. A forwarded drag stays in the pane or popup where it
+started, including when the pointer moves outside it.
+
+Drag across the terminal to select cells; releasing the button copies them, drops
+the highlight, and shows the `copied to clipboard` flash described under
+[Configuration](#configuration). Selection is client-local: it reads the surface
+the client already has, sends nothing to the daemon, and asks it for nothing.
+
+A selection stays inside the pane it started in, and a drag that leaves the pane
+or the window selects up to its edge rather than into its neighbor. A selection
+inside a popup takes the popup's own cells, never the panes it covers. Because
+each end anchors on the half of a cell the pointer sat in, a single character is
+selectable, while a press that never crosses a midpoint selects nothing.
+
+Copied rows are separated by newlines. Wide graphemes copy once rather than
+twice, concealed cells copy as blanks so hidden content does not reach the
+clipboard, and trailing blanks are dropped only from rows selected through to the
+pane's right edge, where a terminal pads short lines. A copy is bounded, and one
+too large to copy reports in the status bar instead.
+
+The highlight is cleared by the release that copies it, and by a reconnect,
+detach, or endpoint switch. Cmd-V still sends semantic paste; there is no copy
+keystroke, because the release has already copied and nothing stays selected.
+
+## File Drops
+
+Drop files from your file manager onto a terminal pane or popup to paste their
+paths there, even if another pane is focused. Paths are quoted as POSIX shell
+words, separated by spaces; the drop never presses Enter. Local drops only paste
+paths; SSH drops read and transfer the selected files.
+Drops are limited to 256 paths and 64 KiB of quoted text. Non-UTF-8 paths and
+paths containing control characters are rejected rather than altered.
+
+On an SSH endpoint, a single supported image is transferred as described below.
+Other regular files and multiple-file drops are streamed using the SSH file-copy
+path below. POSIX quoting is not intended for Windows command shells.
+
+## SSH File Copies
+
+Drop regular files onto an SSH pane or popup to copy them to that host. A
+`Copying...` card shows the filename (or file count), transferred bytes, percentage,
+progress bar, and Cancel button. Once all files are received and the SSH processes
+exit successfully, their quoted remote paths are pasted into the original target.
+No partial list is pasted on failure. Directories and special files are rejected;
+symlinks to regular files are followed. A single recognized image uses the image
+bridge below instead; multiple-file drops copy their originals unchanged.
+
+One file-copy batch runs per window. Files are streamed in bounded 64 KiB chunks
+with 64-bit byte counters, so a 4 GiB ISO does not require a 4 GiB allocation.
+Progress counts bytes written to the SSH stream; `Finalizing copy...` waits for
+remote byte-count verification and SSH completion. This is not a checksum or
+durability guarantee. Files changing size during transfer are rejected.
+
+Copies use a separate noninteractive SSH connection with the same host-key and
+authentication policy as the terminal. Terminal input remains responsive, and
+typing is not queued behind a multi-gigabyte copy: wait for completion before
+submitting a command that needs its path. Switching hosts, losing the target,
+reconnecting, or closing the window cancels the copy. Cancel only terminates the
+copy process, never the Herdr daemon or its terminal connection.
+
+Each file keeps its basename inside a unique private `herdr-upload.*` directory
+under the remote `${TMPDIR:-/tmp}`. Existing files are never overwritten. Partial
+and cancelled copies are removed where possible; cleanup failures display a
+warning identifying the original host. Successfully pasted files remain until
+you remove them or the remote OS cleans its temporary directory: unlike image
+bridge files, they are not owned or deleted by Herdr on disconnect. Network loss
+can prevent cleanup, and kernel-blocked local filesystem operations cannot be
+forcibly interrupted. A copy stalls out after 30 seconds without progress.
+
+## Remote Images
+
+On a selected SSH endpoint, drop one PNG, JPEG, GIF, WebP, or BMP image onto a pane
+or popup to send it through Herdr's existing image bridge. Clipboard images use
+Cmd-V (normal paste, with text taking precedence) or Ctrl-V (Herdr TUI's default
+image-paste shortcut). Ctrl-V retains its normal terminal meaning when the
+clipboard has no image. A pasted absolute image-file path is also recognized,
+including the quoted/backslash-escaped paths used by terminal file drops.
+
+The remote daemon writes a temporary file and pastes its remote path into the
+target terminal. OpenCode or another agent can recognize that path as an image;
+the GUI never presses Enter or claims that the agent accepted an attachment.
+Files are connection-owned and Herdr removes them when the client disconnects.
+
+Images are limited to 16 MiB, with one queued/sending image per connection and
+at most four clipboard preparations per window. File reads, remote clipboard
+acquisition, and encoding run in the background. A FIFO reservation keeps
+subsequent typing and Enter behind the paste. Images within 16 MiB pass through
+unchanged. Larger static images are recompressed, then downscaled if necessary,
+to fit that same daemon limit. Transparency and EXIF orientation are preserved;
+the original file is never modified. A notification reports that the smaller
+copy was queued, not that an agent accepted it.
+
+Automatic resizing accepts at most 128 MiB of encoded source data and a bounded
+64-megapixel / 256-MiB decoded raster. Oversized GIF, WebP, and APNG images are
+rejected instead of silently losing animation. Invalid, too-large-to-process,
+and unsupported images show an `Image discarded` notification with the reason;
+no fallback local path is pasted for resize failures. Unreadable, empty, or
+nonregular image-file candidates retain the TUI's original path-paste fallback.
+TIFF, HEIC, and SVG are not image-bridge formats but can be dropped as ordinary
+files using SSH file copy.
+
+Switching endpoints, reconnecting, or invalidating the target cancels pending
+work. Cancelling an image already partially written closes that client connection
+to avoid corrupting framing; it does not stop the daemon. Slow/stalled transfers
+have a 60-second deadline. There is no upload acknowledgement or progress API.
+
+macOS uses the native pasteboard on a background executor; AppKit may materialize
+its data before the client can check its size. Linux uses `wl-paste` (Wayland) or
+`xclip` (X11) for explicit Ctrl-V image acquisition, with bounded output and a
+three-second acquisition deadline. Ordinary Linux paste retains GPUI's native
+clipboard reader and needs no helper; that existing synchronous API can still
+materialize image data on the UI thread. Install the matching utility for
+background image paste. Regular-file reads use bounded
+chunks and a three-second deadline between reads, but an OS-blocked network/FUSE
+filesystem operation cannot be forcibly interrupted. Such a read stays isolated
+from the UI and holds its bounded preparation slot until it returns.
+
+Local terminals retain text/path paste behavior, as in Herdr's remote-only image
+bridge. Windows SSH and image uploads remain unsupported. Native clipboard/drop
+and real SSH behavior require explicit desktop/host verification in addition to
+the mock-peer and headless tests.
+
 ## Terminal Links
 
 Click an explicit terminal hyperlink or a visible `http://` / `https://` URL to
 open it in your default browser. A hand cursor indicates a clickable destination.
+In a mouse-aware application, hold Shift while clicking to open a link locally
+instead of sending the click to the application.
 Only HTTP and HTTPS destinations are opened. Links inside a popup target that
-popup, and menus block activation. Dragging does not activate a link.
+popup, and menus block activation. Dragging does not activate a link: a drag
+across a link copies it as text, and the click that opens it is the one that
+never left the half-cell it pressed in.
 
 Plain URL detection is limited to one row within one pane; links that wrap or
 reach the right edge need explicit terminal hyperlink metadata. Other URI schemes
 and local file paths are not activated.
+
+## macOS Dock Badge
+
+The Dock icon shows the number of agents reporting `Done` (finished) or `Blocked`
+(waiting for input), and clears at zero. It covers all connected hosts and
+main windows, including minimized windows, without counting the same agent twice.
+Sidebar visibility, muted sounds, and dismissed toasts do not affect the badge.
+Existing attention is counted from each host's first snapshot at startup; no
+new completion or notification is needed. The first positive focus report waits
+until the terminal surface is ready so loading cannot acknowledge unseen work.
+
+The badge follows daemon status, just like the sidebar: foregrounding the app
+does not clear it locally. Finished agents clear according to the daemon's
+acknowledgement behavior: two completions become `1` after the daemon marks one
+seen. The daemon may acknowledge all panes in a viewed tab together. Blocked
+agents remain counted until their status changes, even after you view them.
+Disconnecting a host or closing a window removes its contribution, while other
+windows can keep the badge visible. Quitting the GUI stops monitoring; this is
+not a background notification service. Linux and Windows do not show this badge.
+
+To preview it without waiting for an agent, choose **QA > Enable badge** in the
+macOS menu bar. The preview shows at least `2` and stays on until you choose **QA > Disable badge preview**
+or quit. Disabling the preview restores daemon-driven behavior, so real agent
+attention can keep the badge visible. This QA setting is not saved.
 
 ## Supported
 
@@ -236,7 +583,10 @@ and local file paths are not activated.
   click flips; an active agent view names itself there instead. Client-local
   and persisted beside the sidebar width, as in the terminal client.
 - Resizable sidebar with width persisted per local daemon socket, shared across
-  host groups. Local workspace titles show repository owner avatars; remote
+  host groups. Drag the divider between Spaces and Agents up or down to resize
+  their sections; double-click it to restore an even split. The split is saved
+  across launches and retained while Agents is hidden.
+  Local workspace titles show repository owner avatars; remote
   workspaces use the GitHub fallback mark without resolving remote paths locally.
   Profile and owner avatars share a bounded public-image disk cache with 24-hour
   stale-while-refresh behavior; see [avatar caching](../../README.md#native-github-sign-in)
@@ -249,8 +599,13 @@ and local file paths are not activated.
   Herdr/Ghostty theme folders. Selecting a theme applies and saves it while
   preserving other GUI config settings and comments.
 - Right-click spaces for Rename, Close (Close group on non-linked parents with
-  multiple spaces sharing `worktree.key`), and New worktree on non-linked Git
-  parents. With `features.sidebar_hover_menu` enabled, resting the pointer on a
+  multiple spaces sharing `worktree.key`), and New worktree / Open worktree... on non-linked Git
+  parents, including spaces with a known Git branch but no worktree metadata yet.
+  Right-click also selects the space, switching the terminal and sidebar highlight
+  when the daemon confirms the selection. A compact header repeats the target name
+  and Git branch. Right-clicking another visible space while this menu is open
+  selects it and switches the menu in one click.
+  With `features.sidebar_hover_menu` enabled, resting the pointer on a
   space of the selected connection opens the same menu, and moving the pointer
   anywhere but into that menu closes it again; the flag is off by default, so
   spaces normally open their menu only on right-click, and a menu opened by
@@ -264,6 +619,33 @@ and local file paths are not activated.
   cancels; dialog input never reaches terminals or native creation actions.
   Context menus and dialogs anchor to the pointer and clamp to the viewport.
   Rename trims surrounding whitespace and rejects blank labels inline.
+- Open worktree... asynchronously lists the clicked parent's existing checkouts
+  through `worktree.list`, including already-open and detached checkouts but
+  excluding bare/prunable entries. Use Up/Down and Enter, the Open button, or
+  click a row. A centered modal with the standard dimmed backdrop focuses a native
+  search field, like Color Scheme. Typing immediately filters branch, label, and
+  daemon path case-insensitively, including Unicode text. Selection resets to the
+  first match; no matches is distinct from an empty repository listing. The
+  bounded, scrollable list retains original paths for opening, and IME composition
+  cannot accidentally select or dismiss it. There is no manual-path entry.
+  Rows fill the list width with status labels aligned at the right edge. The
+  top-right ESC control dismisses the modal; Cancel and Open remain in the footer.
+  A bottom status area appears only for errors or an in-flight open, not idle hints.
+  It accepts at most 512 returned entries with 8 KiB per
+  string field, rejecting malformed, duplicate-path, or oversized lists rather
+  than presenting a partial list. Empty results and failures are shown inline;
+  dismiss and reopen to refresh. Both list and open use the clicked
+  `workspace_id` and `trust_repository: false`; open sends the exact returned
+  `path` and `focus: true`, never a locally resolved path or guessed branch.
+  Unadvertised methods are rejected by the client worker. Correlated responses
+  are fenced by endpoint selection/generation, boot, and parent workspace
+  identity. While an open is pending, a branch-only parent may acquire the exact
+  non-linked repository identity returned by its list response; this expected
+  daemon update does not discard the correlated open result. Other identity
+  changes still invalidate the picker. Success selects and reveals the daemon-returned workspace using the
+  same focus flow as creation. Escape/outside click dismisses even while waiting;
+  this does not cancel queued daemon work, but late replies cannot reopen the
+  picker or steal this client's focus. All Git/filesystem work stays in Herdr.
 - Signed-in workspace menus include a compact, divided PR summary. The number/title
   is the last selectable menu action: click it or use arrows and Enter to open the
    validated URL. Cache-only menu opening shows prefetched results immediately,
@@ -289,6 +671,8 @@ and local file paths are not activated.
 - The top-right titlebar profile control starts native GitHub device sign-in on
   a signed-out click, shows the authenticated user's avatar, and offers Sign out
   on right-click. Signed-out workspace menus have no GitHub section or requests.
+  The signed-out GitHub icon and connected avatar share a 20px size and subtle
+  hover glow; authentication errors appear in the account panel, not a red border.
   It uses Herdr GPUI's public client ID `Iv23liurUcwxPjrdIFYT`, overridden by
   `[github].oauth_client_id`, then `HERDR_GITHUB_OAUTH_CLIENT_ID`. No client secret
   or private key is needed or shipped. The compact native macOS titlebar design
@@ -303,13 +687,22 @@ and local file paths are not activated.
   explicit `allow_plaintext_credentials = true` opt-in with a prominent warning,
   separate private credential file and atomic no-follow Unix writes; macOS
   development builds use that same store, enabled by default and warned about in
-  the profile panel. Signed macOS release builds still use Keychain. Sign-out suppresses environment tokens for this app session and
+  the profile panel. Signed macOS release builds still use Keychain. Windows has
+  neither store: the opt-in does not select the file there, saving a token
+  reports `CredentialUnsupported`, and sign-in says to use `GH_TOKEN` /
+  `GITHUB_TOKEN`. Sign-out suppresses environment tokens for this app session and
   fences late profile/avatar/PR results. Plaintext policy reloads re-evaluate the
   active credential, without reactivating an explicitly signed-out session.
   Disabling plaintext stops its session use but keeps the file; explicit sign-out
   still removes the saved file regardless of opt-in, or reports a safe error.
-  Token refresh is not implemented; an
-  expired GitHub App token requires reauthentication. No CLI authentication is used. See
+   Device-flow refresh tokens are saved alongside access tokens in the same
+   store. When restoring a session after restart or update, a rejected access
+   token is renewed automatically and the rotated pair is saved before loading
+   the profile again. Network and Keychain errors do not delete credentials;
+   environment tokens are never renewed or replaced by saved credentials.
+   Older versions saved only access tokens, so an expired legacy token needs
+   one more sign-in to obtain a refresh token. Revoked or expired refresh tokens
+   also require sign-in. No CLI authentication is used. See
   [setup, cancellation, scopes, and sign-out](../../README.md#native-github-sign-in).
 - Workspace actions retain the clicked ID and boot, revalidate before queueing,
   and reject changed close-group membership. Reconnect clears dialogs. Queue
@@ -334,6 +727,15 @@ and local file paths are not activated.
   `confirm_close_tab = false`. Escape or an outside left/right click dismisses
   the menu without sending terminal input.
 - Click workspace, tab, agent, or a visible split pane to focus through the API.
+- Right-click a visible pane, including an inactive split, for Rename, Split
+  Right, Split Down, Toggle Zoom, and Close without first focusing it. Actions
+  retain the clicked pane/tab/workspace and daemon boot, and reject stale
+  membership or a changed connection. Rename uses an IME-aware native field,
+  trims surrounding whitespace, and clears the custom label when blank. It
+  waits for the matching daemon response and reports failures inline. Close
+  always asks for confirmation with Cancel selected. Popups and stale retained
+  terminal frames block pane context actions. Escape or an outside left/right
+  click dismisses the menu without forwarding input to the terminal.
 - Native File/Terminal menus and creation buttons: **+ New Workspace** in the
   sidebar and a persistent 18px SVG **+** in a 44px-wide button beside the horizontally
   scrolling tab strip. Each tab has a 16px SVG close cross in a 24px hit target;
@@ -344,6 +746,9 @@ and local file paths are not activated.
   Cmd-Shift-D splits horizontally (new pane below). Cmd-Shift-] / Cmd-Shift-[
   cycles next/previous tab within the current workspace, wrapping at the ends.
   These shortcuts are native actions, not bytes sent to a terminal.
+- Cmd-Alt-N runs **Open Notification Target**, also available in Terminal and the
+  command palette. It uses the visible card's safe click path; stale, targetless,
+  queued, or menu-hidden cards do not navigate or change endpoint selection.
 - Cmd-1 through Cmd-9 focuses the corresponding numbered tab in the current
   workspace. Cmd-Alt-Left/Right/Up/Down focuses a pane in that direction;
   Cmd-Alt-] / Cmd-Alt-[ cycles next/previous pane within the current tab.
@@ -382,10 +787,62 @@ and local file paths are not activated.
 - Enter, Tab/BackTab, Escape, Backspace, arrows, navigation/editing keys,
   F1-F24, Control characters and modifiers on special keys. Option-printable
   input follows the macOS keyboard layout, including dead keys.
+- Pointer selection of terminal cells, copied to the clipboard on release with
+  a configurable flash. Selections stay within one pane or the popup above it,
+  anchor on half cells, and never reach the daemon.
 - Cmd-V sends semantic Paste; Cmd-Q or window close detaches without killing
   the daemon or its terminals. Window activation is reported to the daemon.
 - Resize uses the actual terminal canvas bounds and measured configured font cell width,
   excluding the native sidebar, tabs and status bar.
+- Semantic daemon notifications appear as nonmodal, host-labeled in-app toasts,
+  when enabled, including from background endpoints, without changing focus or
+  selection. A window-wide scheduler orders arrivals across coalesced host inboxes,
+  keeping one visible card, at most eight queued cards, and at most eight delayed
+  pending events. Each connection's ingress mailbox is separately bounded at eight.
+  Presentation-queue overflow drops the oldest waiting entries, not the visible
+  card. Ingress overflow conservatively retires all older cards for that endpoint
+  before delivering the surviving batch: a lost event may have invalidated a pane's
+  prior notification. This uses one loss flag, not an unbounded invalidation ledger.
+  A new event for
+  the same endpoint and pane replaces any pending, queued, or visible predecessor;
+  targetless events are not coalesced. Titles/bodies are inert plain text, stripped
+  of controls and bidi overrides and capped at 160/512 input characters.
+  Lifetimes begin at promotion: NeedsAttention 8 seconds, Finished 5,
+  UpdateInstalled 3, and Custom 5. The close button dismisses independently.
+  Disconnect, detach, replacement, and boot changes clear that endpoint's cards.
+  Finished always requires projected Done evidence, even at zero delay and never
+  without a pane. Working or missing evidence may wait until one second after
+  arrival, with 50ms rechecks on the UI poll loop; other states reject immediately.
+  Delayed NeedsAttention requires Blocked evidence. Grace is measured from arrival,
+  not added to the configured delay. The active endpoint's focused tab (or workspace
+  when no tab is specified) suppresses normal in-app delivery, regardless of outer
+  window focus; an identically focused background endpoint is not suppressed.
+  Requested corners are honored at wide sizes; below 720px all cards use bottom
+  right. Windows under 180px in either dimension hide cards. Menus and undersized
+  windows pause visible expiry and prevent queued promotion so cards receive a
+  visible lifetime after the obstruction closes.
+  Long text is clipped to keep cards bounded. Toast presentation and previews add
+  no extra sounds; semantic notification audio follows the independent
+  [sound policy](#notification-sounds). No OS notifications or terminal escapes
+  are performed. Clicking a targeted toast activates its
+  originating endpoint and focuses its pane, tab, or workspace through the API.
+  Targets are checked against the current snapshot, original boot, and connection;
+  deleted or reparented targets fail closed, without falling back to another space.
+  A target arriving before its snapshot can initialize during the first second,
+  within the same connection and known boot; after that it remains inert. Inferred
+  parents are frozen on initialization, so later snapshots cannot retarget a click.
+  Navigation waits for endpoint activation and dismisses only after the focus
+  request is queued (not daemon acknowledgement). An accepted click pauses that
+  card's expiry while navigation is pending; dismissal, same-pane replacement,
+  ingress loss, removed membership, and connection/boot changes still invalidate it.
+  Targetless Custom toasts stay
+  inert, and the close button only dismisses.
+  A busy connection inbox defers validation without blocking the UI. A contended
+  source inbox also defers focus release; the destination cannot activate before
+  the source release is acknowledged or its transport has drained. Returning to
+  Local remains an escape hatch: an unsent remote release retires that transport
+  without waiting. Pending
+  toast navigation keeps terminal input fenced until validation completes.
 
 Socket I/O belongs to `herdr-client`'s worker. A separate event thread drains all
 ordered events into a bounded latest-state cache. The UI samples changed state
@@ -417,19 +874,61 @@ GPUI native action/menu/keybinding patterns.
   and DejaVu Sans. No bundled Nerd Font.
   Private-use icons may be missing. Fonts and palettes are configured locally,
   not synchronized from the host terminal's theme.
-- No draggable scrollback UI, text selection/copy, mouse button/motion reporting, split dragging,
+- No draggable scrollback UI, split dragging,
   image rendering, or animated blinking.
-- No pane rename dialogs or horizontal wheel handling,
+- No horizontal wheel handling,
   server-owned keybindings, session picker, saved-host editing, or daemon
   stop/upgrade management.
 - IME uses a minimal transient buffer, not a local editable terminal document;
   composition appears in the status bar rather than inline. Key releases and
   physical-key/extended keyboard protocol metadata are not reported.
 - Popups have a basic centered text presentation, without native title/border
-  chrome. Only semantic notifications are delivered under local sound/toast
-  policy; legacy terminal escapes and remote clipboard writes are not executed.
+  chrome. Only semantic notifications get in-app toasts; legacy notification
+  commands and server clipboard writes are not executed. There is no notification
+  history.
 - Rendering is a simple two-pass cell painter, not an optimized damaged-row
   renderer. Large/high-frequency surfaces can consume significant CPU.
+
+## Windows
+
+Windows is experimental, not a supported platform. CI checks formatting, lints
+every target and feature, and runs workspace tests with default and all features
+on `windows-2025`, including headless UI and CLI tests. The release workflow
+builds and CLI-tests the optimized executable and publishes it as
+`Herdr-VERSION-x86_64-pc-windows-msvc.zip`; native window, rendering, input, and
+live-daemon behavior remain unproven. Local connections use the named pipe the Windows
+daemon binds, derived from the same socket path string upstream uses, so
+discovery and framing are the same code as on Unix. Receive deadlines are
+emulated with `PeekNamedPipe`, the one `unsafe` call in the workspace, because a
+named pipe has no receive timeout; send timeouts cannot be enforced at all
+there. Configuration and state
+follow upstream's Windows layout: `%APPDATA%\herdr` and `%LOCALAPPDATA%\herdr`,
+still overridden by `XDG_CONFIG_HOME` / `XDG_STATE_HOME` when they are set.
+
+These features are unavailable on Windows and say so rather than failing quietly:
+
+- **Saved SSH hosts.** The bridge gives the `ssh` child a socket pair as its
+  standard streams, which requires `OwnedFd`. Connecting to an SSH endpoint
+  reports `SSH endpoints are not supported on this platform`.
+- **In-app updates.** `release::target()` has no Windows updater asset (the
+  release zip is for manual download only), so the updater
+  stays disabled and reports that no standalone updater exists for this platform.
+  Homebrew delegation is macOS-only regardless.
+- **Saved GitHub credentials.** Neither the Keychain nor the private `0600` file
+  exists here, so `GH_TOKEN` / `GITHUB_TOKEN` are the only sources of a token.
+- **The avatar disk cache.** It depends on `openat`, `flock`, and POSIX
+  ownership and mode checks, so avatars stay in memory for the process lifetime.
+
+Starting a local `herdr server` looks for `herdr.exe` and uses
+`CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` in place of `process_group(0)`, so
+the daemon survives the GUI and no console window appears.
+
+Cross type-check it from a Mac or Linux machine with `just lint-windows`, which
+targets `x86_64-pc-windows-gnu` because those hosts cannot supply the MSVC C
+toolchain; CI lints the MSVC target on a Windows runner. `just lint-linux` is
+the matching check for Linux, in the Ubuntu 24.04 container CI uses, because a
+`cfg` gate that is wrong only on Linux is invisible from both macOS and the
+Windows cross-check.
 
 ## Build And Test
 
@@ -458,6 +957,19 @@ rejection, Unicode composition, and headless right-click/input routing.
 sizes, but does not validate OS IME candidate-window delivery or live daemon
 worktree creation/close.
 They do not replace an interactive smoke test against a live daemon.
+
+Notification policy tests use explicit times for evidence grace, delay changes,
+cross-host arrival order, queue bounds, replacement, promotion lifetimes, and
+hidden-card expiry. Mock-peer navigation tests cover clicks and the native command,
+including inbox contention, handoffs, stale targets, and input fences. To draw all
+four offline previews in an isolated native window at narrow/wide sizes:
+
+```sh
+cargo test --locked -p herdr-gpui --features integration-test --test live_gui native_notifications -- --ignored --nocapture
+```
+
+This native check verifies disabled/delayed policy bypass and inert offline
+commands, not live-daemon navigation or pixel-level notification glyph clipping.
 
 `just test-sidebar` runs isolated, daemon-free native fixtures on the active
 desktop. On macOS it checks exact-window clicks with a decoy key window, host

@@ -37,11 +37,12 @@ impl HerdrWindow {
         self.save_chrome();
     }
 
-    /// One file holds the whole chrome, so every save carries both fields.
+    /// One file holds the whole chrome, so every save carries all fields.
     pub(crate) fn save_chrome(&self) {
         if let Some(preferences) = &self.sidebar_preferences {
             preferences.save(crate::preferences::Chrome {
                 sidebar_width: self.sidebar_width,
+                sidebar_split: self.sidebar_split,
                 agent_sort: self.agent_sort,
             });
         }

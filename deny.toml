@@ -1,7 +1,8 @@
 # cargo-deny configuration. Run locally with `cargo deny check`.
 #
-# Evaluate every shipped target: both macOS architectures and experimental
-# x86_64/ARM64 GNU/Linux. Windows-only dependencies do not reach a shipped binary.
+# Evaluate every shipped target: both macOS architectures, experimental
+# x86_64/ARM64 GNU/Linux, and experimental x86_64 Windows. This set is pinned to
+# the release targets by scripts/release/test-release-security.py.
 
 [graph]
 targets = [
@@ -9,6 +10,7 @@ targets = [
     "x86_64-apple-darwin",
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
 ]
 all-features = true
 

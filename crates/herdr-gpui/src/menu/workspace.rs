@@ -35,15 +35,30 @@ impl WorkspaceTarget {
     }
 
     pub(super) fn can_create(&self) -> bool {
-        self.worktree
-            .as_ref()
-            .is_some_and(|tree| !tree.is_linked_worktree)
+        // Like the TUI, accept Git branches before worktree metadata is available.
+        (self.worktree.is_some() || self.branch.is_some()) && !self.can_delete()
     }
 
     pub(super) fn can_delete(&self) -> bool {
         self.worktree
             .as_ref()
             .is_some_and(|tree| tree.is_linked_worktree)
+    }
+
+    pub(super) fn validate_repository(&self, snapshot: &ClientShellSnapshot) -> crate::Result<()> {
+        let workspace = snapshot
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.workspace_id == self.id)
+            .filter(|_| snapshot.boot_id == self.boot_id)
+            .ok_or(crate::Error::StaleWorkspace)?;
+        if !self.can_create()
+            || self.worktree != workspace.worktree
+            || (workspace.worktree.is_none() && workspace.branch.is_none())
+        {
+            return Err(crate::Error::WorkspaceRepositoryChanged);
+        }
+        Ok(())
     }
 
     /// The worktree key this workspace heads, when other checkouts hang off it.
@@ -97,14 +112,23 @@ impl WorkspaceTarget {
                 )
             }
             WorkspaceAction::NewWorktree => {
-                if !self.can_create() || self.worktree != workspace.worktree {
-                    return Err(crate::Error::WorkspaceRepositoryChanged);
-                }
+                self.validate_repository(snapshot)?;
                 let mut params = serde_json::json!({"workspace_id": self.id, "base": "HEAD", "focus": true, "trust_repository": false});
                 if !text.trim().is_empty() {
                     params["branch"] = text.trim().into();
                 }
                 (Method::WorktreeCreate, params)
+            }
+            WorkspaceAction::OpenWorktree => {
+                self.validate_repository(snapshot)?;
+                if text.is_empty() {
+                    return Err(crate::Error::WorktreeSelection);
+                }
+                (
+                    Method::WorktreeOpen,
+                    serde_json::json!({"workspace_id": self.id,
+                    "path": text, "focus": true, "trust_repository": false}),
+                )
             }
             WorkspaceAction::DeleteWorktree => {
                 if !self.can_delete() || self.worktree != workspace.worktree {
@@ -183,6 +207,7 @@ impl HerdrWindow {
         ];
         if target.can_create() {
             items.push((Dialog(WorkspaceAction::NewWorktree), "New worktree"));
+            items.push((Dialog(WorkspaceAction::OpenWorktree), "Open worktree..."));
         }
         if target.can_delete() {
             items.push((
@@ -240,6 +265,7 @@ impl HerdrWindow {
     pub(super) fn open_workspace_dialog(
         &mut self,
         action: WorkspaceAction,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(target) = &self.menu.target else {
@@ -251,12 +277,18 @@ impl HerdrWindow {
             WorkspaceAction::NewWorktree => {
                 Some(DialogInput::new(crate::worktree::proposed_branch()))
             }
-            WorkspaceAction::Close | WorkspaceAction::DeleteWorktree => None,
+            WorkspaceAction::Close
+            | WorkspaceAction::DeleteWorktree
+            | WorkspaceAction::OpenWorktree => None,
         };
         self.menu.page = Some(Page::Dialog(action));
         self.menu.pr.clear();
         self.menu.pr_connection = None;
         self.menu.error = None;
+        if action == WorkspaceAction::OpenWorktree {
+            self.open_existing_worktrees(window, cx);
+            return;
+        }
         if action == WorkspaceAction::NewWorktree {
             self.open_worktree_source(cx);
             cx.notify();
@@ -299,10 +331,11 @@ impl HerdrWindow {
     pub(super) fn activate_workspace_menu(
         &mut self,
         action: WorkspaceMenuAction,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match action {
-            WorkspaceMenuAction::Dialog(action) => self.open_workspace_dialog(action, cx),
+            WorkspaceMenuAction::Dialog(action) => self.open_workspace_dialog(action, window, cx),
             WorkspaceMenuAction::Collapse | WorkspaceMenuAction::Expand => {
                 self.toggle_selected_group(cx)
             }
@@ -399,6 +432,22 @@ impl HerdrWindow {
     /// and to a removal whose dialog has already closed.
     pub(crate) fn update_workspace_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.update_pending_removal(cx);
+        if self.menu.worktree_open.is_some() && !self.worktree_open_current() {
+            self.dismiss_menu(window, cx);
+            return;
+        }
+        if self
+            .menu
+            .worktree_open
+            .as_ref()
+            .is_some_and(|picker| picker.pending.is_some())
+        {
+            if let Some((id, Some(result))) = &self.live.dialog_response {
+                self.menu.apply_worktree_list_response(id, result.clone());
+                cx.notify();
+            }
+            return;
+        }
         if self.menu.deletion.is_none() && self.menu.creation.is_none() {
             return;
         }
@@ -430,7 +479,7 @@ impl HerdrWindow {
         self.apply_creation_response(result, window, cx);
     }
 
-    /// Follow the checkout the daemon created. The daemon switches its own
+    /// Follow the checkout the daemon created or opened. The daemon switches its own
     /// session, but this client shell keeps its own location, so the new
     /// workspace is only selected (and revealed in the sidebar) once this
     /// client focuses it.
@@ -458,7 +507,13 @@ impl HerdrWindow {
             return release(self, format!("{code}: {message}"), cx);
         }
         let result = &response["result"];
-        let created = (result["type"] == "worktree_created")
+        let opening = self.menu.page == Some(Page::Dialog(WorkspaceAction::OpenWorktree));
+        let expected = if opening {
+            "worktree_opened"
+        } else {
+            "worktree_created"
+        };
+        let created = (result["type"] == expected)
             .then(|| result["workspace"]["workspace_id"].as_str())
             .flatten()
             .filter(|id| !id.is_empty())
@@ -473,7 +528,9 @@ impl HerdrWindow {
         };
         // The note names what the checkout is for, so it is taken from the
         // dialog's own pending row before dismissal drops it.
-        self.write_worktree_note(result, cx);
+        if !opening {
+            self.write_worktree_note(result, cx);
+        }
         let endpoint = self.endpoints[self.selected_endpoint].id.clone();
         // A folded group would hide the new checkout the sidebar is about to select.
         let group = self
@@ -481,7 +538,15 @@ impl HerdrWindow {
             .target
             .as_ref()
             .and_then(|target| target.worktree.as_ref())
-            .map(|worktree| worktree.key.clone());
+            .map(|worktree| worktree.key.clone())
+            .or_else(|| {
+                self.menu
+                    .worktree_open
+                    .as_ref()?
+                    .source
+                    .as_ref()
+                    .map(|source| source.repo_key.clone())
+            });
         self.dismiss_menu(window, cx);
         if let Some(group) = group {
             self.collapsed_repos_mut().remove(&group);
@@ -493,6 +558,15 @@ impl HerdrWindow {
         let Some(Page::Dialog(action)) = self.menu.page else {
             return;
         };
+        if action == WorkspaceAction::OpenWorktree
+            && self
+                .menu
+                .worktree_open
+                .as_ref()
+                .is_some_and(|picker| picker.search.read(cx).is_composing())
+        {
+            return;
+        }
         if self
             .menu
             .input
@@ -518,12 +592,21 @@ impl HerdrWindow {
                 .snapshot
                 .as_ref()
                 .ok_or(crate::Error::NoSnapshot)?;
-            let text = self
-                .menu
-                .input
-                .as_ref()
-                .map(|input| input.text.as_str())
-                .unwrap_or("");
+            let text = if action == WorkspaceAction::OpenWorktree {
+                self.menu
+                    .worktree_open
+                    .as_ref()
+                    .filter(|picker| picker.pending.is_none())
+                    .and_then(|picker| picker.entry(picker.selected))
+                    .map(|entry| entry.path.as_str())
+                    .ok_or(crate::Error::WorktreeSelection)?
+            } else {
+                self.menu
+                    .input
+                    .as_ref()
+                    .map(|input| input.text.as_str())
+                    .unwrap_or("")
+            };
             let (method, mut params) = target.request(snapshot, action, text)?;
             if action == WorkspaceAction::DeleteWorktree {
                 let deletion = self
@@ -558,7 +641,10 @@ impl HerdrWindow {
                     focus_changed: true,
                 });
             }
-            if action == WorkspaceAction::NewWorktree {
+            if matches!(
+                action,
+                WorkspaceAction::NewWorktree | WorkspaceAction::OpenWorktree
+            ) {
                 if self.menu.creation.is_some() {
                     return Ok(Submission::Awaiting {
                         focus_changed: false,
@@ -625,6 +711,12 @@ impl HerdrWindow {
         // request already in flight leaves nothing to press either.
         let armed = (action != WorkspaceAction::DeleteWorktree
             || deletion.is_some_and(|deletion| deletion.ready()))
+            && (action != WorkspaceAction::OpenWorktree
+                || self.menu.worktree_open.as_ref().is_some_and(|picker| {
+                    picker.pending.is_none()
+                        && !picker.filtered.is_empty()
+                        && !picker.search.read(cx).is_composing()
+                }))
             && !creating;
         let destructive = matches!(
             action,
@@ -634,11 +726,13 @@ impl HerdrWindow {
             WorkspaceAction::Rename => ("Rename workspace", "Rename"),
             WorkspaceAction::Close => (target.close_label(), target.close_label()),
             WorkspaceAction::NewWorktree => ("New worktree", "Create"),
+            WorkspaceAction::OpenWorktree => ("Open worktree", "Open"),
             WorkspaceAction::DeleteWorktree if force => ("Force delete checkout?", "Force remove"),
             WorkspaceAction::DeleteWorktree => ("Delete worktree checkout?", "Remove"),
         };
         let mut body = div().flex().flex_col().gap(px(10.)).px(px(16.)).py(px(12.));
         body = match action {
+            WorkspaceAction::OpenWorktree => body,
             WorkspaceAction::Rename => {
                 body.child(div().text_color(rgb(theme.muted)).child("Edit the workspace label."))
             }
@@ -721,15 +815,16 @@ impl HerdrWindow {
                 .border_1()
                 .cursor_pointer()
         };
-        // A GitHub tab owns the panel's height, so its list scrolls inside the
+        // A picker owns the panel's height, so its list scrolls inside the
         // dialog instead of growing it past the window.
-        let listing = action == WorkspaceAction::NewWorktree && self.worktree_list_tab().is_some();
+        let listing = action == WorkspaceAction::OpenWorktree || self.worktree_list_tab().is_some();
         div()
             .flex()
             .flex_col()
             .when(listing, |dialog| dialog.size_full().min_h_0())
             .child(
                 div()
+                    .debug_selector(|| "dialog-header".into())
                     .flex()
                     .items_center()
                     .gap(px(10.))
@@ -757,6 +852,10 @@ impl HerdrWindow {
                             .min_w_0()
                             .child(
                                 div()
+                                    .debug_selector(|| "dialog-title".into())
+                                    .when(action == WorkspaceAction::OpenWorktree, |title| {
+                                        title.truncate()
+                                    })
                                     .text_size(px(font.size * 1.35))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(title),
@@ -767,18 +866,57 @@ impl HerdrWindow {
                                     .text_color(rgb(theme.muted))
                                     .child(target.label.clone()),
                             ),
-                    ),
+                    )
+                    .when(action == WorkspaceAction::OpenWorktree, |header| {
+                        header.child(
+                            div()
+                                .id("open-worktree-escape")
+                                .debug_selector(|| "open-worktree-escape".into())
+                                .flex_none()
+                                .px_2()
+                                .py_1()
+                                .rounded(px(4.))
+                                .cursor_pointer()
+                                .text_color(rgb(theme.muted))
+                                .hover(|button| {
+                                    button
+                                        .bg(rgb(theme.active))
+                                        .text_color(rgb(theme.foreground))
+                                })
+                                .child("ESC")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.dismiss_menu(window, cx);
+                                })),
+                        )
+                    }),
             )
             .when(action == WorkspaceAction::NewWorktree, |dialog| {
                 dialog.child(self.render_worktree_tabs(cx))
             })
-            .child(if listing {
+            .child(if action == WorkspaceAction::OpenWorktree {
+                self.render_existing_worktrees(cx).when(
+                    creating || self.menu.error.is_some(),
+                    |picker| {
+                        picker.child(
+                            div()
+                                .id("open-worktree-status")
+                                .debug_selector(|| "open-worktree-status".into())
+                                .flex_none()
+                                .h(px(font.line_height() * 3. + 20.))
+                                .overflow_y_scroll()
+                                .child(body),
+                        )
+                    },
+                )
+            } else if listing {
                 self.render_worktree_items(cx)
             } else {
                 body
             })
             .child(
                 div()
+                    .debug_selector(|| "dialog-footer".into())
                     .flex()
                     .justify_end()
                     .gap(px(8.))
@@ -796,36 +934,38 @@ impl HerdrWindow {
                                 this.dismiss_menu(window, cx);
                             })),
                     )
-                    // A listed row creates its own checkout, so the branch
-                    // field's submit button belongs to the branch tab alone.
-                    .when(!listing, |footer| {
-                        footer.child(
-                            button("dialog-submit")
-                                // The primary action carries the fill; a
-                                // destructive one also carries the warning hue.
-                                .border_color(if !armed {
-                                    rgb(theme.active)
-                                } else if destructive {
-                                    danger
-                                } else {
-                                    rgb(theme.foreground)
-                                })
-                                .when(armed, |button| button.bg(rgb(theme.active)))
-                                .text_color(if !armed {
-                                    rgb(theme.muted)
-                                } else if destructive {
-                                    danger
-                                } else {
-                                    rgb(theme.foreground)
-                                })
-                                .hover(|button| button.bg(rgb(theme.active)))
-                                .child(if creating { "Creating..." } else { submit })
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.submit_workspace_dialog(window, cx);
-                                })),
-                        )
-                    }),
+                    // GitHub rows create their own checkouts without a submit button.
+                    .when(
+                        !listing || action == WorkspaceAction::OpenWorktree,
+                        |footer| {
+                            footer.child(
+                                button("dialog-submit")
+                                    // The primary action carries the fill; a
+                                    // destructive one also carries the warning hue.
+                                    .border_color(if !armed {
+                                        rgb(theme.active)
+                                    } else if destructive {
+                                        danger
+                                    } else {
+                                        rgb(theme.foreground)
+                                    })
+                                    .when(armed, |button| button.bg(rgb(theme.active)))
+                                    .text_color(if !armed {
+                                        rgb(theme.muted)
+                                    } else if destructive {
+                                        danger
+                                    } else {
+                                        rgb(theme.foreground)
+                                    })
+                                    .hover(|button| button.bg(rgb(theme.active)))
+                                    .child(if creating { "Waiting..." } else { submit })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.submit_workspace_dialog(window, cx);
+                                    })),
+                            )
+                        },
+                    ),
             )
     }
 }

@@ -48,8 +48,8 @@ test-update bundle:
     HERDR_TEST_BUNDLE="{{bundle}}" cargo test --locked -p herdr-gpui updater::brew::tests::the_real_cask -- --ignored --nocapture
 
 # Really upgrades the installed app through Homebrew; restart it afterwards.
-test-brew-upgrade bundle:
-    HERDR_TEST_BUNDLE="{{bundle}}" HERDR_TEST_BREW_UPGRADE=1 cargo test --locked -p herdr-gpui updater::brew::tests::homebrew_really_installs -- --ignored --nocapture
+test-brew-upgrade bundle expected:
+    HERDR_TEST_BUNDLE="{{bundle}}" HERDR_TEST_BREW_EXPECTED="{{expected}}" HERDR_TEST_BREW_UPGRADE=1 cargo test --locked -p herdr-gpui updater::brew::tests::homebrew_really_installs -- --ignored --nocapture
 
 # Repeat the Linux suite under CPU pressure in a container, where scheduling
 # races reproduce that a fast machine hides. Needs Docker; nothing else.
@@ -68,7 +68,7 @@ test-perf budget="30":
 build-release:
     cargo build --locked --release -p herdr-gpui
 
-# Regenerate the checked-in artwork on macOS; no third-party image tools required.
+# Regenerate the checked-in artwork on macOS (requires brew install librsvg).
 icons:
     swift scripts/generate-icons.swift
 
@@ -96,6 +96,24 @@ test-build: build-release
 
 ci: format-check lint test
 
+# Cross type-check the Windows target without a Windows machine. CI lints the
+# MSVC target on a Windows runner; this uses the GNU target because a Mac or
+# Linux host cannot supply the MSVC C toolchain some dependencies build against.
+# Needs `rustup target add x86_64-pc-windows-gnu` and mingw-w64
+# (`brew install mingw-w64`, or `apt install gcc-mingw-w64-x86-64`).
+lint-windows:
+    CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc \
+    AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-ar \
+    cargo clippy --locked --workspace --all-targets --all-features \
+        --target x86_64-pc-windows-gnu -- -D warnings
+
+# Clippy for Linux in the Ubuntu 24.04 that CI uses, from any host with Docker.
+# A cfg gate that is wrong only on Linux is invisible from macOS, and
+# lint-windows only covers Windows. The container runs the host architecture;
+# pass a platform, for example linux/amd64 on Apple Silicon, for the other one.
+lint-linux platform="":
+    bash scripts/lint-linux.sh {{platform}}
+
 # Audit the GitHub workflows for injection, over-broad permissions, and unpinned actions.
 audit-workflows:
     zizmor .github/
@@ -111,6 +129,27 @@ sign-release *args:
 # Verify published checksums, Sigstore and provenance; optional local GPG approval.
 verify-release *args:
     ./scripts/verify-release.sh {{args}}
+
+# Check commit subjects the way CI does; the changelog is generated from them.
+check-commits base="origin/main":
+    python3 scripts/release/check-commit-messages.py range "{{base}}..HEAD"
+
+# Install the commit-msg hook for this checkout and every worktree of it.
+hooks:
+    git config core.hooksPath .githooks
+    @echo "core.hooksPath = .githooks"
+
+# What changed since the last release tag, straight from git history.
+changelog-unreleased:
+    git-cliff --config cliff.toml --unreleased
+
+# The whole generated changelog; it is never tracked in git.
+changelog:
+    git-cliff --config cliff.toml
+
+# Exactly what a release would publish: CHANGELOG.md and RELEASE_NOTES.md.
+changelog-release version output:
+    bash scripts/release/generate-changelog.sh "{{version}}" "{{output}}"
 
 # Owner-only remote release; CI derives the YYYYMMDD.COUNTER version itself.
 release:

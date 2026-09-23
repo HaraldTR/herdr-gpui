@@ -18,8 +18,8 @@ ed25519-dalek.workspace        = true
 flate2.workspace               = true
 gpui                           = { features = ["runtime_shaders"], workspace = true }
 herdr-client.workspace         = true
-image.workspace                = true
-rustix.workspace               = true
+image                          = { features = ["bmp"], workspace = true }
+rodio.workspace                = true
 secrecy.workspace              = true
 serde.workspace                = true
 serde_json.workspace           = true
@@ -46,6 +46,9 @@ integration-test = [
   "dep:objc",
   "dep:raw-window-handle",
 ]
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa                        = { optional = true, workspace = true }

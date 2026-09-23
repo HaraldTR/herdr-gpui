@@ -6,6 +6,10 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 const CACHE_LIMIT: usize = 4096;
+/// The selection tints the cells it covers instead of replacing their colors:
+/// a terminal's own background is meaningful, and the glyphs above it stay
+/// readable on every theme.
+const SELECTION_ALPHA: u32 = 0x59;
 const REPORT_INTERVAL: Duration = Duration::from_secs(5);
 const SLOW_PAINT: Duration = Duration::from_millis(16);
 
@@ -219,6 +223,9 @@ impl TerminalPainter {
         width
     }
 
+    /// Paints one frame, tinting the cells `selection` names in that frame's
+    /// own grid. Rows outside the frame are ignored: the selection was made
+    /// against the live surface, which a repaint may already have replaced.
     #[allow(clippy::too_many_arguments)]
     pub fn paint_frame(
         &mut self,
@@ -226,6 +233,7 @@ impl TerminalPainter {
         origin: Point<Pixels>,
         cell_width: f32,
         font: &Font,
+        selection: &[(u16, std::ops::Range<u16>)],
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -268,6 +276,32 @@ impl TerminalPainter {
                 for (x, cell) in row.iter().enumerate() {
                     paint(x, x + 1, cell_colors(cell, &self.theme).1);
                 }
+            }
+        }
+        // Between the backgrounds and the glyphs, so the tint reads as chosen
+        // without hiding either.
+        for (row, columns) in selection {
+            let (start, end) = (columns.start.min(frame.width), columns.end.min(frame.width));
+            if *row >= frame.height || start >= end {
+                continue;
+            }
+            window.paint_quad(fill(
+                Bounds::new(
+                    origin
+                        + point(
+                            px(f32::from(start) * cell_width),
+                            px(f32::from(*row) * self.cell_height),
+                        ),
+                    size(
+                        px(f32::from(end - start) * cell_width),
+                        px(self.cell_height),
+                    ),
+                ),
+                rgba((self.theme.primary() << 8) | SELECTION_ALPHA),
+            ));
+            #[cfg(feature = "integration-test")]
+            {
+                counts.quads += 1;
             }
         }
         for (index, cell) in frame.cells.iter().enumerate() {
@@ -549,7 +583,15 @@ mod tests {
                         let before = cx
                             .default_global::<crate::performance::Counts>()
                             .decorations;
-                        painter.paint_frame(&frame, bounds.origin, 8.5, &font("Menlo"), window, cx);
+                        painter.paint_frame(
+                            &frame,
+                            bounds.origin,
+                            8.5,
+                            &font("Menlo"),
+                            &[],
+                            window,
+                            cx,
+                        );
                         assert_eq!(painter.entries, 0);
                         assert_eq!(
                             cx.default_global::<crate::performance::Counts>()
@@ -643,6 +685,7 @@ mod tests {
                             bounds.origin,
                             cell_width,
                             &font,
+                            &[],
                             window,
                             cx,
                         );

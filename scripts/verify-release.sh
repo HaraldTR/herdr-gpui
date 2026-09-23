@@ -74,7 +74,7 @@ while IFS= read -r name; do
         --certificate-github-workflow-ref refs/heads/main \
         --certificate-github-workflow-sha "$sha" "$file"
     gh attestation verify "$file" --repo "$repo" \
-        --cert-identity "$identity" --signer-workflow "$repo/.github/workflows/release.yml" \
+        --cert-identity "$identity" \
         --cert-oidc-issuer https://token.actions.githubusercontent.com \
         --source-ref refs/heads/main --source-digest "$sha" --signer-digest "$sha" \
         --deny-self-hosted-runners

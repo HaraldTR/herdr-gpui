@@ -10,11 +10,11 @@ use crate::{
     options::{ConnectOptions, validate_options},
     session::run_connection,
     ssh,
+    transport::Stream,
 };
 use crossbeam_channel::bounded;
 use std::{
     io,
-    os::unix::net::UnixStream,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -39,7 +39,7 @@ pub fn connect_with_surface_active(
         let path = target
             .socket_path()
             .map_err(|error| io::Error::new(error.kind(), error))?;
-        UnixStream::connect(path)
+        Stream::connect(path)
     })
 }
 
@@ -50,7 +50,7 @@ pub fn connect_with_connector(
     target: ConnectTarget,
     options: ConnectOptions,
     surface_active: bool,
-    connector: impl FnOnce(&ConnectTarget, &AtomicBool) -> io::Result<UnixStream> + Send + 'static,
+    connector: impl FnOnce(&ConnectTarget, &AtomicBool) -> io::Result<Stream> + Send + 'static,
 ) -> Result<Client> {
     validate_options(options)?;
     if let ConnectTarget::Ssh { target, session } = &target {
@@ -115,6 +115,7 @@ pub fn connect_with_connector(
                 commands,
                 stop,
                 next_request: AtomicU64::new(1),
+                image_busy: Arc::new(AtomicBool::new(false)),
             }),
         },
         events,

@@ -70,7 +70,7 @@ fn open_dialog(view: &Entity<HerdrWindow>, cx: &mut VisualTestContext, connected
                 Default::default()
             };
             view.open_workspace_menu("w3", Default::default(), window, cx);
-            view.open_workspace_dialog(WorkspaceAction::NewWorktree, cx);
+            view.open_workspace_dialog(WorkspaceAction::NewWorktree, window, cx);
             if connected {
                 let source = view.menu.worktree.as_mut().unwrap();
                 source.install(origin(), items());

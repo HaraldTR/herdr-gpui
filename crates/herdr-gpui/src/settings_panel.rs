@@ -70,7 +70,11 @@ pub(crate) struct SettingsPanel {
 
 impl SettingsPanel {
     fn ready(&self) -> bool {
-        self.loaded && self.shared.is_some() && self.task.is_none() && self.error.is_none()
+        cfg!(unix)
+            && self.loaded
+            && self.shared.is_some()
+            && self.task.is_none()
+            && self.error.is_none()
     }
 }
 
@@ -100,6 +104,7 @@ impl HerdrWindow {
                         this.settings.shared = Some(shared);
                         this.settings.load_status = Some("Loaded from local file".into());
                         this.apply_shared_theme(cx);
+                        this.reload_notification_config(cx);
                     }
                     Err(error) => {
                         this.settings.load_status = None;
@@ -125,6 +130,13 @@ impl HerdrWindow {
             match shared.theme(light) {
                 Ok(theme) => {
                     self.theme = theme;
+                    if let Some(mut appearance) =
+                        cx.try_global::<crate::app::InitialAppearance>().cloned()
+                        && appearance.config.theme == "Follow Herdr"
+                    {
+                        appearance.theme = self.theme.clone();
+                        cx.set_global(appearance);
+                    }
                     crate::log_window::set_appearance(&self.config, &self.theme, cx);
                 }
                 Err(error) => self.settings.error = Some(error.to_string()),
@@ -153,6 +165,7 @@ impl HerdrWindow {
                         this.settings.shared = Some(shared);
                         this.settings.status = Some("Saved to local file".into());
                         this.apply_shared_theme(cx);
+                        this.reload_notification_config(cx);
                         // Queue directly: neither dialog nor integration response slots belong to us.
                         let local = this.endpoints.iter().find(|endpoint| {
                             !matches!(
@@ -389,6 +402,9 @@ impl HerdrWindow {
             .overflow_y_scroll()
             .track_scroll(&self.menu.preferences_scroll)
             .p(px(12.));
+        if cfg!(windows) && matches!(tab, Tab::Theme | Tab::Indicators | Tab::Sound | Tab::Toasts) {
+            body = body.child(div().pb(px(8.)).child("Shared Herdr settings are read-only on Windows. Native fonts and theme overrides remain editable."));
+        }
         match tab {
             Tab::Theme => {
                 body = body.child(div().debug_selector(|| "preferences-theme".into()).py(px(8.)).child(format!("GUI theme: {}", self.config.theme)))
@@ -496,7 +512,7 @@ impl HerdrWindow {
                 }
             }
             Tab::Sound => {
-                body = body.child(div().py(px(8.)).child("Agent sounds use the shared sound paths and per-agent overrides. On macOS, missing or unusable custom sounds fall back to Glass/Ping. Native audio is not available on other platforms. No preview is played automatically."));
+                body = body.child(div().py(px(8.)).child("Agent sounds use the dedicated audio backend with shared sound paths and per-agent overrides. Missing or unusable custom sounds fall back to bundled Done/Request sounds. Playback requires an available audio device. No preview is played automatically."));
                 for (label, enabled) in [("On", true), ("Off", false)] {
                     body = body.child(
                         self.settings_button(
@@ -513,9 +529,21 @@ impl HerdrWindow {
                         })),
                     );
                 }
+                body = body.child(
+                    div().py(px(8.)).child(
+                        self.settings_button("sound-preview", "Play test sound (QA)", false, true)
+                            .on_click(cx.listener(|this, _, _, _| this.sound.preview())),
+                    ),
+                );
             }
             Tab::Toasts => {
-                body = body.child(div().py(px(8.)).child("Herdr displays notifications inside this GUI. Terminal mode is not delivered in the GUI. System delivery is supported on macOS and requires OS notification permission; it is unsupported on other platforms."));
+                body = body.child(div().py(px(8.)).child("Shared delivery settings also apply to other Herdr clients. This GUI uses in-app toasts; it does not deliver terminal or OS notifications. Native [notifications] overrides take precedence. QA previews work even when delivery is disabled."))
+                    .child(div().py(px(8.)).child(format!(
+                        "Effective in-app toasts: {} | Delay: {} seconds | Corner: {:?}",
+                        if self.config.notifications.enabled { "On" } else { "Off" },
+                        self.config.notifications.delay_seconds,
+                        self.config.notifications.position,
+                    )));
                 for (label, delivery) in [
                     ("Off", ToastDelivery::Off),
                     ("Herdr", ToastDelivery::Herdr),
@@ -717,6 +745,81 @@ mod tests {
         }
         assert_eq!(Tab::General.next(false), Tab::Theme);
         assert_eq!(Tab::Theme.next(true), Tab::General);
+    }
+
+    #[gpui::test]
+    fn general_retains_layout_summary_and_sound_uses_explicit_preview(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        cx.simulate_resize(size(px(800.), px(600.)));
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.open_menu(window, cx);
+                view.menu.page = Some(crate::menu::Page::Preferences);
+                view.config.layout.mode = crate::config::LayoutMode::Compact;
+                view.config.layout.sidebar_gap = 16.;
+                view.select_settings_tab(Tab::General, window, cx);
+            });
+            window.draw(cx).clear();
+        });
+        for selector in ["preferences-layout", "preferences-sidebar-gap"] {
+            assert!(cx.debug_bounds(selector).is_some(), "{selector}");
+        }
+        assert!(cx.debug_bounds("sound-preview").is_none());
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.select_settings_tab(Tab::Sound, window, cx);
+            });
+            window.draw(cx).clear();
+        });
+        assert!(cx.debug_bounds("sound-preview").is_some());
+        assert!(cx.debug_bounds("preferences-layout").is_none());
+        assert!(cx.debug_bounds("preferences-shared-path").is_none());
+        assert!(cx.debug_bounds("preferences-reload-shared").is_none());
+    }
+
+    #[gpui::test]
+    #[allow(clippy::unwrap_used)]
+    fn followed_theme_updates_startup_cache_without_persisting_session_font_size(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let shared = Settings::parse_text("[theme]\nname = 'nord'").unwrap();
+        let expected = shared.theme(false).unwrap();
+        view.update(cx, |view, cx| {
+            view.settings.shared = Some(shared);
+            view.load_gui_config_with(
+                || {
+                    Ok((
+                        crate::config::Config {
+                            theme: "Follow Herdr".into(),
+                            ..Default::default()
+                        },
+                        Default::default(),
+                    ))
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.theme, expected);
+            assert_eq!(cx.global::<crate::app::InitialAppearance>().theme, expected);
+        });
+        let shared = Settings::parse_text("[theme]\nname = 'dracula'").unwrap();
+        let expected = shared.theme(false).unwrap();
+        view.update(cx, |view, cx| {
+            let saved_size = cx
+                .global::<crate::app::InitialAppearance>()
+                .config
+                .terminal
+                .size;
+            view.config.terminal.size = 28.;
+            view.settings.shared = Some(shared);
+            view.apply_shared_theme(cx);
+            let appearance = cx.global::<crate::app::InitialAppearance>();
+            assert_eq!(appearance.theme, expected);
+            assert_eq!(appearance.config.terminal.size, saved_size);
+        });
     }
 
     #[gpui::test]

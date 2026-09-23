@@ -18,6 +18,18 @@ pub(super) struct CloseConfirmation {
 }
 
 impl CloseConfirmation {
+    pub(super) fn capture_pane(snapshot: &ClientShellSnapshot, id: &str) -> Option<Self> {
+        let pane = snapshot.panes.iter().find(|pane| pane.pane_id == id)?;
+        let mut close = Self::capture_tab(snapshot, &pane.tab_id)?;
+        if close.workspace != pane.workspace_id {
+            return None;
+        }
+        close.pane = Some(pane.pane_id.clone());
+        close.label = pane.label.clone().unwrap_or_else(|| pane.pane_id.clone());
+        close.request(snapshot).ok()?;
+        Some(close)
+    }
+
     pub(super) fn capture_tab(snapshot: &ClientShellSnapshot, id: &str) -> Option<Self> {
         let tab = snapshot.tabs.iter().find(|tab| tab.tab_id == id)?;
         Some(Self {
@@ -142,6 +154,15 @@ impl HerdrWindow {
         let result = (|| {
             if !self.menu_target_current() || !self.input_ready() {
                 return Err(Error::StaleConnection);
+            }
+            if close.pane.is_some()
+                && self
+                    .live
+                    .surface
+                    .as_ref()
+                    .is_some_and(|s| s.popup.is_some())
+            {
+                return Err(Error::ConnectionNotReady);
             }
             let snapshot = self.live.snapshot.as_ref().ok_or(Error::NotConnected)?;
             close.request(snapshot)
@@ -349,6 +370,40 @@ mod tests {
             cx.simulate_keystrokes("enter");
             assert!(view.read_with(cx, |view, _| view.menu.page.is_none()));
             cx.update(|window, cx| window.draw(cx).clear());
+        }
+    }
+
+    #[test]
+    fn explicit_pane_close_retains_inactive_target_and_membership() {
+        let mut snapshot: ClientShellSnapshot = serde_json::from_str(include_str!(
+            "../../herdr-protocol/tests/fixtures/endpoint-snapshot-v1.json"
+        ))
+        .unwrap();
+        let mut pane = snapshot.panes[0].clone();
+        pane.pane_id = "inactive".into();
+        snapshot.panes.push(pane);
+        let close = CloseConfirmation::capture_pane(&snapshot, "inactive").unwrap();
+        assert!(!close.confirm_selected);
+        snapshot.focused_pane_id = None;
+        assert_eq!(
+            close.request(&snapshot).unwrap(),
+            (Method::PaneClose, json!({"pane_id":"inactive"}))
+        );
+        let original = snapshot.clone();
+        for case in 0..6 {
+            let mut snapshot = original.clone();
+            match case {
+                0 => snapshot.boot_id.push('x'),
+                1 => snapshot.workspaces.clear(),
+                2 => snapshot.tabs.clear(),
+                3 => snapshot.panes[1].tab_id.push('x'),
+                4 => snapshot.panes[1].workspace_id.push('x'),
+                _ => snapshot.panes.truncate(1),
+            }
+            assert!(matches!(
+                close.request(&snapshot),
+                Err(Error::StaleCloseTarget)
+            ));
         }
     }
 

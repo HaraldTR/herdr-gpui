@@ -427,12 +427,11 @@ fn worker_discards_stale_results_and_runs_only_requested_jobs() {
 
 #[test]
 fn worktree_registry_requires_unique_exact_branch_and_absolute_checkout() {
-    let entry = "worktree /repo with spaces\nline\0HEAD abc\0branch refs/heads/feature\0\0";
-    assert_eq!(
-        worktree_checkout(entry, "feature").unwrap(),
-        "/repo with spaces\nline"
-    );
-    assert!(worktree_checkout(entry, "feat").is_err());
+    let checkout = std::env::temp_dir().join("repo with spaces\nline");
+    let checkout = checkout.to_str().unwrap();
+    let entry = format!("worktree {checkout}\0HEAD abc\0branch refs/heads/feature\0\0");
+    assert_eq!(worktree_checkout(&entry, "feature").unwrap(), checkout);
+    assert!(worktree_checkout(&entry, "feat").is_err());
     assert!(
         worktree_checkout(&entry.repeat(2), "feature")
             .unwrap_err()
@@ -440,15 +439,16 @@ fn worktree_registry_requires_unique_exact_branch_and_absolute_checkout() {
             .contains("Multiple")
     );
     for invalid in [
-        "worktree relative\0branch refs/heads/feature\0\0",
-        "worktree /repo\0HEAD abc\0detached\0\0",
-        "worktree /repo\0branch refs/remotes/feature\0\0",
-        "worktree /repo\0bare\0\0",
+        "worktree relative\0branch refs/heads/feature\0\0".to_owned(),
+        format!("worktree {checkout}\0HEAD abc\0detached\0\0"),
+        format!("worktree {checkout}\0branch refs/remotes/feature\0\0"),
+        format!("worktree {checkout}\0bare\0\0"),
     ] {
-        assert!(worktree_checkout(invalid, "feature").is_err());
+        assert!(worktree_checkout(&invalid, "feature").is_err());
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn subprocess_success_errors_limits_timeout_and_cancellation() {
     let deadline = || Instant::now() + Duration::from_secs(5);

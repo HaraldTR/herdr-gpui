@@ -80,9 +80,19 @@ parent Wayland socket without exposing its HOME or runtime directory to daemons.
 
 ## Pull Requests
 
-- Use conventional commit subjects: `feat`, `fix`, `refactor`, `test`, `docs`,
-  `chore`. Explain the problem and the chosen approach in the body for
-  non-trivial work.
+- Use conventional commit subjects: `feat`, `fix`, `perf`, `refactor`, `revert`,
+  `docs`, `chore`, `ci`, `build`, `style`, `test`. Explain the problem and the
+  chosen approach in the body for non-trivial work.
+- Subjects are published: the release changelog is generated from them, so
+  `feat` appears under Added, `fix` under Fixed, `perf`/`refactor`/`revert`
+  under Changed, `docs` under Documentation, and `chore`, `ci`, `build`,
+  `style` and `test` are never shown to users. Write the subject for someone
+  reading a release page, and keep rationale in the body; only the first line
+  is published. A breaking change is always published: mark it `type!:` or add
+  a `BREAKING CHANGE: <what breaks>` footer.
+- Run `just hooks` once per clone to install the `commit-msg` hook that checks
+  this locally; CI checks it again for every commit in a pull request. Preview
+  the result with `just changelog-unreleased`.
 - `main` requires a pull request and green CI. Review your own full diff
   against the base before marking it ready.
 - State the validation you actually ran, and say plainly which native or

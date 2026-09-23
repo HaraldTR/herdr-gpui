@@ -17,7 +17,7 @@ pub(crate) struct ConnectionBridge {
     pub inbox: Arc<Mutex<LiveState>>,
     pub drained: Arc<AtomicBool>,
     pub integrations: Arc<Mutex<IntegrationInbox>>,
-    pub(crate) notification_active: Arc<AtomicBool>,
+    sound_cancel: Arc<AtomicBool>,
 }
 
 /// One integration operation, independent of the modal dialog response slot.
@@ -69,25 +69,31 @@ impl IntegrationInbox {
 
 impl ConnectionBridge {
     pub fn new(target: ConnectTarget) -> Self {
+        let state = LiveState::default();
         Self {
             target,
             handle: None,
-            inbox: Arc::new(Mutex::new(LiveState::default())),
+            sound_cancel: state.sound_connection_cancel.clone(),
+            inbox: Arc::new(Mutex::new(state)),
             drained: Arc::new(AtomicBool::new(true)),
             integrations: Arc::default(),
-            notification_active: Arc::new(AtomicBool::new(true)),
         }
     }
 
     fn reset(&mut self, status: ConnectionStatus, active: bool) {
-        self.notification_active.store(false, Ordering::Release);
-        self.notification_active = Arc::new(AtomicBool::new(true));
+        // Retire audio even when the event reducer holds the inbox. Boot-scoped
+        // cancellation alone cannot be reached without that lock.
+        self.sound_cancel.store(true, Ordering::Release);
+        if let Ok(mut state) = self.inbox.try_lock() {
+            state.cancel_sounds();
+        }
         if let Some(handle) = self.handle.take() {
             handle.disconnect();
         }
         let mut state = LiveState::default();
         state.status = status;
         state.set_outer_focus(active);
+        self.sound_cancel = state.sound_connection_cancel.clone();
         // Old readers and deferred paint acknowledgements retain only the old inbox.
         self.inbox = Arc::new(Mutex::new(state));
         self.drained = Arc::new(AtomicBool::new(true));
@@ -212,24 +218,20 @@ impl ConnectionBridge {
             .dialog_response
             .as_mut()
             .and_then(|(_, result)| result.take());
-        // Notifications have their own consume-once drain, not snapshot copies.
         let notifications = std::mem::take(&mut state.notifications);
+        let notifications_lost = std::mem::take(&mut state.notifications_lost);
+        let sounds = std::mem::take(&mut state.sound_events);
+        let reload_sound = std::mem::take(&mut state.reload_sound);
         let mut update = state.clone();
         update.settings_reload = false;
-        state.notifications = notifications;
+        update.notifications = notifications;
+        update.notifications_lost = notifications_lost;
+        update.sound_events = sounds;
+        update.reload_sound = reload_sound;
         if let Some((_, result)) = &mut update.dialog_response {
             *result = response;
         }
         Some(update)
-    }
-
-    pub(crate) fn take_notifications(
-        &self,
-    ) -> std::collections::VecDeque<crate::state::CapturedNotification> {
-        self.inbox
-            .try_lock()
-            .map(|mut state| std::mem::take(&mut state.notifications))
-            .unwrap_or_default()
     }
 
     /// Drain only when the background settings loader can accept a reload.
@@ -307,7 +309,10 @@ impl ConnectionBridge {
 
 impl Drop for ConnectionBridge {
     fn drop(&mut self) {
-        self.notification_active.store(false, Ordering::Release);
+        self.sound_cancel.store(true, Ordering::Release);
+        if let Ok(mut state) = self.inbox.try_lock() {
+            state.cancel_sounds();
+        }
         // Detach this client only; never kill a daemon or PTY.
         if let Some(handle) = &self.handle {
             tracing::debug!("Connection bridge dropping client");
@@ -333,12 +338,21 @@ mod tests {
                 herdr_client::protocol::ServerMessage::ReloadSoundConfig,
             ));
         }
-        assert!(!bridge.take_update().unwrap().settings_reload);
+        let update = bridge.take_update().unwrap();
+        assert!(!update.settings_reload);
+        assert!(update.reload_sound);
         let guard = bridge.inbox.lock().unwrap();
         assert!(!bridge.take_settings_reload());
         drop(guard);
         assert!(bridge.take_settings_reload());
         assert!(!bridge.take_settings_reload());
+        bridge.inbox.lock().unwrap().apply(ClientEvent::Message(
+            herdr_client::protocol::ServerMessage::ReloadSoundConfig,
+        ));
+        assert!(bridge.take_settings_reload());
+        assert!(bridge.take_update().unwrap().reload_sound);
+        bridge.inbox.lock().unwrap().set_outer_focus(true);
+        assert!(!bridge.take_update().unwrap().reload_sound);
         let old = bridge.inbox.clone();
         old.lock().unwrap().settings_reload = true;
         bridge.detach(false);
@@ -358,38 +372,6 @@ mod tests {
                 reason: "closed".into(),
             });
         assert!(!bridge.take_settings_reload());
-    }
-
-    #[test]
-    fn notifications_are_consumed_once_and_reset_revokes_delivery() {
-        let mut bridge = bridge();
-        bridge
-            .inbox
-            .lock()
-            .unwrap()
-            .notifications
-            .push_back(crate::state::CapturedNotification {
-                boot: "boot".into(),
-                received: std::time::Instant::now(),
-                notification: herdr_client::protocol::SemanticNotification {
-                    kind: herdr_client::protocol::SemanticNotificationKind::Finished,
-                    title: "done".into(),
-                    body: None,
-                    sound: None,
-                    agent: None,
-                    workspace_id: None,
-                    tab_id: None,
-                    pane_id: None,
-                    position: None,
-                },
-            });
-        assert!(bridge.take_update().unwrap().notifications.is_empty());
-        assert_eq!(bridge.take_notifications().len(), 1);
-        assert!(bridge.take_notifications().is_empty());
-        let active = bridge.notification_active.clone();
-        bridge.detach(false);
-        assert!(!active.load(Ordering::Acquire));
-        assert!(bridge.take_notifications().is_empty());
     }
 
     #[test]
@@ -483,6 +465,85 @@ mod tests {
         assert!(!Arc::ptr_eq(&old, &bridge.integrations));
         let inbox = bridge.integrations.lock().unwrap();
         assert!(!inbox.list && !inbox.install && inbox.pending.is_none());
+    }
+
+    #[test]
+    fn notifications_move_once_are_bounded_and_fenced_by_replacement() {
+        use crate::notifications::{PENDING_LIMIT, tests::notification};
+        use herdr_client::protocol::ServerMessage;
+        let mut bridge = bridge();
+        let old = bridge.inbox.clone();
+        {
+            let mut state = old.lock().unwrap();
+            state.status = ConnectionStatus::Connected;
+            for id in 0..100 {
+                state.apply(ClientEvent::Message(ServerMessage::SemanticNotification(
+                    notification(&id.to_string()),
+                )));
+            }
+            state.set_outer_focus(true);
+        }
+        let update = bridge.take_update().unwrap();
+        assert_eq!(update.notifications.len(), PENDING_LIMIT);
+        assert_eq!(update.notifications[0].title, "92");
+        assert_eq!(update.notifications[7].title, "99");
+        assert_eq!(update.sound_events.len(), crate::sound::MAX_PENDING);
+        assert_eq!(update.sound_events[0].1.title, "68");
+        assert_eq!(update.sound_events[31].1.title, "99");
+        assert!(bridge.take_update().is_none());
+        old.lock().unwrap().set_outer_focus(false);
+        let next = bridge.take_update().unwrap();
+        assert!(next.notifications.is_empty());
+        assert!(next.sound_events.is_empty());
+        bridge.detach(false);
+        assert!(update.sound_cancel.load(Ordering::Acquire));
+        old.lock()
+            .unwrap()
+            .apply(ClientEvent::Message(ServerMessage::SemanticNotification(
+                notification("late"),
+            )));
+        let detached = bridge.take_update().unwrap();
+        assert!(detached.notifications.is_empty());
+        assert!(detached.sound_events.is_empty());
+        bridge.reset(ConnectionStatus::Connected, false);
+        old.lock()
+            .unwrap()
+            .apply(ClientEvent::Message(ServerMessage::SemanticNotification(
+                notification("late again"),
+            )));
+        let replacement = bridge.take_update().unwrap();
+        assert!(replacement.notifications.is_empty());
+        assert!(replacement.sound_events.is_empty());
+        {
+            let mut state = bridge.inbox.lock().unwrap();
+            state.apply(ClientEvent::Message(ServerMessage::SemanticNotification(
+                notification("discard on disconnect"),
+            )));
+            state.apply(ClientEvent::Disconnected {
+                reason: "test".into(),
+            });
+        }
+        let disconnected = bridge.take_update().unwrap();
+        assert!(disconnected.notifications.is_empty());
+        assert!(disconnected.sound_events.is_empty());
+        assert!(disconnected.sound_cancel.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn contended_retirement_cancels_audio_after_boot_token_replacement() {
+        for detach in [false, true] {
+            let mut bridge = bridge();
+            let inbox = bridge.inbox.clone();
+            let mut held = inbox.lock().unwrap();
+            held.sound_cancel = Arc::new(AtomicBool::new(false));
+            if detach {
+                bridge.detach(false);
+                assert!(!bridge.sound_cancel.load(Ordering::Acquire));
+            } else {
+                drop(bridge);
+            }
+            assert!(held.sound_connection_cancel.load(Ordering::Acquire));
+        }
     }
 
     #[test]

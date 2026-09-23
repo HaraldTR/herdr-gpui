@@ -79,6 +79,7 @@ pub(super) fn kind(error: &Error) -> &'static str {
         Error::CredentialPermissions => "credential_permissions",
         Error::CredentialIo(_) => "credential_io",
         Error::CredentialPolicy => "credential_policy",
+        Error::CredentialUnsupported => "credential_unsupported",
         _ => "other",
     }
 }

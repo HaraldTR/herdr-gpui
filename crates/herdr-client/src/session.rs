@@ -11,12 +11,12 @@ use crate::{
     method::Method,
     options::ConnectOptions,
     protocol::{endpoint::*, *},
+    transport::Stream,
 };
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use serde_json::Value;
 use std::{
     io::Write,
-    os::unix::net::UnixStream,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -133,7 +133,7 @@ impl Session {
 }
 
 pub(crate) fn run_connection(
-    mut stream: UnixStream,
+    mut stream: Stream,
     options: ConnectOptions,
     surface_active: bool,
     remote: bool,
@@ -173,7 +173,20 @@ pub(crate) fn run_connection(
     let mut queued: Option<Command> = None;
     while !stop.load(Ordering::Acquire) {
         session.check_timeouts()?;
-        if let Some(health) = &mut session.health
+        let partial_image = queued
+            .as_ref()
+            .and_then(|c| c.image.as_ref())
+            .is_some_and(|image| image.writer.offset > 0);
+        if let Some(image) = queued.as_ref().and_then(|c| c.image.as_ref()) {
+            image.writer.check_timeout()?;
+            if partial_image && image.lease.cancelled.load(Ordering::Acquire) {
+                return Err(Error::ClipboardImageCancelled);
+            }
+        }
+        // A probe is a frame too: never insert one into a partial image frame.
+        // Preparation does not suppress probes; actual writes have their own deadline.
+        if !partial_image
+            && let Some(health) = &mut session.health
             && health.tick(Instant::now())?
         {
             write_message(
@@ -187,11 +200,12 @@ pub(crate) fn run_connection(
         }
         // Bound the batch so continuous input cannot starve reads.
         for _ in 0..16 {
-            // Finish an inbound frame before dispatching against its old snapshot.
-            if reader.started.is_some() {
+            // Fence new commands on inbound state, but continue a frame already
+            // started: the peer may be waiting to read it before finishing its own.
+            if reader.started.is_some() && !partial_image {
                 break;
             }
-            let Some(command) = queued.take().or_else(|| commands.try_recv().ok()) else {
+            let Some(mut command) = queued.take().or_else(|| commands.try_recv().ok()) else {
                 break;
             };
             if stop.load(Ordering::Acquire) {
@@ -215,6 +229,44 @@ pub(crate) fn run_connection(
                 queued = Some(command);
                 break;
             }
+            if let Some(image) = &mut command.image {
+                if image.lease.cancelled.load(Ordering::Acquire) {
+                    if image.writer.offset > 0 {
+                        return Err(Error::ClipboardImageCancelled);
+                    }
+                    continue;
+                }
+                if command.bytes.is_empty() {
+                    match image.receiver.try_recv() {
+                        Ok(bytes) => command.bytes = bytes,
+                        Err(TryRecvError::Empty) => {
+                            if image.lease.reserved_at.elapsed() >= COMMAND_TIMEOUT {
+                                image.lease.cancelled.store(true, Ordering::Release);
+                                deliver(
+                                    tx,
+                                    ClientEvent::CommandRejected {
+                                        request_id: None,
+                                        reason: Error::ClipboardImagePreparationTimeout,
+                                    },
+                                    stop,
+                                )?;
+                                continue;
+                            }
+                            queued = Some(command);
+                            break;
+                        }
+                        Err(TryRecvError::Disconnected) => continue,
+                    }
+                }
+                stream.set_write_timeout(Some(POLL))?;
+                let finished = image.writer.poll(&mut stream, &command.bytes)?;
+                stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+                if !finished {
+                    queued = Some(command);
+                }
+                // Even a successful bounded write yields to the inbound reader.
+                break;
+            }
             stream.write_all(&command.bytes)?;
             if let Some(request) = command.request {
                 tracing::trace!(category = "api", "request sent");
@@ -225,7 +277,7 @@ pub(crate) fn run_connection(
                 });
             }
         }
-        let Some(message) = reader.poll(&mut stream)? else {
+        let Some(message) = reader.poll_batch(&mut stream)? else {
             continue;
         };
         session.handle_message(message, |event| deliver(tx, event, stop))?;

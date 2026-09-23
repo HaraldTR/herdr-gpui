@@ -9,10 +9,13 @@ actions!(
     herdr,
     [
         Quit,
+        PlaySound,
         ShowHerdrNotDetected,
         ShowLogs,
         CheckForUpdates,
-        ShowUpdatePreview
+        ShowUpdatePreview,
+        ShowUpdateDownloadPreview,
+        ShowUpdateHomebrewPreview
     ]
 );
 
@@ -22,8 +25,32 @@ pub(crate) struct RunCommand {
     pub(crate) command: Command,
 }
 
+#[derive(Clone, PartialEq, serde::Deserialize, Action)]
+#[action(no_json)]
+pub(crate) struct ShowToastPreview {
+    pub(crate) kind: herdr_client::protocol::SemanticNotificationKind,
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, PartialEq, serde::Deserialize, Action)]
+#[action(no_json)]
+pub(crate) struct SetBadgePreview {
+    pub(crate) enabled: bool,
+}
+
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+    // Reaching for `+` is the more natural way to ask for larger text, and the
+    // platforms report it as the shifted character with the shift dropped
+    // rather than as shift-`=`, so `cmd-+` is its own binding. The catalog
+    // carries one shortcut per command, so the alias is bound by hand here.
+    cx.bind_keys([KeyBinding::new(
+        "cmd-+",
+        RunCommand {
+            command: Command::IncreaseFontSize,
+        },
+        None,
+    )]);
     cx.bind_keys(
         controls::COMMANDS
             .iter()

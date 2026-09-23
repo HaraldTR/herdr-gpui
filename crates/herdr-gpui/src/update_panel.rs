@@ -1,5 +1,56 @@
 use crate::{APP_VERSION, HerdrWindow, menu::Page, updater::State};
 use gpui::{prelude::*, *};
+use std::time::Duration;
+
+fn update_progress(state: &State, accent: Hsla, track: Hsla) -> Option<Div> {
+    let fraction = match state {
+        State::Downloading { received, total } if *total > 0 && received < total => {
+            Some(*received as f32 / *total as f32)
+        }
+        State::Ready { .. } | State::Restart { .. } => Some(1.),
+        // Homebrew has no reliable overall percentage. A completed archive still
+        // needs extraction and verification before it is ready to install.
+        State::Checking
+        | State::Downloading { .. }
+        | State::Installing
+        | State::Upgrading { .. }
+        | State::Restarting
+        | State::Cancelling => None,
+        _ => return None,
+    };
+    let fill = div()
+        .debug_selector(|| "app-update-progress-fill".into())
+        .h_full()
+        .rounded_full()
+        .bg(accent);
+    Some(
+        div()
+            .debug_selector(|| "app-update-progress".into())
+            .relative()
+            .flex_none()
+            .w_full()
+            .h(px(6.))
+            .rounded_full()
+            .overflow_hidden()
+            .bg(track)
+            .child(if let Some(fraction) = fraction {
+                fill.w(relative(fraction.clamp(0., 1.))).into_any_element()
+            } else {
+                fill.absolute()
+                    .w(relative(0.3))
+                    .with_animation(
+                        "app-update-busy",
+                        Animation::new(Duration::from_secs(2)).repeat(),
+                        |fill, delta| {
+                            fill.left(relative(
+                                0.35 * (1. - (delta * std::f32::consts::TAU).cos()),
+                            ))
+                        },
+                    )
+                    .into_any_element()
+            }),
+    )
+}
 
 #[derive(Clone, Copy)]
 enum UpdateAction {
@@ -12,6 +63,19 @@ enum UpdateAction {
 }
 
 impl HerdrWindow {
+    pub(super) fn open_update_progress_preview(
+        &mut self,
+        state: State,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.open_menu(window, cx) {
+            return;
+        }
+        self.menu.page = Some(Page::AppUpdate);
+        self.update_preview = Some(state);
+    }
+
     pub(super) fn open_app_update(
         &mut self,
         preview: bool,
@@ -50,6 +114,8 @@ impl HerdrWindow {
             State::Downloading { received, total } => (
                 if *total == 0 {
                     format!("Downloading: {received} bytes received (size unknown)")
+                } else if received >= total {
+                    "Download complete. Extracting and verifying the update...".into()
                 } else {
                     format!(
                         "Downloading: {received} / {total} bytes ({:.0}%)",
@@ -68,7 +134,7 @@ impl HerdrWindow {
                 Some(UpdateAction::Cancel),
             ),
             State::Homebrew { .. } => (
-                "A new app release is available. Herdr was installed with Homebrew, so Homebrew installs the update and keeps its own records correct.".into(),
+                "A new app release is available. Homebrew will install it, refreshing its package metadata if needed.".into(),
                 Some(UpdateAction::Upgrade),
             ),
             State::Upgrading { detail } => (
@@ -179,6 +245,7 @@ impl HerdrWindow {
                             })),
                     )
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(message))
+                    .children(update_progress(state, accent.into(), rgb(theme.active).into()))
                     .child(div().text_color(rgb(theme.muted)).child(
                         "Downloads are verified before installation. Your daemon and terminal sessions stay running.",
                     ))
@@ -191,7 +258,7 @@ impl HerdrWindow {
                                 .bg(rgb(theme.background))
                                 .child(div().font_weight(FontWeight::SEMIBOLD).child("QA preview"))
                                 .child(div().pt(px(4.)).text_color(rgb(theme.muted)).child(
-                                    "Download simulates a verified update. Install and Restart only closes this preview. No network or installation is performed.",
+                                    "Synthetic update state only. No network or installation is performed. Close or Escape dismisses this preview.",
                                 )),
                         )
                     }),

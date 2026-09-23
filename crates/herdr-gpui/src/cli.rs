@@ -268,6 +268,9 @@ mod tests {
         }
     }
 
+    // Windows paths are UTF-16 and have no byte form to round-trip here; the
+    // parser stays byte-agnostic on both because it never converts to `String`.
+    #[cfg(unix)]
     #[test]
     fn socket_paths_need_not_be_utf8() {
         use std::os::unix::ffi::OsStringExt;

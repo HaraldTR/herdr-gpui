@@ -14,6 +14,8 @@ pub(crate) struct MenuState {
     // Selection epoch and connection generation fence captured modal actions.
     pub(super) endpoint_target: (u64, u64),
     pub anchor: Point<Pixels>,
+    /// Ignore repeated right presses until the opening gesture is released.
+    pub(crate) opening_right_click: bool,
     pub focus: FocusHandle,
     pub(super) selected: Option<usize>,
     pub(super) workspace_selected: Option<WorkspaceMenuAction>,
@@ -22,9 +24,10 @@ pub(crate) struct MenuState {
     pub input: Option<DialogInput>,
     pub(super) error: Option<String>,
     pub(super) deletion: Option<Deletion>,
-    /// The correlated `worktree.create` request, so the dialog can report the
-    /// daemon's answer and follow the checkout it actually created.
+    /// The correlated `worktree.create` or `worktree.open` request, so the dialog
+    /// can report the daemon's answer and follow the returned workspace.
     pub(super) creation: Option<String>,
+    pub(super) worktree_open: Option<super::worktree_open::Picker>,
     pub(super) keybinds_scroll: ScrollHandle,
     pub(crate) keybinds_search: Option<Entity<crate::search_input::SearchInput>>,
     pub(super) _keybinds_subscription: Option<Subscription>,
@@ -33,6 +36,7 @@ pub(crate) struct MenuState {
     pub(crate) palette: Option<crate::palette::Palette>,
     pub(crate) close: Option<crate::close_modal::CloseConfirmation>,
     pub(crate) tab: Option<crate::tab_menu::TabMenu>,
+    pub(crate) pane: Option<crate::pane_menu::PaneMenu>,
     /// The new worktree dialog's tabs and the GitHub listing behind them.
     pub(crate) worktree: Option<super::WorktreeSource>,
     pub(crate) pr: crate::pull_request::Lookup,
@@ -154,6 +158,7 @@ impl MenuState {
             page: None,
             endpoint_target: (0, 0),
             anchor: Point::default(),
+            opening_right_click: false,
             focus: cx.focus_handle(),
             selected: None,
             workspace_selected: None,
@@ -163,6 +168,7 @@ impl MenuState {
             error: None,
             deletion: None,
             creation: None,
+            worktree_open: None,
             keybinds_scroll: ScrollHandle::new(),
             keybinds_search: None,
             _keybinds_subscription: None,
@@ -179,12 +185,15 @@ impl MenuState {
             github_scroll: ScrollHandle::new(),
             pr_connection: None,
             tab: None,
+            pane: None,
             worktree: None,
         }
     }
 
     pub fn reset(&mut self) {
+        self.opening_right_click = false;
         self.tab = None;
+        self.pane = None;
         self.github_selected = None;
         self.github_scroll.set_offset(Point::default());
         if self.github.busy() {
@@ -199,6 +208,7 @@ impl MenuState {
         self.error = None;
         self.deletion = None;
         self.creation = None;
+        self.worktree_open = None;
         self.close = None;
         self.worktree = None;
         self.pr.clear();

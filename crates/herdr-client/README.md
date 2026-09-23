@@ -1,6 +1,7 @@
 # Native Client API
 
-Unix/macOS local and SSH client for Herdr's stable generation 1 endpoint. This crate
+Local and SSH client for Herdr's stable generation 1 endpoint. Local connections
+work on Unix and on Windows; SSH endpoints are Unix-only. This crate
 does not link Herdr, GPUI, ratatui, crossterm, Tokio, or a PTY implementation.
 The workspace centralizes `gpui = "=0.2.2"` for the forthcoming GUI member.
 
@@ -42,6 +43,7 @@ ConnectTarget::Session { name: String, development: bool }
 ConnectTarget::Socket(PathBuf)
 ConnectTarget::Ssh { target: String, session: String }
 ConnectTarget::socket_path(&self) -> Result<PathBuf>
+Stream  // std::os::unix::net::UnixStream, or a named-pipe wrapper on Windows
 session_socket(config_dir: &Path, name: &str) -> Result<PathBuf>
 ConnectOptions { surface_size: ClientSurfaceSize, cell_width_px: u32, cell_height_px: u32 }
 ```
@@ -51,6 +53,8 @@ ConnectOptions { surface_size: ClientSurfaceSize, cell_width_px: u32, cell_heigh
 ```text
 send_input(&self, boot_id: &str, pane_id: &str, events: impl IntoIterator<Item = ClientPaneInputEvent>) -> Result<()>
 send_popup_input(&self, boot_id: &str, terminal_id: &str, events: impl IntoIterator<Item = ClientPaneInputEvent>) -> Result<()>
+reserve_clipboard_image(&self, boot_id: &str, target: ClientClipboardImageTarget) -> Result<ClipboardImageUpload>
+reserve_clipboard_input(&self, boot_id: &str, target: ClientClipboardImageTarget) -> Result<ClipboardImageUpload>
 resize(&self, boot_id: &str, options: ConnectOptions) -> Result<()>
 set_focus(&self, boot_id: &str, focused: bool) -> Result<()>
 set_surface_active(&self, boot_id: &str, active: bool) -> Result<String>
@@ -82,7 +86,22 @@ SSH discovery deadlines are `TimedOut`, cancellation is `Interrupted`.
 Errors are not `Clone`, `PartialEq`, or `Eq`; match their typed variants instead.
 
 `connect_with_connector` also returns `Result<Client>`. Its injected connector
-still returns `io::Result<UnixStream>` because it is an actual I/O interface.
+still returns `io::Result<Stream>` because it is an actual I/O interface.
+`Stream` is the crate's local endpoint type, re-exported at the root. It is
+`std::os::unix::net::UnixStream` on Unix. On Windows it wraps an `interprocess`
+named pipe, because that is what the Windows daemon binds: upstream maps the
+same socket path string into the NPFS namespace, so discovery is unchanged.
+Named pipes expose neither a pollable descriptor nor `SO_RCVTIMEO`, so the
+wrapper emulates `set_read_timeout` by peeking the pipe and sleeping briefly
+until data arrives or the deadline passes, keeping the session loop's receive
+deadlines and cancellation identical to the Unix socket. `PIPE_NOWAIT` cannot
+serve here: it reports "no data yet" as `ERROR_NO_DATA`, which the standard
+library maps to `BrokenPipe`, so an idle connection would read as a disconnect.
+The peek is the crate's only `unsafe`, a single `PeekNamedPipe` call with no
+safe wrapper available, matching what the daemon's own Windows client does; no
+extra threads are involved. `set_write_timeout` is accepted and not enforced,
+because a named pipe has no send timeout: a peer that stops reading can block a
+write until it exits.
 If adapting a typed error to that callback, use
 `io::Error::new(error.kind(), error)`, not `error.to_string()`, to retain sources.
 
@@ -99,6 +118,111 @@ controls and is capped at 1024 characters. `CommandRejected.reason` remains a ty
 its original optional request ID. Convert it to display text only at the UI
 boundary. Raw errors and source chains are diagnostic data, not automatically
 safe UI text.
+
+## Remote Clipboard Images
+
+`reserve_clipboard_image` reserves a position in the normal FIFO immediately,
+before asynchronous clipboard or file reads. It validates a nonempty boot ID,
+connection cancellation, and a target ID of 1 through 1024 bytes (`Pane` or
+`Popup`; `DirectTerminal` has no ID). The worker still checks the boot against
+the ready snapshot. This is the existing Herdr TUI `ClipboardImage` wire message,
+not a new API method, and does not acquire the API request lease.
+
+For unknown native clipboard content, use `reserve_clipboard_input` instead. It
+has the same validation, FIFO slot, preparation deadline, and cancellation API,
+but does not claim the image lease until `complete(extension, data)`, immediately
+before encoding. Text/key completion via `complete_input` never claims that lease,
+so text can be reserved and published while an image is active without losing its
+position before subsequent input. A competing image completion returns
+`ClipboardImageBusy` and skips its slot; it does not retry or replay.
+Both APIs use the same 64-entry command queue (plus one worker-held slot) and
+allocate no payload buffer until completion. Callers must separately bound their
+background acquisition tasks and data (the GUI limits preparation to four tasks).
+
+```text
+ClipboardImageUpload::complete(self, extension: &str, data: Vec<u8>) -> Result<()>
+ClipboardImageUpload::complete_input(self, event: ClientPaneInputEvent) -> Result<()>
+ClipboardImageUpload::cancellation_handle(&self) -> ClipboardImageCancellation
+ClipboardImageUpload::is_cancelled(&self) -> bool
+ClipboardImageCancellation::cancel(&self)
+ClipboardImageCancellation::is_finished(&self) -> bool
+```
+
+The upload is an owned, sendable RAII permit, not cloneable. Dropping it skips
+the slot. Only one image lease can be held per connection: the eager image API
+claims it at reservation, the input API only on image completion. Another eager
+image reservation or deferred image completion returns `Error::ClipboardImageBusy`. The atomic
+lease remains held until both preparation and the worker slot are gone, so
+repeated drop/cancel cannot accumulate image slots. The ordinary bounded command
+queue still returns `Full`. A cancellation handle is cloneable and does not
+retain that lease or keep the connection alive.
+Retain it after publication until `is_finished()` returns true: only destruction
+of the worker slot (sent, rejected, cancelled, or connection teardown) sets this
+flag. Calling `cancel`, dropping the preparing permit, and successfully publishing
+do not themselves mark it finished. Finished is not daemon acknowledgement.
+
+GUI handoff: reserve on the UI thread at the paste/drop event, capture the
+connection epoch, boot, and target, and perform bounded file/clipboard reads on
+a background executor. Back on the UI thread, validate that captured identity
+and target are still current. If valid, move the permit and bytes to a background
+executor for `complete`; **encoding must not run on the UI thread**. Retain a
+cancellation handle so a subsequent focus/host/epoch change can cancel encoding,
+queued publication, or transmission. Check `is_cancelled` between bounded file
+reads when practical. The client does not inspect GUI focus or read local files.
+Completion checks cancellation before and after encoding; success only means
+published to the worker, never daemon acknowledgement. As with ordinary input,
+cancellation cannot retract bytes already fully transmitted to the daemon.
+
+Completion accepts nonempty opaque bytes up to 16 MiB and case-insensitive
+`png`, `jpg`/`jpeg`, `gif`, `webp`, or `bmp`; JPEG becomes `jpg`. Like the TUI,
+this is extension/size validation, not image decoding or signature validation.
+Invalid input returns `Error::Protocol` with `ClipboardImageSize`,
+`ClipboardImageExtension`, or `ClipboardImageTarget`. Explicit upload
+cancellation returns `ClipboardImageCancelled`; connection cancellation returns
+`Disconnected`. Late completion after a worker rejection fails rather than
+replaying on another connection.
+
+If a candidate image path is missing, unreadable, oversized, or not a regular
+file, call `complete_input(ClientPaneInputEvent::Paste(original_text))` instead of
+dropping the permit and sending new input. If background native clipboard
+acquisition finds no image for Ctrl+V, pass the **original captured semantic Key
+event** instead. This preserves all key fields without synthesizing terminal bytes.
+It encodes exactly one event for the captured pane/popup using the ordinary
+2 MiB cap, in the same reserved slot, so
+later input (including Enter) cannot overtake the fallback. It shares completion's
+background-only encoding, GUI identity validation, and cancellation rules.
+`DirectTerminal` returns `ClipboardImageInputTarget`: upstream's legacy `Input`
+carries raw terminal bytes, and this client cannot infer the direct terminal's
+keyboard or bracketed-paste mode. There is no paste-only completion wrapper.
+
+Preparation has a 60-second deadline from reservation, including encoding.
+`is_cancelled` reflects expiration, and late completion returns
+`ClipboardImageCancelled`. An expired, still-empty slot is cancelled and skipped
+by the worker, with `CommandRejected { reason: ClipboardImagePreparationTimeout,
+request_id: None }`; ordinary input then resumes without replay. A retained
+expired eager image permit still holds the single-image memory lease until dropped, but no
+longer blocks ordinary commands. Already published data is not subject to the
+preparation deadline; the write deadline starts separately on the first attempt.
+
+While preparation is pending, the worker polls the slot without blocking, keeps
+reading and probing health, and holds later commands in FIFO order. Image writes
+use at most 64 KiB per attempt with a 10 ms socket write timeout, retaining exact
+offsets over short writes/timeouts and yielding to reads after each attempt.
+Each read turn drains one progressing frame for at most 128 reads (1 MiB) or
+10 ms, stopping immediately on a read without progress. This avoids retrying a
+blocked write before every 8 KiB of a large inbound frame, without starving
+outbound progress or cancellation when a peer sends slowly or stops mid-frame.
+An inbound partial frame fences new outbound commands, but an already-started
+outbound frame continues in bounded chunks to avoid a full-duplex stall. No command
+or health frame can interleave with a partial image. Health probes are deferred
+during partial writes; the image has an absolute 60-second write deadline.
+Dropping a pending permit or cancelling before any bytes are written skips the
+slot. Cancellation after a partial write, a write deadline, or a boot change
+closes the connection instead of leaving broken framing or resuming stale data.
+
+Windows returns `ClipboardImageUnsupported` at reservation: its current local
+named-pipe wrapper cannot enforce bounded writes, and remote SSH is already
+unsupported there. Ordinary Windows commands retain their existing behavior.
 
 `ClientEvent` variants:
 
@@ -125,8 +249,10 @@ not execute escape sequences, read graphics file paths, or mutate the clipboard.
   and one in-flight API request. A waiting request holds later commands in FIFO
   order until the preceding response is complete. Events
   use backpressure rather than losing snapshots, input, patches, or responses.
-- 2 MiB outbound payload cap, 32 MiB inbound cap (semantic surfaces may include
-  images), 8 MiB aggregate response assembly cap, strict full-payload decoding.
+- 2 MiB ordinary outbound payload cap; clipboard images alone allow 16 MiB of
+  data plus 2048 bytes of bounded envelope overhead. 32 MiB inbound cap (semantic
+  surfaces may include images), 8 MiB aggregate response assembly cap, strict
+  full-payload decoding.
 - 10-second handshake/initial-snapshot and partial-frame deadlines, 60-second
   request deadline (matching the upstream command lane);
   1-second socket write timeout; 10 ms read/cancellation polling. Partial reads
@@ -180,8 +306,7 @@ focus changes. Full surfaces can skip surface revisions; patches cannot.
 This is a complete **text** baseline. Images retain their wire scene semantics:
 assets contain newly required bytes, not necessarily every live image's bytes.
 Rendering/caching images, optional delta codecs, local server spawning, discovery
-of all running sessions, automatic reconnect, and Windows transport are out of
-scope. No existing Herdr server or session is modified or started by discovery.
+of all running sessions, and automatic reconnect are out of scope. No existing Herdr server or session is modified or started by discovery.
 
 ## Saved SSH Hosts
 
@@ -233,11 +358,102 @@ unanswered probe. Any complete inbound message satisfies a probe, independently
 of the initial-snapshot deadline. As with local connections, continuously drain
 events: event backpressure pauses transport processing, including health checks.
 
-Limitations: POSIX remote hosts only; no Windows remote discovery, interactive
-bootstrap/install/upgrade, version-specific mise install scanning, or retry/replay.
+Limitations: POSIX remote hosts only, reachable from a Unix client only. The
+bridge hands the `ssh` child a socket pair as its standard streams, which needs
+`OwnedFd`; a Windows client therefore validates the target and session and then
+returns `Error::SshUnsupported` without spawning anything. There is no Windows
+remote discovery, interactive bootstrap/install/upgrade, version-specific mise
+install scanning, or retry/replay.
 Shell-initialized PATH entries unavailable to `/bin/sh` are not discovered unless
 covered by the known roots. The remote bridge itself can start the named daemon,
 as upstream does; disconnect only detaches and never stops the remote daemon.
+
+## SSH File Transfers
+
+```text
+upload_files(target: &str, paths: &[PathBuf], cancelled: &AtomicBool,
+             progress: impl FnMut(u64, u64)) -> Result<Vec<String>>
+remove_uploaded_files(target: &str, paths: &[String]) -> Result<()>
+```
+
+This separate **blocking background-worker API** stages arbitrary regular files,
+including multi-gigabyte ISOs, without involving Herdr or its clipboard protocol.
+It never pastes, starts a daemon, or changes GUI state. Callers must capture and
+revalidate their UI target/connection identity before using the returned paths.
+Do not call it or join its worker on the UI thread. Progress callbacks execute on
+that same worker and must return promptly; publish/coalesce UI updates there.
+
+At most 256 paths are accepted (an empty batch is a no-op). Basenames must be
+UTF-8 without control characters. Directories and special files are rejected;
+symlinks to regular files are followed. Files are opened once with `O_NONBLOCK`
+using the inherited workspace `rustix` safe open API (`NONBLOCK | CLOEXEC`),
+and checked through descriptor metadata, so a FIFO or symlink-to-FIFO cannot
+block the open. Regular disk/network filesystem operations can still block in
+the OS: cancellation is checked around them, not by interrupting kernel I/O.
+Open descriptors fix source identity, not contents; callers should avoid changing
+files during transfer. Length changes are rejected, but same-size edits are not
+detected. Lengths, progress, and checked aggregate size use `u64`. Memory is bounded
+to a 64-KiB data chunk, bounded response lines, and at most 256 file/path records,
+not the source size. Progress starts at `(0, total)` and counts bytes accepted by
+the local SSH socket, **not remote acknowledgement or durable storage**.
+
+Each file gets one dedicated SSH process using the connection bridge's shared
+OpenSSH trust/authentication/forwarding policy. Linux/macOS clients are supported;
+other clients return `UploadUnsupported`. Remote hosts need a POSIX `/bin/sh`
+plus `mktemp`, `cat`, `wc`, `tr`, `rm`, and `rmdir`. Private directories are created
+with `mktemp` under canonicalized `${TMPDIR:-/tmp}`, with `umask 077`, preserved
+basenames, and exclusive file creation. A readiness handshake validates the
+absolute staging directory before any file bytes are sent. A separate created
+acknowledgement, including the exact destination path, must arrive after
+exclusive file creation before the client streams payload or claims file cleanup
+ownership. Before that acknowledgement, rollback only attempts `rmdir`; it never
+removes a collided or unacknowledged file. The remote trap owns its created file
+before emitting the acknowledgement, including if that response is lost.
+EOF terminates each
+receive; the remote checks the byte count and reports the exact final path.
+Both that response and a successful SSH exit are required for success. Remote
+stderr is discarded, not exposed or retained as potentially secret-bearing data.
+
+Nonblocking sockets poll cancellation every 10 ms while stalled. A 30-second
+**no-progress** timeout applies, not a whole-transfer deadline: active large
+transfers can take arbitrarily long. Setting `cancelled` stops streaming and
+kills/reaps only the owned SSH child. The remote trap deletes incomplete files on
+EOF, error, or catchable signal. On any batch failure/cancellation, an explicit
+cleanup SSH command removes only the validated owned files and empty staging
+directories, including earlier successes; no partial path list is returned.
+Cleanup intentionally runs despite cancellation, with the same no-progress bound.
+Network failure or uncatchable remote termination can prevent cleanup; a failed
+explicit rollback returns `UploadCleanup` retaining both the original typed error
+and the cleanup error. An unreceived readiness frame can also leave an unknown
+empty directory if the remote process cannot run its trap.
+
+On success the returned strings are raw absolute paths, **not shell-quoted paste
+text**. Quote each path for the destination shell before pasting it. Successful
+files remain after SSH exits and after the GUI detaches. They are temporary,
+user-owned files, not daemon-owned objects: OS temporary-directory cleanup or the
+user may delete them. There is no automatic expiry, durable-backup guarantee, or
+daemon garbage collection.
+
+If success arrives after cancellation, a host switch, or target loss, call
+`remove_uploaded_files` on a background worker with the **original upload SSH
+target** and the unchanged returned paths. Never use the newly selected host.
+This API has no cancellation flag: cleanup must still run after the upload's
+cancellation flag is set. It reuses the explicit rollback implementation and
+shared SSH trust policy, including its 30-second no-progress timeout. An empty
+batch spawns nothing. Unsupported clients still return `UploadUnsupported`.
+
+Before spawning SSH it validates the entire batch: at most 256 paths, at most
+4096 bytes each, absolute POSIX paths without controls, empty components, `.` or
+`..`, and exactly one basename beneath `herdr-upload.<12 ASCII alphanumeric>`.
+Malformed paths return `UploadCleanupPath`. Only the exact files and empty
+staging directories are removed; no recursive deletion occurs. Missing files
+and directories are already clean. A nonempty or symlink-replaced staging
+directory returns failure. Cleanup can partially succeed, so retrying the same
+original paths is permitted. A symlink in the final filename is unlinked, not
+followed. Path validation proves shape, not provenance: callers must never pass
+arbitrary remote paths. The remote account and temporary-directory ancestors
+must remain trusted; shell-based cleanup cannot eliminate concurrent path
+replacement races by that account.
 
 ## Local Discovery
 

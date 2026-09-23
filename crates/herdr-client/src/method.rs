@@ -17,6 +17,7 @@ pub enum Method {
     PaneClose,
     PaneFocus,
     PaneFocusDirection,
+    PaneRename,
     PaneSplit,
     PaneZoom,
     ServerReloadConfig,
@@ -31,6 +32,7 @@ pub enum Method {
     WorkspaceRename,
     WorktreeCreate,
     WorktreeList,
+    WorktreeOpen,
     WorktreeRemove,
 }
 
@@ -44,6 +46,7 @@ impl Method {
             Self::PaneClose => "pane.close",
             Self::PaneFocus => "pane.focus",
             Self::PaneFocusDirection => "pane.focus_direction",
+            Self::PaneRename => "pane.rename",
             Self::PaneSplit => "pane.split",
             Self::PaneZoom => "pane.zoom",
             Self::ServerReloadConfig => "server.reload_config",
@@ -58,6 +61,7 @@ impl Method {
             Self::WorkspaceRename => "workspace.rename",
             Self::WorktreeCreate => "worktree.create",
             Self::WorktreeList => "worktree.list",
+            Self::WorktreeOpen => "worktree.open",
             Self::WorktreeRemove => "worktree.remove",
         }
     }
@@ -92,5 +96,13 @@ mod tests {
             assert!(method.advertised_in(&["unknown.future".into(), name.into()]));
         }
         assert!(!Method::IntegrationInstall.advertised_in(&["integration.list".into()]));
+    }
+
+    #[test]
+    fn pane_rename_wire_name_and_advertisement() {
+        assert_eq!(Method::PaneRename.as_str(), "pane.rename");
+        assert_eq!(Method::PaneRename.to_string(), "pane.rename");
+        assert!(Method::PaneRename.advertised_in(&["pane.rename".into()]));
+        assert!(!Method::PaneRename.advertised_in(&["tab.rename".into()]));
     }
 }

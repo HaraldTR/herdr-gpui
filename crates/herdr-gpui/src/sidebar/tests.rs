@@ -27,7 +27,7 @@ fn section_headings_use_the_configured_sidebar_font_size() {
             fallbacks: None,
         };
         for label in ["spaces", "agents"] {
-            let mut heading = header(label, &font, &Theme::default());
+            let mut heading = header(label, &font, &Theme::default(), &super::layout::Normal);
             assert_eq!(
                 heading.text_style().as_ref().unwrap().font_size,
                 Some(px(size).into())
@@ -84,7 +84,7 @@ fn collapse_uses_repository_identity_without_mutating_selection() {
     let mut workspaces = layout_tests::snapshot(7).workspaces;
     workspaces[4].focused = true;
     let before = workspaces.clone();
-    let collapsed = std::collections::HashSet::from(["/fixture/agent-launcher/.git".into()]);
+    let collapsed = std::collections::HashSet::from([layout_tests::REPO_KEY.into()]);
     let entries = super::visible_workspace_entries(&workspaces, &collapsed);
     assert_eq!(
         entries.iter().map(|entry| entry.0).collect::<Vec<_>>(),
@@ -273,7 +273,7 @@ fn status_symbols_match_upstream_without_changing_status_colors() {
 #[test]
 fn status_slots_are_fixed_for_each_style_and_font_size() {
     use gpui::{Styled, px};
-    for size in [8., 12., 16., 20., 32.] {
+    for size in [6., 8., 12., 12.5, 16., 20., 32.] {
         let font = FontConfig {
             family: "Menlo".into(),
             size,
@@ -284,7 +284,7 @@ fn status_slots_are_fixed_for_each_style_and_font_size() {
             indicators.style = style;
             let width = match style {
                 IndicatorStyle::Dots => STATUS_WIDTH,
-                IndicatorStyle::Symbols => size,
+                IndicatorStyle::Symbols => size.ceil().max(STATUS_WIDTH),
             };
             assert_eq!(indicators.width(&font), width);
             for status in [
@@ -302,6 +302,65 @@ fn status_slots_are_fixed_for_each_style_and_font_size() {
                         Some(px(size).into())
                     );
                 }
+            }
+        }
+    }
+}
+
+#[test]
+fn symbol_rows_keep_layout_density_and_expand_child_indent() {
+    use super::row::{RowIcon, RowKind, RowTree, row};
+    use crate::config::LayoutMode;
+    use gpui::{Styled, px};
+
+    let font = FontConfig {
+        family: "Menlo".into(),
+        size: 20.,
+        fallbacks: None,
+    };
+    let theme = Theme::default();
+    for mode in [LayoutMode::Normal, LayoutMode::Compact] {
+        let layout = super::layout::for_mode(mode);
+        for style in [IndicatorStyle::Dots, IndicatorStyle::Symbols] {
+            let mut indicators = Indicators::new(None, false);
+            indicators.style = style;
+            for kind in [RowKind::Workspace, RowKind::Agent] {
+                let mut row = row(
+                    "density",
+                    &[("child", true)],
+                    "branch",
+                    kind,
+                    AgentStatus::Working,
+                    indicators,
+                    false,
+                    RowTree::LastChild,
+                    true,
+                    160.,
+                    RowIcon::None,
+                    None,
+                    None,
+                    layout,
+                    (&font, &theme),
+                );
+                assert_eq!(
+                    row.style().padding.left,
+                    Some(
+                        px(
+                            layout.padding() + layout.child_indent() + indicators.width(&font)
+                                - STATUS_WIDTH
+                        )
+                        .into()
+                    )
+                );
+                let lines = if layout.workspace_details() || kind == RowKind::Agent {
+                    2.
+                } else {
+                    1.
+                };
+                assert_eq!(
+                    row.style().size.height,
+                    Some(px(super::line_height(&font) * lines + 2. * layout.row_padding()).into())
+                );
             }
         }
     }

@@ -1,4 +1,8 @@
-# Herdr GUI settings, independent of the daemon config unless opted in below.
+# DO NOT EDIT -- WILL BE OVERWRITTEN
+# Managed Herdr GPUI defaults, refreshed on startup and GUI config reload.
+# Put your overrides in config-gpui.local.toml beside this file, then reload.
+# Herdr GUI settings. Independent of the daemon config, except where a setting
+# below says it starts from one the daemon config already carries.
 # Save at $XDG_CONFIG_HOME/herdr/config-gpui.toml (default ~/.config/herdr/).
 # Omitted settings use defaults. Font sizes are logical pixels, inclusive 8..48.
 # Font families below are examples; leave them commented to use platform defaults.
@@ -7,11 +11,11 @@
 # no text face covers. Each section falls back to the installed "Nerd Font"
 # families automatically; set fallback to choose them yourself, or to [] for
 # none. Uninstalled names are ignored, and at most 8 are accepted per section.
-# Restart the GUI or use its GUI config reload action after editing.
+# Restart the GUI or use its GUI config reload action after editing the local file.
 
 # Built-ins: Default, Nord, Dracula, Catppuccin Mocha, Catppuccin Latte.
 # Also accepts a Ghostty theme name, an absolute path, or a ~/ path.
-# Set "Follow Herdr" to use the local Herdr theme (without changing its config).
+# Set "Follow Herdr" in config-gpui.local.toml to follow the local Herdr theme.
 theme = "Default"
 
 # Ask before closing a tab (closing terminates its terminal processes).
@@ -19,6 +23,38 @@ theme = "Default"
 confirm_close_tab = true
 # Show the Agents section below Spaces in the sidebar.
 show_agents = true
+# "normal" or "compact". Compact hides workspace branch lines and PR change
+# counts, and tightens Spaces and Agents spacing without changing font sizes.
+layout = "normal"
+
+# Inherit shared [ui.toast] delivery, delay_seconds, and herdr.position.
+# Only delivery = "herdr" enables in-app toasts; "off", "terminal", and "system"
+# do not. QA previews bypass delivery policy. In config-gpui.local.toml, each
+# explicit key overrides the shared setting independently, including false.
+# [notifications]
+# enabled = false
+# Inclusive 0..3600. Custom notifications are immediate.
+# delay_seconds = 1
+# top-left, top-right, bottom-left, bottom-right. Explicit wire corners win.
+# position = "bottom-right"
+
+# The "copied to clipboard" flash shown after a terminal selection is copied.
+# Left commented out, this follows the daemon config's [ui.toast.clipboard], so
+# setting it there covers both clients. Uncomment a key to override that one
+# here; each key overrides on its own. Defaults, as in herdr: shown, at the
+# bottom center of the terminal.
+# [clipboard_toast]
+# enabled = true
+# top-left, top-center, top-right, bottom-left, bottom-center, bottom-right.
+# position = "bottom-center"
+
+# To customize spacing too, REPLACE the top-level layout above with this table:
+# [layout]
+# mode = "normal"
+# Blank space between the sidebar and the terminal beside it, 0 to 64.
+# The terminal keeps the remaining width, so a wide gap costs columns.
+# Ignored while the sidebar is hidden. Set 0 to sit against the divider.
+# sidebar_gap = 8
 
 [sidebar]
 # Default: "Menlo" on macOS, "DejaVu Sans Mono" on Linux.

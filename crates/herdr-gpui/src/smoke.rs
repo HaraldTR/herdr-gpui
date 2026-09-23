@@ -96,14 +96,19 @@ fn symbol_cascade(window: &mut Window, cx: &mut App) -> Result<&'static str> {
 }
 
 pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
+    if std::env::var_os("HERDR_TEST_NOTIFICATIONS_ONLY").is_some() {
+        start_notifications(handle, cx);
+        return;
+    }
     EXIT_CODE.store(1, Ordering::SeqCst);
     #[cfg(target_os = "macos")]
-    if let Err(error) = app_icon::verify_native() {
+    if let Err(error) = app_icon::verify_native().and_then(|()| crate::app_badge::verify_native()) {
         eprintln!("ICON native FAIL: {error:#}");
         cx.quit();
         return;
     }
     cx.set_global(sidebar::layout_tests::PaintedProbes::default());
+    cx.set_global(sidebar::layout_tests::VerifyChildGeometry(true));
     let timer = cx.background_executor().clone();
     cx.spawn(async move |cx| {
         // Shaping first: the cascade is independent of every layout probe below.
@@ -122,14 +127,15 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
             let _ = cx.update(|cx| cx.quit());
             return;
         }
-        for frame in 0..12 {
+        for frame in 0..24 {
             timer.timer(Duration::from_millis(100)).await;
             let result = AnyWindowHandle::from(handle).update(
                 cx,
                 |root, window, cx| -> Result<()> {
                     use crate::sidebar::layout_tests::PaintedProbes;
                     let (w, h) =
-                        [(1200., 780.), (640., 400.), (1000., 650.), (800., 600.)][frame / 3];
+                        [(1200., 780.), (640., 400.), (1000., 650.), (800., 600.)][(frame % 12) / 3];
+                    let compact = frame >= 12;
                     if frame % 3 == 0 {
                         window.resize(fixture_size(w, h));
                     } else if window.viewport_size() != fixture_size(w, h) {
@@ -141,7 +147,14 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                     cx.default_global::<PaintedProbes>().0.clear();
                     root.downcast::<HerdrWindow>()
                         .map_err(|_| anyhow!("unexpected root"))?
-                        .update(cx, |_, cx| cx.notify());
+                        .update(cx, |view, cx| {
+                            view.config.layout.mode = if compact {
+                                crate::config::LayoutMode::Compact
+                            } else {
+                                crate::config::LayoutMode::Normal
+                            };
+                            cx.notify();
+                        });
                     window.refresh();
                     window.draw(cx).clear();
                     let probes = &cx.global::<PaintedProbes>().0;
@@ -155,6 +168,12 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                         "herdr-gpui-sidebar-rendering-regression-investigation",
                         "fix/sidebar-label-width-and-overflow-regression",
                     ] {
+                        if compact && matches!(input, "main" | "1256789" | "fix/sidebar-label-width-and-overflow-regression") {
+                            if probes.contains_key(input) {
+                                bail!("compact layout painted branch: {input}");
+                            }
+                            continue;
+                        }
                         let p = probes
                             .get(input)
                             .with_context(|| format!("missing paint: {input}"))?;
@@ -163,7 +182,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                         }
                         let expected_short = input.len() < 20;
                         let title_icon = matches!(input, "herdr" | "herdr-gpui-sidebar-rendering-regression-investigation");
-                        let expected_width = px(sidebar::LABEL_WIDTH - if title_icon { sidebar::ICON_RESERVE } else { 0. });
+                        let expected_width = px(sidebar::LABEL_WIDTH + if compact { 16. } else { 0. } - if title_icon { sidebar::ICON_RESERVE } else { 0. });
                         if p.glyph_text != p.cached
                             || (expected_short && p.glyph_text != input)
                             || (!expected_short
@@ -182,7 +201,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                         bail!("incomplete/cropped native glyph output");
                     }
                     eprintln!(
-                        "SIDEBAR verified frame={frame} viewport={:?} labels=7 clipped=0",
+                        "SIDEBAR verified frame={frame} compact={compact} viewport={:?} clipped=0",
                         window.viewport_size()
                     );
                     Ok(())
@@ -194,6 +213,12 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                 return;
             }
         }
+        let _ = handle.update(cx, |view, _, cx| {
+            // Later fixtures add PR badges and dialogs that change label budgets.
+            cx.set_global(sidebar::layout_tests::VerifyChildGeometry(false));
+            view.config.layout.mode = crate::config::LayoutMode::Normal;
+            cx.notify();
+        });
         #[cfg(target_os = "macos")]
         for step in 0..4 {
             let point = AnyWindowHandle::from(handle).update(cx, |root, window, cx| {
@@ -370,9 +395,6 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                         let mut pr = pull_request::fixture()?;
                         pr.head_ref_name = "feature/a-deliberately-long-branch-name-for-the-compact-popover".repeat(3);
                         view.workspace_pr_fixture(pr)?;
-                        // The menu has its prepared PR. Do not also attach its
-                        // badge to the sidebar's fixed-width child-row fixture.
-                        view.menu.pr_cache.clear();
                         Ok(())
                     })?;
                     cx.default_global::<sidebar::layout_tests::PaintedProbes>().0.clear();
@@ -484,7 +506,53 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
             let _ = cx.update(|cx| cx.quit());
             return;
         }
-        eprintln!("SIDEBAR native PASS: {cascade}; 12 Menlo draws, 4 sizes, collapse/expand, menu isolation, PR title/stats glyphs, GitHub auth fixtures, right-click dialogs and Unicode fields at 2 sizes; host routing, disabled selection, scoped repositories, resized host/agent glyphs, independent scroll and decoy key window");
+        eprintln!("SIDEBAR native PASS: {cascade}; 24 Menlo draws, normal/compact layouts at 4 sizes, collapse/expand, menu isolation, PR title/stats glyphs, GitHub auth fixtures, right-click dialogs and Unicode fields at 2 sizes; host routing, disabled selection, scoped repositories, resized host/agent glyphs, independent scroll and decoy key window");
+        EXIT_CODE.store(0, Ordering::SeqCst);
+        let _ = cx.update(|cx| cx.quit());
+    })
+    .detach();
+}
+
+fn start_notifications(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
+    EXIT_CODE.store(1, Ordering::SeqCst);
+    let timer = cx.background_executor().clone();
+    cx.spawn(async move |cx| {
+        for (width, height) in [(360., 240.), (1200., 780.)] {
+            let _ = handle.update(cx, |_, window, _| window.resize(size(px(width), px(height))));
+            timer.timer(Duration::from_millis(100)).await;
+            for kind in [
+                SemanticNotificationKind::NeedsAttention,
+                SemanticNotificationKind::Finished,
+                SemanticNotificationKind::UpdateInstalled,
+                SemanticNotificationKind::Custom,
+            ] {
+                let result = handle.update(cx, |view, window, cx| -> Result<()> {
+                    view.menu.reset();
+                    view.config.notifications.enabled = false;
+                    view.config.notifications.delay_seconds = 3600;
+                    window.focus(&view.focus);
+                    let selected = view.selected_endpoint;
+                    let snapshot = view.live.snapshot.clone();
+                    view.show_toast_preview(kind, cx);
+                    let notice = &view.endpoints[selected].toasts.entries.back().context("missing toast preview")?.1;
+                    if !notice.visible || notice.kind != kind || view.endpoints.iter().any(|e| e.connection.handle.is_some()) {
+                        bail!("preview did not bypass policy offline");
+                    }
+                    view.command(Command::OpenNotificationTarget, window, cx);
+                    if view.selected_endpoint != selected || view.live.snapshot != snapshot || view.pending_navigation.is_some() || !view.focus.is_focused(window) {
+                        bail!("offline notification command navigated or stole focus");
+                    }
+                    Ok(())
+                });
+                let drawn = AnyWindowHandle::from(handle).update(cx, |_, window, cx| window.draw(cx).clear());
+                if !matches!(result, Ok(Ok(()))) || drawn.is_err() {
+                    eprintln!("NOTIFICATIONS native FAIL: {result:?} {drawn:?}");
+                    let _ = cx.update(|cx| cx.quit());
+                    return;
+                }
+            }
+        }
+        eprintln!("NOTIFICATIONS native PASS: all four offline previews drawn at narrow/wide sizes; disabled/delayed policy bypass and inert offline command verified");
         EXIT_CODE.store(0, Ordering::SeqCst);
         let _ = cx.update(|cx| cx.quit());
     })
@@ -806,9 +874,11 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
                 snapshot.workspaces[1].label = format!("child-{index}");
                 snapshot.workspaces.truncate(2);
                 snapshot.agents.truncate(1);
+                // This fixture tests the name fallback, not the shared fixture's
+                // higher-priority "Claude Code" display name.
+                snapshot.agents[0].display_agent = None;
                 snapshot.agents[0].name =
                     Some(format!("agent-{index}-with-a-deliberately-long-label"));
-                snapshot.agents[0].display_agent = None;
                 endpoint.live.snapshot = Some(Arc::new(snapshot));
                 if let Ok(mut inbox) = endpoint.connection.inbox.lock() {
                     *inbox = endpoint.live.clone();
@@ -995,16 +1065,16 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
             800.,
             Some(400.),
             284.,
-            362.,
+            359.,
             "Synthetic host",
             "agent-1-with-a",
         ),
-        (360., None, 77., 82., "Synthetic", "agent-1"),
+        (360., None, 77., 79., "Synthetic", "agent-1"),
         (
             800.,
             Some(160.),
             117.,
-            122.,
+            119.,
             "Synthetic host",
             "agent-1-with-a",
         ),
@@ -1012,11 +1082,11 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
             800.,
             Some(480.),
             364.,
-            442.,
+            439.,
             REMOTE,
             "agent-1-with-a-deliberately-long-label",
         ),
-        (480., None, 116., 194., "Synthetic host", "agent-1-with-a"),
+        (480., None, 116., 191., "Synthetic host", "agent-1-with-a"),
     ] {
         handle
             .update(cx, |view, window, cx| {

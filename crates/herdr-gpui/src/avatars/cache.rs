@@ -2,21 +2,31 @@
 #![forbid(unsafe_code)]
 
 use gpui::{Image, ImageFormat};
+#[cfg(unix)]
 use rustix::fs::{AtFlags, FlockOperation, Mode, OFlags, flock, open, openat, renameat, unlinkat};
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
 use std::{
     fs::{DirBuilder, File},
-    io::{Cursor, Read, Write},
+    io::{Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt},
+    time::{Duration, UNIX_EPOCH},
+};
+use std::{
+    io::Cursor,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::SystemTime,
 };
 
 pub(super) const LIMIT: usize = 1_000_000;
+#[cfg(unix)]
 const TTL: Duration = Duration::from_secs(24 * 60 * 60);
+#[cfg(unix)]
 const SLOTS: u8 = 128;
 
+#[cfg(unix)]
 pub(super) fn root() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .filter(|p| !p.is_empty())
@@ -24,6 +34,25 @@ pub(super) fn root() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".cache")))?;
     base.is_absolute()
         .then(|| base.join("herdr-gpui/avatars-v1"))
+}
+
+/// The disk cache relies on `openat`, `flock`, and POSIX ownership and mode
+/// checks to keep a shared cache directory safe. Off POSIX there is no root, so
+/// avatars stay in memory for the life of the process and the two accessors
+/// below are unreachable.
+#[cfg(not(unix))]
+pub(super) fn root() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(not(unix))]
+pub(super) fn read(_path: &Path, _url: &str, _now: SystemTime) -> Option<(Arc<Image>, bool)> {
+    None
+}
+
+#[cfg(not(unix))]
+pub(super) fn write(_path: &Path, _url: &str, _bytes: &[u8], _now: SystemTime) -> Option<()> {
+    None
 }
 
 pub(super) fn decode(bytes: &[u8]) -> Option<Arc<Image>> {
@@ -64,11 +93,13 @@ pub(super) fn decode(bytes: &[u8]) -> Option<Arc<Image>> {
     Some(Arc::new(Image::from_bytes(gpui_format, bytes.to_vec())))
 }
 
+#[cfg(unix)]
 struct Directory {
     dir: File,
     lock: File,
 }
 
+#[cfg(unix)]
 impl Drop for Directory {
     fn drop(&mut self) {
         // A concurrently spawning child can briefly inherit the open description
@@ -78,6 +109,7 @@ impl Drop for Directory {
     }
 }
 
+#[cfg(unix)]
 impl Directory {
     fn open(path: &Path) -> Option<Self> {
         DirBuilder::new()
@@ -119,6 +151,7 @@ impl Directory {
     }
 }
 
+#[cfg(unix)]
 fn private_file(file: &File) -> bool {
     file.metadata().is_ok_and(|m| {
         m.is_file()
@@ -128,12 +161,14 @@ fn private_file(file: &File) -> bool {
     })
 }
 
+#[cfg(unix)]
 fn key(url: &str) -> ([u8; 32], String) {
     let hash: [u8; 32] = Sha256::digest(url.as_bytes()).into();
     // Fixed slots bound disk usage without walking or deleting arbitrary paths.
     (hash, format!("{:02x}.avatar", hash[0] % SLOTS))
 }
 
+#[cfg(unix)]
 pub(super) fn read(path: &Path, url: &str, now: SystemTime) -> Option<(Arc<Image>, bool)> {
     let directory = Directory::open(path)?;
     let (hash, name) = key(url);
@@ -174,6 +209,7 @@ pub(super) fn read(path: &Path, url: &str, now: SystemTime) -> Option<(Arc<Image
     }
 }
 
+#[cfg(unix)]
 pub(super) fn write(path: &Path, url: &str, bytes: &[u8], now: SystemTime) -> Option<()> {
     decode(bytes)?;
     let directory = Directory::open(path)?;
@@ -202,7 +238,8 @@ pub(super) fn write(path: &Path, url: &str, bytes: &[u8], now: SystemTime) -> Op
     result
 }
 
-#[cfg(test)]
+// The fixtures build a POSIX cache directory with modes and hard links.
+#[cfg(all(test, unix))]
 pub(super) mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;

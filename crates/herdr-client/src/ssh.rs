@@ -1,18 +1,26 @@
 //! POSIX discovery/stdio bridge adapted from upstream remote/attach.rs.
 //! No installers, daemon restarts, SSH config edits, or trust-on-first-use.
-use crate::{Error, Result, catalog::validate_target, limits::POLL, session_socket};
+//! The remote host is always POSIX; the local half needs a socket pair it can
+//! hand to the `ssh` child as its standard streams, which only Unix provides.
+#[cfg(unix)]
+use crate::limits::POLL;
+use crate::{Error, Result, catalog::validate_target, session_socket, transport::Stream};
+#[cfg(unix)]
 use std::{
     io::{self, Read, Write},
-    os::{fd::OwnedFd, unix::net::UnixStream},
-    path::Path,
+    os::fd::OwnedFd,
     process::{Child, Command, Stdio},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::Ordering,
     time::{Duration, Instant},
 };
+use std::{path::Path, sync::atomic::AtomicBool};
 
+#[cfg(unix)]
 const READY: &[u8] = b"herdr-remote-output-ready:1\n";
 
-pub(crate) struct SshChild(Child);
+#[cfg(unix)]
+pub(crate) struct SshChild(pub(super) Child);
+#[cfg(unix)]
 impl Drop for SshChild {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -20,10 +28,16 @@ impl Drop for SshChild {
     }
 }
 
-fn quote(value: &str) -> String {
+/// No bridge child is ever spawned on Windows, so this type has no values.
+#[cfg(windows)]
+pub(crate) enum SshChild {}
+
+#[cfg(unix)]
+pub(super) fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+#[cfg(unix)]
 fn bridge_command(session: &str) -> String {
     // PATH first, excluding mise shims, followed by upstream's known install roots.
     // Keep paths in shell variables: discovered executable names are never eval'd.
@@ -48,7 +62,8 @@ exit 127"#,
     format!("/bin/sh -c {}", quote(&script))
 }
 
-fn command(target: &str, session: &str) -> Command {
+#[cfg(unix)]
+pub(super) fn command(target: &str, remote_command: &str) -> Command {
     let mut command = Command::new("ssh");
     command.args([
         "-T",
@@ -80,21 +95,22 @@ fn command(target: &str, session: &str) -> Command {
         "--",
         target,
     ]);
-    command.arg(bridge_command(session));
+    command.arg(remote_command);
     command
 }
 
+#[cfg(unix)]
 pub(crate) fn connect(
     target: &str,
     session: &str,
     stop: &AtomicBool,
-) -> Result<(UnixStream, SshChild)> {
+) -> Result<(Stream, SshChild)> {
     validate_target(target)?;
     session_socket(Path::new(""), session)?;
-    let (mut stream, child_stream) = UnixStream::pair()?;
+    let (mut stream, child_stream) = Stream::pair()?;
     stream.set_read_timeout(Some(POLL))?;
     stream.set_write_timeout(Some(Duration::from_secs(1)))?;
-    let mut command = command(target, session);
+    let mut command = command(target, &bridge_command(session));
     command
         .stdin(Stdio::from(OwnedFd::from(child_stream.try_clone()?)))
         .stdout(Stdio::from(OwnedFd::from(child_stream)))
@@ -116,6 +132,23 @@ pub(crate) fn connect(
     }
 }
 
+/// Windows rejects SSH endpoints before spawning anything. Handing a socket to a
+/// child as its standard streams needs `OwnedFd`, and the anonymous pipes that
+/// replace it there cannot carry the read timeouts the session loop polls on.
+/// Validation still runs first so a malformed target reports the same error
+/// everywhere.
+#[cfg(windows)]
+pub(crate) fn connect(
+    target: &str,
+    session: &str,
+    _stop: &AtomicBool,
+) -> Result<(Stream, SshChild)> {
+    validate_target(target)?;
+    session_socket(Path::new(""), session)?;
+    Err(Error::SshUnsupported)
+}
+
+#[cfg(unix)]
 fn compatible_status(output: &[u8]) -> Option<bool> {
     output
         .split(|b| *b == b'\n')
@@ -146,6 +179,7 @@ fn compatible_status(output: &[u8]) -> Option<bool> {
 /// Read the bridge's banner until the ready line, returning what preceded it.
 /// Takes only `Read`: the SSH child's pipe is a `UnixStream`, but the limit,
 /// cancellation and timeout rules here are stream-independent and tested so.
+#[cfg(unix)]
 fn await_ready(
     stream: &mut (impl Read + ?Sized),
     stop: &AtomicBool,
@@ -192,15 +226,16 @@ fn await_ready(
     }
 }
 
-#[cfg(test)]
+// The bridge is POSIX-only; its fixtures spawn real shells over a socket pair.
+#[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used)] // Test fixtures only.
 mod tests {
     use super::*;
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn discovery_and_bridge_stdio_work_with_quoted_install_paths() {
+        use std::os::unix::fs::PermissionsExt;
+
         let root =
             std::env::temp_dir().join(format!("herdr-client-{}-quoted ' path", std::process::id()));
         std::fs::create_dir(&root).unwrap();
@@ -215,7 +250,7 @@ IFS= read -r hello || exit 1
 printf '%s\n' "$hello"
 "#).unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let (mut stream, child_stream) = UnixStream::pair().unwrap();
+        let (mut stream, child_stream) = Stream::pair().unwrap();
         stream.set_read_timeout(Some(POLL)).unwrap();
         let child = SshChild(
             Command::new("/bin/sh")
@@ -267,7 +302,7 @@ printf '%s\n' "$hello"
     }
     #[test]
     fn marker_consumes_banners_not_protocol_bytes() {
-        let (mut stream, mut remote) = UnixStream::pair().unwrap();
+        let (mut stream, mut remote) = Stream::pair().unwrap();
         remote
             .write_all(b"banner\n\nherdr-remote-output-ready:1\nWIRE")
             .unwrap();
@@ -390,6 +425,30 @@ printf '%s\n' "$hello"
         assert!(matches!(
             await_ready(&mut fatal, &AtomicBool::new(false), Instant::now()),
             Err(Error::Io(_))
+        ));
+    }
+}
+
+// Windows never spawns the bridge, but a rejected SSH endpoint must still be
+// rejected for the same reasons and in the same order as on POSIX.
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_targets_and_sessions_are_rejected_before_the_platform_refusal() {
+        let stop = AtomicBool::new(false);
+        assert!(matches!(
+            connect("-oProxyCommand=x", "default", &stop),
+            Err(Error::InvalidSshTarget)
+        ));
+        assert!(matches!(
+            connect("host", "../escape", &stop),
+            Err(Error::InvalidSession)
+        ));
+        assert!(matches!(
+            connect("host", "default", &stop),
+            Err(Error::SshUnsupported)
         ));
     }
 }

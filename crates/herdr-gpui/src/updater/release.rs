@@ -186,6 +186,9 @@ fn allowed_url(value: &str) -> bool {
 #[derive(Clone, Copy)]
 enum RequestProfile {
     Metadata,
+    // Only the POSIX installer downloads a release archive; see
+    // `updater::unsupported`.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Archive,
 }
 
@@ -399,6 +402,10 @@ pub(super) fn check(
     }))
 }
 
+// Only the POSIX installer downloads a release archive (see
+// `updater::unsupported`). These stay compiled and tested everywhere because
+// they are portable; they are simply unreachable where the updater is disabled.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn copy_archive(
     mut reader: impl Read,
     mut writer: impl Write,
@@ -435,6 +442,10 @@ fn copy_archive(
     cancelled(cancel)
 }
 
+// Only the POSIX installer downloads a release archive (see
+// `updater::unsupported`). These stay compiled and tested everywhere because
+// they are portable; they are simply unreachable where the updater is disabled.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn create_archive(destination: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -447,6 +458,10 @@ fn create_archive(destination: &Path) -> Result<File> {
 /// caller owns cleanup of its private staging directory, including partial files.
 /// Cancellation is checked between reads; a stalled read can wait for the
 /// remaining ten-minute request deadline. Never wait for this worker on the UI thread.
+// Only the POSIX installer downloads a release archive (see
+// `updater::unsupported`). These stay compiled and tested everywhere because
+// they are portable; they are simply unreachable where the updater is disabled.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(super) fn download(
     offer: &Offer,
     destination: &Path,
@@ -480,6 +495,10 @@ pub(super) fn download(
 
 /// Recheck a staged archive against an authenticated asset immediately before
 /// extraction. The caller must keep the staging directory private throughout.
+// Only the POSIX installer downloads a release archive (see
+// `updater::unsupported`). These stay compiled and tested everywhere because
+// they are portable; they are simply unreachable where the updater is disabled.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(super) fn verify_archive(path: &Path, asset: &Asset, cancel: &AtomicBool) -> Result<()> {
     cancelled(cancel)?;
     let file = File::open(path).map_err(Error::OpenArchive)?;

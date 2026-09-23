@@ -65,6 +65,9 @@ impl HerdrWindow {
             "settings",
             "keybinds",
             "themes",
+            "increase font size",
+            "decrease font size",
+            "reset font size",
             "commands",
             "workspaces",
             "reload GUI config",
@@ -110,6 +113,17 @@ impl HerdrWindow {
             "settings" => self.open_preferences(window, cx),
             "keybinds" => self.open_keybinds(window, cx),
             "themes" => self.open_theme_picker(window, cx),
+            "increase font size" | "decrease font size" | "reset font size" => {
+                use crate::config::FONT_SIZE_STEP;
+                let size = match item {
+                    "increase font size" => self.config.terminal.size + FONT_SIZE_STEP,
+                    "decrease font size" => self.config.terminal.size - FONT_SIZE_STEP,
+                    _ => self.configured_terminal_size,
+                };
+                // `command` refuses to act while a page is open, so apply here.
+                self.set_terminal_font_size(size, cx);
+                self.dismiss_menu(window, cx);
+            }
             "commands" => self.open_palette(false, window, cx),
             "workspaces" => self.open_palette(true, window, cx),
             "update ready" => self.menu.page = Some(Page::Update),
@@ -151,13 +165,20 @@ impl HerdrWindow {
         let theme = &self.theme;
         let viewport = window.viewport_size();
         // A GitHub tab of the new worktree dialog is a picker, not a form.
-        let listing = self.worktree_list_tab().is_some();
+        let listing = self.worktree_list_tab().is_some()
+            || page == Page::Dialog(WorkspaceAction::OpenWorktree);
         // Context menus open where the pointer asked for them. A dialog is a
         // modal decision, not a continuation of the row it came from, so it
         // centres over a dimmed window the way the Herdr TUI's dialogs do.
         let pointer_anchored = matches!(
             page,
-            Page::Workspace | Page::Tab | Page::RenameTab | Page::Git | Page::GitCommit
+            Page::Workspace
+                | Page::Tab
+                | Page::RenameTab
+                | Page::Pane
+                | Page::RenamePane
+                | Page::Git
+                | Page::GitCommit
         );
         let mut panel = div()
             .id("menu-panel")
@@ -219,13 +240,23 @@ impl HerdrWindow {
                         .min(px(if page == Page::Git { 240. } else { 420. })))
                     .max_h((viewport.height - px(24.)).max(px(0.)))
             })
-            .when(matches!(page, Page::Tab | Page::RenameTab), |panel| {
-                panel
-                    .w((viewport.width - px(24.))
-                        .max(px(0.))
-                        .min(px(if page == Page::Tab { 180. } else { 360. })))
-                    .max_h((viewport.height - px(24.)).max(px(0.)))
-            })
+            .when(
+                matches!(
+                    page,
+                    Page::Tab | Page::RenameTab | Page::Pane | Page::RenamePane
+                ),
+                |panel| {
+                    panel
+                        .w((viewport.width - px(24.)).max(px(0.)).min(px(
+                            if matches!(page, Page::Tab | Page::Pane) {
+                                180.
+                            } else {
+                                360.
+                            },
+                        )))
+                        .max_h((viewport.height - px(24.)).max(px(0.)))
+                },
+            )
             .when(
                 page != Page::Menu && !pointer_anchored && !matches!(page, Page::Dialog(_)),
                 |panel| {
@@ -346,6 +377,40 @@ impl HerdrWindow {
         } else if page == Page::GitHub {
             panel = panel.child(self.render_github_auth(cx));
         } else if page == Page::Workspace {
+            if let Some(target) = &self.menu.target {
+                panel = panel.child(
+                    div()
+                        .debug_selector(|| "workspace-menu-header".into())
+                        .px(px(8.))
+                        .py(px(6.))
+                        .mb(px(4.))
+                        .border_b_1()
+                        .border_color(rgb(theme.active))
+                        .child(
+                            div()
+                                .debug_selector(|| "workspace-menu-name".into())
+                                .truncate()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(crate::sidebar::label_text(&target.label)),
+                        )
+                        .when_some(
+                            target
+                                .branch
+                                .as_deref()
+                                .filter(|branch| !branch.trim().is_empty()),
+                            |header, branch| {
+                                header.child(
+                                    div()
+                                        .debug_selector(|| "workspace-menu-branch".into())
+                                        .truncate()
+                                        .text_color(rgb(theme.muted))
+                                        .text_size(px(font.size * 0.9))
+                                        .child(crate::sidebar::label_text(branch)),
+                                )
+                            },
+                        ),
+                );
+            }
             for (action, label) in self.workspace_items() {
                 panel = panel.child(
                     div()
@@ -380,9 +445,9 @@ impl HerdrWindow {
                             )
                         })
                         .child(label)
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                        .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
-                            this.activate_workspace_menu(action, cx);
+                            this.activate_workspace_menu(action, window, cx);
                         })),
                 );
             }
@@ -400,6 +465,8 @@ impl HerdrWindow {
             panel = panel.child(self.render_git_commit(cx));
         } else if matches!(page, Page::Tab | Page::RenameTab) {
             panel = panel.child(self.render_tab_menu(cx));
+        } else if matches!(page, Page::Pane | Page::RenamePane) {
+            panel = panel.child(self.render_pane_menu(cx));
         } else if page == Page::Keybinds {
             panel = panel.child(self.render_keybinds(cx));
         } else if page == Page::Themes {
@@ -516,12 +583,34 @@ impl HerdrWindow {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, _, window, cx| {
-                    cx.stop_propagation();
+                    if this.menu.opening_right_click {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    // Only workspace rows may retarget this gesture. The overlay
+                    // still occludes ordinary terminal and chrome handlers.
+                    if this.menu.page != Some(Page::Workspace) {
+                        cx.stop_propagation();
+                    }
                     this.dismiss_menu(window, cx);
                 }),
             )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if this.settings_key(event, window, cx) {
+                    return;
+                }
+                if this.menu.page == Some(Page::Dialog(WorkspaceAction::OpenWorktree))
+                    && (this
+                        .menu
+                        .worktree_open
+                        .as_ref()
+                        .is_some_and(|picker| picker.search.read(cx).is_composing())
+                        || !matches!(
+                            event.keystroke.key.as_str(),
+                            "escape" | "enter" | "up" | "down"
+                        ))
+                {
+                    // SearchInput and the platform own text editing and composition.
                     return;
                 }
                 // A listing has its own search field, so the branch draft must
@@ -562,6 +651,10 @@ impl HerdrWindow {
                     this.tab_menu_key(event, window, cx);
                     return;
                 }
+                if matches!(this.menu.page, Some(Page::Pane | Page::RenamePane)) {
+                    this.pane_menu_key(event, window, cx);
+                    return;
+                }
                 if this.menu.page == Some(Page::Palette) {
                     this.palette_key(event, window, cx);
                     return;
@@ -596,6 +689,25 @@ impl HerdrWindow {
                 window.prevent_default();
                 match event.keystroke.key.as_str() {
                     "escape" => this.dismiss_menu(window, cx),
+                    "up" | "down"
+                        if this.menu.page == Some(Page::Dialog(WorkspaceAction::OpenWorktree)) =>
+                    {
+                        if let Some(picker) = &mut this.menu.worktree_open
+                            && !picker.filtered.is_empty()
+                            && this.menu.creation.is_none()
+                        {
+                            let count = picker.filtered.len();
+                            picker.selected = if event.keystroke.key == "up" {
+                                (picker.selected + count - 1) % count
+                            } else {
+                                (picker.selected + 1) % count
+                            };
+                            picker
+                                .scroll
+                                .scroll_to_item(picker.selected, ScrollStrategy::Top);
+                            cx.notify();
+                        }
+                    }
                     "enter" if matches!(this.menu.page, Some(Page::Dialog(_))) => {
                         this.submit_workspace_dialog(window, cx)
                     }
@@ -637,7 +749,7 @@ impl HerdrWindow {
                             .workspace_selected
                             .filter(|action| this.workspace_menu_actions().contains(action))
                         {
-                            this.activate_workspace_menu(action, cx);
+                            this.activate_workspace_menu(action, window, cx);
                         }
                     }
                     "up" | "down" | "pageup" | "pagedown"

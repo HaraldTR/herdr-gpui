@@ -1,18 +1,44 @@
 use super::*;
-use std::{
-    fs,
-    os::unix::fs::{PermissionsExt, symlink},
-    path::Path,
-};
+#[cfg(unix)]
+use std::os::unix::fs::{PermissionsExt, symlink};
+use std::{fs, path::Path};
 
 fn parsed(text: &str) -> Result<Settings, Error> {
-    Settings::parse(
-        PathBuf::from("/fixture/herdr/config.toml"),
-        persistence::Snapshot {
-            text: Some(text.into()),
-            ..Default::default()
-        },
-    )
+    #[cfg(unix)]
+    let snapshot = persistence::Snapshot {
+        text: Some(text.into()),
+        ..Default::default()
+    };
+    #[cfg(windows)]
+    let snapshot = persistence::Snapshot {
+        text: Some(text.into()),
+    };
+    Settings::parse(PathBuf::from("/fixture/herdr/config.toml"), snapshot)
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_shared_settings_are_bounded_and_read_only() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("missing/config.toml");
+    let settings = Settings::load_path(path.clone())?;
+    let error = settings
+        .save(Edit::Sound(false))
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("saved on Windows"))?;
+    assert!(matches!(source(&error), Some(Error::Unsupported)));
+    assert!(!path.parent().is_some_and(Path::exists));
+    let path = temp.path().join("config.toml");
+    let original = "[ui.sound]\nenabled = false\n";
+    fs::write(&path, original)?;
+    let settings = Settings::load_path(path.clone())?;
+    assert!(!settings.sound_enabled);
+    assert!(settings.save(Edit::Sound(true)).is_err());
+    assert_eq!(fs::read_to_string(&path)?, original);
+    assert_eq!(fs::read_dir(temp.path())?.count(), 1);
+    fs::write(&path, " ".repeat(1024 * 1024 + 1))?;
+    assert!(matches!(persistence::read(&path), Err(Error::TooLarge)));
+    Ok(())
 }
 
 fn source(error: &crate::Error) -> Option<&Error> {
@@ -31,38 +57,11 @@ fn defaults_and_path_precedence_without_environment_mutation() -> anyhow::Result
     assert_eq!(settings.theme_name, "catppuccin");
     assert_eq!(settings.indicators, IndicatorStyle::Dots);
     assert!(settings.sound_enabled);
-    assert!(settings.sound_allowed(None));
-    assert!(!settings.sound_allowed(Some("droid")));
     assert_eq!(settings.toast_delivery, ToastDelivery::Off);
     assert_eq!(settings.toast_delay_seconds, 1);
     assert_eq!(settings.toast_position, ToastPosition::BottomRight);
     assert!(settings.clipboard.enabled);
     assert_eq!(settings.clipboard.position, ClipboardPosition::BottomCenter);
-    assert_eq!(settings.sound_path(false), None);
-    assert_eq!(
-        config_path(
-            Some("/explicit".into()),
-            Some("/xdg".into()),
-            Some("/home".into())
-        )?,
-        Path::new("/explicit")
-    );
-    assert_eq!(
-        config_path(None, Some("/xdg".into()), None)?,
-        Path::new("/xdg/herdr/config.toml")
-    );
-    assert_eq!(
-        config_path(None, None, Some("/home".into()))?,
-        Path::new("/home/.config/herdr/config.toml")
-    );
-    assert!(matches!(
-        config_path(None, Some("relative".into()), None),
-        Err(Error::ConfigRoot)
-    ));
-    assert!(matches!(
-        config_path(None, None, None),
-        Err(Error::ConfigRoot)
-    ));
     let temp = tempfile::tempdir()?;
     let missing = temp.path().join("missing/config.toml");
     assert_eq!(
@@ -81,16 +80,6 @@ fn exact_upstream_fields_and_legacy_toast_precedence() -> anyhow::Result<()> {
 status_indicators = "symbols"
 [ui.sound]
 enabled = true
-path = "sounds/all.mp3"
-done_path = "sounds/done.mp3"
-request_path = "/sounds/request.mp3"
-[ui.sound.agents]
-claude = "off"
-droid = "on"
-open_code = "off"
-agy = "off"
-github_copilot = "off"
-unknown-agent = "off"
 [ui.toast]
 enabled = true
 delivery = "system"
@@ -108,27 +97,8 @@ position = "top-center"
     assert_eq!(settings.toast_position, ToastPosition::TopLeft);
     assert_eq!(settings.clipboard.position, ClipboardPosition::TopCenter);
     assert!(!settings.clipboard.enabled);
-    for name in ["claude", "opencode", "antigravity", "copilot"] {
-        assert!(!settings.sound_allowed(Some(name)));
-    }
-    assert!(settings.sound_allowed(Some("droid")));
-    assert!(settings.sound_allowed(Some("unknown-agent")));
-    assert_eq!(
-        settings.sound_path(false),
-        Some("/fixture/herdr/sounds/done.mp3".into())
-    );
-    assert_eq!(
-        settings.sound_path(true),
-        Some("/sounds/request.mp3".into())
-    );
-    assert_eq!(
-        parsed("[ui.sound]\npath = 'all.mp3'")?.sound_path(true),
-        Some("/fixture/herdr/all.mp3".into())
-    );
-    assert!(
-        !parsed("[ui.sound]\nenabled = false\n[ui.sound.agents]\ndroid = 'on'")?
-            .sound_allowed(Some("droid"))
-    );
+    assert!(settings.sound_enabled);
+    assert!(!parsed("[ui.sound]\nenabled = false")?.sound_enabled);
     assert_eq!(
         parsed("[ui.toast]\nenabled = true")?.toast_delivery,
         ToastDelivery::Herdr
@@ -145,7 +115,6 @@ fn strict_known_fields_and_typed_sources() -> anyhow::Result<()> {
     for text in [
         "[ui]\nstatus_indicators = 'bad'",
         "[ui.sound]\nenabled = 'true'",
-        "[ui.sound.agents]\nclaude = true",
         "[theme]\nauto_switch = 1",
         "[theme.custom]\nred = 123",
         "[ui.toast]\ndelay_seconds = -1",
@@ -174,6 +143,38 @@ fn strict_known_fields_and_typed_sources() -> anyhow::Result<()> {
 }
 
 #[test]
+fn shared_sound_reader_only_validates_the_enabled_switch() -> anyhow::Result<()> {
+    for text in [
+        "",
+        "[ui.sound]",
+        "[ui.sound]\npath = 42\n[ui.sound.agents]\nclaude = true",
+    ] {
+        assert!(parsed(text)?.sound_enabled);
+    }
+    assert!(!parsed("[ui.sound]\nenabled = false\nagents = 'backend-owned'")?.sound_enabled);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn sound_edits_preserve_paths_per_agent_policy_and_unknown_fields_verbatim() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("config.toml");
+    let original = "[ui.sound] # audio\nenabled = true # switch\npath = 'all.mp3'\ndone_path = 'done.mp3' # done\nrequest_path = 'request.mp3'\nfuture = { key = 42 }\n[ui.sound.agents] # policy\ndroid = 'default'\nclaude = 'off'\nfuture-agent = 'new-policy'\n";
+    fs::write(&path, original)?;
+    let settings = Settings::load_path(path.clone())?.save(Edit::Sound(false))?;
+    assert!(!settings.sound_enabled);
+    assert_eq!(
+        fs::read_to_string(&path)?,
+        original.replace("enabled = true", "enabled = false")
+    );
+    assert!(settings.save(Edit::Sound(true))?.sound_enabled);
+    assert_eq!(fs::read_to_string(&path)?, original);
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
 fn edits_preserve_comments_unknown_fields_and_disable_auto_switch() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("config.toml");
@@ -222,6 +223,7 @@ fn edits_preserve_comments_unknown_fields_and_disable_auto_switch() -> anyhow::R
 }
 
 #[test]
+#[cfg(unix)]
 fn inline_tables_and_dotted_keys_remain_valid() -> anyhow::Result<()> {
     for text in [
         "ui = { sound = { enabled = true }, toast = { enabled = true, future = 42 } }\n",
@@ -241,6 +243,7 @@ fn inline_tables_and_dotted_keys_remain_valid() -> anyhow::Result<()> {
 }
 
 #[test]
+#[cfg(unix)]
 fn saves_reject_changed_deleted_created_or_replaced_originals() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("config.toml");
@@ -283,6 +286,7 @@ fn saves_reject_changed_deleted_created_or_replaced_originals() -> anyhow::Resul
 }
 
 #[test]
+#[cfg(unix)]
 fn symlinks_hardlinks_permissions_and_size_are_protected() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("config.toml");
@@ -379,13 +383,17 @@ fn invalid_theme_edits_do_not_create_config_or_parent() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("saved unknown theme"))?;
     assert!(matches!(source(&error), Some(Error::Theme(_))));
     assert!(!path.parent().is_some_and(Path::exists));
-    let settings = settings.save(Edit::Sound(false))?;
-    assert!(!settings.sound_enabled);
-    assert_eq!(fs::metadata(path)?.permissions().mode() & 0o777, 0o600);
+    #[cfg(unix)]
+    {
+        let settings = settings.save(Edit::Sound(false))?;
+        assert!(!settings.sound_enabled);
+        assert_eq!(fs::metadata(path)?.permissions().mode() & 0o777, 0o600);
+    }
     Ok(())
 }
 
 #[test]
+#[cfg(unix)]
 fn advisory_lock_is_nonblocking_and_released_after_saves() -> anyhow::Result<()> {
     use rustix::fs::{FlockOperation, flock};
     let temp = tempfile::tempdir()?;
@@ -409,6 +417,7 @@ fn advisory_lock_is_nonblocking_and_released_after_saves() -> anyhow::Result<()>
 }
 
 #[test]
+#[cfg(unix)]
 fn parent_replacement_and_permission_changes_are_conflicts() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let parent = temp.path().join("config");
@@ -474,8 +483,6 @@ fn upstream_aliases_fallbacks_and_legacy_override_precedence() -> anyhow::Result
     )?;
     assert_eq!(custom.theme(false)?.palette[5], 0xabcdef);
     assert_eq!(custom.theme(true)?, custom.theme(false)?);
-    // An explicit `default` is not the same as Droid's absent-field default.
-    assert!(parsed("[ui.sound.agents]\ndroid = 'default'")?.sound_allowed(Some("droid")));
     Ok(())
 }
 
@@ -498,6 +505,7 @@ fn prepared_indicator_palettes_and_parse_limit() -> anyhow::Result<()> {
 }
 
 #[test]
+#[cfg(unix)]
 fn symlink_ancestors_cannot_redirect_directory_creation() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let target = temp.path().join("target");
@@ -517,6 +525,7 @@ fn symlink_ancestors_cannot_redirect_directory_creation() -> anyhow::Result<()> 
 }
 
 #[test]
+#[cfg(unix)]
 fn in_place_file_revision_changes_are_not_overwritten() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("config.toml");
@@ -544,13 +553,19 @@ fn diagnostics_do_not_dump_unrelated_shared_config() -> anyhow::Result<()> {
     assert!(!diagnostic.contains("do-not-log-me"));
     assert!(!diagnostic.contains("private-sound-path"));
     assert!(diagnostic.contains("clipboard"));
-    let error = Error::Committed(std::io::Error::other("sync failed"));
-    assert!(std::error::Error::source(&error).is_some_and(|cause| cause.is::<std::io::Error>()));
-    assert!(error.to_string().contains("reload"));
+    #[cfg(unix)]
+    {
+        let error = Error::Committed(std::io::Error::other("sync failed"));
+        assert!(
+            std::error::Error::source(&error).is_some_and(|cause| cause.is::<std::io::Error>())
+        );
+        assert!(error.to_string().contains("reload"));
+    }
     Ok(())
 }
 
 #[test]
+#[cfg(unix)]
 fn lock_symlinks_and_nonregular_configs_are_rejected() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("config.toml");

@@ -6,6 +6,7 @@ mod device;
 mod http;
 mod log;
 mod store;
+mod token;
 
 #[cfg(test)]
 mod tests;
@@ -19,4 +20,4 @@ pub(crate) use {
 
 use crate::Result;
 use device::{Device, Reply, SETUP_MESSAGE, profile, token_reply};
-use store::{load_token, save, valid_token};
+use store::{save, valid_token};

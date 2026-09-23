@@ -10,14 +10,20 @@
 #[path = "herdr_settings/palette.rs"]
 mod palette;
 #[path = "herdr_settings/persistence.rs"]
+#[cfg(unix)]
+mod persistence;
+#[cfg(windows)]
+#[path = "herdr_settings/persistence_windows.rs"]
 mod persistence;
 #[cfg(test)]
 #[path = "herdr_settings/tests.rs"]
 mod tests;
 
+pub(crate) use crate::config::ClipboardToastPosition as ClipboardPosition;
 use herdr_client::protocol::AgentStatus;
+pub(crate) use herdr_client::protocol::ToastHerdrPosition as ToastPosition;
 use serde::Deserialize;
-use std::{collections::BTreeMap, env, path::PathBuf};
+use std::{env, path::PathBuf};
 use toml_edit::{DocumentMut, Item, Value};
 
 pub(crate) const THEME_NAMES: &[&str] = &[
@@ -45,14 +51,20 @@ pub(crate) const THEME_NAMES: &[&str] = &[
 pub(crate) enum Error {
     #[error("shared Herdr config I/O failed")]
     Io(#[from] std::io::Error),
+    #[cfg(windows)]
+    #[error("saving shared Herdr settings is unsupported on Windows; edit config.toml manually")]
+    Unsupported,
+    #[cfg(unix)]
     #[error("shared Herdr config was replaced but completion failed; reload before saving again")]
     Committed(#[source] std::io::Error),
     #[error("invalid shared Herdr TOML")]
     Parse(#[from] toml::de::Error),
     #[error("cannot edit shared Herdr TOML")]
     Edit(#[from] toml_edit::TomlError),
+    #[cfg(unix)]
     #[error("shared Herdr config changed; reload before saving")]
     Conflict,
+    #[cfg(unix)]
     #[error("shared Herdr config is busy; retry saving")]
     Busy,
     #[error(
@@ -61,14 +73,13 @@ pub(crate) enum Error {
     UnsafePath,
     #[error("shared Herdr config exceeds the 1 MiB limit")]
     TooLarge,
-    #[error("HOME is unset or the config root is not absolute")]
-    ConfigRoot,
     #[error("ui.toast.delay_seconds must be between 0 and 3600")]
     ToastDelay,
     #[error("unknown Herdr theme: {0}")]
     Theme(String),
     #[error("cannot edit non-table config field {0}")]
     Table(&'static str),
+    #[cfg(unix)]
     #[error("could not remove shared config temporary file: {cleanup}")]
     Cleanup {
         #[source]
@@ -106,56 +117,16 @@ pub(crate) enum ToastDelivery {
     System,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum ToastPosition {
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    #[default]
-    BottomRight,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum ClipboardPosition {
-    TopLeft,
-    TopCenter,
-    TopRight,
-    BottomLeft,
-    #[default]
-    BottomCenter,
-    BottomRight,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum AgentSoundSetting {
-    #[default]
-    Default,
-    On,
-    Off,
-}
-
-#[derive(Clone, Debug, Deserialize)]
+// Playback paths and per-agent policy are parsed by the sound backend, not this editor.
+#[derive(Deserialize)]
 #[serde(default)]
-pub(crate) struct Sound {
-    pub enabled: bool,
-    pub path: Option<PathBuf>,
-    pub done_path: Option<PathBuf>,
-    pub request_path: Option<PathBuf>,
-    pub agents: BTreeMap<String, AgentSoundSetting>,
+struct Sound {
+    enabled: bool,
 }
 
 impl Default for Sound {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            path: None,
-            done_path: None,
-            request_path: None,
-            agents: BTreeMap::new(),
-        }
+        Self { enabled: true }
     }
 }
 
@@ -177,7 +148,6 @@ pub(crate) struct Settings {
     pub toast_delay_seconds: u64,
     pub toast_position: ToastPosition,
     pub clipboard: ClipboardToast,
-    pub sound: Sound,
     palettes: [palette::Palette; 2],
     original: persistence::Snapshot,
 }
@@ -225,10 +195,18 @@ struct RawToast {
     clipboard: ClipboardToast,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Deserialize)]
 #[serde(default)]
 struct HerdrToast {
     position: ToastPosition,
+}
+
+impl Default for HerdrToast {
+    fn default() -> Self {
+        Self {
+            position: ToastPosition::BottomRight,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -248,13 +226,28 @@ impl Default for ClipboardToast {
 }
 
 impl Settings {
+    #[cfg(test)]
+    pub(crate) fn parse_text(text: &str) -> Result<Self, Error> {
+        #[cfg(unix)]
+        let snapshot = persistence::Snapshot {
+            text: Some(text.into()),
+            ..Default::default()
+        };
+        #[cfg(windows)]
+        let snapshot = persistence::Snapshot {
+            text: Some(text.into()),
+        };
+        Self::parse(PathBuf::from("config.toml"), snapshot)
+    }
+
     /// Background-only. A missing file yields defaults without creating anything.
     pub(crate) fn load() -> crate::Result<Self> {
-        let path = config_path(
-            env::var_os("HERDR_CONFIG_PATH"),
-            env::var_os("XDG_CONFIG_HOME"),
-            env::var_os("HOME"),
-        )?;
+        let path = crate::config::daemon_config_path(|key| env::var_os(key));
+        let path = if path.is_absolute() {
+            path
+        } else {
+            env::current_dir()?.join(path)
+        };
         Self::load_path(path)
     }
 
@@ -293,7 +286,6 @@ impl Settings {
             theme_name: theme_name.into(),
             indicators: parsed.ui.status_indicators,
             sound_enabled: parsed.ui.sound.enabled,
-            sound: parsed.ui.sound,
             toast_delivery: toast.delivery.unwrap_or(if toast.enabled == Some(true) {
                 ToastDelivery::Herdr
             } else {
@@ -378,13 +370,9 @@ impl Settings {
             }
             let text = document.to_string();
             // Validate before performing any writes, including directory creation.
-            let mut next = Self::parse(
-                self.path.clone(),
-                persistence::Snapshot {
-                    text: Some(text.clone()),
-                    ..self.original.clone()
-                },
-            )?;
+            let mut snapshot = self.original.clone();
+            snapshot.text = Some(text.clone());
+            let mut next = Self::parse(self.path.clone(), snapshot)?;
             next.original = persistence::save(&self.path, &self.original, &text)?;
             Ok(next)
         })();
@@ -403,75 +391,6 @@ impl Settings {
     pub(crate) fn status_color(&self, status: AgentStatus, light: bool) -> u32 {
         self.colors(light).status(status)
     }
-
-    /// Does not check existence or play audio. Relative paths use this snapshot's
-    /// config directory, not the current environment or daemon endpoint.
-    pub(crate) fn sound_path(&self, request: bool) -> Option<PathBuf> {
-        let specific = if request {
-            &self.sound.request_path
-        } else {
-            &self.sound.done_path
-        };
-        let path = specific.as_ref().or(self.sound.path.as_ref())?;
-        Some(if path.is_absolute() {
-            path.clone()
-        } else {
-            self.path.parent()?.join(path)
-        })
-    }
-
-    /// `agent` is the daemon's canonical agent label (config keys for OpenCode,
-    /// Copilot, and Antigravity are accepted too). Unknown agents inherit the
-    /// global switch, just as upstream's `None`/unconfigured agents do.
-    pub(crate) fn sound_allowed(&self, agent: Option<&str>) -> bool {
-        if !self.sound_enabled {
-            return false;
-        }
-        let key = match agent {
-            Some("opencode" | "open-code" | "open_code") => "open_code",
-            Some("copilot" | "github-copilot" | "github_copilot") => "github_copilot",
-            Some("antigravity" | "agy") => "agy",
-            Some(
-                key @ ("pi" | "claude" | "codex" | "gemini" | "cursor" | "devin" | "cline" | "kimi"
-                | "kiro" | "droid" | "amp" | "grok" | "hermes" | "kilo" | "qodercli"
-                | "qwen" | "letta" | "maki" | "muse"),
-            ) => key,
-            Some(_) | None => return true,
-        };
-        let default = if key == "droid" {
-            AgentSoundSetting::Off
-        } else {
-            AgentSoundSetting::Default
-        };
-        self.sound.agents.get(key).copied().unwrap_or(default) != AgentSoundSetting::Off
-    }
-}
-
-fn config_path(
-    explicit: Option<std::ffi::OsString>,
-    xdg: Option<std::ffi::OsString>,
-    home: Option<std::ffi::OsString>,
-) -> Result<PathBuf, Error> {
-    let path = if let Some(path) = explicit.filter(|p| !p.is_empty()) {
-        PathBuf::from(path)
-    } else if let Some(root) = xdg.filter(|p| !p.is_empty()) {
-        let root = PathBuf::from(root);
-        if !root.is_absolute() {
-            return Err(Error::ConfigRoot);
-        }
-        root.join("herdr/config.toml")
-    } else {
-        let root = PathBuf::from(home.filter(|p| !p.is_empty()).ok_or(Error::ConfigRoot)?);
-        if !root.is_absolute() {
-            return Err(Error::ConfigRoot);
-        }
-        root.join(".config/herdr/config.toml")
-    };
-    Ok(if path.is_absolute() {
-        path
-    } else {
-        env::current_dir()?.join(path)
-    })
 }
 
 fn set(document: &mut DocumentMut, keys: &[&'static str], mut value: Value) -> Result<(), Error> {

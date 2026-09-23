@@ -28,6 +28,17 @@ VERSION = "20260920.1"
 
 
 class ReleaseTargets(unittest.TestCase):
+    def test_verifier_uses_one_exact_attestation_identity(self):
+        verifier = (ROOT / "scripts/verify-release.sh").read_text()
+        command = verifier.split('gh attestation verify "$file"', 1)[1].split('\n    if ', 1)[0]
+        self.assertIn('--cert-identity "$identity"', command)
+        for flag in ("--cert-identity-regex", "--signer-repo", "--signer-workflow"):
+            self.assertNotIn(flag, command)
+        for flag in ("--source-digest", "--signer-digest"):
+            self.assertIn(f'{flag} "$sha"', command)
+        self.assertIn('--source-ref refs/heads/main', command)
+        self.assertIn('--deny-self-hosted-runners', command)
+
     def test_ci_platform_checks_keep_owner_policy_and_required_gate(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         sections = re.split(r"^  ([a-z-]+):\n", workflow.split("\njobs:\n", 1)[1], flags=re.M)
@@ -36,18 +47,32 @@ class ReleaseTargets(unittest.TestCase):
             for condition in ("github.repository == 'penso/herdr-gpui'",
                               "github.actor == 'penso'", "github.triggering_actor == 'penso'"):
                 self.assertIn(condition, job)
-        for name in ("checks", "checks-passed"):
+        self.assertIn("    needs: [checks, windows, commits]\n", jobs["checks-passed"])
+        self.assertIn('test "$RESULT" = success && test "$WINDOWS" = success && test "$COMMITS" = success', jobs["checks-passed"])
+        self.assertIn("WINDOWS: ${{ needs.windows.result }}", jobs["checks-passed"])
+        self.assertIn("          fetch-depth: 0\n", jobs["commits"])
+        self.assertIn("python3 scripts/release/check-commit-messages.py range", jobs["commits"])
+        for name in ("checks", "windows", "checks-passed"):
             self.assertIn("github.event.pull_request.user.login == 'penso'", jobs[name])
             self.assertIn("github.event.pull_request.head.repo.full_name == 'penso/herdr-gpui'", jobs[name])
         self.assertIn("runner: [macos-15, ubuntu-24.04, ubuntu-24.04-arm]", jobs["checks"])
         self.assertIn("    name: Format, lint, and test\n", jobs["checks-passed"])
-        self.assertIn("    needs: checks\n", jobs["checks-passed"])
         self.assertIn("always()", jobs["checks-passed"])
         self.assertIn('test "$RESULT" = success', jobs["checks-passed"])
         self.assertIn("github.ref == 'refs/heads/main'", jobs["build"])
         self.assertNotIn("github.event_name == 'pull_request'", jobs["build"])
         for name in ("checks", "build"):
             self.assertIn("bash scripts/install-linux-deps.sh", jobs[name])
+        windows = jobs["windows"]
+        self.assertIn("    runs-on: windows-2025\n", windows)
+        for name in ("checks", "windows"):
+            for command in ("cargo fmt --all -- --check",
+                            "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
+                            "cargo test --locked --workspace",
+                            "cargo test --locked --workspace --all-features"):
+                self.assertIn(f"run: {command}\n", jobs[name])
+        self.assertNotIn("--release", windows)
+        self.assertNotIn("cargo build", windows)
 
     def test_workflow_and_metadata_contract(self):
         # Keep this offline and dependency-free; actionlint validates YAML syntax.
@@ -55,7 +80,8 @@ class ReleaseTargets(unittest.TestCase):
         sections = re.split(r"^  ([a-z-]+):\n", workflow.split("\njobs:\n", 1)[1], flags=re.M)
         jobs = dict(zip(sections[1::2], sections[2::2]))
         targets = {"aarch64-apple-darwin", "x86_64-apple-darwin",
-                   "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"}
+                   "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu",
+                   "x86_64-pc-windows-msvc"}
         self.assertEqual(set(SBOM.TARGETS), targets)
         self.assertEqual(set(tomllib.loads((ROOT / "deny.toml").read_text())["graph"]["targets"]), targets)
         self.assertEqual(set(tomllib.loads((ROOT / "scripts/release/about.toml").read_text())["targets"]), targets)
@@ -74,6 +100,21 @@ class ReleaseTargets(unittest.TestCase):
             self.assertIn(command, linux)
         for target in ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"):
             self.assertIn(f"name: linux-package-{target}\n", jobs["attest"])
+        windows = jobs["windows"]
+        self.assertEqual(re.findall(r"- runner: (\S+)\n            target: (\S+)", windows), [
+            ("windows-2025", "x86_64-pc-windows-msvc")])
+        for command in ('cargo build --locked --release -p herdr-gpui --target "$TARGET"',
+                        'cargo test --locked --release -p herdr-gpui --test cli --target "$TARGET"',
+                        'cargo clippy --locked --workspace --all-targets --all-features -- -D warnings',
+                        'cargo test --locked -p herdr-protocol -p herdr-client',
+                        'test "$(rustc -vV | sed -n \'s/^host: //p\')" = "$TARGET"',
+                        'python scripts/release/generate-notices.py',
+                        'python scripts/release/package-windows.py "$VERSION" "$TARGET"',
+                        'name: windows-package-${{ matrix.target }}'):
+            self.assertIn(command, windows)
+        self.assertIn("name: windows-package-x86_64-pc-windows-msvc\n", jobs["attest"])
+        for name in ("sign", "attest"):
+            self.assertRegex(jobs[name], r"    needs: \[[^]]*\bwindows\b")
         attest = jobs["attest"].replace("${{ needs.validate.outputs.version }}", VERSION)
         signed = re.search(r"^          files: (.+)$", attest, re.M)[1].split()
         subjects = re.findall(r"^            dist/(\S+)$", attest, re.M)
@@ -90,7 +131,7 @@ class ReleaseTargets(unittest.TestCase):
         self.assertEqual(workflow.count('artifact-manifest.py create "$VERSION" dist'), 1)
         self.assertNotIn("scripts/package-linux.sh", workflow)
         self.assertNotIn("uses: actions/cache", workflow)
-        for name in ("macos-checks", "macos-build", "linux", "windows-protocol", "metadata"):
+        for name in ("macos-checks", "macos-build", "linux", "windows", "metadata", "changelog"):
             self.assertIn("    needs: validate\n", jobs[name])
             self.assertNotIn("secrets.", jobs[name])
             self.assertNotIn("environment:", jobs[name])
@@ -107,6 +148,24 @@ class ReleaseTargets(unittest.TestCase):
         self.assertIn("    environment: homebrew\n", jobs["homebrew"])
         self.assertEqual(re.findall(r"^  (\w+):", workflow.split("permissions:", 1)[0], re.M),
                          ["workflow_dispatch"])
+
+    def test_release_notes_come_from_history_and_stay_out_of_the_signed_assets(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        sections = re.split(r"^  ([a-z-]+):\n", workflow.split("\njobs:\n", 1)[1], flags=re.M)
+        jobs = dict(zip(sections[1::2], sections[2::2]))
+        changelog = jobs["changelog"]
+        # Notes are derived from git history, so the clone must carry all of it.
+        self.assertIn("          fetch-depth: 0\n", changelog)
+        self.assertIn('bash scripts/release/generate-changelog.sh "$VERSION" release-notes', changelog)
+        self.assertIn("          name: release-notes\n", changelog)
+        publish = jobs["publish"]
+        self.assertIn("    needs: [validate, attest, changelog]\n", publish)
+        self.assertIn("          name: release-notes\n", publish)
+        self.assertIn("          path: release-notes\n", publish)
+        self.assertIn("--notes-file release-notes/RELEASE_NOTES.md", publish)
+        # The body is not an asset: it never lands in the checksummed directory.
+        self.assertNotIn("release-notes/CHANGELOG.md dist", publish)
+        self.assertNotIn("RELEASE_NOTES", str(MANIFEST.asset_names(VERSION)))
 
     def test_updater_signing_boundary(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
@@ -218,12 +277,13 @@ class ReleaseSecurity(unittest.TestCase):
             "Herdr-20260920.1-universal-apple-darwin.dmg", "Herdr-20260920.1.cdx.json",
             "Herdr-20260920.1-x86_64-unknown-linux-gnu.tar.gz",
             "Herdr-20260920.1-aarch64-unknown-linux-gnu.tar.gz",
+            "Herdr-20260920.1-x86_64-pc-windows-msvc.zip",
             "herdr-gpui-20260920.1-macos-universal.app.tar.gz",
             "herdr-gpui-20260920.1-x86_64-unknown-linux-gnu-update.tar.gz",
             "herdr-gpui-20260920.1-aarch64-unknown-linux-gnu-update.tar.gz",
             "update-manifest.json", "update-manifest.sig"})
-        self.assertEqual(len((self.path / "SHA256SUMS").read_text().splitlines()), 45)
-        self.assertEqual(len(self.run_manifest("names").splitlines()), 46)
+        self.assertEqual(len((self.path / "SHA256SUMS").read_text().splitlines()), 50)
+        self.assertEqual(len(self.run_manifest("names").splitlines()), 51)
         self.assertEqual(self.run_manifest("base-names").splitlines(), MANIFEST.base_names(VERSION))
         with tempfile.TemporaryDirectory() as temp:
             name = MANIFEST.base_names(VERSION)[0]

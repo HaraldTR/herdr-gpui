@@ -43,9 +43,12 @@ tell the owner rather than pulling on their behalf.
 Untracked files block a release. If you have added files to the repo (a skill, a
 scratch script), they must be committed or ignored before `just release` will run.
 
-Show the owner what is about to ship before dispatching:
+Show the owner what is about to ship before dispatching. `just
+changelog-unreleased` is the same text users will read on the release page; the
+raw log is the fallback when `git-cliff` is not installed locally:
 
 ```sh
+just changelog-unreleased
 git log --oneline "$(gh api repos/penso/herdr-gpui/releases/latest --jq .tag_name)"..HEAD
 ```
 
@@ -56,8 +59,8 @@ not hit a foreground timeout.
 
 Jobs run roughly: `audit` (shown as "Release Workflow Security") and `validate`,
 then `macos-checks`, `macos-build` (arm64 + x86_64), `linux` (aarch64 + x86_64),
-`windows-protocol` and `metadata`, then `sign`, `attest`, `publish`, and finally
-`homebrew`.
+`windows` (x86_64 MSVC), `metadata` and `changelog`, then `sign`, `attest`, `publish`,
+and finally `homebrew`.
 
 `sign`, `attest` and `publish` use the **`release`** environment; `homebrew` uses
 the **`homebrew`** environment. Both have required reviewers, so the run pauses
@@ -98,6 +101,19 @@ gh run view <run-id> --repo penso/herdr-gpui --json status,conclusion,jobs
 Because the watcher owns the final summary, losing it also means nothing local
 will print the published tag. Confirm with
 `gh api repos/penso/herdr-gpui/releases/latest --jq .tag_name`.
+
+## The release notes write themselves
+
+`changelog` generates the release body from git history with `git-cliff`
+(`cliff.toml`) and `publish` passes it to `gh release create --notes-file`. Do
+not hand-write notes, and do not edit a published body to add them: fix the
+commit subjects instead, since those are the entries. The standing preamble
+about GUI-only DMG, experimental Linux archives and Windows zip, and the required daemon lives in
+`scripts/release/generate-changelog.sh`.
+
+`CHANGELOG.md` is generated too, but it is **not** a release asset — the asset
+set is fixed by `artifact-manifest.py` and each asset is checksummed, signed and
+attested. Both files are uploaded as the run's `release-notes` workflow artifact.
 
 ## After it publishes
 

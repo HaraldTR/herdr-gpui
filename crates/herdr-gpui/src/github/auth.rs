@@ -5,8 +5,8 @@
 #[cfg(any(test, feature = "integration-test"))]
 use super::VERIFY_URL;
 use super::{
-    Device, Profile, Reply, Result, SETUP_MESSAGE, Store, http::oauth, load_token, log, profile,
-    save, token_reply,
+    Device, Profile, Reply, Result, SETUP_MESSAGE, Store, http::oauth, log, profile, save,
+    token_reply,
 };
 use crate::Error;
 use secrecy::{ExposeSecret, SecretString};
@@ -61,7 +61,7 @@ impl Auth {
         self.profile.is_some()
     }
     pub fn loading_profile(&self) -> bool {
-        self.reload_pending || self.profile_incoming.is_some()
+        !self.signed_out && (self.reload_pending || self.profile_incoming.is_some())
     }
     pub fn initialize(&mut self, config: &crate::config::Config) -> bool {
         self.initialize_with(Store::select(config))
@@ -199,8 +199,13 @@ impl Auth {
                 "No secure credential store is configured for GitHub sign-in"
             );
             self.failed = true;
-            self.message =
-                Some("No secure credential store configured. To accept unencrypted token storage, set [github] allow_plaintext_credentials = true and reload GUI config. Otherwise use GH_TOKEN / GITHUB_TOKEN.".into());
+            // The plaintext opt-in only exists where a private file can be kept
+            // private, so platforms without one must not be told to set it.
+            self.message = Some(if super::store::FILE {
+                "No secure credential store configured. To accept unencrypted token storage, set [github] allow_plaintext_credentials = true and reload GUI config. Otherwise use GH_TOKEN / GITHUB_TOKEN.".into()
+            } else {
+                "No GitHub credential store is available on this platform. Sign in by setting GH_TOKEN or GITHUB_TOKEN.".into()
+            });
             return;
         }
         let client = match config.github.client_id() {
@@ -260,9 +265,9 @@ impl Auth {
         self.signed_out = true;
         self.reload_pending = false;
         self.profile = None;
-        self.profile_incoming = None;
         self.flow = None;
-        // Serialize deletion after an accepted write, but suppress credentials now.
+        // A profile worker can rotate and persist credentials. Drain it before
+        // deletion, just like an accepted sign-in write, but suppress its result.
         if !self.committing {
             self.incoming = None;
         }
@@ -282,12 +287,9 @@ impl Auth {
         &mut self,
         persist: impl FnOnce(Option<&SecretString>) -> Result<()> + Send + 'static,
     ) -> bool {
-        self.poll_with(persist, |token, store| {
-            let token = match token {
-                Some(token) => Some(token),
-                None => load_token(store)?.map(Arc::new),
-            };
-            token.map(profile).transpose()
+        self.poll_with(persist, |token, store| match token {
+            Some(token) => profile(token).map(Some),
+            None => super::store::load_profile(store),
         })
     }
     pub(super) fn poll_with(
@@ -295,7 +297,7 @@ impl Auth {
         persist: impl FnOnce(Option<&SecretString>) -> Result<()> + Send + 'static,
         load: impl FnOnce(Option<Arc<SecretString>>, Store) -> Result<Option<Profile>> + Send + 'static,
     ) -> bool {
-        if self.signout_pending && !self.committing {
+        if self.signout_pending && !self.committing && self.profile_incoming.is_none() {
             self.signout_pending = false;
             self.committing = true;
             self.launch(move || {
@@ -332,7 +334,7 @@ impl Auth {
             };
             if let Some(result) = result {
                 self.profile_incoming = None;
-                if !self.reload_pending {
+                if !self.reload_pending && !self.signed_out {
                     match result {
                         Ok(profile) => {
                             self.profile = profile;
@@ -412,8 +414,8 @@ impl Auth {
                                     "GitHub authorized; saving the credential"
                                 );
                                 self.launch(move || {
-                                    persist(Some(&token))?;
-                                    Ok(Reply::Authenticated(Arc::new(token)))
+                                    persist(Some(&token.encode()?))?;
+                                    Ok(Reply::Authenticated(Arc::new(token.access_token)))
                                 });
                             } else {
                                 tracing::warn!(
@@ -474,15 +476,18 @@ impl Auth {
                 let device = Arc::clone(&flow.device);
                 let timeout = (flow.deadline - now).min(Duration::from_secs(15));
                 self.launch(move || {
-                    token_reply(oauth(
-                        "oauth/access_token",
-                        &[
-                            ("client_id", &client),
-                            ("device_code", device.device_code.expose_secret()),
-                            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-                        ],
-                        timeout,
-                    )?)
+                    token_reply(
+                        oauth(
+                            "oauth/access_token",
+                            &[
+                                ("client_id", &client),
+                                ("device_code", device.device_code.expose_secret()),
+                                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                            ],
+                            timeout,
+                        )?,
+                        &client,
+                    )
                 });
             }
         }

@@ -5,7 +5,9 @@
 use super::{
     Result,
     http::{agent, authorization, response},
-    log, valid_token,
+    log,
+    token::Credential,
+    valid_token,
 };
 use crate::Error;
 use secrecy::{ExposeSecret, SecretString};
@@ -16,7 +18,7 @@ use std::{
 };
 
 pub(crate) const VERIFY_URL: &str = "https://github.com/login/device";
-pub(super) const SETUP_MESSAGE: &str = "Connect with Herdr GPUI's GitHub App. Optionally set [github] oauth_client_id in config-gpui.toml, or HERDR_GITHUB_OAUTH_CLIENT_ID, to another GitHub App or OAuth App public client ID with Device Flow enabled. Reload GUI config after file edits.";
+pub(super) const SETUP_MESSAGE: &str = "Connect with Herdr GPUI's GitHub App. Optionally set [github] oauth_client_id in config-gpui.local.toml, or HERDR_GITHUB_OAUTH_CLIENT_ID, to another GitHub App or OAuth App public client ID with Device Flow enabled. Reload GUI config after file edits.";
 
 #[derive(Debug, Deserialize)]
 pub(super) struct Device {
@@ -77,7 +79,7 @@ impl Device {
 pub(super) enum Reply {
     Device(Device, String, Instant),
     Pending(bool),
-    Token(SecretString),
+    Token(Credential),
     SignedOut,
     Authenticated(Arc<SecretString>),
 }
@@ -127,6 +129,7 @@ pub(super) fn profile(token: Arc<SecretString>) -> Result<Profile> {
 #[derive(Debug, Deserialize)]
 pub(super) struct TokenResponse {
     pub(super) access_token: Option<SecretString>,
+    pub(super) refresh_token: Option<SecretString>,
     pub(super) token_type: Option<String>,
     pub(super) error: Option<String>,
     /// Logged, never displayed: GitHub's own wording is the only place an
@@ -134,7 +137,7 @@ pub(super) struct TokenResponse {
     pub(super) error_description: Option<String>,
 }
 
-pub(super) fn token_reply(value: TokenResponse) -> Result<Reply> {
+pub(super) fn token_reply(value: TokenResponse, client: &str) -> Result<Reply> {
     match value.error.as_deref() {
         Some("authorization_pending") => Ok(Reply::Pending(false)),
         Some("slow_down") => Ok(Reply::Pending(true)),
@@ -174,7 +177,11 @@ pub(super) fn token_reply(value: TokenResponse) -> Result<Reply> {
                 );
                 return Err(Error::GitHubTokenType);
             }
-            Ok(Reply::Token(token))
+            Ok(Reply::Token(Credential::new(
+                token,
+                value.refresh_token,
+                client,
+            )?))
         }
     }
 }

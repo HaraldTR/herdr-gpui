@@ -2,10 +2,13 @@
 
 use super::{Auth, Device, Note, Profile, Reply, SETUP_MESSAGE, Store, VERIFY_URL};
 use super::{
+    credentials,
     device::TokenResponse,
     http::{LIMIT, authorization, graphql, pr_cooldown, response},
     log::{header, kind, public_sso},
+    store,
     store::{KEYCHAIN, credential_bytes, resolve_token},
+    token::Credential,
 };
 use crate::{Error, Result};
 use secrecy::{ExposeSecret, SecretString};
@@ -87,7 +90,21 @@ fn only_a_signed_release_build_uses_the_keychain() {
         assert_eq!(Store::select(&config), Store::File);
     }
     config.github.allow_plaintext_credentials = true;
-    assert_eq!(Store::select(&config), Store::choose(true, KEYCHAIN, false));
+    assert_eq!(
+        Store::select(&config),
+        Store::choose(store::FILE, KEYCHAIN, false)
+    );
+    // Platforms without POSIX ownership and mode bits cannot keep the file
+    // private, so opting in must not select it there.
+    assert_eq!(store::FILE, cfg!(unix));
+    if !store::FILE {
+        assert_eq!(Store::select(&config), Store::Environment);
+        assert!(matches!(
+            credentials::store(std::path::Path::new("."), Some(&"token".into()), true),
+            Err(Error::CredentialUnsupported)
+        ));
+        assert!(credentials::store(std::path::Path::new("."), None, false).is_ok());
+    }
 }
 #[test]
 fn credential_notes_state_where_tokens_are_kept() {
@@ -236,12 +253,15 @@ fn signout_discards_late_profile_and_auth_without_environment_reactivation() {
     let mut auth = Auth::connected_fixture();
     let (tx, rx) = mpsc::sync_channel(1);
     auth.profile_incoming = Some(rx);
-    deliver(&mut auth, Ok(Reply::Token("late-fixture".into())));
+    deliver(&mut auth, Ok(Reply::Token(credential("late-fixture"))));
     auth.sign_out();
     assert!(!auth.connected());
     assert!(!auth.loading_profile());
     assert!(auth.incoming.is_none());
-    assert!(tx.send(Ok(Auth::connected_fixture().profile)).is_err());
+    assert!(tx.send(Ok(Auth::connected_fixture().profile)).is_ok());
+    auth.poll_with_store(|_| panic!("profile must drain before deletion"));
+    assert!(auth.profile_incoming.is_none());
+    assert!(!auth.connected());
     // Reload/reconnect cannot read environment or disk after explicit sign-out.
     auth.initialize(&crate::config::Config::default());
     assert!(!auth.loading_profile());
@@ -299,6 +319,117 @@ fn signout_serializes_after_accepted_write_and_discards_its_profile() {
 }
 
 #[test]
+fn signout_drains_inflight_profile_refresh_before_deleting_its_rotated_credential() {
+    let saved = Arc::new(std::sync::Mutex::new(Some(
+        Credential::new("old-access".into(), Some("old-refresh".into()), "client")
+            .unwrap()
+            .encode()
+            .unwrap(),
+    )));
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let mut auth = Auth::connected_fixture();
+    let worker_saved = saved.clone();
+    auth.load_profile_with(None, move |token, _| {
+        assert!(token.is_none());
+        let credential = Credential::decode(worker_saved.lock().unwrap().as_ref().unwrap())?;
+        credential
+            .profile_with(
+                |token| {
+                    if token.expose_secret() == "old-access" {
+                        return Err(Error::GitHubAuthentication);
+                    }
+                    assert_eq!(token.expose_secret(), "new-access");
+                    let mut profile = Auth::connected_fixture().profile.unwrap();
+                    profile.token = token;
+                    Ok(profile)
+                },
+                |_| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Credential::new("new-access".into(), Some("new-refresh".into()), "client")
+                },
+                |value| {
+                    *worker_saved.lock().unwrap() = Some(value.expose_secret().into());
+                    Ok(())
+                },
+            )
+            .map(Some)
+    });
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    auth.sign_out();
+    assert!(!auth.poll_with(
+        |_| panic!("refresh must finish before deletion"),
+        |_, _| panic!("signed out"),
+    ));
+    assert!(auth.profile_incoming.is_some());
+    assert!(auth.signout_pending);
+    assert!(!auth.committing);
+    assert!(auth.incoming.is_none());
+    assert!(!auth.connected());
+    assert!(!auth.loading_profile());
+
+    release_tx.send(()).unwrap();
+    let result = auth
+        .profile_incoming
+        .take()
+        .unwrap()
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(
+        result
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .token
+            .expose_secret(),
+        "new-access"
+    );
+    let (tx, rx) = mpsc::sync_channel(1);
+    tx.send(result).ok().unwrap();
+    auth.profile_incoming = Some(rx);
+    assert!(auth.poll_with(
+        |_| panic!("drain the late result before deletion"),
+        |_, _| panic!("signed out"),
+    ));
+    assert!(auth.profile_incoming.is_none());
+    assert!(auth.signout_pending);
+    assert!(!auth.connected());
+    let worker_saved = saved.clone();
+    assert!(auth.poll_with(
+        move |token| {
+            assert!(token.is_none());
+            let value = worker_saved.lock().unwrap().take().unwrap();
+            let credential = Credential::decode(&value)?;
+            assert_eq!(credential.access_token.expose_secret(), "new-access");
+            assert_eq!(
+                credential.refresh_token.as_ref().unwrap().expose_secret(),
+                "new-refresh"
+            );
+            Ok(())
+        },
+        |_, _| panic!("signed out"),
+    ));
+    let reply = auth
+        .incoming
+        .take()
+        .unwrap()
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    deliver(&mut auth, reply);
+    assert!(auth.poll_with(
+        |_| panic!("already removed"),
+        |_, _| panic!("late profile must not reactivate the session"),
+    ));
+    assert!(saved.lock().unwrap().is_none());
+    assert!(auth.signed_out);
+    assert!(!auth.connected());
+    assert!(!auth.busy());
+    assert!(!auth.failed);
+}
+
+#[test]
 fn profile_loading_success_error_and_idle_do_not_start_device_auth() {
     let mut auth = Auth::default();
     for result in [
@@ -331,7 +462,10 @@ fn setup_fixture_describes_public_config_and_environment_override() {
     assert!(SETUP_MESSAGE.contains("GitHub App or OAuth App public client ID"));
 }
 fn token_reply(value: Value) -> Result<Reply> {
-    super::token_reply(serde_json::from_value(value).unwrap())
+    super::token_reply(serde_json::from_value(value).unwrap(), "fixture-client")
+}
+fn credential(token: &str) -> Credential {
+    Credential::new(token.into(), None, "fixture-client").unwrap()
 }
 fn deliver(auth: &mut Auth, reply: Result<Reply>) {
     let (tx, rx) = mpsc::sync_channel(1);
@@ -433,12 +567,48 @@ fn oauth_responses_deserialize_directly_to_redacted_secrets() {
     };
     let parsed: TokenResponse = response(
         "test",
-        reply(br#"{"access_token":"fixture-access-secret","token_type":"bearer"}"#),
+        reply(br#"{"access_token":"fixture-access-secret","refresh_token":"fixture-refresh-secret","token_type":"bearer"}"#),
     )
     .unwrap();
     assert!(!format!("{parsed:?}").contains("fixture-access-secret"));
-    let Reply::Token(token) = super::token_reply(parsed).unwrap() else {
+    assert!(!format!("{parsed:?}").contains("fixture-refresh-secret"));
+    let Reply::Token(token) = super::token_reply(parsed, "fixture-client").unwrap() else {
         panic!()
+    };
+    assert_eq!(token.access_token.expose_secret(), "fixture-access-secret");
+    assert_eq!(
+        token.refresh_token.as_ref().unwrap().expose_secret(),
+        "fixture-refresh-secret"
+    );
+    assert!(!format!("{token:?}").contains("fixture-access-secret"));
+    assert!(!format!("{token:?}").contains("fixture-refresh-secret"));
+    let mut auth = waiting();
+    deliver(&mut auth, Ok(Reply::Token(token)));
+    assert!(auth.poll_with_store(|value| {
+        assert_eq!(thread::current().name(), Some("herdr-github-auth"));
+        let value = value.unwrap();
+        assert!(!format!("{value:?}").contains("fixture-access-secret"));
+        assert!(!format!("{value:?}").contains("fixture-refresh-secret"));
+        let record: Value = serde_json::from_str(value.expose_secret()).unwrap();
+        assert_eq!(record["version"], 1);
+        assert_eq!(record["client_id"], "fixture-client");
+        let saved = Credential::decode(value)?;
+        assert_eq!(saved.access_token.expose_secret(), "fixture-access-secret");
+        assert_eq!(
+            saved.refresh_token.as_ref().unwrap().expose_secret(),
+            "fixture-refresh-secret"
+        );
+        Ok(())
+    }));
+    let persisted = auth
+        .incoming
+        .take()
+        .unwrap()
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    let Reply::Authenticated(token) = persisted else {
+        panic!("the credential must be persisted before authentication completes");
     };
     assert_eq!(token.expose_secret(), "fixture-access-secret");
     for body in [
@@ -463,7 +633,7 @@ fn oauth_responses_deserialize_directly_to_redacted_secrets() {
 fn expired_token_reply_is_not_persisted() {
     let mut auth = waiting();
     auth.flow.as_mut().unwrap().deadline = Instant::now();
-    deliver(&mut auth, Ok(Reply::Token("expired-secret".into())));
+    deliver(&mut auth, Ok(Reply::Token(credential("expired-secret"))));
     auth.poll_with_store(|_| panic!("expired token must never be stored"));
     assert!(!auth.busy());
     assert!(auth.code().is_none());
@@ -650,7 +820,7 @@ fn pending_slowdown_expiry_and_cancel_do_not_store_stale_tokens() {
     assert!(!auth.busy());
     assert!(auth.message.as_ref().unwrap().contains("expired"));
     for reply in [
-        Reply::Token("fixture".into()),
+        Reply::Token(credential("fixture")),
         Reply::Device(device(), "client".into(), Instant::now()),
     ] {
         let mut auth = waiting();
@@ -664,7 +834,7 @@ fn pending_slowdown_expiry_and_cancel_do_not_store_stale_tokens() {
 #[test]
 fn accepted_token_uses_store_off_thread_and_reports_failure() {
     let mut auth = waiting();
-    deliver(&mut auth, Ok(Reply::Token("fixture-token".into())));
+    deliver(&mut auth, Ok(Reply::Token(credential("fixture-token"))));
     auth.poll_with_store(|token| {
         assert_eq!(
             token.map(ExposeSecret::expose_secret),

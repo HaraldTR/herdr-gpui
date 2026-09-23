@@ -47,6 +47,18 @@ pub enum Error {
     Full,
     #[error("client is disconnected")]
     Disconnected,
+    #[error("a clipboard image upload is already reserved or in progress")]
+    ClipboardImageBusy,
+    #[error("clipboard image upload cancelled")]
+    ClipboardImageCancelled,
+    #[error("clipboard image write timed out; reconnect required")]
+    ClipboardImageWriteTimeout,
+    #[error("clipboard image uploads require a transport with bounded writes")]
+    ClipboardImageUnsupported,
+    #[error("semantic input fallback requires a pane or popup target")]
+    ClipboardImageInputTarget,
+    #[error("clipboard image preparation timed out; reservation skipped")]
+    ClipboardImagePreparationTimeout,
     #[error("invalid client command: snapshot boot ID required")]
     MissingBootId,
     #[error("command does not match a ready snapshot boot")]
@@ -113,6 +125,8 @@ pub enum Error {
     ResponseId,
     #[error("{0}")]
     ServerShutdown(String),
+    #[error("SSH endpoints are not supported on this platform")]
+    SshUnsupported,
     #[error("SSH connection cancelled")]
     SshCancelled,
     #[error("SSH discovery timed out")]
@@ -121,6 +135,36 @@ pub enum Error {
     SshClosed,
     #[error("SSH startup output exceeds limit")]
     SshOutputLimit,
+    #[error("SSH file transfer requires a Linux or macOS client")]
+    UploadUnsupported,
+    #[error("SSH file transfer accepts at most 256 paths")]
+    UploadPathLimit,
+    #[error("file transfer requires a UTF-8 basename without controls")]
+    UploadName,
+    #[error("file transfer source is not a regular file")]
+    UploadNotFile,
+    #[error("file transfer total size exceeds u64")]
+    UploadSizeOverflow,
+    #[error("file transfer source changed length")]
+    UploadSourceChanged,
+    #[error("SSH file transfer cancelled")]
+    UploadCancelled,
+    #[error("SSH file transfer made no progress for 30 seconds")]
+    UploadTimeout,
+    #[error("invalid or excessive SSH file transfer response")]
+    UploadResponse,
+    #[error("cleanup requires unchanged absolute paths returned by upload_files")]
+    UploadCleanupPath,
+    #[error("SSH file transfer failed; check host trust, authentication, and remote storage")]
+    UploadExit { status: std::process::ExitStatus },
+    #[error("SSH file transfer I/O failed")]
+    UploadIo(#[source] io::Error),
+    #[error("{source}; remote temporary-file cleanup also failed")]
+    UploadCleanup {
+        #[source]
+        source: Box<Error>,
+        cleanup: Box<Error>,
+    },
     #[error("endpoint selection is not a regular file")]
     SelectionNotFile,
     #[error("endpoint selection exceeds storage limit")]
@@ -164,6 +208,14 @@ impl Error {
         match self {
             Self::Storage { source, .. } => source.kind(),
             Self::Io(error) => error.kind(),
+            Self::UploadIo(error) => error.kind(),
+            Self::UploadCleanup { source, .. } => source.kind(),
+            Self::UploadUnsupported => io::ErrorKind::Unsupported,
+            Self::UploadCancelled => io::ErrorKind::Interrupted,
+            Self::UploadTimeout => io::ErrorKind::TimedOut,
+            Self::UploadPathLimit | Self::UploadName | Self::UploadCleanupPath => {
+                io::ErrorKind::InvalidInput
+            }
             Self::Protocol(error) => error.kind(),
             Self::Json(error) => error.io_error_kind().unwrap_or(if error.is_eof() {
                 io::ErrorKind::UnexpectedEof
@@ -173,11 +225,16 @@ impl Error {
             Self::InvalidSession | Self::NoLocalSocket | Self::InvalidSshTarget => {
                 io::ErrorKind::InvalidInput
             }
+            Self::SshUnsupported | Self::ClipboardImageUnsupported => io::ErrorKind::Unsupported,
+            Self::ClipboardImageCancelled => io::ErrorKind::Interrupted,
+            Self::ClipboardImageWriteTimeout | Self::ClipboardImagePreparationTimeout => {
+                io::ErrorKind::TimedOut
+            }
             Self::Cancelled | Self::SshCancelled => io::ErrorKind::Interrupted,
             Self::EventReceiverDropped | Self::Disconnected => io::ErrorKind::BrokenPipe,
             Self::SocketClosed | Self::SshClosed => io::ErrorKind::UnexpectedEof,
             Self::HealthTimeout | Self::SshTimeout => io::ErrorKind::TimedOut,
-            Self::Full => io::ErrorKind::WouldBlock,
+            Self::Full | Self::ClipboardImageBusy => io::ErrorKind::WouldBlock,
             _ => io::ErrorKind::InvalidData,
         }
     }

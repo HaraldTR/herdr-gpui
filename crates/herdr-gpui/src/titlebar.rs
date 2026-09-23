@@ -2,7 +2,7 @@
 use crate::{HerdrWindow, fonts::StyledFont, menu::Page};
 use gpui::{prelude::*, *};
 
-/// Signed-in avatar. Smaller than the hit target around it, which stays a
+/// Avatar or signed-out GitHub icon. Smaller than the hit target, which stays a
 /// comfortable size for the pointer.
 const AVATAR: f32 = 20.;
 
@@ -176,7 +176,6 @@ impl HerdrWindow {
     }
 
     pub(super) fn render_titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let background = rgb(self.theme.surface).blend(rgba(0xffffff1a));
         let image = self
             .menu
             .github
@@ -197,6 +196,7 @@ impl HerdrWindow {
                     .child(
                         div()
                             .id("titlebar-avatar")
+                            .group("titlebar-account")
                             .debug_selector(|| "titlebar-avatar".into())
                             .flex()
                             .items_center()
@@ -204,9 +204,6 @@ impl HerdrWindow {
                             .size(px(28.))
                             .rounded_full()
                             .cursor_pointer()
-                            .hover(|s| {
-                                s.bg(background.blend(rgba((self.theme.foreground << 8) | 0x14)))
-                            })
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 cx.stop_propagation();
@@ -225,17 +222,15 @@ impl HerdrWindow {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .size(px(if image.is_some() { AVATAR } else { 16. }))
+                                    .size(px(AVATAR))
                                     .rounded_full()
-                                    .overflow_hidden()
-                                    .bg(background.blend(rgba((self.theme.foreground << 8) | 0x26)))
-                                    .when(
-                                        self.menu.github.busy()
-                                            || self.menu.github.loading_profile(),
-                                        |s| s.border_1().border_color(rgb(self.theme.palette[3])),
-                                    )
-                                    .when(self.menu.github.failed, |s| {
-                                        s.border_1().border_color(rgb(self.theme.palette[1]))
+                                    .group_hover("titlebar-account", |s| {
+                                        s.shadow(vec![BoxShadow {
+                                            color: rgba((self.theme.foreground << 8) | 0x38).into(),
+                                            offset: point(px(0.), px(0.)),
+                                            blur_radius: px(5.),
+                                            spread_radius: px(1.),
+                                        }])
                                     })
                                     .map(|circle| match image {
                                         Some(image) => {
@@ -243,8 +238,8 @@ impl HerdrWindow {
                                         }
                                         None => circle.child(
                                             svg()
-                                                .path("icons/user.svg")
-                                                .size(px(12.))
+                                                .path("icons/github.svg")
+                                                .size(px(AVATAR))
                                                 .text_color(rgb(self.theme.foreground)),
                                         ),
                                     }),
@@ -292,6 +287,58 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use crate::menu::Page;
     use gpui::{Bounds, Modifiers, MouseButton, MouseDownEvent, TestAppContext, point, px, size};
+
+    #[gpui::test]
+    fn account_icon_keeps_the_same_bounds_when_signed_out_failed_or_connected(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        for width in [1200., 360.] {
+            cx.simulate_resize(size(px(width), px(400.)));
+            for state in 0..4 {
+                cx.update(|_, cx| {
+                    view.update(cx, |view, cx| {
+                        view.menu.github = match state {
+                            2 => crate::github::Auth::fixture(true),
+                            3 => crate::github::Auth::connected_fixture(),
+                            _ => crate::github::Auth::default(),
+                        };
+                        view.menu.github.failed = state == 1;
+                        if let Some(profile) = view.menu.github.profile.as_mut() {
+                            profile.avatar = Some(std::sync::Arc::new(gpui::Image::from_bytes(
+                                gpui::ImageFormat::Svg,
+                                include_bytes!("../../../assets/icons/user.svg").to_vec(),
+                            )));
+                        }
+                        cx.notify();
+                    });
+                });
+                for hovered in [false, true] {
+                    cx.update(|window, cx| {
+                        window.refresh();
+                        let _ = window.draw(cx);
+                    });
+                    let hit = cx.debug_bounds("titlebar-avatar").unwrap();
+                    cx.simulate_event(gpui::MouseMoveEvent {
+                        position: if hovered {
+                            hit.center()
+                        } else {
+                            point(px(100.), px(100.))
+                        },
+                        ..Default::default()
+                    });
+                    cx.update(|window, cx| {
+                        window.refresh();
+                        let _ = window.draw(cx);
+                    });
+                    let icon = cx.debug_bounds("titlebar-avatar-circle").unwrap();
+                    assert_eq!(icon.size, size(px(super::AVATAR), px(super::AVATAR)));
+                    assert_eq!(icon.center(), hit.center());
+                    assert_eq!(hit.size, size(px(28.), px(28.)));
+                }
+            }
+        }
+    }
 
     #[gpui::test]
     fn profile_slot_bounds_and_context_menu_do_not_start_auth(cx: &mut TestAppContext) {
@@ -354,6 +401,7 @@ mod git_button_tests {
         git::{Git, Status},
         menu::Page,
         pull_request::Input,
+        sidebar::layout_tests::REPO_KEY,
     };
     use gpui::{Modifiers, MouseButton, MouseDownEvent, TestAppContext, px, size};
 
@@ -378,7 +426,7 @@ mod git_button_tests {
                 view.git = Git::fixture(
                     Input {
                         checkout: None,
-                        repo_key: "/fixture/agent-launcher/.git".into(),
+                        repo_key: REPO_KEY.into(),
                         branch: "develop".into(),
                     },
                     Status {
@@ -442,7 +490,7 @@ mod git_button_tests {
                 view.git = Git::fixture(
                     Input {
                         checkout: None,
-                        repo_key: "/fixture/agent-launcher/.git".into(),
+                        repo_key: REPO_KEY.into(),
                         branch: "develop".into(),
                     },
                     Status::default(),
@@ -468,7 +516,7 @@ mod git_button_tests {
         let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
         let input = Input {
             checkout: None,
-            repo_key: "/fixture/agent-launcher/.git".into(),
+            repo_key: REPO_KEY.into(),
             branch: "develop".into(),
         };
         cx.simulate_resize(size(px(900.), px(600.)));
@@ -522,7 +570,7 @@ mod git_button_tests {
         let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
         let input = Input {
             checkout: None,
-            repo_key: "/fixture/agent-launcher/.git".into(),
+            repo_key: REPO_KEY.into(),
             branch: "develop".into(),
         };
         cx.simulate_resize(size(px(900.), px(600.)));
@@ -583,7 +631,7 @@ mod native_chrome_tests {
                 );
                 assert_eq!(
                     cx.debug_bounds("titlebar-avatar-circle").unwrap(),
-                    Bounds::new(point(px(width - 28.), px(9.)), size(px(16.), px(16.)))
+                    Bounds::new(point(px(width - 30.), px(7.)), size(px(20.), px(20.)))
                 );
                 // Signing in swaps the placeholder for the avatar, which sits
                 // inside the same hit target rather than filling it.

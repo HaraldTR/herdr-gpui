@@ -7,6 +7,22 @@ use crate::{HerdrWindow, config::Config};
 use gpui::{prelude::*, *};
 
 impl HerdrWindow {
+    pub(crate) fn reload_notification_config(&mut self, cx: &mut Context<Self>) {
+        self.sound.reload();
+        let enabled = self.config.notifications.enabled;
+        if let Some(shared) = &self.settings.shared {
+            self.config.apply_shared_notifications(shared);
+        }
+        let now = std::time::Instant::now();
+        for endpoint in &mut self.endpoints {
+            if !enabled && self.config.notifications.enabled {
+                endpoint.toasts.enabled_since = Some(now);
+            }
+        }
+        self.tick_toasts(self.menu.page.is_some() || self.toasts_hidden, now);
+        cx.notify();
+    }
+
     pub(crate) fn open_keybinds(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.open_menu(window, cx) {
             return;
@@ -86,17 +102,38 @@ impl HerdrWindow {
                 let native_reload = std::mem::take(&mut this.settings.native_reloading);
                 // Apply a coherent pair only after both have loaded successfully.
                 match loaded {
-                    Ok((config, theme)) => {
+                    Ok((mut config, theme)) => {
+                        if let Some(shared) = &this.settings.shared {
+                            config.apply_shared_notifications(shared);
+                        }
                         if this.avatars.is_some() && this.menu.github.initialize(&config) {
                             this.menu.pr_cache.clear();
                             this.menu.pr.clear();
                             this.menu.pr_connection = None;
                         }
+                        if !this.config.notifications.enabled && config.notifications.enabled {
+                            let cutoff = std::time::Instant::now();
+                            for endpoint in &mut this.endpoints {
+                                endpoint.toasts.enabled_since = Some(cutoff);
+                            }
+                        }
+                        // Replacing the config also discards any session font
+                        // adjustment, so the baseline follows the file again.
+                        this.configured_terminal_size = config.terminal.size;
                         this.config = config;
+                        this.tick_toasts(
+                            this.menu.page.is_some() || this.toasts_hidden,
+                            std::time::Instant::now(),
+                        );
                         if this.config.theme != "Follow Herdr" {
                             this.theme = theme;
                         }
                         this.apply_shared_theme(cx);
+                        cx.set_global(crate::app::InitialAppearance {
+                            config: this.config.clone(),
+                            theme: this.theme.clone(),
+                            error: None,
+                        });
                         if native_reload {
                             this.settings.native_status =
                                 Some("GUI config saved and applied".into());
@@ -171,6 +208,9 @@ impl HerdrWindow {
                 | Command::WorkspacePicker => 1,
                 Command::NewWindow
                 | Command::ToggleSidebar
+                | Command::IncreaseFontSize
+                | Command::DecreaseFontSize
+                | Command::ResetFontSize
                 | Command::Settings
                 | Command::Keybinds
                 | Command::Themes
@@ -179,6 +219,7 @@ impl HerdrWindow {
                 | Command::Quit
                 | Command::Logs
                 | Command::About => 2,
+                Command::OpenNotificationTarget => 1,
             };
             groups[group].1.push((info.shortcut, info.label));
         }
@@ -377,6 +418,147 @@ fn shortcut_matches(query: &str, keys: &str, description: &str, section: &str) -
 
 #[cfg(test)]
 mod tests {
+    #[gpui::test]
+    #[allow(clippy::unwrap_used)]
+    fn enabling_does_not_replay_undrained_disabled_ingress(cx: &mut gpui::TestAppContext) {
+        use crate::{config::Config, notifications::tests::notification, state::ConnectionStatus};
+        use herdr_client::{
+            ClientEvent,
+            protocol::{SemanticNotificationKind, ServerMessage},
+        };
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let inbox = view.update(cx, |view, _| {
+            // This fixture has no transport; polling must not start one.
+            view.endpoints[0].enabled = false;
+            view.endpoints[0].connection.inbox.clone()
+        });
+        let mut wire = notification("disabled ingress");
+        wire.kind = SemanticNotificationKind::Custom;
+        for _ in 0..2 {
+            view.update(cx, |view, cx| {
+                view.load_gui_config_with(|| Ok((Config::default(), Default::default())), cx)
+            });
+            cx.run_until_parked();
+            {
+                let mut state = inbox.lock().unwrap();
+                state.status = ConnectionStatus::Connected;
+                state.apply(ClientEvent::Message(ServerMessage::SemanticNotification(
+                    wire.clone(),
+                )));
+            }
+            // Enabling cannot drain this inbox; the arrival fence must survive until later polling.
+            let held = inbox.lock().unwrap();
+            view.update(cx, |view, cx| {
+                view.load_gui_config_with(
+                    || {
+                        let mut config = Config::default();
+                        config.notifications.enabled = true;
+                        config.notifications.delay_seconds = 0;
+                        Ok((config, Default::default()))
+                    },
+                    cx,
+                )
+            });
+            cx.run_until_parked();
+            assert_eq!(held.notifications.len(), 1);
+            view.read_with(cx, |view, _| assert!(view.config.notifications.enabled));
+            drop(held);
+            view.update(cx, |view, cx| {
+                view.poll_endpoints(cx);
+                assert!(view.endpoints[0].toasts.entries.is_empty());
+            });
+            let mut fresh = wire.clone();
+            fresh.title = "enabled ingress".into();
+            inbox
+                .lock()
+                .unwrap()
+                .apply(ClientEvent::Message(ServerMessage::SemanticNotification(
+                    fresh,
+                )));
+            view.update(cx, |view, cx| {
+                view.poll_endpoints(cx);
+                assert_eq!(view.endpoints[0].toasts.entries.len(), 1);
+                assert_eq!(
+                    view.endpoints[0].toasts.entries[0].1.title,
+                    "enabled ingress"
+                );
+                assert!(view.endpoints[0].toasts.entries[0].1.visible);
+            });
+        }
+    }
+
+    #[gpui::test]
+    #[allow(clippy::unwrap_used)]
+    fn notification_reload_retimes_pending_clears_disabled_and_keeps_failed_settings(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::{
+            config::{Config, NotificationConfig},
+            notifications::{Notice, tests::notification},
+        };
+        use std::time::Instant;
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        view.update(cx, |view, _| {
+            view.config.terminal.size = 24.;
+            view.config.notifications = NotificationConfig {
+                enabled: true,
+                delay_seconds: 3600,
+                ..Default::default()
+            };
+            view.endpoints[0]
+                .toasts
+                .receive([Notice::new(notification("pending"), Instant::now())]);
+            view.tick_toasts(false, Instant::now());
+            assert!(!view.endpoints[0].toasts.entries[0].1.visible);
+        });
+        view.update(cx, |view, cx| {
+            view.load_gui_config_with(
+                || {
+                    let mut config = Config::default();
+                    config.notifications.enabled = true;
+                    config.notifications.delay_seconds = 0;
+                    config.notifications.position =
+                        herdr_client::protocol::ToastHerdrPosition::TopRight;
+                    config.terminal.size = 18.;
+                    config.layout.sidebar_gap = 16.;
+                    config.layout.mode = crate::config::LayoutMode::Compact;
+                    let theme = config.theme()?;
+                    Ok((config, theme))
+                },
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            assert!(view.endpoints[0].toasts.entries[0].1.visible);
+            assert_eq!(view.config.notifications.delay_seconds, 0);
+            assert_eq!(view.config.terminal.size, 18.);
+            assert_eq!(view.configured_terminal_size, 18.);
+            assert_eq!(view.config.layout.sidebar_gap, 16.);
+            assert_eq!(view.config.layout.mode, crate::config::LayoutMode::Compact);
+            view.set_terminal_font_size(20., cx);
+            view.load_gui_config_with(|| Err(crate::Error::MissingHome), cx);
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            assert!(view.config.notifications.enabled);
+            assert!(view.endpoints[0].toasts.entries[0].1.visible);
+            assert_eq!(view.config.terminal.size, 20.);
+            assert_eq!(view.configured_terminal_size, 18.);
+            assert_eq!(view.config.layout.sidebar_gap, 16.);
+            assert_eq!(view.config.layout.mode, crate::config::LayoutMode::Compact);
+            view.load_gui_config_with(|| Ok((Config::default(), Default::default())), cx);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(!view.config.notifications.enabled);
+            assert!(view.endpoints[0].toasts.entries.is_empty());
+            assert_eq!(view.config.terminal.size, Config::default().terminal.size);
+            assert_eq!(view.configured_terminal_size, view.config.terminal.size);
+            assert_eq!(view.config.layout, Config::default().layout);
+        });
+    }
+
     #[gpui::test]
     fn config_reload_toggles_tab_flags_and_preserves_them_on_failure(
         cx: &mut gpui::TestAppContext,

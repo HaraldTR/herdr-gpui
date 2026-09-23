@@ -210,9 +210,9 @@ impl HerdrWindow {
                                 }
                                 cx.notify();
                             }))
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
-                                this.activate_workspace_menu(action, cx);
+                                this.activate_workspace_menu(action, window, cx);
                             }))
                             .child(
                                 div()
@@ -533,7 +533,11 @@ mod tests {
             });
             let panel = cx.debug_bounds("menu-panel").unwrap();
             let title = cx.debug_bounds("workspace-pr-title").unwrap();
-            assert!(panel.size.height < px(300.), "oversized popover: {panel:?}");
+            let header = cx.debug_bounds("workspace-menu-header").unwrap();
+            assert!(
+                panel.size.height < px(340.) + header.size.height + px(4.),
+                "oversized popover: {panel:?}"
+            );
             assert!(panel.left() >= px(0.) && panel.right() <= px(width));
             assert!(panel.bottom() <= px(400.));
             assert!(panel.contains(&title.origin) && title.right() <= panel.right());
@@ -609,11 +613,17 @@ mod tests {
             window.draw(cx).clear();
         });
         // GPUI retains removed debug selectors; measure the remaining action panel.
-        // Four action rows and nothing else: no PR section, no stale metadata.
+        // Five action rows and the target header: no PR section or stale metadata.
         let rows = cx.update(|_, cx| view.read(cx).workspace_menu_actions().len());
-        assert_eq!(rows, 4);
+        assert_eq!(rows, 5);
         let panel = cx.debug_bounds("menu-panel").unwrap().size.height;
-        assert!(panel < px(35. * rows as f32), "{panel:?}");
+        let header = cx
+            .debug_bounds("workspace-menu-header")
+            .unwrap()
+            .size
+            .height
+            + px(4.);
+        assert!(panel - header < px(35. * rows as f32), "{panel:?}");
     }
 
     /// Explicitly selected running daemon only: no start, focus, resize, input,
@@ -765,17 +775,20 @@ mod tests {
 
     #[test]
     fn checkout_response_requires_authoritative_identity_and_absolute_path() {
+        let root = std::env::temp_dir();
+        let repo_key = root.join("repo/.git").to_str().unwrap().to_owned();
+        let checkout = root.join("worktree").to_str().unwrap().to_owned();
         let tree = ClientShellWorktree {
-            key: "/repo/.git".into(),
+            key: repo_key.clone(),
             label: "repo".into(),
             is_linked_worktree: true,
         };
         let response = serde_json::json!({"result":{"type":"workspace_info", "workspace":{
-            "workspace_id":"w", "worktree":{"repo_key":"/repo/.git", "checkout_path":"/worktree"}
+            "workspace_id":"w", "worktree":{"repo_key":repo_key, "checkout_path":checkout}
         }}});
         let input = checkout_input(&response, "w", Some(&tree), Some("feature")).unwrap();
-        assert_eq!(input.checkout.as_deref(), Some("/worktree"));
-        assert_eq!(input.repo_key, "/repo/.git");
+        assert_eq!(input.checkout.as_deref(), Some(checkout.as_str()));
+        assert_eq!(input.repo_key, repo_key);
         assert_eq!(input.branch, "feature");
         let fallback = repository_input(Some(&tree), Some("feature")).unwrap();
         assert!(fallback.checkout.is_none());

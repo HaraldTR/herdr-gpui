@@ -1,13 +1,15 @@
-//! Native GUI settings; shared Herdr settings are read only when explicitly selected.
+//! GUI settings. The daemon's own config is read only where the GUI honors a
+//! preference the user already expressed there, never written and never used
+//! to change daemon behavior. Managed defaults are refreshed from the binary;
+//! `config-gpui.local.toml` holds persistent user overrides.
 use crate::{Error, Result, error::ThemeParseError};
 use gpui::{Font, FontFallbacks};
 use serde::Deserialize;
 use std::{
     env, fs,
     io::{ErrorKind, Write},
-    os::unix::fs::MetadataExt,
+    ops::RangeInclusive,
     path::{Component, Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
 };
 
 const DEFAULT_CONFIG: &str = include_str!("../config-gpui.example.toml");
@@ -42,6 +44,16 @@ impl FontRole {
         }
     }
 }
+// Compare the first line so Windows checkouts and editors can use CRLF.
+const MANAGED_HEADER: &str = "# DO NOT EDIT -- WILL BE OVERWRITTEN";
+const LOCAL_CONFIG: &str = "# Herdr GPUI overrides. Edit this file, then reload GUI config.\n# Unset keys inherit config-gpui.toml; tables merge key by key.\n";
+
+/// Every face is held to this range, whether it comes from the config file or
+/// from a runtime adjustment, so the two can never disagree on what is valid.
+pub const FONT_SIZE_RANGE: RangeInclusive<f32> = 8.0..=48.0;
+
+/// One logical pixel: the smallest step that can move the terminal cell grid.
+pub const FONT_SIZE_STEP: f32 = 1.0;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -54,6 +66,154 @@ pub struct Config {
     pub ui: FontConfig,
     pub github: GitHubConfig,
     pub features: Features,
+    pub notifications: NotificationConfig,
+    pub(crate) notification_overrides: NotificationSettings,
+    pub clipboard_toast: ClipboardToast,
+    pub layout: Layout,
+}
+
+/// Where the "copied to clipboard" flash sits, and whether it appears at all.
+/// Resolved from the daemon's `[ui.toast.clipboard]`, then from this GUI's own
+/// `[clipboard_toast]`, so one terminal preference covers both clients.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClipboardToast {
+    pub enabled: bool,
+    pub position: ClipboardToastPosition,
+}
+
+impl Default for ClipboardToast {
+    fn default() -> Self {
+        // herdr's own defaults, so an unconfigured pair of clients agrees.
+        Self {
+            enabled: true,
+            position: ClipboardToastPosition::BottomCenter,
+        }
+    }
+}
+
+/// From herdr src/config/model.rs.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClipboardToastPosition {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    BottomLeft,
+    #[default]
+    BottomCenter,
+    BottomRight,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct NotificationConfig {
+    pub enabled: bool,
+    #[serde(deserialize_with = "notification_delay")]
+    pub delay_seconds: u64,
+    pub position: herdr_client::protocol::ToastHerdrPosition,
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            delay_seconds: 1,
+            position: herdr_client::protocol::ToastHerdrPosition::BottomRight,
+        }
+    }
+}
+
+/// Only explicitly configured GUI keys override the shared Herdr preferences.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct NotificationSettings {
+    enabled: Option<bool>,
+    #[serde(deserialize_with = "optional_notification_delay")]
+    delay_seconds: Option<u64>,
+    position: Option<herdr_client::protocol::ToastHerdrPosition>,
+}
+
+impl NotificationSettings {
+    fn resolve(self, base: NotificationConfig) -> NotificationConfig {
+        NotificationConfig {
+            enabled: self.enabled.unwrap_or(base.enabled),
+            delay_seconds: self.delay_seconds.unwrap_or(base.delay_seconds),
+            position: self.position.unwrap_or(base.position),
+        }
+    }
+}
+
+fn optional_notification_delay<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<u64>, D::Error> {
+    notification_delay(d).map(Some)
+}
+
+fn notification_delay<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<u64, D::Error> {
+    let seconds = u64::deserialize(d)?;
+    if seconds > 3600 {
+        return Err(serde::de::Error::custom(
+            "notifications.delay_seconds must be between 0 and 3600",
+        ));
+    }
+    Ok(seconds)
+}
+
+/// Sidebar density and spacing the config file can adjust.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layout {
+    pub mode: LayoutMode,
+    /// Blank space between the sidebar and the terminal it borders. Applies
+    /// only while the sidebar is on screen, and narrows the terminal, so the
+    /// daemon is told about the columns it actually has.
+    pub sidebar_gap: f32,
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Self {
+            mode: LayoutMode::Normal,
+            sidebar_gap: DEFAULT_SIDEBAR_GAP,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LayoutMode {
+    #[default]
+    Normal,
+    Compact,
+}
+
+impl<'de> Deserialize<'de> for Layout {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        // Keep shipped [layout] spacing settings readable alongside named layouts.
+        #[derive(Deserialize)]
+        #[serde(untagged, deny_unknown_fields)]
+        enum Setting {
+            Named(LayoutMode),
+            Options {
+                #[serde(default)]
+                mode: LayoutMode,
+                sidebar_gap: Option<f32>,
+            },
+        }
+        Ok(match Setting::deserialize(deserializer)? {
+            Setting::Named(mode) => Self {
+                mode,
+                ..Self::default()
+            },
+            Setting::Options { mode, sidebar_gap } => Self {
+                mode,
+                sidebar_gap: sidebar_gap.unwrap_or(DEFAULT_SIDEBAR_GAP),
+            },
+        })
+    }
 }
 
 /// Optional behaviors the config file turns on. Every flag is off by default,
@@ -104,6 +264,19 @@ impl GitHubConfig {
         Ok(id.map(str::to_owned))
     }
 }
+
+/// The first terminal column otherwise starts against the sidebar's divider,
+/// which crowds the prompt. Two-thirds of a default cell reads as a gutter
+/// without costing a column at any usable window width.
+const DEFAULT_SIDEBAR_GAP: f32 = 8.;
+
+/// A gap wider than this stops reading as spacing and starts eating columns the
+/// terminal needs, so the config file is held to a band a window can afford.
+const MAX_SIDEBAR_GAP: f32 = 64.;
+
+/// The daemon's config is read for a handful of keys, so a file far larger
+/// than any hand-written config is skipped rather than parsed on every load.
+const MAX_DAEMON_CONFIG_BYTES: u64 = 1 << 20;
 
 /// Upper bound on a configured cascade. Every entry is searched for each
 /// uncovered codepoint, so a long list costs shaping time and covers nothing a
@@ -196,6 +369,10 @@ impl Default for Config {
             confirm_close_tab: true,
             show_agents: true,
             features: Features::default(),
+            notifications: NotificationConfig::default(),
+            notification_overrides: NotificationSettings::default(),
+            clipboard_toast: ClipboardToast::default(),
+            layout: Layout::default(),
             sidebar: font(monospace, 12.0),
             // Tabs are terminal chrome, so they read in the monospace face the
             // sidebar and terminal use, as they do in the reference UI.
@@ -218,6 +395,27 @@ struct Settings {
     ui: FontSettings,
     github: GitHubConfig,
     features: Features,
+    notifications: NotificationSettings,
+    clipboard_toast: ClipboardToastSettings,
+    layout: Layout,
+}
+
+/// Each key overrides the daemon's answer on its own, so naming one of them
+/// here does not silently reset the other to a GUI default.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ClipboardToastSettings {
+    enabled: Option<bool>,
+    position: Option<ClipboardToastPosition>,
+}
+
+impl ClipboardToastSettings {
+    fn resolve(self, base: ClipboardToast) -> ClipboardToast {
+        ClipboardToast {
+            enabled: self.enabled.unwrap_or(base.enabled),
+            position: self.position.unwrap_or(base.position),
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -228,13 +426,24 @@ struct FontSettings {
     fallback: Option<Vec<String>>,
 }
 
+/// Windows sets `USERPROFILE` rather than `HOME`, and upstream Herdr reads both.
 fn home() -> Result<PathBuf> {
-    env::var_os("HOME")
-        .filter(|value| !value.is_empty())
+    let variable = |name| env::var_os(name).filter(|value: &std::ffi::OsString| !value.is_empty());
+    variable("HOME")
+        .or_else(|| {
+            if cfg!(windows) {
+                variable("USERPROFILE")
+            } else {
+                None
+            }
+        })
         .map(PathBuf::from)
         .ok_or(Error::MissingHome)
 }
 
+/// The directory holding this app's `herdr` configuration directory. Upstream
+/// Herdr puts it under `%APPDATA%` on Windows, and the GUI config lives beside
+/// the daemon's, so the same root has to be used on both sides.
 fn config_root() -> Result<PathBuf> {
     match env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
         Some(value) => {
@@ -244,8 +453,82 @@ fn config_root() -> Result<PathBuf> {
             }
             Ok(path)
         }
-        None => Ok(home()?.join(".config")),
+        None => {
+            #[cfg(windows)]
+            if let Some(roaming) = env::var_os("APPDATA").filter(|value| !value.is_empty()) {
+                return Ok(PathBuf::from(roaming));
+            }
+            #[cfg(windows)]
+            return Ok(home()?.join("AppData").join("Roaming"));
+            #[cfg(not(windows))]
+            Ok(home()?.join(".config"))
+        }
     }
+}
+
+/// The daemon's own config file, resolved exactly as herdr resolves it. Every
+/// GUI reader of those settings shares this one answer.
+pub(crate) fn daemon_config_path(get: impl Fn(&str) -> Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(path) = get("HERDR_CONFIG_PATH") {
+        return path.into();
+    }
+    let root = get("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            #[cfg(windows)]
+            {
+                if let Some(root) = get("APPDATA") {
+                    return PathBuf::from(root);
+                }
+                get("HOME")
+                    .or_else(|| get("USERPROFILE"))
+                    .map(PathBuf::from)
+                    .map(|home| home.join("AppData/Roaming"))
+                    .unwrap_or_else(env::temp_dir)
+            }
+            #[cfg(not(windows))]
+            get("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".config"))
+                .unwrap_or_else(env::temp_dir)
+        });
+    // Share production TUI settings even in a debug GUI build or SSH session.
+    root.join("herdr/config.toml")
+}
+
+/// A config file the GUI does not own can hold anything, including settings
+/// from a newer herdr, so only the keys read here matter and anything
+/// unreadable, oversized, malformed, or unrecognized leaves the defaults alone.
+fn daemon_clipboard_toast(path: &Path) -> ClipboardToast {
+    let mut resolved = ClipboardToast::default();
+    if fs::metadata(path).is_ok_and(|data| data.len() > MAX_DAEMON_CONFIG_BYTES) {
+        return resolved;
+    }
+    let Some(clipboard) = fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .and_then(|table| {
+            table
+                .get("ui")?
+                .get("toast")?
+                .get("clipboard")?
+                .as_table()
+                .cloned()
+        })
+    else {
+        return resolved;
+    };
+    if let Some(enabled) = clipboard.get("enabled").and_then(toml::Value::as_bool) {
+        resolved.enabled = enabled;
+    }
+    if let Some(position) = clipboard
+        .get("position")
+        .cloned()
+        .and_then(|position| position.try_into().ok())
+    {
+        resolved.position = position;
+    }
+    resolved
 }
 
 fn theme_directories() -> Result<Vec<PathBuf>> {
@@ -271,6 +554,16 @@ fn theme_directories() -> Result<Vec<PathBuf>> {
 }
 
 impl Config {
+    /// Pure application of a prepared shared snapshot. Native explicit keys win;
+    /// terminal/system delivery does not implicitly enable this GUI's in-app toasts.
+    pub(crate) fn apply_shared_notifications(&mut self, shared: &crate::herdr_settings::Settings) {
+        self.notifications = self.notification_overrides.resolve(NotificationConfig {
+            enabled: shared.toast_delivery == crate::herdr_settings::ToastDelivery::Herdr,
+            delay_seconds: shared.toast_delay_seconds,
+            position: shared.toast_position,
+        });
+    }
+
     pub(crate) fn font(&self, role: FontRole) -> &FontConfig {
         match role {
             FontRole::Sidebar => &self.sidebar,
@@ -282,6 +575,10 @@ impl Config {
 
     pub fn path() -> Result<PathBuf> {
         Ok(config_root()?.join("herdr/config-gpui.toml"))
+    }
+
+    pub fn local_path() -> Result<PathBuf> {
+        Ok(Self::path()?.with_extension("local.toml"))
     }
 
     /// Gives every face the config left alone an automatic icon-font cascade.
@@ -309,40 +606,144 @@ impl Config {
     }
 
     pub fn load() -> Result<Self> {
-        Self::load_path(&Self::path()?)
+        Self::load_path(&Self::path()?, &daemon_config_path(|key| env::var_os(key)))
     }
 
-    fn load_path(path: &Path) -> Result<Self> {
-        let result = (|| {
-            match fs::read_to_string(path) {
-                Ok(text) => return Self::parse(&text),
-                Err(error) if error.kind() == ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
+    /// First-frame settings only: no lock, migration, writes, or fsync. The
+    /// background load performs maintenance after the window has appeared.
+    pub(crate) fn load_startup() -> Result<Self> {
+        Self::load_startup_path(&Self::path()?, &daemon_config_path(|key| env::var_os(key)))
+    }
+
+    fn load_startup_path(path: &Path, daemon: &Path) -> Result<Self> {
+        let local = path.with_extension("local.toml");
+        let (text, source) = match fs::read_to_string(&local) {
+            Ok(text) => (text, local),
+            Err(error) if error.kind() == ErrorKind::NotFound => match fs::read_to_string(path) {
+                Ok(text) if text.lines().next() != Some(MANAGED_HEADER) => (text, path.to_owned()),
+                Ok(_) => (String::new(), local),
+                Err(error) if error.kind() == ErrorKind::NotFound => (String::new(), local),
+                Err(error) => return Err(Error::from(error).at_path(path)),
+            },
+            Err(error) => return Err(Error::from(error).at_path(&local)),
+        };
+        Self::parse_layers([DEFAULT_CONFIG, &text], daemon_clipboard_toast(daemon))
+            .map_err(|error| error.at_path(&source))
+    }
+
+    /// `daemon` is the herdr config whose settings this GUI also honors. It is
+    /// read for those keys alone and never written; a missing one is normal.
+    fn load_path(path: &Path, daemon: &Path) -> Result<Self> {
+        let base = daemon_clipboard_toast(daemon);
+        let (_lock, local) = Self::prepare_files(path)?;
+        let text =
+            fs::read_to_string(&local).map_err(|error| Error::from(error).at_path(&local))?;
+        // Validate the override independently so bad types/unknown keys cannot
+        // disappear inside the merge. Empty arrays explicitly replace defaults.
+        Self::parse_over(&text, base).map_err(|error| error.at_path(&local))?;
+        Self::parse_layers([DEFAULT_CONFIG, &text], base).map_err(|error| error.at_path(&local))
+    }
+
+    /// Serialize migration, defaults refresh, and appearance saves across GUI windows
+    /// and processes. This is only called by background config workers.
+    fn prepare_files(path: &Path) -> Result<(fs::File, PathBuf)> {
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        fs::create_dir_all(parent).map_err(|error| Error::from(error).at_path(parent))?;
+        let lock_path = path.with_extension("lock");
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|error| Error::from(error).at_path(&lock_path))?;
+        lock.lock()
+            .map_err(|error| Error::from(error).at_path(&lock_path))?;
+        let local = path.with_extension("local.toml");
+        let original = match fs::read_to_string(path) {
+            Ok(text) => Some(text),
+            Err(error) if error.kind() == ErrorKind::NotFound => None,
+            Err(error) => return Err(Error::from(error).at_path(path)),
+        };
+        let legacy = original
+            .as_deref()
+            .filter(|text| text.lines().next() != Some(MANAGED_HEADER));
+        if let Some(text) = legacy {
+            // Never replace an old user's file until its exact contents are
+            // safely stored in the local file. A conflict needs human resolution.
+            Self::parse_over(text, ClipboardToast::default())
+                .map_err(|error| error.at_path(path))?;
+        }
+        match fs::read_to_string(&local) {
+            Ok(text) if legacy.is_some_and(|legacy| legacy != text) => {
+                return Err(Error::ConfigMigrationConflict {
+                    original: path.into(),
+                    local,
+                });
             }
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                let mut file = tempfile::NamedTempFile::new_in(parent)
+                    .map_err(|error| Error::from(error).at_path(&local))?;
+                file.write_all(legacy.unwrap_or(LOCAL_CONFIG).as_bytes())
+                    .map_err(|error| Error::from(error).at_path(&local))?;
+                file.as_file()
+                    .sync_all()
+                    .map_err(|error| Error::from(error).at_path(&local))?;
+                file.persist_noclobber(&local)
+                    .map_err(|error| Error::from(error.error).at_path(&local))?;
             }
-            match fs::OpenOptions::new()
+            Err(error) => return Err(Error::from(error).at_path(&local)),
+        }
+        if legacy.is_some() {
+            // Windows FlushFileBuffers requires write access, including when
+            // resuming a migration whose local copy already exists. Never truncate.
+            fs::OpenOptions::new()
                 .write(true)
-                .create_new(true)
-                .open(path)
-            {
-                Ok(mut file) => file.write_all(DEFAULT_CONFIG.as_bytes())?,
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error.into()),
-            }
-            Self::parse(&fs::read_to_string(path)?)
-        })();
-        result.map_err(|error| error.at_path(path))
+                .open(&local)
+                .and_then(|file| file.sync_all())
+                .map_err(|error| Error::from(error).at_path(&local))?;
+            // Publish the migration copy durably before replacing the only old
+            // copy. Windows does not expose directory sync through std::fs.
+            #[cfg(unix)]
+            fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| Error::from(error).at_path(parent))?;
+        }
+        if original.as_deref() != Some(DEFAULT_CONFIG) {
+            write_config(path, DEFAULT_CONFIG)?;
+        }
+        Ok((lock, local))
     }
 
+    /// The GUI file on its own, with nothing layered under it: the shape the
+    /// tests below read, since loading also consults the daemon's config.
+    #[cfg(test)]
     fn parse(text: &str) -> Result<Self> {
-        let loaded = config_loader::Config::builder()
-            .add_source(config_loader::File::from_str(
+        Self::parse_over(text, ClipboardToast::default())
+    }
+
+    /// `base` is what the daemon's own config asked for, which every key this
+    /// file names overrides.
+    fn parse_over(text: &str, base: ClipboardToast) -> Result<Self> {
+        Self::parse_layers([text], base)
+    }
+
+    fn parse_layers<'a>(
+        texts: impl IntoIterator<Item = &'a str>,
+        base: ClipboardToast,
+    ) -> Result<Self> {
+        let mut builder = config_loader::Config::builder();
+        for text in texts {
+            builder = builder.add_source(config_loader::File::from_str(
                 text,
                 config_loader::FileFormat::Toml,
-            ))
-            .build()?;
+            ));
+        }
+        let loaded = builder.build()?;
         // Config's typed deserializer coerces strings/numbers. Preserve TOML
         // types so existing strict font and theme validation remains intact.
         let value: toml::Value = loaded.try_deserialize()?;
@@ -351,6 +752,17 @@ impl Config {
         settings.github.client_id_with_override(None)?;
         config.github = settings.github;
         config.features = settings.features;
+        config.notification_overrides = settings.notifications;
+        config.notifications = settings
+            .notifications
+            .resolve(NotificationConfig::default());
+        config.clipboard_toast = settings.clipboard_toast.resolve(base);
+        if !settings.layout.sidebar_gap.is_finite()
+            || !(0.0..=MAX_SIDEBAR_GAP).contains(&settings.layout.sidebar_gap)
+        {
+            return Err(Error::InvalidSidebarGap);
+        }
+        config.layout = settings.layout;
         if let Some(theme) = settings.theme {
             if theme.trim().is_empty() {
                 return Err(Error::EmptyTheme);
@@ -383,7 +795,7 @@ impl Config {
             if font.family.trim().is_empty() {
                 return Err(Error::EmptyFontFamily(name));
             }
-            if !font.size.is_finite() || !(8.0..=48.0).contains(&font.size) {
+            if !font.size.is_finite() || !FONT_SIZE_RANGE.contains(&font.size) {
                 return Err(Error::InvalidFontSize(name));
             }
         }
@@ -435,7 +847,12 @@ impl Config {
 
     /// Persist only the theme selection, retaining the latest on-disk settings.
     pub fn save_theme(&self, name: &str) -> Result<()> {
-        self.save_theme_path(name, &Self::path()?)
+        self.save_theme_at(name, &Self::path()?)
+    }
+
+    fn save_theme_at(&self, name: &str, path: &Path) -> Result<()> {
+        let (_lock, local) = Self::prepare_files(path)?;
+        self.save_theme_path(name, &local)
     }
 
     fn save_theme_path(&self, name: &str, path: &Path) -> Result<()> {
@@ -444,7 +861,7 @@ impl Config {
             ..self.clone()
         };
         selected.theme()?;
-        Self::save_path(path, |document| {
+        Self::edit_path(path, |document| {
             let mut value = toml_edit::Value::from(name);
             if let Some(previous) = document.get("theme").and_then(toml_edit::Item::as_value) {
                 *value.decor_mut() = previous.decor().clone();
@@ -454,21 +871,21 @@ impl Config {
         })
     }
 
-    /// Persist only this face's family and size, leaving fallbacks unchanged.
-    /// Synchronous disk I/O: call from a worker, not the UI thread.
+    /// Blocking I/O: save only family and size to native local overrides.
     pub(crate) fn save_font(&self, role: FontRole, family: &str, size: f32) -> Result<()> {
-        self.save_font_path(role, family, size, &Self::path()?)
+        self.save_font_at(role, family, size, &Self::path()?)
     }
 
-    fn save_font_path(&self, role: FontRole, family: &str, size: f32, path: &Path) -> Result<()> {
+    fn save_font_at(&self, role: FontRole, family: &str, size: f32, path: &Path) -> Result<()> {
         let key = role.key();
         if family.trim().is_empty() {
             return Err(Error::EmptyFontFamily(key));
         }
-        if !size.is_finite() || !(8.0..=48.0).contains(&size) {
+        if !size.is_finite() || !FONT_SIZE_RANGE.contains(&size) {
             return Err(Error::InvalidFontSize(key));
         }
-        Self::save_path(path, |document| {
+        let (_lock, local) = Self::prepare_files(path)?;
+        Self::edit_path(&local, |document| {
             if !document.contains_key(key) {
                 document[key] = toml_edit::Item::Table(toml_edit::Table::new());
             }
@@ -490,105 +907,20 @@ impl Config {
         })
     }
 
-    fn save_path(
+    /// The caller holds the native config lock while reading and replacing overrides.
+    fn edit_path(
         path: &Path,
         edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<()>,
     ) -> Result<()> {
         let result = (|| -> Result<()> {
-            let parent = path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."));
-            fs::create_dir_all(parent)?;
-            let parent = fs::canonicalize(parent)?;
-            let denied = || {
-                std::io::Error::new(
-                    ErrorKind::PermissionDenied,
-                    "native config saves require an owned, non-shared directory and regular files; symlink targets are refused",
-                )
-            };
-            let uid = rustix::process::geteuid().as_raw();
-            let metadata = fs::metadata(&parent)?;
-            if metadata.uid() != uid || metadata.mode() & 0o022 != 0 {
-                return Err(denied().into());
-            }
-            let name = path.file_name().ok_or_else(denied)?;
-            let path = parent.join(name);
-            let mut lock_name = std::ffi::OsString::from(".");
-            lock_name.push(name);
-            lock_name.push(".gpui-lock");
-            // Never unlink this inode: waiters must lock the same file even after
-            // the config is replaced. Closing the descriptor releases the lock.
-            let lock = fs::File::from(
-                rustix::fs::open(
-                    parent.join(lock_name),
-                    rustix::fs::OFlags::RDWR
-                        | rustix::fs::OFlags::CREATE
-                        | rustix::fs::OFlags::NOFOLLOW
-                        | rustix::fs::OFlags::NONBLOCK
-                        | rustix::fs::OFlags::CLOEXEC,
-                    rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-                )
-                .map_err(std::io::Error::from)?,
-            );
-            let validate_file = |metadata: fs::Metadata| -> std::io::Result<()> {
-                if !metadata.is_file()
-                    || metadata.uid() != uid
-                    || metadata.nlink() != 1
-                    || metadata.mode() & 0o022 != 0
-                {
-                    return Err(denied());
-                }
-                Ok(())
-            };
-            validate_file(lock.metadata()?)?;
-            lock.lock()?;
-            let check_target = || match fs::symlink_metadata(&path) {
-                Ok(metadata) => validate_file(metadata),
-                Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(error),
-            };
-            check_target()?;
-            let text = match fs::read_to_string(&path) {
+            let text = match fs::read_to_string(path) {
                 Ok(text) => text,
-                Err(error) if error.kind() == ErrorKind::NotFound => DEFAULT_CONFIG.into(),
+                Err(error) if error.kind() == ErrorKind::NotFound => LOCAL_CONFIG.into(),
                 Err(error) => return Err(error.into()),
             };
             let mut document = text.parse::<toml_edit::DocumentMut>()?;
             edit(&mut document)?;
-            static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
-            let (temporary, mut file) = loop {
-                let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-                let temporary =
-                    parent.join(format!(".config-gpui-{}-{id}.tmp", std::process::id()));
-                match fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&temporary)
-                {
-                    Ok(file) => break (temporary, file),
-                    Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
-                    Err(error) => return Err(error.into()),
-                }
-            };
-            let write_result = (|| {
-                file.write_all(document.to_string().as_bytes())?;
-                file.sync_all()?;
-                drop(file);
-                // Advisory locking coordinates native saves, not arbitrary editors.
-                check_target()?;
-                fs::rename(&temporary, &path)
-            })();
-            if let Err(error) = write_result {
-                if let Err(cleanup) = fs::remove_file(&temporary) {
-                    return Err(Error::Cleanup {
-                        source: error,
-                        path: temporary,
-                        cleanup,
-                    });
-                }
-                return Err(error.into());
-            }
+            write_config(path, &document.to_string())?;
             Ok(())
         })();
         result.map_err(|error| error.at_path(path))
@@ -645,6 +977,22 @@ impl Config {
         let text = fs::read_to_string(&path).map_err(|error| Error::from(error).at_path(&path))?;
         Theme::parse_ghostty(&text).map_err(|error| error.at_path(&path))
     }
+}
+
+fn write_config(path: &Path, text: &str) -> Result<()> {
+    let result = (|| -> std::io::Result<()> {
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        fs::create_dir_all(parent)?;
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
+        file.write_all(text.as_bytes())?;
+        file.as_file().sync_all()?;
+        file.persist(path).map_err(|error| error.error)?;
+        Ok(())
+    })();
+    result.map_err(|error| Error::from(error).at_path(path))
 }
 
 /// Colors are packed 24-bit RGB, without an alpha channel.
@@ -857,6 +1205,486 @@ impl Theme {
 mod tests {
     use super::*;
     use anyhow::Context as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn shared_notifications_inherit_only_supported_delivery_without_resetting_session()
+    -> anyhow::Result<()> {
+        use crate::herdr_settings::Settings as Shared;
+        use herdr_client::protocol::ToastHerdrPosition;
+
+        for mut config in [
+            Config::default(),
+            Config::parse("")?,
+            Config::parse("[notifications]")?,
+            Config::parse(DEFAULT_CONFIG)?,
+        ] {
+            assert_eq!(config.notifications, NotificationConfig::default());
+            config.terminal.size = 27.5;
+            config.ui.size = 18.;
+            config.terminal.fallbacks = Some(vec!["Session Fallback".into()]);
+            config.clipboard_toast.enabled = false;
+            let session = config.clone();
+            for (delivery, enabled) in [
+                ("herdr", true),
+                ("off", false),
+                ("system", false),
+                ("terminal", false),
+                ("herdr", true),
+            ] {
+                let shared = Shared::parse_text(&format!(
+                    "[ui.toast]\ndelivery = '{delivery}'\ndelay_seconds = 7\n[ui.toast.herdr]\nposition = 'top-left'\n"
+                ))?;
+                config.apply_shared_notifications(&shared);
+                assert_eq!(
+                    config.notifications,
+                    NotificationConfig {
+                        enabled,
+                        delay_seconds: 7,
+                        position: ToastHerdrPosition::TopLeft
+                    }
+                );
+                for role in FontRole::ALL {
+                    assert_eq!(config.font(role).family, session.font(role).family);
+                    assert_eq!(config.font(role).size, session.font(role).size);
+                    assert_eq!(config.font(role).fallbacks, session.font(role).fallbacks);
+                }
+                assert_eq!(config.clipboard_toast, session.clipboard_toast);
+                assert_eq!(config.layout, session.layout);
+                assert_eq!(config.theme, session.theme);
+            }
+            config.apply_shared_notifications(&Shared::parse_text("")?);
+            assert_eq!(config.notifications, NotificationConfig::default());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn shared_notifications_respect_each_explicit_native_override() -> anyhow::Result<()> {
+        use crate::herdr_settings::Settings as Shared;
+        use herdr_client::protocol::ToastHerdrPosition::{BottomLeft, TopRight};
+        let shared = Shared::parse_text(
+            "[ui.toast]\ndelivery = 'herdr'\ndelay_seconds = 7\n[ui.toast.herdr]\nposition = 'top-right'",
+        )?;
+        for (text, enabled, delay_seconds, position) in [
+            ("enabled = false", false, 7, TopRight),
+            ("delay_seconds = 0", true, 0, TopRight),
+            ("position = 'bottom-left'", true, 7, BottomLeft),
+            (
+                "enabled = false\ndelay_seconds = 0\nposition = 'bottom-left'",
+                false,
+                0,
+                BottomLeft,
+            ),
+        ] {
+            let mut config = Config::parse_layers(
+                [DEFAULT_CONFIG, &format!("[notifications]\n{text}")],
+                ClipboardToast::default(),
+            )?;
+            for _ in 0..2 {
+                config.apply_shared_notifications(&shared);
+                assert_eq!(
+                    config.notifications,
+                    NotificationConfig {
+                        enabled,
+                        delay_seconds,
+                        position
+                    },
+                    "{text}"
+                );
+            }
+        }
+        let mut config = Config::parse("[notifications]\nenabled = true")?;
+        for delivery in ["off", "terminal", "system"] {
+            config.apply_shared_notifications(&Shared::parse_text(&format!(
+                "[ui.toast]\ndelivery = '{delivery}'"
+            ))?);
+            assert!(
+                config.notifications.enabled,
+                "explicit native opt-in wins over {delivery}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn managed_notifications_defer_but_persisted_local_and_legacy_keys_still_win()
+    -> anyhow::Result<()> {
+        use crate::herdr_settings::Settings as Shared;
+        let shared = Shared::parse_text("[ui.toast]\ndelivery = 'herdr'\ndelay_seconds = 9")?;
+        for legacy in [false, true] {
+            let temp = TempDirectory::new()?;
+            let path = temp.0.join("config-gpui.toml");
+            let daemon = temp.0.join("absent.toml");
+            if legacy {
+                fs::write(&path, "[notifications]\nenabled = false\n")?;
+            }
+            for mut config in [
+                Config::load_startup_path(&path, &daemon)?,
+                Config::load_path(&path, &daemon)?,
+            ] {
+                config.apply_shared_notifications(&shared);
+                assert_eq!(config.notifications.enabled, !legacy);
+                assert_eq!(config.notifications.delay_seconds, 9);
+            }
+            let local = path.with_extension("local.toml");
+            fs::write(
+                &local,
+                "[notifications]\nenabled = false\ndelay_seconds = 1\nposition = 'bottom-right'\n",
+            )?;
+            for mut config in [
+                Config::load_startup_path(&path, &daemon)?,
+                Config::load_path(&path, &daemon)?,
+            ] {
+                config.apply_shared_notifications(&shared);
+                assert_eq!(config.notifications, NotificationConfig::default());
+            }
+            assert_eq!(fs::read_to_string(&path)?, DEFAULT_CONFIG);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn font_saves_use_local_overrides_and_preserve_other_fields() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config-gpui.toml");
+        let local = path.with_extension("local.toml");
+        let config = Config::default();
+        for role in FontRole::ALL {
+            Config::load_path(&path, &temp.0.join("absent.toml"))?;
+            let original = format!(
+                "# personal\ntheme = 'Nord'\n[{}] # face\nfamily = 'Old' # family\nsize = 19 # size\nfallback = [] # cascade\n",
+                role.key()
+            );
+            fs::write(&local, &original)?;
+            config.save_font_at(role, "New Font", 20.5, &path)?;
+            assert_eq!(
+                fs::read_to_string(&local)?,
+                original
+                    .replace("'Old'", "\"New Font\"")
+                    .replace("size = 19", "size = 20.5")
+            );
+            assert_eq!(fs::read_to_string(&path)?, DEFAULT_CONFIG);
+            let loaded = Config::load_path(&path, &temp.0.join("absent.toml"))?;
+            assert_eq!(loaded.font(role).family, "New Font");
+            assert_eq!(loaded.font(role).fallbacks, Some(vec![]));
+            assert_eq!(loaded.theme, "Nord");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_font_saves_do_not_create_files() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("missing/config-gpui.toml");
+        for role in FontRole::ALL {
+            for size in [7.9, 48.1, f32::NAN, f32::INFINITY] {
+                assert!(matches!(
+                    Config::default().save_font_at(role, "Font", size, &path),
+                    Err(Error::InvalidFontSize(_))
+                ));
+            }
+            assert!(matches!(
+                Config::default().save_font_at(role, "  ", 12., &path),
+                Err(Error::EmptyFontFamily(_))
+            ));
+        }
+        assert!(!path.parent().context("parent")?.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn font_saves_migrate_legacy_and_handle_inline_or_invalid_tables() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config-gpui.toml");
+        let local = path.with_extension("local.toml");
+        let daemon = temp.0.join("absent.toml");
+        fs::write(&path, "# legacy\ntheme = 'Nord'\n")?;
+        let config = Config::default();
+        config.save_font_at(FontRole::Ui, "Font \"Quoted\" \\ Face", 48., &path)?;
+        assert_eq!(fs::read_to_string(&path)?, DEFAULT_CONFIG);
+        let loaded = Config::load_path(&path, &daemon)?;
+        assert_eq!(loaded.ui.family, "Font \"Quoted\" \\ Face");
+        assert_eq!(loaded.ui.size, 48.);
+        assert_eq!(loaded.theme, "Nord");
+        fs::write(&local, "ui = { fallback = [] } # inline\n")?;
+        config.save_font_at(FontRole::Ui, "New Font", 8., &path)?;
+        assert_eq!(
+            Config::load_path(&path, &daemon)?.ui.fallbacks,
+            Some(vec![])
+        );
+        assert!(fs::read_to_string(&local)?.contains("# inline"));
+        for text in [
+            "ui = [",
+            "ui = 'not a table'",
+            "ui = []",
+            "[[ui]]\nsize = 12\n",
+        ] {
+            fs::write(&local, text)?;
+            assert!(
+                config
+                    .save_font_at(FontRole::Ui, "New Font", 12., &path)
+                    .is_err()
+            );
+            assert_eq!(fs::read_to_string(&local)?, text);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_font_and_theme_saves_share_the_native_lock() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config-gpui.toml");
+        let config = Config::default();
+        let barrier = std::sync::Barrier::new(5);
+        std::thread::scope(|scope| {
+            let (config, barrier, path) = (&config, &barrier, &path);
+            let mut handles = Vec::new();
+            for role in FontRole::ALL {
+                handles.push(scope.spawn(move || {
+                    barrier.wait();
+                    config.save_font_at(role, role.label(), 20., path)
+                }));
+            }
+            handles.push(scope.spawn(move || {
+                barrier.wait();
+                config.save_theme_at("Nord", path)
+            }));
+            for handle in handles {
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("save worker panicked"))??;
+            }
+            anyhow::Ok(())
+        })?;
+        let loaded = Config::load_path(&path, &temp.0.join("absent.toml"))?;
+        assert_eq!(loaded.theme, "Nord");
+        for role in FontRole::ALL {
+            assert_eq!(loaded.font(role).family, role.label());
+            assert_eq!(loaded.font(role).size, 20.);
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shared_windows_config_path_matches_upstream_roaming_layout() {
+        let vars = [
+            ("USERPROFILE", r"C:\Users\test"),
+            ("APPDATA", r"C:\Roaming"),
+            ("XDG_CONFIG_HOME", r"C:\xdg"),
+            ("HERDR_CONFIG_PATH", r"C:\explicit.toml"),
+        ];
+        for (count, expected) in [
+            (1, r"C:\Users\test\AppData\Roaming\herdr\config.toml"),
+            (2, r"C:\Roaming\herdr\config.toml"),
+            (3, r"C:\xdg\herdr\config.toml"),
+            (4, r"C:\explicit.toml"),
+        ] {
+            assert_eq!(
+                daemon_config_path(|key| vars[..count]
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| (*value).into())),
+                PathBuf::from(expected)
+            );
+        }
+    }
+
+    /// The daemon's own answer is the starting point, each GUI key overrides
+    /// it alone, and the file this GUI writes for a new user pins neither.
+    #[test]
+    fn clipboard_toast_layers_the_daemon_config_under_the_gui_config() -> anyhow::Result<()> {
+        use ClipboardToastPosition::*;
+        let temp = TempDirectory::new()?;
+        let gui = temp.0.join("config-gpui.toml");
+        let local = gui.with_extension("local.toml");
+        let daemon = temp.0.join("config.toml");
+
+        // No files at all: herdr's defaults, so both clients agree.
+        fs::write(&gui, "")?;
+        let load = |daemon: &Path| Config::load_path(&gui, daemon);
+        assert_eq!(
+            load(&daemon)?.clipboard_toast,
+            ClipboardToast {
+                enabled: true,
+                position: BottomCenter
+            }
+        );
+
+        // The daemon config alone decides when the GUI config is silent.
+        fs::write(
+            &daemon,
+            "onboarding = false\n[ui]\nstatus_indicators = \"dots\"\n[ui.toast.clipboard]\nenabled = false\nposition = \"top-right\"\n",
+        )?;
+        assert_eq!(
+            load(&daemon)?.clipboard_toast,
+            ClipboardToast {
+                enabled: false,
+                position: TopRight
+            }
+        );
+
+        // Each GUI key overrides on its own, leaving the other one alone.
+        for (text, expected) in [
+            (
+                "[clipboard_toast]\nenabled = true",
+                ClipboardToast {
+                    enabled: true,
+                    position: TopRight,
+                },
+            ),
+            (
+                "[clipboard_toast]\nposition = \"bottom-left\"",
+                ClipboardToast {
+                    enabled: false,
+                    position: BottomLeft,
+                },
+            ),
+            (
+                "[clipboard_toast]\nenabled = true\nposition = \"top-center\"",
+                ClipboardToast {
+                    enabled: true,
+                    position: TopCenter,
+                },
+            ),
+            (
+                "[clipboard_toast]",
+                ClipboardToast {
+                    enabled: false,
+                    position: TopRight,
+                },
+            ),
+        ] {
+            fs::write(&local, text)?;
+            assert_eq!(load(&daemon)?.clipboard_toast, expected, "{text}");
+        }
+
+        // A daemon config the GUI cannot use leaves herdr's defaults standing:
+        // it belongs to another program and may hold anything.
+        fs::write(&local, "")?;
+        for text in [
+            "not toml",
+            "[ui.toast.clipboard]\nenabled = \"yes\"\nposition = 3",
+            "[ui.toast.clipboard]\nposition = \"middle\"",
+            "[ui.toast]\nclipboard = 7",
+            "[ui]\ntoast = false",
+            "",
+        ] {
+            fs::write(&daemon, text)?;
+            assert_eq!(
+                load(&daemon)?.clipboard_toast,
+                ClipboardToast::default(),
+                "{text}"
+            );
+        }
+        fs::remove_file(&daemon)?;
+        assert_eq!(load(&daemon)?.clipboard_toast, ClipboardToast::default());
+        assert_eq!(
+            load(&temp.0)?.clipboard_toast,
+            ClipboardToast::default(),
+            "a directory is not a config"
+        );
+
+        // Oversized files are skipped rather than parsed on every config load.
+        let mut oversized = "[ui.toast.clipboard]\nenabled = false\n".to_owned();
+        oversized.push_str(&"# pad\n".repeat(MAX_DAEMON_CONFIG_BYTES as usize / 6));
+        assert!(oversized.len() as u64 > MAX_DAEMON_CONFIG_BYTES);
+        fs::write(&daemon, &oversized)?;
+        assert_eq!(load(&daemon)?.clipboard_toast, ClipboardToast::default());
+
+        // The file written for a new user must not pin either key, or the
+        // daemon config could never reach a GUI that has run once.
+        assert_eq!(
+            ClipboardToastSettings::default().resolve(ClipboardToast {
+                enabled: false,
+                position: TopLeft
+            }),
+            ClipboardToast {
+                enabled: false,
+                position: TopLeft
+            }
+        );
+        fs::write(&gui, DEFAULT_CONFIG)?;
+        fs::write(
+            &daemon,
+            "[ui.toast.clipboard]\nenabled = false\nposition = \"top-left\"\n",
+        )?;
+        assert_eq!(
+            load(&daemon)?.clipboard_toast,
+            ClipboardToast {
+                enabled: false,
+                position: TopLeft
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn clipboard_toast_keys_are_strict() {
+        for text in [
+            "[clipboard_toast]\nenabled = 1",
+            "[clipboard_toast]\nenabled = \"true\"",
+            "[clipboard_toast]\nposition = \"middle\"",
+            "[clipboard_toast]\nposition = \"BottomCenter\"",
+            "[clipboard_toast]\nposition = 1",
+            "[clipboard_toast]\nunknown = true",
+            "clipboard_toast = true",
+        ] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn notification_settings_defaults_bounds_corners_and_strict_types() -> anyhow::Result<()> {
+        use herdr_client::protocol::ToastHerdrPosition;
+        use std::error::Error as _;
+        for text in ["", "[notifications]", DEFAULT_CONFIG] {
+            assert_eq!(
+                Config::parse(text)?.notifications,
+                NotificationConfig::default()
+            );
+        }
+        for delay in [0, 1, 3600] {
+            for (name, position) in [
+                ("top-left", ToastHerdrPosition::TopLeft),
+                ("top-right", ToastHerdrPosition::TopRight),
+                ("bottom-left", ToastHerdrPosition::BottomLeft),
+                ("bottom-right", ToastHerdrPosition::BottomRight),
+            ] {
+                let config = Config::parse(&format!(
+                    "[notifications]\nenabled=true\ndelay_seconds={delay}\nposition=\"{name}\"\n[layout]\nsidebar_gap=16\n[terminal]\nsize=18"
+                ))?;
+                assert_eq!(config.layout.sidebar_gap, 16.);
+                assert_eq!(config.terminal.size, 18.);
+                assert_eq!(
+                    config.notifications,
+                    NotificationConfig {
+                        enabled: true,
+                        delay_seconds: delay,
+                        position
+                    }
+                );
+            }
+        }
+        for field in [
+            "enabled=1",
+            "enabled=\"true\"",
+            "delay_seconds=-1",
+            "delay_seconds=3601",
+            "delay_seconds=1.5",
+            "delay_seconds=\"1\"",
+            "position=\"center\"",
+            "unknown=true",
+        ] {
+            let error = Config::parse(&format!("[notifications]\n{field}"))
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("accepted {field}"))?;
+            assert!(matches!(error, Error::Toml(_)), "{field}: {error:?}");
+            assert!(error.source().is_some());
+        }
+        Ok(())
+    }
 
     #[test]
     fn primary_selection_text_contrasts_in_every_builtin_theme() {
@@ -904,7 +1732,7 @@ mod tests {
         let temp = TempDirectory::new()?;
         let path = temp.0.join("invalid.toml");
         fs::write(&path, "theme = [")?;
-        let error = Config::load_path(&path)
+        let error = Config::load_path(&path, &temp.0.join("absent.toml"))
             .err()
             .ok_or_else(|| anyhow::anyhow!("accepted invalid TOML"))?;
         assert!(
@@ -1068,107 +1896,6 @@ mod tests {
     }
 
     #[test]
-    fn saves_only_font_fields_and_preserves_latest_settings_and_comments() -> anyhow::Result<()> {
-        let temp = TempDirectory::new()?;
-        let path = temp.0.join("config.toml");
-        let config = Config::default();
-        for (role, label) in FontRole::ALL
-            .into_iter()
-            .zip(["Sidebar", "Tabs", "Terminal", "UI"])
-        {
-            assert_eq!(role.label(), label);
-            let original = format!(
-                "# heading\ntheme = 'Nord' # selection\nfuture = true\n\n[{}] # fonts\nfamily = 'Old Font' # family\nsize = 19 # size\nfallback = ['Symbols Nerd Font Mono'] # keep cascade\nfuture_font = true\n\n[github]\noauth_client_id = 'Iv1.fixture'\n",
-                role.key()
-            );
-            fs::write(&path, &original)?;
-            config.save_font_path(role, "New Font", 20.5, &path)?;
-            assert_eq!(
-                fs::read_to_string(&path)?,
-                original
-                    .replace("'Old Font'", "\"New Font\"")
-                    .replace("size = 19", "size = 20.5")
-            );
-            assert_ne!(config.font(role).family, "New Font");
-            assert_ne!(config.font(role).size, 20.5);
-            assert_eq!(fs::read_dir(&temp.0)?.count(), 2);
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn font_saves_create_missing_fields_and_preserve_inline_tables() -> anyhow::Result<()> {
-        let temp = TempDirectory::new()?;
-        let path = temp.0.join("nested/config.toml");
-        let config = Config::default();
-        let family = "Font \"Quoted\" \\ Face";
-        config.save_font_path(FontRole::Terminal, family, 8.0, &path)?;
-        let saved = Config::load_path(&path)?;
-        assert_eq!(saved.terminal.family, family);
-        assert_eq!(saved.terminal.size, 8.0);
-        assert_eq!(saved.terminal.fallbacks, None);
-        assert_eq!(saved.theme, "Default");
-        for text in [
-            "# no fonts\ntheme = 'Dracula'\n",
-            "theme = 'Dracula'\n[ui]\nfallback = [] # no cascade\n",
-            "theme = 'Dracula'\nui = { fallback = [] } # inline\n",
-        ] {
-            fs::write(&path, text)?;
-            config.save_font_path(FontRole::Ui, family, 48.0, &path)?;
-            let saved_text = fs::read_to_string(&path)?;
-            let saved = Config::parse(&saved_text)?;
-            assert_eq!(saved.font(FontRole::Ui).family, family);
-            assert_eq!(saved.font(FontRole::Ui).size, 48.0);
-            assert_eq!(saved.theme, "Dracula");
-            if text.contains("fallback") {
-                assert_eq!(saved.ui.fallbacks, Some(vec![]));
-            } else {
-                assert_eq!(saved.ui.fallbacks, None);
-            }
-            assert!(saved_text.contains(text.split_once('#').context("missing comment")?.1.trim()));
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn font_save_validation_leaves_files_unchanged() -> anyhow::Result<()> {
-        let temp = TempDirectory::new()?;
-        let path = temp.0.join("config.toml");
-        let config = Config::default();
-        for role in FontRole::ALL {
-            for family in ["", " \t\n"] {
-                assert!(matches!(
-                    config.save_font_path(role, family, 12.0, &path),
-                    Err(Error::EmptyFontFamily(key)) if key == role.key()
-                ));
-                assert!(!path.exists());
-            }
-            for size in [7.9, 48.1, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-                assert!(matches!(
-                    config.save_font_path(role, "Menlo", size, &path),
-                    Err(Error::InvalidFontSize(key)) if key == role.key()
-                ));
-                assert!(!path.exists());
-            }
-        }
-        for text in [
-            "ui = [",
-            "[ui]\nsize = 12\nsize = 14\n",
-            "ui = 'not a table'",
-            "ui = []",
-            "[[ui]]\nsize = 12\n",
-        ] {
-            fs::write(&path, text)?;
-            let error = config.save_font_path(FontRole::Ui, "Menlo", 12.0, &path);
-            assert!(matches!(error, Err(Error::Path { path: actual, source })
-                if actual == path && matches!(*source, Error::Toml(_) | Error::TomlEdit(_))));
-            assert_eq!(fs::read_to_string(&path)?, text);
-            assert_eq!(fs::read_dir(&temp.0)?.count(), 2);
-        }
-        Ok(())
-    }
-
-    #[test]
     fn saves_only_theme_and_preserves_latest_settings_and_comments() -> anyhow::Result<()> {
         let temp = TempDirectory::new()?;
         let path = temp.0.join("config.toml");
@@ -1183,7 +1910,7 @@ mod tests {
             original.replace("'Default'", "\"Nord\"")
         );
         assert_eq!(config.theme, "Default");
-        assert_eq!(fs::read_dir(&temp.0)?.count(), 2);
+        assert_eq!(fs::read_dir(&temp.0)?.count(), 1);
 
         fs::write(
             &path,
@@ -1218,155 +1945,21 @@ mod tests {
             fs::write(&path, text)?;
             assert!(config.save_theme_path("Nord", &path).is_err());
             assert_eq!(fs::read_to_string(&path)?, text);
-            assert_eq!(fs::read_dir(&temp.0)?.count(), 3);
+            assert_eq!(fs::read_dir(&temp.0)?.count(), 2);
         }
         fs::write(&custom, "background=112233")?;
         let new_path = temp.0.join("nested/config.toml");
         config.save_theme_path(custom_name, &new_path)?;
-        assert_eq!(Config::load_path(&new_path)?.theme()?.background, 0x112233);
+        assert_eq!(
+            Config::parse(&fs::read_to_string(&new_path)?)?
+                .theme()?
+                .background,
+            0x112233
+        );
         assert_eq!(
             fs::read_dir(new_path.parent().context("missing parent")?)?.count(),
-            2
+            1
         );
-        Ok(())
-    }
-
-    #[test]
-    fn native_config_writer_child() -> anyhow::Result<()> {
-        let Some(path) = env::var_os("HERDR_NATIVE_CONFIG_WRITER_TEST") else {
-            return Ok(());
-        };
-        let path = PathBuf::from(path);
-        let lock = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path.with_file_name(".config.toml.gpui-lock"))?;
-        assert!(matches!(lock.try_lock(), Err(fs::TryLockError::WouldBlock)));
-        println!("native writer ready");
-        std::io::stdout().flush()?;
-        if env::var_os("HERDR_NATIVE_CONFIG_WRITER_THEME").is_some() {
-            Config::default().save_theme_path("Dracula", &path)?;
-        } else {
-            Config::default().save_font_path(FontRole::Terminal, "Child Font", 21.0, &path)?;
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn concurrent_native_saves_read_after_acquiring_the_process_lock() -> anyhow::Result<()> {
-        use std::{
-            io::{BufRead as _, BufReader},
-            process::{Child, Command, Stdio},
-            sync::mpsc,
-            time::{Duration, Instant},
-        };
-
-        struct Writer(Child);
-        impl Drop for Writer {
-            fn drop(&mut self) {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
-            }
-        }
-
-        let temp = TempDirectory::new()?;
-        let path = temp.0.join("config.toml");
-        for theme in [false, true] {
-            fs::write(&path, "theme = 'Nord'\n[sidebar]\nsize = 12\n")?;
-            let mut writer = None;
-            Config::save_path(&path, |document| {
-                let mut command = Command::new(env::current_exe()?);
-                command
-                    .args([
-                        "--exact",
-                        "config::tests::native_config_writer_child",
-                        "--nocapture",
-                    ])
-                    .env("HERDR_NATIVE_CONFIG_WRITER_TEST", &path)
-                    .env_remove("HERDR_NATIVE_CONFIG_WRITER_THEME")
-                    .stdout(Stdio::piped());
-                if theme {
-                    command.env("HERDR_NATIVE_CONFIG_WRITER_THEME", "1");
-                }
-                let mut child = Writer(command.spawn()?);
-                let stdout = child
-                    .0
-                    .stdout
-                    .take()
-                    .ok_or_else(|| std::io::Error::other("missing child stdout"))?;
-                let (ready_tx, ready_rx) = mpsc::channel();
-                std::thread::spawn(move || {
-                    for line in BufReader::new(stdout).lines() {
-                        if line.is_ok_and(|line| line == "native writer ready") {
-                            let _ = ready_tx.send(());
-                        }
-                    }
-                });
-                ready_rx
-                    .recv_timeout(Duration::from_secs(10))
-                    .map_err(|error| std::io::Error::new(ErrorKind::TimedOut, error))?;
-                // The other process has proved this transaction owns the lock.
-                // Its narrow edit must read the document only after this commits.
-                document["sidebar"]["family"] = toml_edit::value("Parent Font");
-                document["sidebar"]["size"] = toml_edit::value(18.0);
-                writer = Some(child);
-                Ok(())
-            })?;
-            let mut writer = writer.context("missing child")?;
-            let deadline = Instant::now() + Duration::from_secs(10);
-            loop {
-                if let Some(status) = writer.0.try_wait()? {
-                    assert!(status.success(), "child failed: {status}");
-                    break;
-                }
-                anyhow::ensure!(Instant::now() < deadline, "child save timed out");
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            let saved = Config::load_path(&path)?;
-            assert_eq!(saved.sidebar.family, "Parent Font");
-            assert_eq!(saved.sidebar.size, 18.0);
-            if theme {
-                assert_eq!(saved.theme, "Dracula");
-            } else {
-                assert_eq!(saved.terminal.family, "Child Font");
-                assert_eq!(saved.terminal.size, 21.0);
-                assert_eq!(saved.theme, "Nord");
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn native_saves_refuse_symlinks_and_release_locks_on_errors() -> anyhow::Result<()> {
-        use std::os::unix::fs::symlink;
-
-        let temp = TempDirectory::new()?;
-        let target = temp.0.join("target.toml");
-        let path = temp.0.join("config.toml");
-        let config = Config::default();
-        fs::write(&target, "theme = 'Nord'\n")?;
-        symlink(&target, &path)?;
-        assert!(config.save_theme_path("Dracula", &path).is_err());
-        assert!(
-            config
-                .save_font_path(FontRole::Ui, "Menlo", 14.0, &path)
-                .is_err()
-        );
-        assert!(fs::symlink_metadata(&path)?.file_type().is_symlink());
-        assert_eq!(fs::read_to_string(&target)?, "theme = 'Nord'\n");
-        fs::remove_file(&target)?;
-        assert!(config.save_theme_path("Dracula", &path).is_err());
-        assert!(!target.exists());
-        fs::remove_file(&path)?;
-        config.save_theme_path("Dracula", &path)?;
-        assert_eq!(Config::load_path(&path)?.theme, "Dracula");
-
-        let lock_path = temp.0.join(".config.toml.gpui-lock");
-        fs::remove_file(&lock_path)?;
-        symlink(&path, &lock_path)?;
-        let original = fs::read_to_string(&path)?;
-        assert!(config.save_theme_path("Nord", &path).is_err());
-        assert_eq!(fs::read_to_string(&path)?, original);
         Ok(())
     }
 
@@ -1454,6 +2047,68 @@ mod tests {
     }
 
     #[test]
+    fn compact_layout_is_opt_in() -> anyhow::Result<()> {
+        for config in [
+            Config::default(),
+            Config::parse("")?,
+            Config::parse(DEFAULT_CONFIG)?,
+            Config::parse("[layout]")?,
+            Config::parse("layout = 'normal'")?,
+        ] {
+            assert_eq!(config.layout.mode, LayoutMode::Normal);
+        }
+        let config = Config::parse("layout = 'compact'")?;
+        assert_eq!(config.layout.mode, LayoutMode::Compact);
+        assert_eq!(config.layout.sidebar_gap, Layout::default().sidebar_gap);
+        assert_eq!(config.sidebar.size, Config::default().sidebar.size);
+        let custom = Config::parse("[layout]\nmode = 'compact'\nsidebar_gap = 4")?;
+        assert_eq!(custom.layout.mode, LayoutMode::Compact);
+        assert_eq!(custom.layout.sidebar_gap, 4.);
+        for value in ["'unknown'", "true", "1"] {
+            assert!(matches!(
+                Config::parse(&format!("layout = {value}")),
+                Err(Error::Toml(_))
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sidebar_gap_defaults_to_a_gutter_and_accepts_its_band() -> anyhow::Result<()> {
+        for config in [
+            Config::default(),
+            Config::parse("")?,
+            Config::parse(DEFAULT_CONFIG)?,
+        ] {
+            assert_eq!(config.layout, Layout::default());
+            assert_eq!(config.layout.sidebar_gap, 8.);
+        }
+        // An empty table keeps the default; only a written value replaces it.
+        assert_eq!(Config::parse("[layout]")?.layout.sidebar_gap, 8.);
+        for (text, gap) in [
+            ("[layout]\nsidebar_gap = 0", 0.),
+            ("[layout]\nsidebar_gap = 12", 12.),
+            ("[layout]\nsidebar_gap = 7.5", 7.5),
+            ("[layout]\nsidebar_gap = 64", 64.),
+        ] {
+            let config = Config::parse(text)?;
+            assert_eq!(config.layout.sidebar_gap, gap);
+            // Spacing alone leaves every other setting at its default.
+            assert_eq!(config.theme, Config::default().theme);
+            assert_eq!(config.terminal.size, Config::default().terminal.size);
+        }
+        assert!(matches!(
+            Config::parse("[layout]\nsidebar_gap = 64.1"),
+            Err(Error::InvalidSidebarGap)
+        ));
+        assert!(matches!(
+            Config::parse("[layout]\nsidebar_gap = nan"),
+            Err(Error::InvalidSidebarGap)
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn rejects_invalid_settings() {
         for text in [
             "unknown = 1",
@@ -1480,6 +2135,11 @@ mod tests {
             "[features]\nunknown = true",
             "[features]\nsidebar_hover_menu = 'true'",
             "[features]\nsidebar_hover_menu = 1",
+            "[layout]\nunknown = 1",
+            "[layout]\nsidebar_gap = -1",
+            "[layout]\nsidebar_gap = 65",
+            "[layout]\nsidebar_gap = inf",
+            "[layout]\nsidebar_gap = '8'",
         ] {
             assert!(Config::parse(text).is_err(), "accepted {text:?}");
         }
@@ -1622,7 +2282,256 @@ mod tests {
     }
 
     #[test]
-    fn creates_config_without_overwriting_and_loads_absolute_theme() -> anyhow::Result<()> {
+    fn startup_reads_settings_without_writes_or_waiting_for_maintenance() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config-gpui.toml");
+        let daemon = temp.0.join("absent.toml");
+        assert_eq!(
+            Config::load_startup_path(&path, &daemon)?.layout.mode,
+            LayoutMode::Normal
+        );
+        assert_eq!(fs::read_dir(&temp.0)?.count(), 0);
+        let legacy = "layout = 'compact'\ntheme = 'Nord'\n[terminal]\nsize = 18\n";
+        fs::write(&path, legacy)?;
+        let config = Config::load_startup_path(&path, &daemon)?;
+        assert_eq!(config.layout.mode, LayoutMode::Compact);
+        assert_eq!(config.theme, "Nord");
+        assert_eq!(config.terminal.size, 18.);
+        assert_eq!(fs::read_to_string(&path)?, legacy);
+        assert_eq!(fs::read_dir(&temp.0)?.count(), 1);
+
+        let local = path.with_extension("local.toml");
+        fs::write(&local, "layout = 'compact'\ntheme = 'Dracula'")?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path.with_extension("lock"))?;
+        lock.lock()?;
+        // Hold the maintenance lock until the read finishes, with a bounded wait
+        // so accidentally adding lock acquisition is a deterministic failure.
+        let (send, receive) = std::sync::mpsc::channel();
+        let (worker_path, worker_daemon) = (path.clone(), daemon.clone());
+        let worker = std::thread::spawn(move || {
+            let _ = send.send(Config::load_startup_path(&worker_path, &worker_daemon));
+        });
+        let result = receive.recv_timeout(std::time::Duration::from_secs(5));
+        drop(lock);
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("startup reader panicked"))?;
+        assert_eq!(result??.theme, "Dracula");
+        assert_eq!(fs::read_to_string(&path)?, legacy);
+        assert_eq!(
+            fs::read_to_string(&local)?,
+            "layout = 'compact'\ntheme = 'Dracula'"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn startup_appearance_read_timing() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config-gpui.toml");
+        let daemon = temp.0.join("absent.toml");
+        fs::write(
+            path.with_extension("local.toml"),
+            "layout = 'compact'\ntheme = 'Nord'",
+        )?;
+        let mut samples = Vec::new();
+        for _ in 0..100 {
+            let start = std::time::Instant::now();
+            let config = Config::load_startup_path(&path, &daemon)?;
+            let theme = config.theme()?;
+            samples.push(start.elapsed());
+            assert_eq!(config.layout.mode, LayoutMode::Compact);
+            assert_eq!(Some(theme), Theme::builtin("Nord"));
+        }
+        let first = samples[0];
+        samples.sort();
+        eprintln!(
+            "Startup config + built-in theme: first={first:?}, median={:?}, p95={:?} (100 reads)",
+            samples[50], samples[94]
+        );
+        // Timing is reported, not gated: filesystem latency is machine-dependent.
+        Ok(())
+    }
+
+    #[test]
+    fn theme_save_updates_only_local_overrides() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config-gpui.toml");
+        let daemon = temp.0.join("absent.toml");
+        let legacy = "# user fonts\n[terminal]\nsize = 19 # keep\n";
+        fs::write(&path, legacy)?;
+        Config::default().save_theme_at("Nord", &path)?;
+        assert_eq!(fs::read_to_string(&path)?, DEFAULT_CONFIG);
+        let local = fs::read_to_string(path.with_extension("local.toml"))?;
+        assert!(local.contains("# user fonts"));
+        assert!(local.contains("size = 19 # keep"));
+        let config = Config::load_path(&path, &daemon)?;
+        assert_eq!(config.theme, "Nord");
+        assert_eq!(config.terminal.size, 19.);
+        Ok(())
+    }
+
+    #[test]
+    fn local_overrides_merge_tables_replace_arrays_and_refresh_defaults() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config-gpui.toml");
+        let local = path.with_extension("local.toml");
+        let daemon = temp.0.join("absent.toml");
+        Config::load_path(&path, &daemon)?;
+        assert_eq!(
+            fs::read_to_string(&path)?.lines().next(),
+            Some(MANAGED_HEADER)
+        );
+        assert_eq!(fs::read_to_string(&local)?, LOCAL_CONFIG);
+        let overrides = "# personal settings\nlayout = 'compact'\n[terminal]\nsize = 19\nfallback = []\n[notifications]\nenabled = true\n";
+        fs::write(&local, overrides)?;
+        fs::write(&path, format!("{MANAGED_HEADER}\ntheme = 'old-default'\n"))?;
+        let config = Config::load_path(&path, &daemon)?;
+        assert_eq!(config.layout.mode, LayoutMode::Compact);
+        assert_eq!(config.terminal.size, 19.);
+        assert_eq!(config.terminal.fallbacks, Some(vec![]));
+        assert!(config.notifications.enabled);
+        assert_eq!(config.notifications.delay_seconds, 1);
+        assert_eq!(config.theme, "Default");
+        assert_eq!(fs::read_to_string(&local)?, overrides);
+        assert_eq!(fs::read_to_string(&path)?, DEFAULT_CONFIG);
+        // A table can replace the named default without losing layout defaults.
+        fs::write(&local, "[layout]\nmode = 'compact'\nsidebar_gap = 3")?;
+        assert_eq!(Config::load_path(&path, &daemon)?.layout.sidebar_gap, 3.);
+        let merged = Config::parse_layers(
+            [
+                "[terminal]\nfallback = ['first', 'second']",
+                "[terminal]\nfallback = []",
+            ],
+            ClipboardToast::default(),
+        )?;
+        assert_eq!(merged.terminal.fallbacks, Some(vec![]));
+        Ok(())
+    }
+
+    #[test]
+    fn managed_headers_accept_lf_and_crlf_without_migrating_defaults() -> anyhow::Result<()> {
+        for newline in ["\n", "\r\n"] {
+            for overrides in [None, Some("theme = 'Nord'\r\n")] {
+                let temp = TempDirectory::new()?;
+                let path = temp.0.join("config-gpui.toml");
+                let local = path.with_extension("local.toml");
+                let daemon = temp.0.join("absent.toml");
+                let managed = format!(
+                    "# DO NOT EDIT -- WILL BE OVERWRITTEN{newline}theme = 'Dracula'{newline}"
+                );
+                fs::write(&path, &managed)?;
+                if let Some(text) = overrides {
+                    fs::write(&local, text)?;
+                }
+                let expected_theme = if overrides.is_some() {
+                    "Nord"
+                } else {
+                    "Default"
+                };
+                assert_eq!(
+                    Config::load_startup_path(&path, &daemon)?.theme,
+                    expected_theme
+                );
+                assert_eq!(fs::read_to_string(&path)?, managed);
+                assert_eq!(local.exists(), overrides.is_some());
+                for _ in 0..2 {
+                    assert_eq!(Config::load_path(&path, &daemon)?.theme, expected_theme);
+                    assert_eq!(fs::read_to_string(&path)?, DEFAULT_CONFIG);
+                    assert_eq!(
+                        fs::read_to_string(&local)?,
+                        overrides.unwrap_or(LOCAL_CONFIG)
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_config_migrates_verbatim_and_conflicts_never_overwrite() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config-gpui.toml");
+        let local = path.with_extension("local.toml");
+        let daemon = temp.0.join("absent.toml");
+        // A longer comment is not the exact managed marker. Preserve CRLF too.
+        let legacy = "# DO NOT EDIT -- WILL BE OVERWRITTEN (personal copy)\r\ntheme = 'Nord'\r\n[layout]\r\nsidebar_gap = 4\r\n";
+        fs::write(&path, legacy)?;
+        assert_eq!(Config::load_path(&path, &daemon)?.theme, "Nord");
+        assert_eq!(fs::read_to_string(&local)?, legacy);
+        assert_eq!(fs::read_to_string(&path)?, DEFAULT_CONFIG);
+        assert_eq!(Config::load_path(&path, &daemon)?.layout.sidebar_gap, 4.);
+        // A crash after the local copy but before refresh is safe to resume.
+        fs::write(&path, legacy)?;
+        assert_eq!(Config::load_path(&path, &daemon)?.theme, "Nord");
+        assert_eq!(fs::read_to_string(&local)?, legacy);
+        assert_eq!(fs::read_to_string(&path)?, DEFAULT_CONFIG);
+        fs::write(&path, "theme = 'Dracula'")?;
+        assert!(matches!(
+            Config::load_path(&path, &daemon),
+            Err(Error::ConfigMigrationConflict { .. })
+        ));
+        assert_eq!(fs::read_to_string(&local)?, legacy);
+        assert_eq!(fs::read_to_string(&path)?, "theme = 'Dracula'");
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_local_overrides_keep_their_path_and_contents() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config-gpui.toml");
+        let local = path.with_extension("local.toml");
+        let daemon = temp.0.join("absent.toml");
+        Config::load_path(&path, &daemon)?;
+        for text in [
+            "theme = [",
+            "[terminal]\nsize = '19'",
+            "[notifications]\nunknown = true",
+        ] {
+            fs::write(&local, text)?;
+            let error = Config::load_path(&path, &daemon)
+                .err()
+                .context("accepted bad local config")?;
+            assert!(
+                matches!(&error, Error::Path { path, source } if path == &local
+                    && matches!(source.as_ref(), Error::ConfigFile { .. } | Error::Toml(_))),
+                "{error:?}"
+            );
+            assert_eq!(fs::read_to_string(&local)?, text);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn simultaneous_migration_keeps_user_settings() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config-gpui.toml");
+        fs::write(&path, "theme = 'Nord'")?;
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| scope.spawn(|| Config::load_path(&path, &temp.0.join("absent.toml"))))
+                .collect();
+            for handle in handles {
+                let config = handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("config loader panicked"))??;
+                assert_eq!(config.theme, "Nord");
+            }
+            anyhow::Ok(())
+        })?;
+        assert_eq!(
+            fs::read_to_string(path.with_extension("local.toml"))?,
+            "theme = 'Nord'"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn refreshes_managed_config_and_loads_absolute_theme() -> anyhow::Result<()> {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos();
@@ -1630,11 +2539,15 @@ mod tests {
             env::temp_dir().join(format!("herdr-config-{}-{unique}", std::process::id()));
         let path = directory.join("config-gpui.toml");
         let result = (|| {
-            Config::load_path(&path)?;
+            let absent = directory.join("config.toml");
+            Config::load_path(&path, &absent)?;
             assert_eq!(fs::read_to_string(&path)?, DEFAULT_CONFIG);
-            fs::write(&path, "theme = 'Nord'")?;
-            assert_eq!(Config::load_path(&path)?.theme, "Nord");
-            assert_eq!(fs::read_to_string(&path)?, "theme = 'Nord'");
+            let local = path.with_extension("local.toml");
+            fs::write(&local, "theme = 'Nord'")?;
+            fs::write(&path, format!("{MANAGED_HEADER}\ntheme = 'Dracula'"))?;
+            assert_eq!(Config::load_path(&path, &absent)?.theme, "Nord");
+            assert_eq!(fs::read_to_string(&path)?, DEFAULT_CONFIG);
+            assert_eq!(fs::read_to_string(&local)?, "theme = 'Nord'");
             let theme_path = directory.join("custom-theme");
             fs::write(&theme_path, "background=112233")?;
             let config = Config {

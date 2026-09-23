@@ -2,7 +2,10 @@
 #![allow(clippy::unwrap_used)]
 use super::*;
 use crate::controls::Command;
-use gpui::AppContext;
+use gpui::{
+    AppContext, ClipboardItem, Image, ImageFormat, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, point, px, size,
+};
 use herdr_client::{
     ClientEvent, Method,
     protocol::{endpoint::*, *},
@@ -179,6 +182,7 @@ fn connected_endpoint(id: &str) -> (Endpoint, Server) {
             Method::CommandInvoke,
             Method::WorkspaceClose,
             Method::WorktreeCreate,
+            Method::WorktreeOpen,
             Method::WorktreeRemove,
         ]
         .map(|method| method.as_str().to_owned()),
@@ -217,6 +221,2684 @@ fn connected_endpoint(id: &str) -> (Endpoint, Server) {
         .apply(ClientEvent::Surface(frame));
     endpoint.poll(Instant::now());
     (endpoint, server)
+}
+
+fn prepare_mouse(view: &mut HerdrWindow, endpoint: Endpoint) {
+    view.endpoints.truncate(1);
+    view.endpoints.push(endpoint);
+    view.selected_endpoint = 1;
+    view.options = ConnectOptions::default();
+    view.reset_selected();
+    view.activation_deadline = None;
+    let snapshot = Arc::make_mut(view.live.snapshot.as_mut().unwrap());
+    let mut inactive = snapshot.panes[0].clone();
+    inactive.pane_id = "w1:p2".into();
+    inactive.focused = false;
+    snapshot.panes.push(inactive);
+    Arc::make_mut(view.live.surface.as_mut().unwrap()).panes = [0, 40]
+        .into_iter()
+        .map(|x| PaneSurfacePane {
+            pane_id: if x == 0 { "w1:p1" } else { "w1:p2" }.into(),
+            content_revision: 1,
+            rect: SurfaceRect {
+                x,
+                y: 0,
+                width: 40,
+                height: 24,
+            },
+            inner_rect: SurfaceRect {
+                x: x + 1,
+                y: 1,
+                width: 38,
+                height: 22,
+            },
+            scrollbar_rect: None,
+            scroll: None,
+            focused: x == 0,
+            mouse_reporting: true,
+            sgr_pixel_mouse: false,
+            alternate_screen_active: false,
+            pixel_width: 760,
+            pixel_height: 880,
+        })
+        .collect();
+    view.cell_width = 10.;
+    view.bounds = gpui::Bounds::new(
+        point(px(100.), px(50.)),
+        size(px(800.), px(24. * view.config.terminal.line_height())),
+    );
+    assert!(view.input_ready());
+}
+
+fn mouse_position(view: &HerdrWindow, column: f32, row: f32) -> gpui::Point<gpui::Pixels> {
+    view.bounds.origin
+        + point(
+            px(column * 10.),
+            px(row * view.config.terminal.line_height()),
+        )
+}
+
+fn mouse_event(kind: ClientMouseKind, column: u16, row: u16) -> ClientPaneInputEvent {
+    ClientPaneInputEvent::Mouse {
+        kind,
+        position: ClientMousePosition::Cell { column, row },
+        geometry: None,
+        modifiers: 0,
+        lines: 1,
+    }
+}
+
+fn clipboard_image(bytes: &[u8]) -> ClipboardItem {
+    ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, bytes.to_vec()))
+}
+
+fn prepare_remote_image(view: &mut HerdrWindow, mut endpoint: Endpoint) {
+    // Only change the classification after connecting the isolated socket harness.
+    endpoint.connection.target = ConnectTarget::Ssh {
+        target: "unused-image-test.invalid".into(),
+        session: "default".into(),
+    };
+    prepare_mouse(view, endpoint);
+    assert!(view.accepts_remote_images());
+}
+
+fn image_popup(view: &mut HerdrWindow, id: &str) {
+    let surface = Arc::make_mut(view.live.surface.as_mut().unwrap());
+    surface.popup = Some(Box::new(ClientShellPopupSurface {
+        terminal_id: id.into(),
+        title: String::new(),
+        width: None,
+        height: None,
+        frame: surface.frame.clone(),
+        mouse_reporting: false,
+        sgr_pixel_mouse: false,
+        pixel_width: 800,
+        pixel_height: 480,
+    }));
+}
+
+fn wait_image_finished(view: &gpui::Entity<HerdrWindow>, cx: &mut gpui::VisualTestContext) {
+    // GPUI tasks publish the frame; only the socket worker can finish its FIFO slot.
+    wait_until(|| {
+        view.update(cx, |view, _| {
+            view.cancel_stale_image();
+            view.pending_images.is_empty()
+        })
+    });
+}
+
+#[gpui::test]
+fn connected_image_paste_captures_pane_before_immediate_text_and_enter(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (endpoint, mut server) = connected_endpoint("ssh:image");
+    let enter = gpui::KeyDownEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+        is_held: false,
+    };
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            prepare_remote_image(view, endpoint);
+            assert!(view.paste_terminal_clipboard(clipboard_image(&[0, 1, 255]), false, cx));
+            assert_eq!(view.pending_images.len(), 1);
+            // Focus can move while preparation runs; the image retains its original pane.
+            Arc::make_mut(view.live.snapshot.as_mut().unwrap()).focused_pane_id =
+                Some("w1:p2".into());
+            view.send(ClientPaneInputEvent::TextCommit("after image".into()), cx);
+            view.key_down(&enter, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        server.receive(),
+        ClientMessage::ClipboardImage {
+            target: ClientClipboardImageTarget::Pane("w1:p1".into()),
+            extension: "png".into(),
+            data: vec![0, 1, 255],
+        }
+    );
+    for event in [
+        ClientPaneInputEvent::TextCommit("after image".into()),
+        crate::terminal::key_input(&enter).unwrap(),
+    ] {
+        assert_eq!(
+            server.receive(),
+            ClientMessage::ClientShellPaneInput {
+                pane_id: "w1:p2".into(),
+                events: vec![event],
+            }
+        );
+    }
+    wait_image_finished(&view, cx);
+    view.read_with(cx, |view, _| assert!(view.local_error.is_none()));
+}
+
+#[gpui::test]
+fn connected_image_paste_popup_never_reaches_underlying_pane(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (endpoint, mut server) = connected_endpoint("ssh:image");
+    view.update(cx, |view, cx| {
+        prepare_remote_image(view, endpoint);
+        image_popup(view, "image-popup");
+        assert!(view.paste_terminal_clipboard(clipboard_image(&[42]), false, cx));
+        view.send(ClientPaneInputEvent::TextCommit("popup only".into()), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        server.receive(),
+        ClientMessage::ClipboardImage {
+            target: ClientClipboardImageTarget::Popup("image-popup".into()),
+            extension: "png".into(),
+            data: vec![42],
+        }
+    );
+    assert_eq!(
+        server.receive(),
+        ClientMessage::ClientShellPopupInput {
+            terminal_id: "image-popup".into(),
+            events: vec![ClientPaneInputEvent::TextCommit("popup only".into())],
+        }
+    );
+    wait_image_finished(&view, cx);
+    view.read_with(cx, |view, _| assert!(view.local_error.is_none()));
+}
+
+#[gpui::test]
+fn connected_image_paste_local_isolation_and_image_only_preserve_text(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    for remote in [false, true] {
+        let (endpoint, mut server) = connected_endpoint("image");
+        view.update(cx, |view, cx| {
+            if remote {
+                prepare_remote_image(view, endpoint);
+            } else {
+                prepare_mouse(view, endpoint);
+                assert!(!view.accepts_remote_images());
+                for image_only in [false, true] {
+                    assert!(!view.paste_terminal_clipboard(clipboard_image(&[42]), image_only, cx));
+                }
+            }
+            let text = ClipboardItem::new_string("ordinary text".into());
+            assert!(!view.paste_terminal_clipboard(text.clone(), true, cx));
+            assert!(view.pending_images.is_empty());
+            assert!(view.paste_terminal_clipboard(text, false, cx));
+            view.send(ClientPaneInputEvent::TextCommit("sentinel".into()), cx);
+        });
+        cx.run_until_parked();
+        for event in [
+            ClientPaneInputEvent::Paste("ordinary text".into()),
+            ClientPaneInputEvent::TextCommit("sentinel".into()),
+        ] {
+            assert_eq!(
+                server.receive(),
+                ClientMessage::ClientShellPaneInput {
+                    pane_id: "w1:p1".into(),
+                    events: vec![event],
+                },
+                "remote={remote}"
+            );
+        }
+        view.read_with(cx, |view, _| {
+            assert!(view.pending_images.is_empty());
+            assert!(view.local_error.is_none());
+        });
+    }
+}
+
+#[gpui::test]
+fn connected_image_paste_missing_path_falls_back_in_reserved_order(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let directory = tempfile::tempdir().unwrap();
+    let text = format!(
+        "'{}'\r\n",
+        directory.path().join("missing image.png").display()
+    );
+    let (endpoint, mut server) = connected_endpoint("ssh:image");
+    view.update(cx, |view, cx| {
+        prepare_remote_image(view, endpoint);
+        assert!(view.paste_terminal_clipboard(ClipboardItem::new_string(text.clone()), false, cx));
+        assert_eq!(view.pending_images.len(), 1);
+        view.send(
+            ClientPaneInputEvent::TextCommit("after fallback".into()),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    for event in [
+        ClientPaneInputEvent::Paste(text),
+        ClientPaneInputEvent::TextCommit("after fallback".into()),
+    ] {
+        assert_eq!(
+            server.receive(),
+            ClientMessage::ClientShellPaneInput {
+                pane_id: "w1:p1".into(),
+                events: vec![event],
+            }
+        );
+    }
+    wait_image_finished(&view, cx);
+    view.read_with(cx, |view, _| assert!(view.local_error.is_none()));
+}
+
+#[gpui::test]
+fn connected_image_paste_cancels_stale_preparation_without_blocking_fifo(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    for change in [
+        "epoch",
+        "generation",
+        "boot",
+        "menu",
+        "pane",
+        "popup",
+        "endpoint",
+        "local",
+    ] {
+        for cancel_before_prepare in [false, true] {
+            let (endpoint, mut server) = connected_endpoint("ssh:image");
+            cx.update(|window, cx| {
+                view.update(cx, |view, cx| {
+                    prepare_remote_image(view, endpoint);
+                    if change == "popup" {
+                        image_popup(view, "original-popup");
+                    }
+                    assert!(view.paste_terminal_clipboard(clipboard_image(&[42]), false, cx));
+                    assert_eq!(view.pending_images.len(), 1);
+                    match change {
+                        "epoch" => view.selection_epoch += 1,
+                        "generation" => view.endpoints[1].generation += 1,
+                        "boot" => {
+                            Arc::make_mut(view.live.snapshot.as_mut().unwrap()).boot_id =
+                                "replacement".into();
+                            Arc::make_mut(view.live.surface.as_mut().unwrap()).boot_id =
+                                "replacement".into();
+                        }
+                        "menu" => view.open_keybinds(window, cx),
+                        "pane" => Arc::make_mut(view.live.surface.as_mut().unwrap())
+                            .panes
+                            .retain(|pane| pane.pane_id != "w1:p1"),
+                        "popup" => image_popup(view, "replacement-popup"),
+                        "endpoint" => view.endpoints[1].id = "ssh:replacement".into(),
+                        "local" => {
+                            view.endpoints[1].connection.target =
+                                ConnectTarget::Socket(server.path.clone());
+                        }
+                        _ => unreachable!(),
+                    }
+                    if cancel_before_prepare {
+                        view.cancel_stale_image();
+                        // Cancellation retains the task until its background work exits.
+                        assert_eq!(view.pending_images.len(), 1);
+                    }
+                    view.endpoints[1]
+                        .connection
+                        .handle
+                        .as_ref()
+                        .unwrap()
+                        .set_focus(&snapshot().boot_id, false)
+                        .unwrap();
+                });
+            });
+            cx.run_until_parked();
+            // A bounded FIFO sentinel catches both stray images and stuck cancelled slots.
+            assert_eq!(
+                server.receive(),
+                ClientMessage::ClientShellFocus { focused: false },
+                "{change}, cancel_before_prepare={cancel_before_prepare}"
+            );
+            wait_image_finished(&view, cx);
+            view.read_with(cx, |view, _| {
+                assert!(view.local_error.is_none(), "{change}")
+            });
+        }
+    }
+}
+
+#[gpui::test]
+fn connected_image_paste_busy_guard_releases_after_completion(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (endpoint, mut server) = connected_endpoint("ssh:image");
+    view.update(cx, |view, _| prepare_remote_image(view, endpoint));
+    for byte in [1, 2] {
+        view.update(cx, |view, cx| {
+            assert!(view.pending_images.is_empty());
+            assert!(view.paste_terminal_clipboard(clipboard_image(&[byte]), false, cx));
+            assert!(view.paste_terminal_clipboard(clipboard_image(&[99]), false, cx));
+            assert_eq!(
+                view.local_error.as_deref(),
+                Some(
+                    format!(
+                        "Image not sent: {}",
+                        herdr_client::Error::ClipboardImageBusy
+                    )
+                    .as_str()
+                )
+            );
+            view.send(ClientPaneInputEvent::TextCommit("sentinel".into()), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            server.receive(),
+            ClientMessage::ClipboardImage {
+                target: ClientClipboardImageTarget::Pane("w1:p1".into()),
+                extension: "png".into(),
+                data: vec![byte],
+            }
+        );
+        assert_eq!(
+            server.receive(),
+            ClientMessage::ClientShellPaneInput {
+                pane_id: "w1:p1".into(),
+                events: vec![ClientPaneInputEvent::TextCommit("sentinel".into())],
+            }
+        );
+        wait_image_finished(&view, cx);
+    }
+}
+
+#[gpui::test]
+fn connected_image_paste_reconnect_cancels_old_task_and_keeps_single_preparation(
+    cx: &mut gpui::TestAppContext,
+) {
+    use std::io::Read as _;
+
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (endpoint, mut old_server) = connected_endpoint("ssh:image");
+    let (replacement, mut server) = connected_endpoint("ssh:image");
+    let directory = tempfile::tempdir().unwrap();
+    view.update(cx, |view, cx| {
+        prepare_remote_image(view, endpoint);
+        assert!(view.paste_terminal_clipboard(clipboard_image(&[1]), false, cx));
+        view.send(
+            ClientPaneInputEvent::TextCommit("must not replay".into()),
+            cx,
+        );
+        // Exercise reconnect without ever launching SSH or discovering a personal daemon.
+        view.endpoints[1].connection.target =
+            ConnectTarget::Socket(directory.path().join("missing.sock"));
+        view.reconnect();
+        assert_eq!(view.pending_images.len(), 1);
+        prepare_remote_image(view, replacement);
+        assert!(view.paste_terminal_clipboard(clipboard_image(&[2]), false, cx));
+        assert!(view.local_error.is_some());
+        view.send(
+            ClientPaneInputEvent::TextCommit("replacement sentinel".into()),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(old_server.stream.read(&mut [0]).unwrap(), 0);
+    assert_eq!(
+        server.receive(),
+        ClientMessage::ClientShellPaneInput {
+            pane_id: "w1:p1".into(),
+            events: vec![ClientPaneInputEvent::TextCommit(
+                "replacement sentinel".into()
+            )],
+        }
+    );
+    wait_image_finished(&view, cx);
+    view.update(cx, |view, cx| {
+        assert!(view.paste_terminal_clipboard(clipboard_image(&[3]), false, cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        server.receive(),
+        ClientMessage::ClipboardImage {
+            target: ClientClipboardImageTarget::Pane("w1:p1".into()),
+            extension: "png".into(),
+            data: vec![3],
+        }
+    );
+    wait_image_finished(&view, cx);
+}
+
+#[gpui::test]
+fn connected_image_paste_key_down_ctrl_v_and_cmd_v(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    for remote in [false, true] {
+        for key in ["ctrl-v", "cmd-v"] {
+            for image in [false, true] {
+                let (endpoint, mut server) = connected_endpoint("image");
+                let event = gpui::KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse(key).unwrap(),
+                    is_held: false,
+                };
+                cx.update(|window, cx| {
+                    view.update(cx, |view, cx| {
+                        if remote {
+                            prepare_remote_image(view, endpoint);
+                        } else {
+                            prepare_mouse(view, endpoint);
+                        }
+                        let item = if image {
+                            clipboard_image(&[42])
+                        } else {
+                            ClipboardItem::new_string("clipboard text".into())
+                        };
+                        cx.write_to_clipboard(item.clone());
+                        view.key_down(&event, window, cx);
+                        assert_eq!(cx.read_from_clipboard(), Some(item));
+                        // Remote clipboard reads reserve FIFO order even for text-only Ctrl-V.
+                        assert_eq!(
+                            view.pending_images.len(),
+                            usize::from(
+                                remote && (image || key == "ctrl-v" || !cfg!(target_os = "linux"))
+                            )
+                        );
+                        view.send(ClientPaneInputEvent::TextCommit("key sentinel".into()), cx);
+                    });
+                });
+                cx.run_until_parked();
+                if remote && image {
+                    assert_eq!(
+                        server.receive(),
+                        ClientMessage::ClipboardImage {
+                            target: ClientClipboardImageTarget::Pane("w1:p1".into()),
+                            extension: "png".into(),
+                            data: vec![42],
+                        }
+                    );
+                } else if key == "ctrl-v" || !image {
+                    assert_eq!(
+                        server.receive(),
+                        ClientMessage::ClientShellPaneInput {
+                            pane_id: "w1:p1".into(),
+                            events: vec![if key == "ctrl-v" {
+                                crate::terminal::key_input(&event).unwrap()
+                            } else {
+                                ClientPaneInputEvent::Paste("clipboard text".into())
+                            }],
+                        }
+                    );
+                }
+                assert_eq!(
+                    server.receive(),
+                    ClientMessage::ClientShellPaneInput {
+                        pane_id: "w1:p1".into(),
+                        events: vec![ClientPaneInputEvent::TextCommit("key sentinel".into())],
+                    },
+                    "remote={remote}, key={key}, image={image}"
+                );
+                wait_image_finished(&view, cx);
+                view.read_with(cx, |view, _| assert!(view.local_error.is_none()));
+            }
+        }
+    }
+}
+
+#[gpui::test]
+fn connected_image_paste_native_text_reservations_preserve_fifo(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (endpoint, mut server) = connected_endpoint("ssh:image");
+    view.update(cx, |view, cx| {
+        prepare_remote_image(view, endpoint);
+        for text in ["first paste", "second paste"] {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.into()));
+            view.paste_remote_clipboard(false, None, cx);
+        }
+        assert_eq!(view.pending_images.len(), 2);
+        assert!(view.local_error.is_none());
+        view.send(ClientPaneInputEvent::TextCommit("sentinel".into()), cx);
+    });
+    cx.run_until_parked();
+    for event in [
+        ClientPaneInputEvent::Paste("first paste".into()),
+        ClientPaneInputEvent::Paste("second paste".into()),
+        ClientPaneInputEvent::TextCommit("sentinel".into()),
+    ] {
+        assert_eq!(
+            server.receive(),
+            ClientMessage::ClientShellPaneInput {
+                pane_id: "w1:p1".into(),
+                events: vec![event],
+            }
+        );
+    }
+    wait_image_finished(&view, cx);
+    view.read_with(cx, |view, _| assert!(view.local_error.is_none()));
+}
+
+#[gpui::test]
+fn connected_image_paste_native_text_during_blocked_image_and_second_image_busy(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (endpoint, mut server) = connected_endpoint("ssh:image");
+    view.update(cx, |view, cx| {
+        prepare_remote_image(view, endpoint);
+        let handle = view.endpoints[1].connection.handle.as_ref().unwrap();
+        // The second API request holds the FIFO behind the first request's reply.
+        for _ in 0..2 {
+            handle
+                .request(
+                    &snapshot().boot_id,
+                    Method::TabCreate,
+                    serde_json::json!({}),
+                )
+                .unwrap();
+        }
+        assert!(view.paste_terminal_clipboard(clipboard_image(&[42]), false, cx));
+    });
+    let ClientMessage::ClientShellEndpointRequest { request, .. } = server.receive() else {
+        panic!("missing first API request");
+    };
+    let first: serde_json::Value = serde_json::from_str(&request).unwrap();
+    cx.run_until_parked();
+    view.update(cx, |view, cx| {
+        assert_eq!(view.pending_images.len(), 1);
+        for text in ["first paste", "second paste"] {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.into()));
+            view.paste_remote_clipboard(false, None, cx);
+        }
+        assert_eq!(view.pending_images.len(), 3);
+        assert!(view.local_error.is_none());
+        cx.write_to_clipboard(clipboard_image(&[99]));
+        view.paste_remote_clipboard(false, None, cx);
+        assert_eq!(view.pending_images.len(), 4);
+        view.send(ClientPaneInputEvent::TextCommit("sentinel".into()), cx);
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert_eq!(
+            view.local_error,
+            Some(format!(
+                "Image not sent: {}",
+                herdr_client::Error::ClipboardImageBusy
+            ))
+        );
+    });
+    server.respond(&first);
+    let ClientMessage::ClientShellEndpointRequest { request, .. } = server.receive() else {
+        panic!("missing second API request");
+    };
+    server.respond(&serde_json::from_str(&request).unwrap());
+    assert_eq!(
+        server.receive(),
+        ClientMessage::ClipboardImage {
+            target: ClientClipboardImageTarget::Pane("w1:p1".into()),
+            extension: "png".into(),
+            data: vec![42],
+        }
+    );
+    for event in [
+        ClientPaneInputEvent::Paste("first paste".into()),
+        ClientPaneInputEvent::Paste("second paste".into()),
+        ClientPaneInputEvent::TextCommit("sentinel".into()),
+    ] {
+        assert_eq!(
+            server.receive(),
+            ClientMessage::ClientShellPaneInput {
+                pane_id: "w1:p1".into(),
+                events: vec![event],
+            }
+        );
+    }
+    wait_image_finished(&view, cx);
+}
+
+#[gpui::test]
+fn connected_image_paste_native_preparations_stay_bounded_across_reset(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    for reset_all in [false, true] {
+        let (endpoint, mut server) = connected_endpoint("ssh:image");
+        view.update(cx, |view, cx| {
+            prepare_remote_image(view, endpoint);
+            let surface = view.live.surface.clone();
+            for index in 0..4 {
+                if index == 3 {
+                    view.reset_selected();
+                    view.activation_deadline = None;
+                    view.live.surface = surface.clone();
+                }
+                cx.write_to_clipboard(ClipboardItem::new_string(format!("paste {index}")));
+                view.paste_remote_clipboard(false, None, cx);
+                assert_eq!(view.pending_images.len(), index + 1);
+            }
+            if reset_all {
+                view.reset_selected();
+                view.live.surface = surface;
+            }
+            view.cancel_stale_image();
+            assert_eq!(view.pending_images.len(), 4);
+            // Even cancelled tasks count until their background work returns.
+            view.activation_deadline = None;
+            cx.write_to_clipboard(ClipboardItem::new_string("overflow".into()));
+            view.paste_remote_clipboard(false, None, cx);
+            assert_eq!(view.pending_images.len(), 4);
+            assert_eq!(
+                view.local_error,
+                Some(format!(
+                    "Image not sent: {}",
+                    herdr_client::Error::ClipboardImageBusy
+                ))
+            );
+            view.endpoints[1]
+                .connection
+                .handle
+                .as_ref()
+                .unwrap()
+                .set_focus(&snapshot().boot_id, false)
+                .unwrap();
+        });
+        cx.run_until_parked();
+        if !reset_all {
+            assert_eq!(
+                server.receive(),
+                ClientMessage::ClientShellPaneInput {
+                    pane_id: "w1:p1".into(),
+                    events: vec![ClientPaneInputEvent::Paste("paste 3".into())],
+                }
+            );
+        }
+        assert_eq!(
+            server.receive(),
+            ClientMessage::ClientShellFocus { focused: false }
+        );
+        wait_image_finished(&view, cx);
+    }
+}
+
+#[gpui::test]
+fn connected_image_paste_queued_upload_remains_cancellable_after_preparation(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    for change in ["epoch", "popup", "local"] {
+        let (endpoint, mut server) = connected_endpoint("ssh:image");
+        let requests = view.update(cx, |view, cx| {
+            prepare_remote_image(view, endpoint);
+            if change == "popup" {
+                image_popup(view, "original-popup");
+            }
+            let handle = view.endpoints[1].connection.handle.as_ref().unwrap();
+            // Images bypass the API lease, so a second API request must block the FIFO.
+            let requests = [0, 1].map(|_| {
+                handle
+                    .request(
+                        &snapshot().boot_id,
+                        Method::TabCreate,
+                        serde_json::json!({}),
+                    )
+                    .unwrap()
+            });
+            assert!(view.paste_terminal_clipboard(clipboard_image(&[42]), false, cx));
+            view.endpoints[1]
+                .connection
+                .handle
+                .as_ref()
+                .unwrap()
+                .set_focus(&snapshot().boot_id, false)
+                .unwrap();
+            requests
+        });
+        let ClientMessage::ClientShellEndpointRequest { request, .. } = server.receive() else {
+            panic!("missing first API request");
+        };
+        let first: serde_json::Value = serde_json::from_str(&request).unwrap();
+        assert_eq!(first["id"], requests[0]);
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            view.cancel_stale_image();
+            assert!(
+                !view.pending_images.is_empty(),
+                "publication must retain cancellation"
+            );
+            assert!(view.local_error.is_none());
+            // No preparation is running now, but the unsent frame still occupies the guard.
+            assert!(view.paste_terminal_clipboard(clipboard_image(&[99]), false, cx));
+            assert_eq!(
+                view.local_error,
+                Some(format!(
+                    "Image not sent: {}",
+                    herdr_client::Error::ClipboardImageBusy
+                ))
+            );
+            match change {
+                "epoch" => view.selection_epoch += 1,
+                "popup" => image_popup(view, "replacement-popup"),
+                "local" => {
+                    view.endpoints[1].connection.target =
+                        ConnectTarget::Socket(server.path.clone());
+                }
+                _ => unreachable!(),
+            }
+            view.cancel_stale_image();
+            assert!(
+                !view.pending_images.is_empty(),
+                "cancelling does not finish the worker slot"
+            );
+        });
+        server.respond(&first);
+        let ClientMessage::ClientShellEndpointRequest { request, .. } = server.receive() else {
+            panic!("missing second API request");
+        };
+        let second: serde_json::Value = serde_json::from_str(&request).unwrap();
+        assert_eq!(second["id"], requests[1]);
+        server.respond(&second);
+        assert_eq!(
+            server.receive(),
+            ClientMessage::ClientShellFocus { focused: false },
+            "queued image escaped after {change} changed"
+        );
+        wait_image_finished(&view, cx);
+    }
+}
+
+#[gpui::test]
+fn connected_image_paste_snapshot_surface_gap_preserves_existing_target(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    for removed in [false, true] {
+        let (endpoint, mut server) = connected_endpoint("ssh:image");
+        let requests = view.update(cx, |view, cx| {
+            prepare_remote_image(view, endpoint);
+            let handle = view.endpoints[1].connection.handle.as_ref().unwrap();
+            let requests = [0, 1].map(|_| {
+                handle
+                    .request(
+                        &snapshot().boot_id,
+                        Method::TabCreate,
+                        serde_json::json!({}),
+                    )
+                    .unwrap()
+            });
+            assert!(view.paste_terminal_clipboard(clipboard_image(&[42]), false, cx));
+            view.send(
+                ClientPaneInputEvent::TextCommit("after surface gap".into()),
+                cx,
+            );
+            // A newer snapshot invalidates old cells before the replacement surface arrives.
+            let snapshot = Arc::make_mut(view.live.snapshot.as_mut().unwrap());
+            snapshot.revision += 1;
+            if removed {
+                snapshot.panes.retain(|pane| pane.pane_id != "w1:p1");
+                snapshot.focused_pane_id = Some("w1:p2".into());
+            }
+            view.live.surface = None;
+            assert!(!view.input_ready());
+            view.cancel_stale_image();
+            assert_eq!(view.pending_images.len(), 1);
+            requests
+        });
+        let ClientMessage::ClientShellEndpointRequest { request, .. } = server.receive() else {
+            panic!("missing first API request");
+        };
+        let first: serde_json::Value = serde_json::from_str(&request).unwrap();
+        assert_eq!(first["id"], requests[0]);
+        cx.run_until_parked();
+        view.update(cx, |view, _| {
+            view.cancel_stale_image();
+            if !removed {
+                assert!(
+                    !view.pending_images.is_empty(),
+                    "missing cells must not cancel an existing pane"
+                );
+            }
+            assert!(view.local_error.is_none());
+        });
+        server.respond(&first);
+        let ClientMessage::ClientShellEndpointRequest { request, .. } = server.receive() else {
+            panic!("missing second API request");
+        };
+        let second: serde_json::Value = serde_json::from_str(&request).unwrap();
+        assert_eq!(second["id"], requests[1]);
+        server.respond(&second);
+        if !removed {
+            assert_eq!(
+                server.receive(),
+                ClientMessage::ClipboardImage {
+                    target: ClientClipboardImageTarget::Pane("w1:p1".into()),
+                    extension: "png".into(),
+                    data: vec![42],
+                }
+            );
+        }
+        assert_eq!(
+            server.receive(),
+            ClientMessage::ClientShellPaneInput {
+                pane_id: "w1:p1".into(),
+                events: vec![ClientPaneInputEvent::TextCommit("after surface gap".into())],
+            },
+            "snapshot removed pane={removed}"
+        );
+        wait_image_finished(&view, cx);
+        view.read_with(cx, |view, _| assert!(view.local_error.is_none()));
+    }
+}
+
+#[gpui::test]
+fn connected_mouse_focused_pane_preserves_drag_target_and_immediate_text(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    for (button, wire_button) in [
+        (MouseButton::Left, ClientMouseButton::Left),
+        (MouseButton::Middle, ClientMouseButton::Middle),
+        (MouseButton::Right, ClientMouseButton::Right),
+    ] {
+        let (endpoint, mut server) = connected_endpoint("ssh:mouse");
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                prepare_mouse(view, endpoint);
+                assert!(view.terminal_mouse_down(
+                    &MouseDownEvent {
+                        position: mouse_position(view, 3.5, 4.5),
+                        button,
+                        ..Default::default()
+                    },
+                    window,
+                    cx
+                ));
+                assert!(view.input_ready());
+                assert!(view.focus.is_focused(window));
+                // Crossing another pane and leaving the canvas must stay on the pressed pane.
+                assert!(view.terminal_mouse_move(
+                    &MouseMoveEvent {
+                        position: mouse_position(view, 45.5, 6.5),
+                        pressed_button: Some(button),
+                        ..Default::default()
+                    },
+                    cx
+                ));
+                assert!(view.terminal_mouse_up(
+                    &MouseUpEvent {
+                        position: mouse_position(view, 90., 30.),
+                        button,
+                        ..Default::default()
+                    },
+                    cx
+                ));
+                assert!(view.terminal_mouse.is_none());
+                assert!(view.input_ready());
+                assert!(view.live.activation.is_none());
+                assert!(view.activation_deadline.is_none());
+                view.send(ClientPaneInputEvent::TextCommit("immediate".into()), cx);
+            });
+        });
+        for event in [
+            mouse_event(ClientMouseKind::Down(wire_button), 2, 3),
+            mouse_event(ClientMouseKind::Drag(wire_button), 37, 5),
+            mouse_event(ClientMouseKind::Up(wire_button), 37, 21),
+            ClientPaneInputEvent::TextCommit("immediate".into()),
+        ] {
+            assert_eq!(
+                server.receive(),
+                ClientMessage::ClientShellPaneInput {
+                    pane_id: "w1:p1".into(),
+                    events: vec![event],
+                }
+            );
+        }
+    }
+}
+
+#[gpui::test]
+fn connected_mouse_inactive_pane_receives_first_click_before_focus_fence(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (endpoint, mut server) = connected_endpoint("ssh:mouse");
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            prepare_mouse(view, endpoint);
+            let position = mouse_position(view, 43.5, 4.5);
+            assert!(view.terminal_mouse_down(
+                &MouseDownEvent {
+                    position,
+                    button: MouseButton::Left,
+                    ..Default::default()
+                },
+                window,
+                cx
+            ));
+            assert!(view.input_ready());
+            assert!(view.live.activation.is_none());
+            assert!(view.mouse_focus_pending());
+            view.send(
+                ClientPaneInputEvent::TextCommit("must not reach old pane during press".into()),
+                cx,
+            );
+            assert!(view.terminal_mouse_up(
+                &MouseUpEvent {
+                    position,
+                    button: MouseButton::Left,
+                    ..Default::default()
+                },
+                cx
+            ));
+            assert!(!view.input_ready());
+            assert!(!view.mouse_focus_pending());
+            assert!(view.live.activation.is_some());
+            assert!(view.activation_deadline.is_some());
+            view.send(
+                ClientPaneInputEvent::TextCommit("must stay fenced".into()),
+                cx,
+            );
+            view.endpoints[1]
+                .connection
+                .handle
+                .as_ref()
+                .unwrap()
+                .set_focus(&snapshot().boot_id, false)
+                .unwrap();
+        });
+    });
+    for kind in [
+        ClientMouseKind::Down(ClientMouseButton::Left),
+        ClientMouseKind::Up(ClientMouseButton::Left),
+    ] {
+        assert_eq!(
+            server.receive(),
+            ClientMessage::ClientShellPaneInput {
+                pane_id: "w1:p2".into(),
+                events: vec![mouse_event(kind, 2, 3)],
+            }
+        );
+    }
+    let ClientMessage::ClientShellEndpointRequest { request, .. } = server.receive() else {
+        panic!("missing focus after the complete first click");
+    };
+    let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+    assert_eq!(request["method"], "pane.focus");
+    assert_eq!(request["params"], serde_json::json!({"pane_id": "w1:p2"}));
+    server.respond(&request);
+    let ClientMessage::ClientShellEndpointRequest { request, .. } = server.receive() else {
+        panic!("missing ordered surface fence");
+    };
+    let barrier: serde_json::Value = serde_json::from_str(&request).unwrap();
+    assert_eq!(barrier["method"], Method::ClientShellSurfaceSet.as_str());
+    assert_eq!(barrier["params"]["active"], true);
+    // The FIFO sentinel catches text incorrectly sent to the previously focused pane.
+    assert_eq!(
+        server.receive(),
+        ClientMessage::ClientShellFocus { focused: false }
+    );
+}
+
+#[gpui::test]
+fn connected_mouse_popup_uses_popup_relative_pixel_coordinates_and_blocks_covered_panes(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (endpoint, mut server) = connected_endpoint("ssh:mouse");
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            prepare_mouse(view, endpoint);
+            let surface = Arc::make_mut(view.live.surface.as_mut().unwrap());
+            surface.popup = Some(Box::new(ClientShellPopupSurface {
+                terminal_id: "popup-mouse".into(),
+                title: String::new(),
+                width: None,
+                height: None,
+                frame: FrameData {
+                    width: 20,
+                    height: 10,
+                    ..surface.frame.clone()
+                },
+                mouse_reporting: true,
+                sgr_pixel_mouse: true,
+                pixel_width: 400,
+                pixel_height: 400,
+            }));
+            let outside = mouse_position(view, 3.5, 4.5);
+            assert!(!view.terminal_mouse_down(
+                &MouseDownEvent {
+                    position: outside,
+                    button: MouseButton::Left,
+                    ..Default::default()
+                },
+                window,
+                cx
+            ));
+            assert!(!view.terminal_mouse_up(
+                &MouseUpEvent {
+                    position: outside,
+                    button: MouseButton::Left,
+                    ..Default::default()
+                },
+                cx
+            ));
+            let modifiers = gpui::Modifiers {
+                control: true,
+                alt: true,
+                platform: true,
+                ..Default::default()
+            };
+            // A 20x10 popup in an 80x24 surface starts at column 30, row 7.
+            assert!(view.terminal_mouse_down(
+                &MouseDownEvent {
+                    position: mouse_position(view, 32.5, 10.5),
+                    button: MouseButton::Left,
+                    modifiers,
+                    ..Default::default()
+                },
+                window,
+                cx
+            ));
+            assert!(view.terminal_mouse_move(
+                &MouseMoveEvent {
+                    position: mouse_position(view, 34.5, 12.5),
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers,
+                },
+                cx
+            ));
+            assert!(view.terminal_mouse_up(
+                &MouseUpEvent {
+                    position: mouse_position(view, 35.5, 13.5),
+                    button: MouseButton::Left,
+                    modifiers,
+                    ..Default::default()
+                },
+                cx
+            ));
+            assert!(view.input_ready());
+            assert!(view.live.activation.is_none());
+            assert!(view.activation_deadline.is_none());
+            view.send(ClientPaneInputEvent::TextCommit("popup text".into()), cx);
+        });
+    });
+    for (kind, column, row, x, y) in [
+        (
+            ClientMouseKind::Down(ClientMouseButton::Left),
+            2,
+            3,
+            50,
+            140,
+        ),
+        (
+            ClientMouseKind::Drag(ClientMouseButton::Left),
+            4,
+            5,
+            90,
+            220,
+        ),
+        (ClientMouseKind::Up(ClientMouseButton::Left), 5, 6, 110, 260),
+    ] {
+        assert_eq!(
+            server.receive(),
+            ClientMessage::ClientShellPopupInput {
+                terminal_id: "popup-mouse".into(),
+                events: vec![ClientPaneInputEvent::Mouse {
+                    kind,
+                    position: ClientMousePosition::Pixels { x, y, column, row },
+                    geometry: Some(ClientMouseGeometry {
+                        cols: 20,
+                        rows: 10,
+                        width_px: 400,
+                        height_px: 400
+                    }),
+                    modifiers: 14,
+                    lines: 1,
+                }],
+            }
+        );
+    }
+    assert_eq!(
+        server.receive(),
+        ClientMessage::ClientShellPopupInput {
+            terminal_id: "popup-mouse".into(),
+            events: vec![ClientPaneInputEvent::TextCommit("popup text".into())],
+        }
+    );
+}
+
+#[gpui::test]
+fn connected_mouse_cancels_stale_gestures_before_drag_or_release(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    for change in [
+        "epoch",
+        "generation",
+        "boot",
+        "menu",
+        "geometry",
+        "reporting",
+    ] {
+        for move_first in [false, true] {
+            let (endpoint, mut server) = connected_endpoint("ssh:mouse");
+            cx.update(|window, cx| {
+                view.update(cx, |view, cx| {
+                    prepare_mouse(view, endpoint);
+                    let position = mouse_position(view, 3.5, 4.5);
+                    assert!(view.terminal_mouse_down(
+                        &MouseDownEvent {
+                            position,
+                            button: MouseButton::Left,
+                            ..Default::default()
+                        },
+                        window,
+                        cx
+                    ));
+                    assert!(view.terminal_mouse_move(
+                        &MouseMoveEvent {
+                            position: mouse_position(view, 5.5, 6.5),
+                            pressed_button: Some(MouseButton::Left),
+                            ..Default::default()
+                        },
+                        cx
+                    ));
+                    match change {
+                        "epoch" => view.selection_epoch += 1,
+                        "generation" => view.selected_generation += 1,
+                        "boot" => {
+                            Arc::make_mut(view.live.snapshot.as_mut().unwrap()).boot_id =
+                                "replacement".into();
+                            Arc::make_mut(view.live.surface.as_mut().unwrap()).boot_id =
+                                "replacement".into();
+                        }
+                        "menu" => view.open_keybinds(window, cx),
+                        "geometry" => {
+                            Arc::make_mut(view.live.surface.as_mut().unwrap()).panes[0]
+                                .inner_rect
+                                .width -= 1
+                        }
+                        "reporting" => {
+                            Arc::make_mut(view.live.surface.as_mut().unwrap()).panes[0]
+                                .mouse_reporting = false
+                        }
+                        _ => unreachable!(),
+                    }
+                    assert!(
+                        view.input_ready(),
+                        "isolate gesture cancellation from input readiness"
+                    );
+                    if move_first {
+                        view.terminal_mouse_move(
+                            &MouseMoveEvent {
+                                position,
+                                pressed_button: Some(MouseButton::Left),
+                                ..Default::default()
+                            },
+                            cx,
+                        );
+                        assert!(view.terminal_mouse.is_none(), "{change}");
+                    }
+                    view.terminal_mouse_up(
+                        &MouseUpEvent {
+                            position,
+                            button: MouseButton::Left,
+                            ..Default::default()
+                        },
+                        cx,
+                    );
+                    assert!(view.terminal_mouse.is_none(), "{change}");
+                    view.cancel_terminal_mouse(cx);
+                    view.endpoints[1]
+                        .connection
+                        .handle
+                        .as_ref()
+                        .unwrap()
+                        .set_focus(&snapshot().boot_id, false)
+                        .unwrap();
+                });
+            });
+            assert_eq!(
+                server.receive(),
+                ClientMessage::ClientShellPaneInput {
+                    pane_id: "w1:p1".into(),
+                    events: vec![mouse_event(
+                        ClientMouseKind::Down(ClientMouseButton::Left),
+                        2,
+                        3
+                    )],
+                }
+            );
+            assert_eq!(
+                server.receive(),
+                ClientMessage::ClientShellPaneInput {
+                    pane_id: "w1:p1".into(),
+                    events: vec![mouse_event(
+                        ClientMouseKind::Drag(ClientMouseButton::Left),
+                        4,
+                        5
+                    )],
+                }
+            );
+            if matches!(change, "menu" | "geometry" | "reporting") {
+                // Cleanup uses the last sent drag, not the rejected move/release position.
+                assert_eq!(
+                    server.receive(),
+                    ClientMessage::ClientShellPaneInput {
+                        pane_id: "w1:p1".into(),
+                        events: vec![mouse_event(
+                            ClientMouseKind::Up(ClientMouseButton::Left),
+                            4,
+                            5
+                        )],
+                    }
+                );
+            }
+            assert_eq!(
+                server.receive(),
+                ClientMessage::ClientShellFocus { focused: false },
+                "{change}, move_first={move_first}"
+            );
+        }
+    }
+}
+
+#[gpui::test]
+fn connected_mouse_external_drag_cleans_up_once_without_forwarding_synthetic_input(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    for pressed in [false, true] {
+        for move_first in [false, true] {
+            let (endpoint, mut server) = connected_endpoint("ssh:mouse");
+            let position = cx.update(|window, cx| {
+                view.update(cx, |view, cx| {
+                    prepare_mouse(view, endpoint);
+                    let position = mouse_position(view, 3.5, 4.5);
+                    if pressed {
+                        assert!(view.terminal_mouse_down(
+                            &MouseDownEvent {
+                                position,
+                                button: MouseButton::Left,
+                                ..Default::default()
+                            },
+                            window,
+                            cx
+                        ));
+                    }
+                    mouse_position(view, 7.5, 8.5)
+                })
+            });
+            // Use GPUI's real external-drag state; the nonrendering Fixture keeps resize out.
+            cx.simulate_event(gpui::FileDropEvent::Entered {
+                position,
+                paths: gpui::ExternalPaths::default(),
+            });
+            cx.update(|window, cx| {
+                view.update(cx, |view, cx| {
+                    assert!(cx.has_active_drag());
+                    if move_first {
+                        assert!(!view.terminal_mouse_move(
+                            &MouseMoveEvent {
+                                position,
+                                pressed_button: Some(MouseButton::Left),
+                                ..Default::default()
+                            },
+                            cx
+                        ));
+                    }
+                    assert!(!view.terminal_mouse_up(
+                        &MouseUpEvent {
+                            position,
+                            button: MouseButton::Left,
+                            ..Default::default()
+                        },
+                        cx
+                    ));
+                    assert!(view.terminal_mouse.is_none());
+                    assert!(view.terminal_mouse_down(
+                        &MouseDownEvent {
+                            position,
+                            button: MouseButton::Left,
+                            ..Default::default()
+                        },
+                        window,
+                        cx
+                    ));
+                    assert!(view.terminal_mouse.is_none());
+                    view.terminal_mouse_hover(
+                        &MouseMoveEvent {
+                            position,
+                            ..Default::default()
+                        },
+                        cx,
+                    );
+                    view.cancel_terminal_mouse(cx);
+                    view.endpoints[1]
+                        .connection
+                        .handle
+                        .as_ref()
+                        .unwrap()
+                        .set_focus(&snapshot().boot_id, false)
+                        .unwrap();
+                });
+            });
+            cx.simulate_event(gpui::FileDropEvent::Exited);
+            if pressed {
+                assert_eq!(
+                    server.receive(),
+                    ClientMessage::ClientShellPaneInput {
+                        pane_id: "w1:p1".into(),
+                        events: vec![mouse_event(
+                            ClientMouseKind::Down(ClientMouseButton::Left),
+                            2,
+                            3
+                        )],
+                    }
+                );
+                assert_eq!(
+                    server.receive(),
+                    ClientMessage::ClientShellPaneInput {
+                        pane_id: "w1:p1".into(),
+                        events: vec![mouse_event(
+                            ClientMouseKind::Up(ClientMouseButton::Left),
+                            2,
+                            3
+                        )],
+                    }
+                );
+            }
+            assert_eq!(
+                server.receive(),
+                ClientMessage::ClientShellFocus { focused: false }
+            );
+        }
+    }
+}
+
+#[gpui::test]
+fn connected_mouse_deactivation_releases_last_sent_position_once_without_focusing(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    for (offset, pane_id) in [(0., "w1:p1"), (40., "w1:p2")] {
+        let (endpoint, mut server) = connected_endpoint("ssh:mouse");
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                prepare_mouse(view, endpoint);
+                view.active = true;
+                assert!(view.terminal_mouse_down(
+                    &MouseDownEvent {
+                        position: mouse_position(view, offset + 3.5, 4.5),
+                        button: MouseButton::Left,
+                        ..Default::default()
+                    },
+                    window,
+                    cx
+                ));
+                assert!(view.terminal_mouse_move(
+                    &MouseMoveEvent {
+                        position: mouse_position(view, offset + 5.5, 6.5),
+                        pressed_button: Some(MouseButton::Left),
+                        ..Default::default()
+                    },
+                    cx
+                ));
+                view.active = false;
+                view.cancel_terminal_mouse(cx);
+                view.cancel_terminal_mouse(cx);
+                assert!(view.terminal_mouse.is_none());
+                assert!(!view.mouse_focus_pending());
+                assert!(!view.terminal_mouse_up(
+                    &MouseUpEvent {
+                        position: mouse_position(view, offset + 7.5, 8.5),
+                        button: MouseButton::Left,
+                        ..Default::default()
+                    },
+                    cx
+                ));
+                assert!(view.live.activation.is_none());
+                assert!(view.activation_deadline.is_none());
+                view.active = true;
+                view.send(
+                    ClientPaneInputEvent::TextCommit("after cancellation".into()),
+                    cx,
+                );
+            });
+        });
+        for event in [
+            mouse_event(ClientMouseKind::Down(ClientMouseButton::Left), 2, 3),
+            mouse_event(ClientMouseKind::Drag(ClientMouseButton::Left), 4, 5),
+            mouse_event(ClientMouseKind::Up(ClientMouseButton::Left), 4, 5),
+        ] {
+            assert_eq!(
+                server.receive(),
+                ClientMessage::ClientShellPaneInput {
+                    pane_id: pane_id.into(),
+                    events: vec![event],
+                }
+            );
+        }
+        assert_eq!(
+            server.receive(),
+            ClientMessage::ClientShellPaneInput {
+                pane_id: "w1:p1".into(),
+                events: vec![ClientPaneInputEvent::TextCommit(
+                    "after cancellation".into()
+                )],
+            }
+        );
+    }
+}
+
+#[gpui::test]
+fn connected_mouse_hover_is_separate_from_capture_and_obeys_input_guards(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (endpoint, mut server) = connected_endpoint("ssh:mouse");
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            prepare_mouse(view, endpoint);
+            let event = MouseMoveEvent {
+                position: mouse_position(view, 43.5, 4.5),
+                ..Default::default()
+            };
+            assert!(!view.terminal_mouse_move(&event, cx));
+            view.terminal_mouse_hover(&event, cx);
+            view.terminal_mouse_hover(
+                &MouseMoveEvent {
+                    pressed_button: Some(MouseButton::Left),
+                    ..event.clone()
+                },
+                cx,
+            );
+            view.terminal_mouse_hover(
+                &MouseMoveEvent {
+                    modifiers: gpui::Modifiers {
+                        shift: true,
+                        ..Default::default()
+                    },
+                    ..event.clone()
+                },
+                cx,
+            );
+            view.terminal_mouse_hover(
+                &MouseMoveEvent {
+                    position: mouse_position(view, 90., 30.),
+                    ..event.clone()
+                },
+                cx,
+            );
+            Arc::make_mut(view.live.surface.as_mut().unwrap()).panes[1].mouse_reporting = false;
+            view.terminal_mouse_hover(&event, cx);
+            Arc::make_mut(view.live.surface.as_mut().unwrap()).panes[1].mouse_reporting = true;
+            view.open_keybinds(window, cx);
+            view.terminal_mouse_hover(&event, cx);
+            view.menu.reset();
+            assert!(view.terminal_mouse.is_none());
+            assert!(view.live.activation.is_none());
+            assert!(view.activation_deadline.is_none());
+            view.send(
+                ClientPaneInputEvent::TextCommit("hover does not focus".into()),
+                cx,
+            );
+        });
+    });
+    assert_eq!(
+        server.receive(),
+        ClientMessage::ClientShellPaneInput {
+            pane_id: "w1:p2".into(),
+            events: vec![mouse_event(ClientMouseKind::Moved, 2, 3)],
+        }
+    );
+    assert_eq!(
+        server.receive(),
+        ClientMessage::ClientShellPaneInput {
+            pane_id: "w1:p1".into(),
+            events: vec![ClientPaneInputEvent::TextCommit(
+                "hover does not focus".into()
+            )],
+        }
+    );
+}
+
+#[gpui::test]
+fn startup_focus_waits_for_the_first_surface_without_flapping_on_later_updates(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (mut endpoint, mut server) = connected_endpoint(LOCAL);
+    endpoint.connection.inbox.lock().unwrap().surface = None;
+    endpoint.live.surface = None;
+    let inbox = endpoint.connection.inbox.clone();
+    view.update(cx, |view, _| {
+        view.endpoints = vec![endpoint];
+        view.options = ConnectOptions::default();
+        view.reset_selected();
+        view.active = true;
+        assert!(!view.input_ready());
+        view.report_focus();
+        assert_eq!(view.sent_focus, Some(false));
+    });
+    assert!(matches!(
+        server.receive(),
+        ClientMessage::ClientShellFocus { focused: false }
+    ));
+
+    inbox
+        .lock()
+        .unwrap()
+        .apply(ClientEvent::Surface(surface(&snapshot())));
+    view.update(cx, |view, cx| {
+        project_until(view, cx, "startup surface ready", HerdrWindow::input_ready);
+        view.report_focus();
+        assert_eq!(view.sent_focus, Some(true));
+        // New snapshot/surface pairs can arrive separately during normal activity.
+        view.live.surface = None;
+        view.report_focus();
+        assert_eq!(view.sent_focus, Some(true));
+        view.active = false;
+        view.report_focus();
+        assert_eq!(view.sent_focus, Some(false));
+    });
+    assert!(matches!(
+        server.receive(),
+        ClientMessage::ClientShellFocus { focused: true }
+    ));
+    assert!(matches!(
+        server.receive(),
+        ClientMessage::ClientShellFocus { focused: false }
+    ));
+}
+
+#[gpui::test]
+fn workspace_menu_keeps_immediate_and_deferred_navigation(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    for deferred in [false, true] {
+        let (endpoint, mut server) = connected_endpoint("local");
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.selected_endpoint = 0;
+                view.endpoints = vec![endpoint];
+                view.options = ConnectOptions::default();
+                view.reset_selected();
+                if deferred {
+                    view.live.surface = None;
+                }
+                assert!(view.navigate_endpoint("local", NavigationTarget::Workspace("w1"), cx));
+                view.open_workspace_menu("w1", Default::default(), window, cx);
+                assert_eq!(view.menu.page, Some(crate::menu::Page::Workspace));
+                if deferred {
+                    assert!(view.pending_navigation.is_some());
+                    view.live = view.endpoints[0].live.clone();
+                    view.poll_endpoints(cx);
+                }
+                assert!(view.pending_navigation.is_none());
+                assert!(!view.input_ready());
+                assert_eq!(view.menu.page, Some(crate::menu::Page::Workspace));
+                assert!(view.menu.focus.is_focused(window));
+                // New input is still blocked while the menu owns focus.
+                assert!(!view.navigate(NavigationTarget::Workspace("other"), cx));
+            });
+        });
+        let ClientMessage::ClientShellEndpointRequest { request, .. } = server.receive() else {
+            panic!("missing workspace focus request");
+        };
+        let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        assert_eq!(request["method"], "workspace.focus");
+        assert_eq!(request["params"], serde_json::json!({"workspace_id": "w1"}));
+        server.respond(&request);
+        let ClientMessage::ClientShellEndpointRequest { request, .. } = server.receive() else {
+            panic!("missing surface barrier");
+        };
+        let barrier: serde_json::Value = serde_json::from_str(&request).unwrap();
+        assert_eq!(barrier["method"], Method::ClientShellSurfaceSet.as_str());
+        view.update(cx, |view, cx| {
+            let mut next = snapshot();
+            next.revision += 1;
+            next.focused_workspace_id = Some("w1".into());
+            for workspace in &mut next.workspaces {
+                workspace.focused = workspace.workspace_id == "w1";
+            }
+            {
+                let mut state = view.endpoints[0].connection.inbox.lock().unwrap();
+                state.apply(ClientEvent::Snapshot(Arc::new(next.clone())));
+                state.apply(ClientEvent::Surface(surface(&next)));
+                state.apply(ClientEvent::Response {
+                    request_id: barrier["id"].as_str().unwrap().into(),
+                    response: serde_json::json!({"result": {
+                        "type": "client_shell_surface_set", "active": true,
+                        "projection_revision": next.revision
+                    }}),
+                });
+            }
+            project_until(view, cx, "workspace selection", HerdrWindow::input_ready);
+            assert_eq!(view.menu.page, Some(crate::menu::Page::Workspace));
+            let selected = view.live.snapshot.as_ref().unwrap();
+            assert_eq!(selected.focused_workspace_id.as_deref(), Some("w1"));
+            assert!(
+                selected
+                    .workspaces
+                    .iter()
+                    .any(|workspace| workspace.workspace_id == "w1" && workspace.focused)
+            );
+        });
+    }
+}
+
+#[gpui::test]
+fn toast_navigation_queues_typed_targets_and_fences_input(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    for (tab, pane, method, params) in [
+        (
+            None,
+            None,
+            "workspace.focus",
+            serde_json::json!({"workspace_id":"w1"}),
+        ),
+        (
+            Some("w1:t1"),
+            None,
+            "tab.focus",
+            serde_json::json!({"tab_id":"w1:t1"}),
+        ),
+        (
+            Some("w1:t1"),
+            Some("w1:p1"),
+            "pane.focus",
+            serde_json::json!({"pane_id":"w1:p1"}),
+        ),
+    ] {
+        let (mut endpoint, mut server) = connected_endpoint("ssh:toast");
+        let mut wire = crate::notifications::tests::notification("Navigate");
+        wire.workspace_id = Some("w1".into());
+        wire.tab_id = tab.map(str::to_owned);
+        wire.pane_id = pane.map(str::to_owned);
+        endpoint
+            .toasts
+            .receive([crate::notifications::Notice::new(wire, Instant::now())
+                .with_snapshot(endpoint.live.snapshot.as_deref())
+                .preview()]);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.endpoints.truncate(1);
+                view.endpoints.push(endpoint);
+                view.selected_endpoint = 1;
+                view.options = ConnectOptions::default();
+                view.reset_selected();
+                window.focus(&view.focus);
+                view.marked = "composition".into();
+                assert!(view.input_ready());
+                view.tick_toasts(false, Instant::now());
+                view.command(Command::OpenNotificationTarget, window, cx);
+                assert!(view.endpoints[1].toasts.entries.is_empty());
+                assert!(view.marked.is_empty());
+                assert!(view.focus.is_focused(window));
+                assert!(!view.input_ready());
+            })
+        });
+        let ClientMessage::ClientShellEndpointRequest { request, .. } = server.receive() else {
+            panic!("expected semantic focus request")
+        };
+        let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        assert_eq!(request["method"], method);
+        assert_eq!(request["params"], params);
+    }
+}
+
+#[gpui::test]
+fn wire_completion_waits_for_evidence_then_command_uses_original_pane(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (mut endpoint, mut server) = connected_endpoint("ssh:completion");
+    let mut projection = snapshot();
+    projection.revision += 1;
+    projection.agents[0].agent_status = AgentStatus::Working;
+    write_message(
+        &mut server.stream,
+        &ServerMessage::EndpointControl {
+            kind: ENDPOINT_SNAPSHOT_KIND.into(),
+            data: serde_json::to_string(&projection).unwrap(),
+        },
+        MAX_GRAPHICS_FRAME_SIZE,
+    )
+    .unwrap();
+    let mut event = crate::notifications::tests::notification("wire completion");
+    event.kind = SemanticNotificationKind::Finished;
+    event.workspace_id = None;
+    event.pane_id = Some("w1:p1".into());
+    write_message(
+        &mut server.stream,
+        &ServerMessage::SemanticNotification(event),
+        MAX_GRAPHICS_FRAME_SIZE,
+    )
+    .unwrap();
+    wait_until(|| {
+        endpoint.poll(Instant::now());
+        !endpoint.toasts.entries.is_empty()
+    });
+    let now = Instant::now();
+    view.update(cx, |view, _| {
+        view.endpoints.push(endpoint);
+        view.config.notifications.enabled = true;
+        view.config.notifications.delay_seconds = 0;
+        view.tick_toasts(false, now);
+        assert!(!view.endpoints[1].toasts.entries[0].1.visible);
+    });
+    projection.revision += 1;
+    projection.agents[0].agent_status = AgentStatus::Done;
+    write_message(
+        &mut server.stream,
+        &ServerMessage::EndpointControl {
+            kind: ENDPOINT_SNAPSHOT_KIND.into(),
+            data: serde_json::to_string(&projection).unwrap(),
+        },
+        MAX_GRAPHICS_FRAME_SIZE,
+    )
+    .unwrap();
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            wait_until(|| {
+                view.endpoints[1].poll(Instant::now());
+                view.endpoints[1]
+                    .live
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|s| s.revision == projection.revision)
+            });
+            view.tick_toasts(false, now + Duration::from_millis(50));
+            assert!(view.endpoints[1].toasts.entries[0].1.visible);
+            view.endpoints[1]
+                .connection
+                .inbox
+                .lock()
+                .unwrap()
+                .apply(ClientEvent::Surface(surface(&projection)));
+            wait_until(|| {
+                view.endpoints[1].poll(Instant::now());
+                view.endpoints[1].live.surface.is_some()
+            });
+            // Select the already-active fixture surface without issuing unrelated activation requests.
+            view.selected_endpoint = 1;
+            view.reset_selected();
+            view.command(Command::OpenNotificationTarget, window, cx);
+            assert!(view.endpoints[1].toasts.entries.is_empty());
+            assert!(!view.input_ready());
+        })
+    });
+    let ClientMessage::ClientShellEndpointRequest { request, .. } = server.receive() else {
+        panic!("expected completion target focus");
+    };
+    let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+    assert_eq!(request["method"], "pane.focus");
+    assert_eq!(request["params"]["pane_id"], "w1:p1");
+}
+
+#[gpui::test]
+fn toast_click_uses_origin_and_close_never_navigates(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+    let (mut remote, _server) = connected_endpoint("ssh:toast");
+    remote.initial_surface = false;
+    let mut wire = crate::notifications::tests::notification("Remote target");
+    wire.workspace_id = Some("w1".into());
+    let notice = crate::notifications::Notice::new(wire, Instant::now())
+        .with_snapshot(remote.live.snapshot.as_deref())
+        .preview();
+    remote.toasts.receive([notice.clone(), notice]);
+    cx.simulate_resize(size(px(1000.), px(600.)));
+    cx.update(|window, cx| {
+        view.update(cx, |view, _| {
+            // The same IDs on Local must not win over the notification's origin.
+            view.endpoints[0].live.snapshot = remote.live.snapshot.clone();
+            view.endpoints[0].detached = true;
+            view.endpoints.push(remote);
+            window.focus(&view.focus);
+            view.marked = "composition".into();
+        });
+        window.draw(cx).clear();
+    });
+    let dismiss = cx.debug_bounds("toast-dismiss-ssh:toast-0").unwrap();
+    cx.simulate_click(dismiss.center(), Default::default());
+    cx.update(|window, cx| {
+        let view = view.read(cx);
+        assert_eq!(view.selected_endpoint, 0);
+        assert!(view.pending_navigation.is_none());
+        assert_eq!(view.marked, "composition");
+        assert!(view.focus.is_focused(window));
+        assert_eq!(view.endpoints[1].toasts.entries.len(), 1);
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    let card = cx.debug_bounds("toast-ssh:toast-1").unwrap();
+    cx.simulate_click(card.center(), Default::default());
+    view.update(cx, |view, _| {
+        assert_eq!(view.selected_endpoint, 1);
+        assert_eq!(view.pending_toast, Some(1));
+        assert_eq!(
+            view.pending_navigation,
+            Some(NavigationTarget::Workspace("w1".into()))
+        );
+        assert_eq!(view.endpoints[1].toasts.entries.len(), 1);
+        // A newer inbox boot is rejected even before it reaches the UI projection.
+        let inbox = view.endpoints[1].connection.inbox.clone();
+        {
+            let mut state = inbox.lock().unwrap();
+            Arc::make_mut(state.snapshot.as_mut().unwrap()).boot_id = "replacement".into();
+        }
+        assert_eq!(view.toast_target(1, 1), std::task::Poll::Ready(None));
+        view.endpoints[1].stop();
+        assert_eq!(view.toast_target(1, 1), std::task::Poll::Ready(None));
+    });
+}
+
+#[gpui::test]
+fn toast_rendered_clicks_reject_replaced_removed_and_disabled_origins(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+    cx.simulate_resize(size(px(1000.), px(600.)));
+    for change in 0..4 {
+        let (mut remote, _server) = connected_endpoint("ssh:toast");
+        let mut wire = crate::notifications::tests::notification("old render");
+        wire.workspace_id = Some("w1".into());
+        remote
+            .toasts
+            .receive([crate::notifications::Notice::new(wire, Instant::now())
+                .with_snapshot(remote.live.snapshot.as_deref())
+                .preview()]);
+        cx.update(|window, cx| {
+            view.update(cx, |view, _| {
+                view.endpoints.truncate(1);
+                view.endpoints.push(remote);
+            });
+            window.draw(cx).clear();
+        });
+        assert!(cx.debug_bounds("toast-ssh:toast-0").is_some());
+        let (generation, inbox) = view.read_with(cx, |view, _| {
+            (
+                view.endpoints[1].generation,
+                view.endpoints[1].connection.inbox.clone(),
+            )
+        });
+        view.update(cx, |view, _| match change {
+            0 => view.endpoints[1].generation += 1,
+            1 => {
+                view.endpoints[1].connection.inbox =
+                    Arc::new(Mutex::new(view.endpoints[1].live.clone()))
+            }
+            2 => {
+                view.endpoints.pop();
+            }
+            _ => view.endpoints[1].enabled = false,
+        });
+        // Invoke the captured callback identity directly: simulate_click redraws
+        // first and would correctly capture the replacement generation instead.
+        view.update(cx, |view, cx| {
+            view.click_toast("ssh:toast", generation, &inbox, 0, cx)
+        });
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.selected_endpoint, 0);
+            assert!(view.pending_navigation.is_none());
+            assert!(view.pending_toast.is_none());
+        });
+    }
+}
+
+#[gpui::test]
+fn newer_same_endpoint_navigation_cannot_replay_a_pending_toast(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (mut endpoint, mut server) = connected_endpoint("ssh:toast");
+    let inbox = endpoint.connection.inbox.clone();
+    let mut wire = crate::notifications::tests::notification("older intent");
+    wire.workspace_id = Some("w1".into());
+    wire.pane_id = Some("w1:p1".into());
+    endpoint
+        .toasts
+        .receive([crate::notifications::Notice::new(wire, Instant::now())
+            .with_snapshot(endpoint.live.snapshot.as_deref())
+            .preview()]);
+    view.update(cx, |view, cx| {
+        view.endpoints[0].detached = true;
+        view.endpoints.push(endpoint);
+        view.selected_endpoint = 1;
+        view.options = ConnectOptions::default();
+        view.reset_selected();
+        view.tick_toasts(false, Instant::now());
+        let held = inbox.lock().unwrap();
+        view.click_toast("ssh:toast", view.endpoints[1].generation, &inbox, 0, cx);
+        assert_eq!(view.pending_toast, Some(0));
+        assert_eq!(
+            view.pending_navigation,
+            Some(NavigationTarget::Pane("w1:p1".into()))
+        );
+        drop(held);
+        assert!(view.navigation_ready());
+        view.navigate_endpoint("ssh:toast", NavigationTarget::Pane("new-pane"), cx);
+        assert!(view.pending_toast.is_none());
+        assert!(view.pending_navigation.is_none());
+        assert!(!view.input_ready());
+    });
+    let ClientMessage::ClientShellEndpointRequest { request, .. } = server.receive() else {
+        panic!("missing newer navigation");
+    };
+    let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+    assert_eq!(request["method"], "pane.focus");
+    assert_eq!(request["params"]["pane_id"], "new-pane");
+    server.respond(&request);
+    let ClientMessage::ClientShellEndpointRequest { request, .. } = server.receive() else {
+        panic!("missing newer navigation barrier");
+    };
+    let barrier: serde_json::Value = serde_json::from_str(&request).unwrap();
+    assert_eq!(barrier["method"], Method::ClientShellSurfaceSet.as_str());
+    let mut next = snapshot();
+    next.revision += 1;
+    let mut pane = next.panes[0].clone();
+    pane.pane_id = "new-pane".into();
+    next.panes[0].focused = false;
+    next.panes.push(pane);
+    next.focused_pane_id = Some("new-pane".into());
+    write_message(&mut server.stream, &ServerMessage::ClientShellEndpointResponseChunk {
+        boot_id: next.boot_id.clone(),
+        request_id: barrier["id"].as_str().unwrap().into(),
+        final_chunk: true,
+        data: serde_json::to_vec(&serde_json::json!({"id": barrier["id"], "result": {
+            "type": "client_shell_surface_set", "active": true, "projection_revision": next.revision
+        }})).unwrap(),
+    }, MAX_GRAPHICS_FRAME_SIZE).unwrap();
+    wait_until(|| {
+        inbox
+            .lock()
+            .unwrap()
+            .activation
+            .as_ref()
+            .and_then(|a| a.revision)
+            == Some(next.revision)
+    });
+    {
+        let mut state = inbox.lock().unwrap();
+        state.apply(ClientEvent::Snapshot(Arc::new(next.clone())));
+        state.apply(ClientEvent::Surface(surface(&next)));
+    }
+    view.update(cx, |view, cx| {
+        project_until(view, cx, "newer navigation completed", |view| {
+            view.live
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.revision == next.revision)
+        });
+        view.poll_endpoints(cx);
+        assert!(view.pending_navigation.is_none());
+        assert!(view.input_ready());
+        assert_eq!(
+            view.live
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .focused_pane_id
+                .as_deref(),
+            Some("new-pane")
+        );
+        // FIFO input proves no old pane.focus was queued after the completed barrier.
+        view.send(
+            ClientPaneInputEvent::TextCommit("new intent only".into()),
+            cx,
+        );
+    });
+    let ClientMessage::ClientShellPaneInput { pane_id, .. } = server.receive() else {
+        panic!("old navigation replayed instead of input to the newer target");
+    };
+    assert_eq!(pane_id, "new-pane");
+}
+
+#[gpui::test]
+fn toast_handoff_retains_busy_validation_and_revalidates_before_queueing(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    for (deleted, busy_click, already_active) in [
+        (false, false, false),
+        (false, true, false),
+        (true, false, false),
+        (true, true, false),
+        (false, true, true),
+        (true, true, true),
+    ] {
+        let (mut endpoint, mut server) = connected_endpoint("ssh:toast");
+        endpoint.initial_surface = already_active;
+        let mut wire = crate::notifications::tests::notification("handoff");
+        wire.workspace_id = Some("w1".into());
+        endpoint
+            .toasts
+            .receive([crate::notifications::Notice::new(wire, Instant::now())
+                .with_snapshot(endpoint.live.snapshot.as_deref())
+                .preview()]);
+        view.update(cx, |view, cx| {
+            view.selected_endpoint = 0;
+            view.endpoints.truncate(1);
+            view.endpoints[0].detached = true;
+            view.endpoints.push(endpoint);
+            view.options = ConnectOptions::default();
+            if already_active {
+                view.selected_endpoint = 1;
+                view.reset_selected();
+                assert!(view.input_ready());
+            }
+            let inbox = view.endpoints[1].connection.inbox.clone();
+            view.tick_toasts(false, Instant::now());
+            let held = busy_click.then(|| inbox.lock().unwrap());
+            view.click_toast("ssh:toast", view.endpoints[1].generation, &inbox, 0, cx);
+            drop(held);
+            assert_eq!(view.pending_toast, Some(0));
+            assert!(!view.input_ready());
+            assert_eq!(view.endpoints[1].toasts.entries.len(), 1);
+            // Complete the handoff with a coherent current projection.
+            {
+                let mut state = inbox.lock().unwrap();
+                if deleted {
+                    Arc::make_mut(state.snapshot.as_mut().unwrap())
+                        .workspaces
+                        .clear();
+                }
+                state.surface = Some(surface(state.snapshot.as_ref().unwrap()));
+                state.activation = None;
+                state.dirty = true;
+                view.endpoints[1].initial_surface = true;
+                // Project the completed handoff, then deterministically hold
+                // the inbox across polling and attempted terminal input.
+                view.endpoints[1].live = state.clone();
+                view.live = state.clone();
+                for _ in 0..2 {
+                    view.poll_endpoints(cx);
+                    assert!(view.navigation_ready());
+                    assert!(!view.input_ready());
+                    assert_eq!(view.pending_toast, Some(0));
+                    assert_eq!(
+                        view.pending_navigation,
+                        Some(NavigationTarget::Workspace("w1".into()))
+                    );
+                    assert_eq!(view.endpoints[1].toasts.entries.len(), 1);
+                    view.send(
+                        ClientPaneInputEvent::TextCommit("must stay fenced".into()),
+                        cx,
+                    );
+                }
+            }
+            project_until(view, cx, "toast handoff", |view| {
+                view.pending_toast.is_none()
+            });
+            assert_eq!(view.endpoints[1].toasts.entries.len(), usize::from(deleted));
+            assert!(view.pending_navigation.is_none());
+            assert_eq!(view.input_ready(), deleted);
+            if deleted {
+                view.endpoints[1]
+                    .connection
+                    .handle
+                    .as_ref()
+                    .unwrap()
+                    .set_focus(&snapshot().boot_id, false)
+                    .unwrap();
+            }
+        });
+        if !deleted {
+            let ClientMessage::ClientShellEndpointRequest { request, .. } = server.receive() else {
+                panic!("expected focus after handoff")
+            };
+            let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(request["method"], "workspace.focus");
+        } else {
+            assert!(matches!(
+                server.receive(),
+                ClientMessage::ClientShellFocus { focused: false }
+            ));
+        }
+    }
+}
+
+#[gpui::test]
+fn accepted_toast_survives_expiry_but_not_invalidation(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    for invalidation in [
+        "none",
+        "dismiss",
+        "replace",
+        "boot",
+        "membership",
+        "generation",
+        "overflow",
+    ] {
+        let (mut endpoint, mut server) = connected_endpoint("ssh:toast");
+        endpoint.initial_surface = false;
+        let mut wire = crate::notifications::tests::notification("accepted");
+        wire.workspace_id = Some("w1".into());
+        wire.pane_id = Some("w1:p1".into());
+        endpoint.toasts.receive([
+            crate::notifications::Notice::new(wire.clone(), Instant::now())
+                .with_snapshot(endpoint.live.snapshot.as_deref())
+                .preview(),
+        ]);
+        view.update(cx, |view, cx| {
+            view.selected_endpoint = 0;
+            view.endpoints.truncate(1);
+            view.endpoints[0].detached = true;
+            view.reset_selected();
+            view.endpoints.push(endpoint);
+            view.tick_toasts(false, Instant::now());
+            let inbox = view.endpoints[1].connection.inbox.clone();
+            view.click_toast("ssh:toast", view.endpoints[1].generation, &inbox, 0, cx);
+            assert_eq!(view.pending_toast, Some(0));
+            assert!(!view.input_ready());
+            let after_expiry =
+                view.endpoints[1].toasts.entries[0].1.expires + Duration::from_secs(1);
+            view.tick_toasts(false, after_expiry);
+            assert_eq!(view.endpoints[1].toasts.entries.len(), 1);
+            // An accepted intent also remains eligible between timer samples.
+            view.endpoints[1].toasts.entries[0].1.expires = Instant::now();
+            assert!(matches!(
+                view.toast_target(1, 0),
+                std::task::Poll::Ready(Some(_))
+            ));
+            match invalidation {
+                "dismiss" => view.endpoints[1].toasts.dismiss(0),
+                "replace" => {
+                    // Revalidate against an undrained replacement, not just the UI queue.
+                    inbox.lock().unwrap().apply(ClientEvent::Message(
+                        ServerMessage::SemanticNotification(wire),
+                    ));
+                }
+                "boot" => {
+                    Arc::make_mut(inbox.lock().unwrap().snapshot.as_mut().unwrap()).boot_id =
+                        "other".into()
+                }
+                "membership" => Arc::make_mut(inbox.lock().unwrap().snapshot.as_mut().unwrap())
+                    .panes
+                    .clear(),
+                "generation" => view.endpoints[1].stop(),
+                "overflow" => {
+                    let mut state = inbox.lock().unwrap();
+                    state.apply(ClientEvent::Message(ServerMessage::SemanticNotification(
+                        wire,
+                    )));
+                    for _ in 0..crate::notifications::PENDING_LIMIT {
+                        state.apply(ClientEvent::Message(ServerMessage::SemanticNotification(
+                            crate::notifications::tests::notification("other"),
+                        )));
+                    }
+                }
+                _ => {}
+            }
+            if invalidation != "generation" {
+                view.endpoints[1].initial_surface = true;
+                view.live = inbox.lock().unwrap().clone();
+                view.live.surface = Some(surface(view.live.snapshot.as_ref().unwrap()));
+                view.live.activation = None;
+                view.navigate_toast(0, cx);
+                assert!(view.pending_toast.is_none());
+                if invalidation == "none" {
+                    assert!(view.endpoints[1].toasts.entries.is_empty());
+                } else {
+                    view.endpoints[1]
+                        .connection
+                        .handle
+                        .as_ref()
+                        .unwrap()
+                        .set_focus(&snapshot().boot_id, false)
+                        .unwrap();
+                }
+            } else {
+                assert_eq!(view.toast_target(1, 0), std::task::Poll::Ready(None));
+            }
+        });
+        if invalidation == "none" {
+            let ClientMessage::ClientShellEndpointRequest { request, .. } = server.receive() else {
+                panic!("missing accepted focus")
+            };
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&request).unwrap()["method"],
+                "pane.focus"
+            );
+        } else if invalidation != "generation" {
+            assert!(
+                matches!(
+                    server.receive(),
+                    ClientMessage::ClientShellFocus { focused: false }
+                ),
+                "{invalidation}"
+            );
+        }
+    }
+}
+
+#[gpui::test]
+fn toast_handoff_defers_a_contended_source_without_activating_destination(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (source, mut source_server) = connected_endpoint("ssh:source");
+    let (mut target, mut target_server) = connected_endpoint("ssh:target");
+    target.initial_surface = false;
+    let source_inbox = source.connection.inbox.clone();
+    let target_inbox = target.connection.inbox.clone();
+    let target_handle = target.connection.handle.clone().unwrap();
+    let mut wire = crate::notifications::tests::notification("target");
+    wire.workspace_id = Some("w1".into());
+    target
+        .toasts
+        .receive([crate::notifications::Notice::new(wire, Instant::now())
+            .with_snapshot(target.live.snapshot.as_deref())
+            .preview()]);
+    let held = source_inbox.lock().unwrap();
+    view.update(cx, |view, cx| {
+        view.endpoints[0].detached = true;
+        view.endpoints.extend([source, target]);
+        view.selected_endpoint = 1;
+        view.reset_selected();
+        view.tick_toasts(false, Instant::now());
+        view.click_toast(
+            "ssh:target",
+            view.endpoints[2].generation,
+            &target_inbox,
+            0,
+            cx,
+        );
+        assert_eq!(view.selected_endpoint, 2);
+        assert_eq!(view.pending_toast, Some(0));
+        for _ in 0..2 {
+            view.poll_endpoints(cx);
+            assert!(matches!(
+                view.pending_releases[0].phase,
+                ReleasePhase::Deferred(_)
+            ));
+            assert!(!view.endpoints[2].initial_surface);
+            assert!(!view.input_ready());
+        }
+    });
+    target_handle.set_focus(&snapshot().boot_id, false).unwrap();
+    assert!(matches!(
+        target_server.receive(),
+        ClientMessage::ClientShellFocus { focused: false }
+    ));
+    drop(held);
+    view.update(cx, |view, cx| {
+        project_until(view, cx, "source release queued", |view| {
+            matches!(view.pending_releases[0].phase, ReleasePhase::Sent(_))
+        })
+    });
+    assert!(matches!(
+        source_server.receive(),
+        ClientMessage::ClientShellFocus { focused: false }
+    ));
+    let ClientMessage::ClientShellEndpointRequest { request, .. } = source_server.receive() else {
+        panic!("missing source release")
+    };
+    let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+    assert_eq!(request["method"], Method::ClientShellSurfaceSet.as_str());
+    assert_eq!(request["params"]["active"], false);
+    target_handle.set_focus(&snapshot().boot_id, true).unwrap();
+    assert!(matches!(
+        target_server.receive(),
+        ClientMessage::ClientShellFocus { focused: true }
+    ));
+    source_inbox.lock().unwrap().apply(ClientEvent::Response {
+        request_id: request["id"].as_str().unwrap().into(),
+        response: serde_json::json!({"result": {"type": "client_shell_surface_set", "active": false, "projection_revision": 7}}),
+    });
+    view.update(cx, |view, cx| {
+        project_until(view, cx, "source release acknowledged", |view| {
+            view.endpoints[2].initial_surface
+        });
+        assert!(view.pending_releases.is_empty());
+        assert!(view.endpoints[2].initial_surface);
+        assert!(!view.input_ready());
+    });
+    assert!(matches!(
+        target_server.receive(),
+        ClientMessage::ClientShellResize { .. }
+    ));
+    let ClientMessage::ClientShellEndpointRequest { request, .. } = target_server.receive() else {
+        panic!("missing destination activation")
+    };
+    let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+    assert_eq!(request["method"], Method::ClientShellSurfaceSet.as_str());
+    assert_eq!(request["params"]["active"], true);
+}
+
+#[gpui::test]
+fn deferred_release_is_generation_fenced_and_local_can_escape(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    for change in ["retire", "boot", "local"] {
+        let (source, _source_server) = connected_endpoint("ssh:source");
+        let (mut target, _target_server) = connected_endpoint("ssh:target");
+        target.initial_surface = false;
+        let inbox = source.connection.inbox.clone();
+        let drained = source.connection.drained.clone();
+        let handle = source.connection.handle.clone().unwrap();
+        let mut held = inbox.lock().unwrap();
+        view.update(cx, |view, cx| {
+            view.pending_releases.clear();
+            view.endpoints.truncate(1);
+            view.endpoints[0].detached = true;
+            view.endpoints.extend([source, target]);
+            view.selected_endpoint = 1;
+            view.reset_selected();
+            assert!(view.select_endpoint("ssh:target", cx));
+            assert!(matches!(
+                view.pending_releases[0].phase,
+                ReleasePhase::Deferred(_)
+            ));
+            match change {
+                "retire" => {
+                    view.endpoints[1].stop();
+                    view.endpoints[1].detached = true;
+                    assert!(!Arc::ptr_eq(&inbox, &view.endpoints[1].connection.inbox));
+                    assert!(handle.is_disconnected());
+                }
+                "boot" => {
+                    Arc::make_mut(held.snapshot.as_mut().unwrap()).boot_id = "replacement".into()
+                }
+                _ => {
+                    assert!(view.select_endpoint(LOCAL, cx));
+                    assert!(view.pending_releases.is_empty());
+                    assert!(handle.is_disconnected());
+                }
+            }
+            assert!(!view.endpoints[2].initial_surface);
+        });
+        drop(held);
+        view.update(cx, |view, cx| {
+            if change == "boot" {
+                project_until(view, cx, "stale source retired", |_| {
+                    handle.is_disconnected()
+                });
+                view.endpoints[1].detached = true;
+            }
+        });
+        wait_until(|| drained.load(Ordering::Acquire));
+        if change != "local" {
+            view.update(cx, |view, cx| {
+                project_until(view, cx, "retired source drained", |view| {
+                    view.endpoints[2].initial_surface
+                });
+                assert!(view.pending_releases.is_empty());
+            });
+        }
+    }
+}
+
+#[gpui::test]
+fn toast_queue_failure_retains_notice(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (mut endpoint, _server) = connected_endpoint("ssh:toast");
+    let mut wire = crate::notifications::tests::notification("queue failure");
+    wire.workspace_id = Some("w1".into());
+    endpoint
+        .toasts
+        .receive([crate::notifications::Notice::new(wire, Instant::now())
+            .with_snapshot(endpoint.live.snapshot.as_deref())
+            .preview()]);
+    view.update(cx, |view, cx| {
+        view.endpoints.push(endpoint);
+        view.selected_endpoint = 1;
+        view.options = ConnectOptions::default();
+        view.reset_selected();
+        // Keep the projected connected state to exercise enqueue failure itself.
+        view.endpoints[1].connection.inbox = Arc::new(Mutex::new(view.live.clone()));
+        view.endpoints[1]
+            .connection
+            .handle
+            .as_ref()
+            .unwrap()
+            .disconnect();
+        assert!(view.input_ready());
+        view.tick_toasts(false, Instant::now());
+        view.navigate_toast(0, cx);
+        assert_eq!(view.endpoints[1].toasts.entries.len(), 1);
+        assert!(view.local_error.is_some());
+    });
+}
+
+#[gpui::test]
+fn notification_command_rejects_ineligible_cards_without_selection_or_requests(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    for case in 0..7 {
+        let (mut endpoint, mut server) = connected_endpoint("ssh:toast");
+        let mut wire = crate::notifications::tests::notification("ineligible");
+        wire.workspace_id = (case != 0).then(|| "w1".into());
+        let mut notice = crate::notifications::Notice::new(wire, Instant::now())
+            .with_snapshot(endpoint.live.snapshot.as_deref())
+            .preview();
+        if case != 4 {
+            notice.promote(Instant::now());
+        }
+        if case == 3 {
+            notice.expires = Instant::now();
+        }
+        endpoint.toasts.receive([notice]);
+        if case == 1 || case == 2 {
+            let mut state = endpoint.connection.inbox.lock().unwrap();
+            let snapshot = Arc::make_mut(state.snapshot.as_mut().unwrap());
+            if case == 1 {
+                snapshot.workspaces.clear();
+            } else {
+                snapshot.boot_id = "new-boot".into();
+            }
+        }
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.menu.reset();
+                view.endpoints.truncate(1);
+                view.endpoints.push(endpoint);
+                view.selected_endpoint = 0;
+                view.toasts_hidden = case == 5;
+                if case == 6 {
+                    view.open_keybinds(window, cx);
+                }
+                view.command(Command::OpenNotificationTarget, window, cx);
+                assert_eq!(view.selected_endpoint, 0, "case {case}");
+                assert!(view.pending_navigation.is_none());
+                assert!(view.pending_toast.is_none());
+                assert_eq!(view.endpoints[1].toasts.entries.len(), 1);
+                view.endpoints[1]
+                    .connection
+                    .handle
+                    .as_ref()
+                    .unwrap()
+                    .set_focus(&snapshot().boot_id, false)
+                    .unwrap();
+            })
+        });
+        // Ordered sentinel proves that no focus request preceded it.
+        assert!(matches!(
+            server.receive(),
+            ClientMessage::ClientShellFocus { focused: false }
+        ));
+    }
+}
+
+#[gpui::test]
+fn qa_play_sound_dispatches_without_daemon_or_pane(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+    let (sound, played) = crate::sound::Service::recording();
+    view.update(cx, |view, _| {
+        view.sound = sound;
+        for endpoint in &mut view.endpoints {
+            endpoint.stop();
+            endpoint.live = Default::default();
+        }
+    });
+    cx.update(|window, cx| {
+        view.read(cx).focus.focus(window);
+        window.draw(cx).clear();
+        let menus = crate::menus();
+        let qa = menus
+            .iter()
+            .find(|menu| menu.name.as_ref() == "QA")
+            .unwrap();
+        let action = qa
+            .items
+            .iter()
+            .find_map(|item| match item {
+                gpui::MenuItem::Action { name, action, .. } if name.as_ref() == "Play Sound" => {
+                    Some(action)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(action.partial_eq(&crate::PlaySound));
+        window.dispatch_action(action.boxed_clone(), cx);
+    });
+    assert_eq!(
+        played.recv_timeout(Duration::from_secs(3)).unwrap(),
+        SemanticNotificationSound::Done
+    );
+    view.update(cx, |view, _| {
+        for endpoint in &view.endpoints {
+            assert!(endpoint.live.snapshot.is_none());
+            assert!(endpoint.live.sound_events.is_empty());
+        }
+        view.sound = Default::default();
+    });
+    assert!(matches!(
+        played.recv_timeout(Duration::from_secs(3)),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    ));
+}
+
+#[gpui::test]
+fn inactive_endpoint_semantic_sound_reaches_worker_once(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (remote, mut server) = connected_endpoint("ssh:sound");
+    let (sound, played) = crate::sound::Service::recording();
+    view.update(cx, |view, _| {
+        view.sound = sound;
+        view.endpoints[0].detached = true;
+        view.endpoints.push(remote);
+        assert_eq!(view.selected_endpoint, 0);
+    });
+    for message in [
+        ServerMessage::Notify {
+            kind: NotifyKind::Sound,
+            message: "legacy".into(),
+            body: None,
+        },
+        ServerMessage::TerminalBell { count: 1 },
+        ServerMessage::SemanticNotification(SemanticNotification {
+            kind: SemanticNotificationKind::Custom,
+            title: "test".into(),
+            body: None,
+            sound: Some(SemanticNotificationSound::Request),
+            agent: None,
+            workspace_id: None,
+            tab_id: None,
+            pane_id: None,
+            position: None,
+        }),
+    ] {
+        write_message(&mut server.stream, &message, MAX_FRAME_SIZE).unwrap();
+    }
+    view.update(cx, |view, cx| {
+        wait_until(|| {
+            view.poll_endpoints(cx);
+            match played.try_recv() {
+                Ok(sound) => {
+                    assert_eq!(sound, SemanticNotificationSound::Request);
+                    true
+                }
+                Err(_) => false,
+            }
+        });
+        assert!(view.endpoints[1].live.sound_events.is_empty());
+        // Subsequent coalesced updates cannot redeliver the moved event.
+        view.endpoints[1]
+            .connection
+            .inbox
+            .lock()
+            .unwrap()
+            .set_outer_focus(true);
+        view.poll_endpoints(cx);
+        assert!(played.try_recv().is_err());
+        view.endpoints[1].stop();
+    });
 }
 
 #[gpui::test]
@@ -327,6 +3009,7 @@ fn every_focus_changing_command_fences_immediate_input_until_ack_and_surface(
         (Command::Palette, Method::CommandInvoke),
         (Command::Workspace, Method::WorkspaceClose),
         (Command::Workspace, Method::WorktreeCreate),
+        (Command::Workspace, Method::WorktreeOpen),
         (Command::Workspace, Method::WorktreeRemove),
     ]
     .into_iter()
@@ -356,7 +3039,10 @@ fn every_focus_changing_command_fences_immediate_input_until_ack_and_surface(
                     view.open_tab_close(id, window, cx);
                 } else if matches!(
                     method,
-                    Method::WorkspaceClose | Method::WorktreeCreate | Method::WorktreeRemove
+                    Method::WorkspaceClose
+                        | Method::WorktreeCreate
+                        | Method::WorktreeOpen
+                        | Method::WorktreeRemove
                 ) {
                     crate::menu::workspace_tests::submit_focus_change(view, method, window, cx);
                 } else {
@@ -406,6 +3092,13 @@ fn every_focus_changing_command_fences_immediate_input_until_ack_and_surface(
         };
         let request: serde_json::Value = serde_json::from_str(&request).unwrap();
         assert_eq!(request["method"], method.as_str());
+        if method == Method::WorktreeOpen {
+            assert_eq!(
+                request["params"],
+                serde_json::json!({"workspace_id": "w3",
+                "path": "/endpoint/existing checkout ", "focus": true, "trust_repository": false})
+            );
+        }
         if method == Method::TabClose {
             let focused = snapshot().focused_tab_id.unwrap();
             assert_eq!(

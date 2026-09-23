@@ -2,16 +2,7 @@ use herdr_client::{
     ClientEvent, Method,
     protocol::{ClientShellSnapshot, PaneSurfaceFrame, ServerMessage},
 };
-use std::{collections::VecDeque, sync::Arc, time::Instant};
-
-pub(crate) const NOTIFICATION_CAPACITY: usize = 32;
-
-#[derive(Clone)]
-pub(crate) struct CapturedNotification {
-    pub boot: String,
-    pub received: Instant,
-    pub notification: herdr_client::protocol::SemanticNotification,
-}
+use std::sync::Arc;
 
 pub(crate) type DialogResponse = Result<serde_json::Value, Arc<crate::Error>>;
 
@@ -46,8 +37,14 @@ impl std::fmt::Display for ConnectionStatus {
 
 #[derive(Clone)]
 pub struct LiveState {
-    pub(crate) notifications: VecDeque<CapturedNotification>,
     pub(crate) settings_reload: bool,
+    pub(crate) sound_events: std::collections::VecDeque<(
+        std::time::Instant,
+        herdr_client::protocol::SemanticNotification,
+    )>,
+    pub(crate) reload_sound: bool,
+    pub(crate) sound_cancel: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) sound_connection_cancel: Arc<std::sync::atomic::AtomicBool>,
     pub snapshot: Option<Arc<ClientShellSnapshot>>,
     pub surface: Option<Arc<PaneSurfaceFrame>>,
     pub status: ConnectionStatus,
@@ -58,15 +55,19 @@ pub struct LiveState {
     pub(crate) supports_workspace_get: bool,
     pub dirty: bool,
     pub(crate) dialog_response: Option<(String, Option<DialogResponse>)>,
+    pub(crate) notifications: std::collections::VecDeque<crate::notifications::Notice>,
+    pub(crate) notifications_lost: bool,
     outer_focused: Option<bool>,
     pub activation: Option<SurfaceActivation>,
     pub supports_surface: bool,
-    // One modal request, retained across coalesced snapshots until the UI observes it.
-    pub tab_rename: Option<TabRenameResult>,
+    // Bounded rename slots survive coalesced snapshots and do not overwrite a
+    // worktree operation whose dialog has already closed.
+    pub tab_rename: Option<RenameResult>,
+    pub pane_rename: Option<RenameResult>,
 }
 
 #[derive(Clone)]
-pub struct TabRenameResult {
+pub struct RenameResult {
     pub request: String,
     pub result: Option<Result<(), Arc<crate::Error>>>,
 }
@@ -84,8 +85,11 @@ pub struct SurfaceActivation {
 impl Default for LiveState {
     fn default() -> Self {
         Self {
-            notifications: VecDeque::new(),
             settings_reload: false,
+            sound_events: Default::default(),
+            reload_sound: false,
+            sound_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sound_connection_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             snapshot: None,
             surface: None,
             status: ConnectionStatus::Connecting,
@@ -95,10 +99,13 @@ impl Default for LiveState {
             supports_workspace_get: false,
             dirty: true,
             dialog_response: None,
+            notifications: Default::default(),
+            notifications_lost: false,
             outer_focused: None,
             activation: None,
             supports_surface: false,
             tab_rename: None,
+            pane_rename: None,
         }
     }
 }
@@ -157,7 +164,6 @@ impl LiveState {
     pub fn apply(&mut self, event: ClientEvent) {
         match event {
             ClientEvent::Connected(welcome) => {
-                self.notifications.clear();
                 self.settings_reload = false;
                 self.supports_workspace_get = Method::WorkspaceGet.advertised_in(&welcome.methods);
                 self.supports_surface = Method::ClientShellSurfaceSet
@@ -172,8 +178,15 @@ impl LiveState {
                 self.error = None;
             }
             ClientEvent::Snapshot(snapshot) => {
-                self.notifications
-                    .retain(|event| event.boot == snapshot.boot_id);
+                if self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|old| old.boot_id != snapshot.boot_id)
+                {
+                    self.notifications.clear();
+                    self.cancel_sounds();
+                    self.sound_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                }
                 if let Some(activation) = &mut self.activation
                     && activation.boot != snapshot.boot_id
                 {
@@ -200,8 +213,9 @@ impl LiveState {
                 }
             }
             ClientEvent::Disconnected { reason } => {
-                self.notifications.clear();
                 self.settings_reload = false;
+                self.notifications.clear();
+                self.cancel_sounds();
                 self.status = ConnectionStatus::Disconnected;
                 self.error = Some(reason);
                 self.snapshot = None;
@@ -215,10 +229,13 @@ impl LiveState {
                 {
                     *result = Some(Err(reason.clone()));
                 }
-                if let Some(rename) = &mut self.tab_rename
-                    && request_id.as_ref() == Some(&rename.request)
+                for rename in [&mut self.tab_rename, &mut self.pane_rename]
+                    .into_iter()
+                    .flatten()
                 {
-                    rename.result = Some(Err(reason));
+                    if request_id.as_ref() == Some(&rename.request) {
+                        rename.result = Some(Err(reason.clone()));
+                    }
                 }
                 if let Some(activation) = &mut self.activation
                     && request_id.as_ref() == Some(&activation.request)
@@ -230,17 +247,20 @@ impl LiveState {
                 request_id,
                 response,
             } => {
-                if let Some(rename) = &mut self.tab_rename
-                    && request_id == rename.request
+                for rename in [&mut self.tab_rename, &mut self.pane_rename]
+                    .into_iter()
+                    .flatten()
                 {
-                    rename.result = Some(
-                        match response.get("error").filter(|error| !error.is_null()) {
-                            Some(error) => {
-                                Err(Arc::new(crate::Error::DaemonResponse(error.clone())))
-                            }
-                            None => Ok(()),
-                        },
-                    );
+                    if request_id == rename.request {
+                        rename.result = Some(
+                            match response.get("error").filter(|error| !error.is_null()) {
+                                Some(error) => {
+                                    Err(Arc::new(crate::Error::DaemonResponse(error.clone())))
+                                }
+                                None => Ok(()),
+                            },
+                        );
+                    }
                 }
                 if let Some(activation) = &mut self.activation
                     && request_id == activation.request
@@ -267,42 +287,36 @@ impl LiveState {
                     *result = Some(Ok(response));
                 }
             }
-            ClientEvent::Message(ServerMessage::ReloadSoundConfig) => {
-                self.settings_reload = true;
-            }
-            ClientEvent::Message(ServerMessage::SemanticNotification(mut notification)) => {
-                let Some(snapshot) = &self.snapshot else {
-                    return;
-                };
-                if self.status != ConnectionStatus::Connected {
-                    return;
-                }
-                // Bound retained remote text as well as the number of events.
-                for value in [
-                    Some(&mut notification.title),
-                    notification.body.as_mut(),
-                    notification.agent.as_mut(),
-                    notification.workspace_id.as_mut(),
-                    notification.tab_id.as_mut(),
-                    notification.pane_id.as_mut(),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    let end = value.floor_char_boundary(2048.min(value.len()));
-                    value.truncate(end);
-                }
-                if self.notifications.len() == NOTIFICATION_CAPACITY {
-                    self.notifications.pop_front();
-                }
-                self.notifications.push_back(CapturedNotification {
-                    boot: snapshot.boot_id.clone(),
-                    received: Instant::now(),
-                    notification,
-                });
-            }
             ClientEvent::Message(ServerMessage::ClientShellError { message }) => {
                 self.error = Some(message)
+            }
+            ClientEvent::Message(ServerMessage::SemanticNotification(notification)) => {
+                if !self.status.is_connected() {
+                    return;
+                }
+                if self.sound_events.len() == crate::sound::MAX_PENDING {
+                    self.sound_events.pop_front();
+                }
+                let received = std::time::Instant::now();
+                self.sound_events
+                    .push_back((received, notification.clone()));
+                if let Some(pane) = notification.pane_id.as_ref() {
+                    self.notifications
+                        .retain(|n| n.pane_id.as_ref() != Some(pane));
+                }
+                if self.notifications.len() == crate::notifications::PENDING_LIMIT {
+                    self.notifications.pop_front();
+                    // A dropped event may have invalidated an already displayed pane.
+                    self.notifications_lost = true;
+                }
+                self.notifications.push_back(
+                    crate::notifications::Notice::new(notification, received)
+                        .with_snapshot(self.snapshot.as_deref()),
+                );
+            }
+            ClientEvent::Message(ServerMessage::ReloadSoundConfig) => {
+                self.reload_sound = true;
+                self.settings_reload = true;
             }
             _ => return,
         }
@@ -316,6 +330,13 @@ impl LiveState {
         }
         self.dirty = true;
     }
+
+    pub(crate) fn cancel_sounds(&mut self) {
+        self.sound_cancel
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.sound_events.clear();
+        self.reload_sound = false;
+    }
 }
 
 fn coherent(snapshot: &ClientShellSnapshot, surface: &PaneSurfaceFrame) -> bool {
@@ -328,51 +349,6 @@ mod tests {
     use super::*;
     use herdr_client::protocol::AgentStatus;
     use herdr_client::protocol::FrameData;
-
-    #[test]
-    fn semantic_notifications_are_bounded_and_boot_fenced() {
-        let mut state = LiveState::default();
-        state.apply(ClientEvent::Snapshot(snapshot()));
-        for index in 0..NOTIFICATION_CAPACITY + 5 {
-            state.apply(ClientEvent::Message(ServerMessage::SemanticNotification(
-                herdr_client::protocol::SemanticNotification {
-                    kind: herdr_client::protocol::SemanticNotificationKind::Custom,
-                    title: index.to_string(),
-                    body: Some("a".repeat(3000)),
-                    sound: None,
-                    agent: None,
-                    workspace_id: None,
-                    tab_id: None,
-                    pane_id: None,
-                    position: None,
-                },
-            )));
-        }
-        assert_eq!(state.notifications.len(), NOTIFICATION_CAPACITY);
-        assert_eq!(state.notifications.front().unwrap().notification.title, "5");
-        assert_eq!(
-            state
-                .notifications
-                .front()
-                .unwrap()
-                .notification
-                .body
-                .as_ref()
-                .unwrap()
-                .len(),
-            2048
-        );
-        state.apply(ClientEvent::Message(ServerMessage::Notify {
-            kind: herdr_client::protocol::NotifyKind::Sound,
-            message: "/untrusted/sound;command".into(),
-            body: None,
-        }));
-        assert_eq!(state.notifications.len(), NOTIFICATION_CAPACITY);
-        let mut reboot = snapshot();
-        Arc::make_mut(&mut reboot).boot_id = "new-boot".into();
-        state.apply(ClientEvent::Snapshot(reboot));
-        assert!(state.notifications.is_empty());
-    }
 
     #[test]
     fn dialog_response_is_correlated_and_survives_coalescing() {
@@ -411,7 +387,7 @@ mod tests {
     #[test]
     fn rename_failures_stay_typed_and_shared_across_mailbox_clones() {
         let mut state = LiveState {
-            tab_rename: Some(TabRenameResult {
+            tab_rename: Some(RenameResult {
                 request: "rename".into(),
                 result: None,
             }),

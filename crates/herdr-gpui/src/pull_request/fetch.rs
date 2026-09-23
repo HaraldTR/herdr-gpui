@@ -4,11 +4,12 @@
 
 use super::{Input, Result, parse_graphql};
 use crate::Error;
+#[cfg(unix)]
+use std::os::{fd::OwnedFd, unix::net::UnixStream};
 use std::{
     io::Read,
-    os::{fd::OwnedFd, unix::net::UnixStream},
     path::Path,
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -201,20 +202,6 @@ pub(crate) fn run(
     if cancelled() {
         return Err(Error::PrCancelled);
     }
-    let (mut reader, writer) = UnixStream::pair().map_err(|source| Error::PrProcess {
-        operation: "create process output channel",
-        source,
-    })?;
-    reader
-        .set_nonblocking(true)
-        .map_err(|source| Error::PrProcess {
-            operation: "configure process output",
-            source,
-        })?;
-    let error_writer = writer.try_clone().map_err(|source| Error::PrProcess {
-        operation: "configure process errors",
-        source,
-    })?;
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("GIT_") {
             command.env_remove(key);
@@ -230,59 +217,178 @@ pub(crate) fn run(
         .env("GH_PROMPT_DISABLED", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("NO_COLOR", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(OwnedFd::from(writer)))
-        .stderr(Stdio::from(OwnedFd::from(error_writer)));
-    let mut child = command.spawn().map_err(|source| Error::PrProcess {
-        operation: "launch Git (install git on PATH)",
-        source,
-    })?;
+        .stdin(Stdio::null());
+    let (output, mut child) = capture(command)?;
     // Command retains Stdio descriptors after spawn; release them so EOF is observable.
     command.stdout(Stdio::null()).stderr(Stdio::null());
-    let result = (|| {
-        let mut output = Vec::new();
-        let mut buffer = [0; 8192];
-        let mut eof = false;
-        loop {
-            if cancelled() {
-                return Err(Error::PrCancelled);
-            }
-            if Instant::now() >= deadline {
-                return Err(Error::PrTimeout);
-            }
-            match reader.read(&mut buffer) {
-                Ok(0) => eof = true,
-                Ok(n) => {
-                    if output.len() + n > OUTPUT_LIMIT {
-                        return Err(Error::PrSize);
-                    }
-                    output.extend_from_slice(&buffer[..n]);
-                    continue;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(source) => {
-                    return Err(Error::PrProcess {
-                        operation: "read process output",
-                        source,
-                    });
-                }
-            }
-            if let Some(status) = child.try_wait().map_err(|source| Error::PrProcess {
-                operation: "wait for process",
-                source,
-            })? && eof
-            {
-                return String::from_utf8(output)
-                    .map(|text| (status.success(), text))
-                    .map_err(|error| Error::PrEncoding(error.utf8_error()));
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-    })();
+    let result = collect(output, &mut child, deadline, cancelled);
     if result.is_err() {
         let _ = child.kill();
     }
     let _ = child.wait();
     result
+}
+
+fn spawned(source: std::io::Error) -> Error {
+    Error::PrProcess {
+        operation: "launch Git (install git on PATH)",
+        source,
+    }
+}
+
+fn unreadable(source: std::io::Error) -> Error {
+    Error::PrProcess {
+        operation: "read process output",
+        source,
+    }
+}
+
+/// Merges the child's stdout and stderr into one stream this process can poll.
+#[cfg(unix)]
+fn capture(command: &mut Command) -> crate::Result<(UnixStream, Child)> {
+    let (reader, writer) = UnixStream::pair().map_err(|source| Error::PrProcess {
+        operation: "create process output channel",
+        source,
+    })?;
+    reader
+        .set_nonblocking(true)
+        .map_err(|source| Error::PrProcess {
+            operation: "configure process output",
+            source,
+        })?;
+    let error_writer = writer.try_clone().map_err(|source| Error::PrProcess {
+        operation: "configure process errors",
+        source,
+    })?;
+    command
+        .stdout(Stdio::from(OwnedFd::from(writer)))
+        .stderr(Stdio::from(OwnedFd::from(error_writer)));
+    let child = command.spawn().map_err(spawned)?;
+    Ok((reader, child))
+}
+
+/// Windows cannot hand a socket to a child as its standard streams, so the two
+/// halves of the output join in an anonymous pipe instead.
+#[cfg(windows)]
+fn capture(command: &mut Command) -> crate::Result<(std::io::PipeReader, Child)> {
+    let (reader, writer) = std::io::pipe().map_err(|source| Error::PrProcess {
+        operation: "create process output channel",
+        source,
+    })?;
+    let error_writer = writer.try_clone().map_err(|source| Error::PrProcess {
+        operation: "configure process errors",
+        source,
+    })?;
+    command
+        .stdout(Stdio::from(writer))
+        .stderr(Stdio::from(error_writer));
+    let child = command.spawn().map_err(spawned)?;
+    Ok((reader, child))
+}
+
+/// Reads the merged output under the caller's deadline and cancellation. The
+/// child is only reaped once its output has ended, so nothing is truncated.
+#[cfg(unix)]
+fn collect(
+    mut reader: UnixStream,
+    child: &mut Child,
+    deadline: Instant,
+    cancelled: &impl Fn() -> bool,
+) -> crate::Result<(bool, String)> {
+    let mut output = Vec::new();
+    let mut buffer = [0; 8192];
+    let mut eof = false;
+    loop {
+        if cancelled() {
+            return Err(Error::PrCancelled);
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::PrTimeout);
+        }
+        match reader.read(&mut buffer) {
+            Ok(0) => eof = true,
+            Ok(n) => {
+                if output.len() + n > OUTPUT_LIMIT {
+                    return Err(Error::PrSize);
+                }
+                output.extend_from_slice(&buffer[..n]);
+                continue;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(source) => return Err(unreadable(source)),
+        }
+        if let Some(status) = child.try_wait().map_err(|source| Error::PrProcess {
+            operation: "wait for process",
+            source,
+        })? && eof
+        {
+            return String::from_utf8(output)
+                .map(|text| (status.success(), text))
+                .map_err(|error| Error::PrEncoding(error.utf8_error()));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// An anonymous pipe on Windows cannot be made nonblocking, so the reads run on
+/// their own thread and the deadline is enforced here. Killing the child closes
+/// the last writer, which ends that thread.
+#[cfg(windows)]
+fn collect(
+    mut reader: std::io::PipeReader,
+    child: &mut Child,
+    deadline: Instant,
+    cancelled: &impl Fn() -> bool,
+) -> crate::Result<(bool, String)> {
+    let (sender, reads) = std::sync::mpsc::channel();
+    thread::Builder::new()
+        .name("herdr-pr-output".into())
+        .spawn(move || {
+            let mut output = Vec::new();
+            let mut buffer = [0; 8192];
+            let result = loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break Ok(output),
+                    Ok(n) => {
+                        if output.len() + n > OUTPUT_LIMIT {
+                            break Err(Error::PrSize);
+                        }
+                        output.extend_from_slice(&buffer[..n]);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(source) => break Err(unreadable(source)),
+                }
+            };
+            let _ = sender.send(result);
+        })
+        .map_err(unreadable)?;
+    let mut ended: Option<Vec<u8>> = None;
+    loop {
+        if cancelled() {
+            return Err(Error::PrCancelled);
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::PrTimeout);
+        }
+        if ended.is_none() {
+            match reads.try_recv() {
+                Ok(result) => ended = Some(result?),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return Err(unreadable(std::io::Error::other("output reader stopped")));
+                }
+            }
+        }
+        if let Some(status) = child.try_wait().map_err(|source| Error::PrProcess {
+            operation: "wait for process",
+            source,
+        })? && let Some(output) = ended.take()
+        {
+            return String::from_utf8(output)
+                .map(|text| (status.success(), text))
+                .map_err(|error| Error::PrEncoding(error.utf8_error()));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }

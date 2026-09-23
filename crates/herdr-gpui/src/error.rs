@@ -9,14 +9,92 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("ui.toast.delay_seconds must be between 0 and 3600")]
+    SoundDelay,
+    #[error("Sound configuration exceeds 1 MiB")]
+    SoundConfigSize,
+    #[error("Could not open audio output: {0}")]
+    SoundDevice(#[from] rodio::DeviceSinkError),
+    #[error("Audio output failed: {0}")]
+    SoundStream(#[from] rodio::cpal::StreamError),
+    #[error("Could not decode MP3 sound: {0}")]
+    SoundDecode(#[from] rodio::decoder::DecoderError),
+    #[error("Could not read sound file {}: {source}", path.display())]
+    SoundFile {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("Sound must be a regular file of at most 16 MiB")]
+    SoundFileSize,
+    #[error("Audio playback timed out")]
+    SoundTimeout,
+    #[error("Audio playback cancelled")]
+    SoundCancelled,
     #[error(
         "PR lookup requires your owned local session socket. Select Local using its standard socket; SSH and other socket locations are unsupported."
     )]
     PrUntrustedEndpoint,
+    #[error("The selected pane is no longer on screen.")]
+    SelectionStale,
+    #[error("Selection is too large to copy.")]
+    SelectionSize,
+    #[error("File drop exceeds 256 paths or 64 KiB of quoted text.")]
+    FileDropSize,
+    #[error("Dropped paths must be UTF-8.")]
+    FileDropEncoding,
+    #[error("Dropped paths must not contain control characters.")]
+    FileDropControl,
+    #[error("Dropped paths must not be empty.")]
+    FileDropEmptyPath,
+    #[error("Could not {operation} the local image file.")]
+    ImageFile {
+        operation: &'static str,
+        #[source]
+        source: io::Error,
+    },
+    #[error("The local image must be a regular file.")]
+    ImageFileType,
+    #[error("The image must not be empty.")]
+    ImageSize,
+    #[error("The image exceeds Herdr's {limit}-byte upload limit.")]
+    ImageTooLarge { limit: usize },
+    #[error("The image exceeds the {limit}-byte resize input limit.")]
+    ImageInputTooLarge { limit: usize },
+    #[error("The image exceeds the resize pixel or decoded-memory limit.")]
+    ImageDecodeLimit,
+    #[error("Oversized GIF, WebP, and animated PNG images cannot be resized safely.")]
+    ImageAnimationResize,
+    #[error("Could not decode the oversized image.")]
+    ImageDecode(#[source] image::ImageError),
+    #[error("Could not encode the resized image.")]
+    ImageEncode(#[source] image::ImageError),
+    #[error("Reading the local image timed out (3 seconds).")]
+    ImageReadTimeout,
+    #[error("TIFF and SVG clipboard images are not supported. Use PNG, JPEG, GIF, WebP, or BMP.")]
+    ImageFormat,
+    #[error("Clipboard content exceeds the {limit}-byte limit.")]
+    ClipboardSize { limit: usize },
+    #[error("Clipboard text is not valid UTF-8.")]
+    ClipboardEncoding(#[source] std::str::Utf8Error),
+    #[error("The clipboard changed while reading. Try pasting again.")]
+    ClipboardChanged,
+    #[error("Clipboard acquisition timed out.")]
+    ClipboardTimeout,
+    #[error("Could not read the clipboard using wl-paste or xclip.")]
+    ClipboardProcess(#[source] io::Error),
+    #[error("Remote clipboard acquisition is not supported on this platform.")]
+    ClipboardUnsupported,
     #[error("Checkout lookup failed. Dismiss and reopen the menu.")]
     DeletionLookup,
     #[error("Reopen the deletion dialog.")]
     MissingDeletion,
+    #[error("Invalid or oversized worktree list. Dismiss and reopen the menu.")]
+    WorktreeList,
+    #[error("Malformed worktree list. Dismiss and reopen the menu.")]
+    WorktreeListDecode(#[source] serde_json::Error),
+    #[error("Select a checkout from the daemon's worktree list.")]
+    WorktreeSelection,
     #[error("{method}: {source}")]
     Request {
         method: herdr_client::Method,
@@ -142,6 +220,10 @@ pub enum Error {
         "No secure credential store configured. Explicitly opt in with [github] allow_plaintext_credentials = true, or use GH_TOKEN / GITHUB_TOKEN."
     )]
     CredentialPolicy,
+    #[error(
+        "No GitHub credential store is available on this platform. Use GH_TOKEN / GITHUB_TOKEN."
+    )]
+    CredentialUnsupported,
     #[error("PR lookup cancelled.")]
     PrCancelled,
     #[error("PR lookup timed out (15 seconds).")]
@@ -217,6 +299,8 @@ pub enum Error {
     MissingHome,
     #[error("XDG_CONFIG_HOME must be an absolute path")]
     RelativeConfigRoot,
+    #[error("Cannot migrate {}: {} already contains different settings. Merge your old settings into the local file, then remove the old config; it will be regenerated.", original.display(), local.display())]
+    ConfigMigrationConflict { original: PathBuf, local: PathBuf },
     #[error("theme must not be empty")]
     EmptyTheme,
     #[error("{0}.family must not be empty")]
@@ -227,6 +311,8 @@ pub enum Error {
     EmptyFontFallback(&'static str),
     #[error("{0}.fallback must list at most 8 families")]
     TooManyFontFallbacks(&'static str),
+    #[error("layout.sidebar_gap must be finite and between 0 and 64 logical pixels")]
+    InvalidSidebarGap,
     #[error("theme must be a name, absolute path, or ~/ path")]
     InvalidThemePath,
     #[error("theme {name:?} not found in {directories:?}")]
@@ -249,6 +335,8 @@ pub enum Error {
     NotConnected,
     #[error("The original tab changed or no longer exists. Cancel and try again.")]
     StaleTab,
+    #[error("The original pane changed or no longer exists. Cancel and try again.")]
+    StalePane,
     #[error("Enter a tab name.")]
     EmptyTabName,
     #[error("No tab selected.")]

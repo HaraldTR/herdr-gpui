@@ -4,9 +4,10 @@
 
 use super::HerdrWindow;
 use crate::{
-    APP_VERSION, CheckForUpdates, RunCommand, ShowHerdrNotDetected, ShowUpdatePreview, TAB_HEIGHT,
-    TAB_WIDTH, controls::Command, fonts::StyledFont, navigation::NavigationTarget,
-    state::ConnectionStatus, terminal::*, worktree_banner,
+    APP_VERSION, CheckForUpdates, PlaySound, RunCommand, ShowHerdrNotDetected, ShowUpdatePreview,
+    TAB_HEIGHT, TAB_WIDTH, actions::ShowToastPreview, config::ClipboardToastPosition,
+    controls::Command, fonts::StyledFont, navigation::NavigationTarget, state::ConnectionStatus,
+    terminal::*, worktree_banner,
 };
 use gpui::{prelude::*, *};
 use herdr_client::ConnectOptions;
@@ -132,14 +133,35 @@ impl Render for HerdrWindow {
         let focus = self.focus.clone();
         let cell_width = self.cell_width;
         let painter = self.painter.clone();
-        self.hovered_terminal_link = self.terminal_link_at(window.mouse_position()).is_some();
+        // The highlight is grid coordinates, so it paints with the frame that
+        // owns the cells rather than being recomputed from the pointer here.
+        let selection = self.selection.clone();
+        self.hovered_terminal_link = self.terminal_link_at(window.mouse_position()).is_some()
+            && (window.modifiers().shift
+                || self
+                    .terminal_mouse_at(window.mouse_position())
+                    .is_none_or(|hit| !hit.mouse_reporting));
+        // Pad the terminal itself: the canvas bounds that painting, hit testing,
+        // and IME placement all read then already exclude the gap.
+        let sidebar_gap = if self.sidebar_visible {
+            self.config.layout.sidebar_gap
+        } else {
+            0.
+        };
         let terminal = div()
             .id("terminal")
+            .debug_selector(|| "terminal".into())
+            .pl(px(sidebar_gap))
             .when(self.hovered_terminal_link, |terminal| {
                 terminal.cursor_pointer()
             })
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                let hovered = this.terminal_link_at(event.position).is_some();
+                this.terminal_mouse_hover(event, cx);
+                let hovered = this.terminal_link_at(event.position).is_some()
+                    && (event.modifiers.shift
+                        || this
+                            .terminal_mouse_at(event.position)
+                            .is_none_or(|hit| !hit.mouse_reporting));
                 if hovered != this.hovered_terminal_link {
                     this.hovered_terminal_link = hovered;
                     cx.notify();
@@ -155,41 +177,57 @@ impl Render for HerdrWindow {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
+            .on_drop(cx.listener(Self::drop_terminal_files))
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.terminal_mouse_down(event, window, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if this.terminal_mouse_down(event, window, cx) {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    this.open_pane_menu_at(event.position, window, cx);
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if this.terminal_mouse_down(event, window, cx) {
+                        return;
+                    }
                     this.pressed_terminal_link = this
                         .terminal_link_at(event.position)
                         .map(|url| (url, event.position));
                     if this.menu.page.is_some() {
                         return;
                     }
+                    // A press on a link may still turn into a drag across it,
+                    // so the selection starts either way; the click that opens
+                    // the link is the one that never left its half-cell.
+                    this.begin_selection(event.position, cx);
                     if this.pressed_terminal_link.is_some() {
                         cx.stop_propagation();
                         return;
                     }
                     window.focus(&this.focus);
-                    if let Some(surface) = &this.live.surface
-                        && surface.popup.is_none()
+                    if this.input_ready()
+                        && let Some(surface) = &this.live.surface
                     {
-                        let col = ((event.position.x - this.bounds.origin.x).to_f64()
-                            / this.cell_width as f64)
-                            .floor() as u16;
-                        let row = ((event.position.y - this.bounds.origin.y).to_f64()
-                            / this.config.terminal.line_height() as f64)
-                            .floor() as u16;
-                        let pane = surface
-                            .panes
-                            .iter()
-                            .find(|p| {
-                                col >= p.rect.x
-                                    && col < p.rect.x.saturating_add(p.rect.width)
-                                    && row >= p.rect.y
-                                    && row < p.rect.y.saturating_add(p.rect.height)
-                            })
-                            .map(|p| p.pane_id.clone());
+                        let pane = pane_at(
+                            surface,
+                            this.bounds,
+                            event.position,
+                            this.cell_width,
+                            this.config.terminal.line_height(),
+                        )
+                        .map(str::to_owned);
                         if let Some(id) = pane {
-                            this.navigate(NavigationTarget::Pane(&id), cx);
+                            this.focus_clicked_pane(&id, cx);
                         }
                     }
                 }),
@@ -218,7 +256,11 @@ impl Render for HerdrWindow {
                         let entity = paint_entity.clone();
                         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
-                                entity.update(cx, |this, _| {
+                                entity.update(cx, |this, cx| {
+                                    if this.terminal_mouse_move(event, cx) {
+                                        cx.stop_propagation();
+                                        return;
+                                    }
                                     if this.pressed_terminal_link.as_ref().is_some_and(
                                         |(_, position)| {
                                             (event.position.x - position.x).abs() > px(4.)
@@ -226,6 +268,34 @@ impl Render for HerdrWindow {
                                         },
                                     ) {
                                         this.pressed_terminal_link = None;
+                                    }
+                                    // A drag that leaves the terminal keeps
+                                    // selecting, and hover work elsewhere stays
+                                    // out of the gesture.
+                                    if this.extend_selection(event.position, cx) {
+                                        cx.stop_propagation();
+                                    }
+                                });
+                            }
+                        });
+                        let released = paint_entity.clone();
+                        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture {
+                                released.update(cx, |this, cx| {
+                                    // Global: the overlay occludes the opener, and release
+                                    // may also precede the overlay's first frame.
+                                    if matches!(
+                                        event.button,
+                                        MouseButton::Left | MouseButton::Right
+                                    ) {
+                                        this.menu.opening_right_click = false;
+                                    }
+                                    if this.terminal_mouse_up(event, cx)
+                                        || (event.button == MouseButton::Left
+                                            && !cx.has_active_drag()
+                                            && this.release_selection(cx))
+                                    {
+                                        cx.stop_propagation();
                                     }
                                 });
                             }
@@ -236,11 +306,28 @@ impl Render for HerdrWindow {
                             cx,
                         );
                         if let Some(surface) = &surface {
+                            // The highlight belongs to the frame that owns the
+                            // cells, so only one of the two paints it.
+                            let highlight = |owned: bool| {
+                                selection
+                                    .as_ref()
+                                    .filter(|_| owned)
+                                    .map(|selection| {
+                                        selection.rows(surface, cell_width, cell_height).collect()
+                                    })
+                                    .unwrap_or_default()
+                            };
+                            let panes: Vec<_> = highlight(
+                                selection
+                                    .as_ref()
+                                    .is_some_and(|selection| selection.in_panes()),
+                            );
                             painter.borrow_mut().paint_frame(
                                 &surface.frame,
                                 bounds.origin,
                                 cell_width,
                                 &font,
+                                &panes,
                                 window,
                                 cx,
                             );
@@ -251,11 +338,16 @@ impl Render for HerdrWindow {
                                     cell_width,
                                     cell_height,
                                 );
+                                let rows: Vec<_> =
+                                    highlight(selection.as_ref().is_some_and(|selection| {
+                                        selection.in_popup(&popup.terminal_id)
+                                    }));
                                 painter.borrow_mut().paint_frame(
                                     &popup.frame,
                                     bounds.origin + offset,
                                     cell_width,
                                     &font,
+                                    &rows,
                                     window,
                                     cx,
                                 );
@@ -264,7 +356,57 @@ impl Render for HerdrWindow {
                     },
                 )
                 .size_full(),
-            );
+            )
+            // Direct feedback for the user's own gesture, not a daemon notice:
+            // it sits over the cells it copied and needs no dismissing.
+            .when(self.copy_feedback.is_some(), |terminal| {
+                use ClipboardToastPosition::*;
+                let position = self.config.clipboard_toast.position;
+                terminal.child(
+                    div()
+                        .absolute()
+                        .map(|row| match position {
+                            TopLeft | TopCenter | TopRight => row.top(px(12.)),
+                            BottomLeft | BottomCenter | BottomRight => row.bottom(px(12.)),
+                        })
+                        .map(|row| match position {
+                            TopLeft | BottomLeft => row.justify_start(),
+                            TopCenter | BottomCenter => row.justify_center(),
+                            TopRight | BottomRight => row.justify_end(),
+                        })
+                        // The pane's own padding is not part of the terminal:
+                        // the flash spans the cells, so centering centers on
+                        // them and a corner is the corner of the grid.
+                        .left(px(sidebar_gap))
+                        .right_0()
+                        .px(px(12.))
+                        .flex()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .debug_selector(|| "copy-feedback".into())
+                                .min_w_0()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .px(px(12.))
+                                .py(px(6.))
+                                .rounded(px(6.))
+                                .border_1()
+                                .border_color(rgb(self.theme.palette[2]))
+                                .bg(rgb(self.theme.surface))
+                                .text_color(rgb(self.theme.foreground))
+                                .child(
+                                    div()
+                                        .size(px(6.))
+                                        .flex_none()
+                                        .rounded_full()
+                                        .bg(rgb(self.theme.palette[2])),
+                                )
+                                .child(div().truncate().child("copied to clipboard")),
+                        ),
+                )
+            });
         let status = self.live.status_text(self.local_error.as_deref());
         div()
             .on_action(cx.listener(|this, action: &RunCommand, window, cx| {
@@ -279,6 +421,26 @@ impl Render for HerdrWindow {
             }))
             .on_action(cx.listener(|this, _: &ShowUpdatePreview, window, cx| {
                 this.open_app_update(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::actions::ShowUpdateDownloadPreview, window, cx| {
+                this.open_update_progress_preview(
+                    crate::updater::State::Downloading { received: 50_000_000, total: 100_000_000 },
+                    window,
+                    cx,
+                );
+            }))
+            .on_action(cx.listener(|this, _: &crate::actions::ShowUpdateHomebrewPreview, window, cx| {
+                this.open_update_progress_preview(
+                    crate::updater::State::Upgrading { detail: "Refreshing Homebrew metadata with brew update...".into() },
+                    window,
+                    cx,
+                );
+            }))
+            .on_action(cx.listener(|this, action: &ShowToastPreview, _, cx| {
+                this.show_toast_preview(action.kind, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PlaySound, _, _| {
+                this.sound.preview();
             }))
             .size_full()
             .relative()
@@ -496,7 +658,8 @@ impl Render for HerdrWindow {
                             })),
                     ),
             )
-            .child(self.notifications.render_notifications(&self.theme))
+            .children(self.render_toasts(window, cx))
+            .children(self.render_file_transfer(window, cx))
             .when(self.menu.page.is_some(), |root| {
                 root.child(self.render_menu(window, cx))
             })

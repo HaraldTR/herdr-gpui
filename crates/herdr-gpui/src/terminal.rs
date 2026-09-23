@@ -1,5 +1,7 @@
 mod links;
+mod selection;
 pub(crate) use links::link_at;
+pub(crate) use selection::Selection;
 
 use crate::config::Theme;
 use gpui::{
@@ -77,6 +79,46 @@ pub(crate) enum InputTarget {
     Popup(String),
 }
 
+/// Pane context actions include the pane's chrome, but never a popup or the
+/// unused area outside the composite surface. Coordinates use the paint origin.
+pub(crate) fn pane_at(
+    surface: &PaneSurfaceFrame,
+    bounds: Bounds<Pixels>,
+    position: Point<Pixels>,
+    cell_width: f32,
+    cell_height: f32,
+) -> Option<&str> {
+    let x = (position.x - bounds.origin.x).to_f64() as f32;
+    let y = (position.y - bounds.origin.y).to_f64() as f32;
+    if surface.popup.is_some()
+        || !x.is_finite()
+        || !y.is_finite()
+        || !cell_width.is_finite()
+        || !cell_height.is_finite()
+        || cell_width <= 0.
+        || cell_height <= 0.
+        || x < 0.
+        || y < 0.
+        || x >= bounds.size.width.to_f64() as f32
+        || y >= bounds.size.height.to_f64() as f32
+        || x >= f32::from(surface.frame.width) * cell_width
+        || y >= f32::from(surface.frame.height) * cell_height
+    {
+        return None;
+    }
+    surface
+        .panes
+        .iter()
+        .find(|pane| {
+            let r = pane.rect;
+            x >= f32::from(r.x) * cell_width
+                && x < (u32::from(r.x) + u32::from(r.width)) as f32 * cell_width
+                && y >= f32::from(r.y) * cell_height
+                && y < (u32::from(r.y) + u32::from(r.height)) as f32 * cell_height
+        })
+        .map(|pane| pane.pane_id.as_str())
+}
+
 #[derive(Default)]
 pub struct WheelAccumulator {
     target: Option<InputTarget>,
@@ -115,25 +157,42 @@ impl WheelAccumulator {
 
 pub struct WheelTarget {
     pub target: InputTarget,
+    pub(crate) mouse_reporting: bool,
+    pub(crate) bounds: Bounds<Pixels>,
     position: ClientMousePosition,
     geometry: Option<ClientMouseGeometry>,
 }
 
 impl WheelTarget {
     pub fn event(&self, lines: i16, modifiers: Modifiers) -> ClientPaneInputEvent {
-        ClientPaneInputEvent::Mouse {
-            kind: if lines > 0 {
+        let mut event = self.mouse_event(
+            if lines > 0 {
                 ClientMouseKind::ScrollUp
             } else {
                 ClientMouseKind::ScrollDown
             },
+            modifiers,
+        );
+        if let ClientPaneInputEvent::Mouse { lines: count, .. } = &mut event {
+            *count = lines.unsigned_abs();
+        }
+        event
+    }
+
+    pub(crate) fn mouse_event(
+        &self,
+        kind: ClientMouseKind,
+        modifiers: Modifiers,
+    ) -> ClientPaneInputEvent {
+        ClientPaneInputEvent::Mouse {
+            kind,
             position: self.position,
             geometry: self.geometry,
             modifiers: u8::from(modifiers.shift)
                 | (u8::from(modifiers.control) << 1)
                 | (u8::from(modifiers.alt) << 2)
                 | (u8::from(modifiers.platform) << 3),
-            lines: lines.unsigned_abs(),
+            lines: 1,
         }
     }
 }
@@ -156,7 +215,7 @@ pub fn wheel_target(
     {
         return None;
     }
-    let (target, rect, pixel_mouse, width_px, height_px, origin_x, origin_y) =
+    let (target, rect, mouse_reporting, pixel_mouse, width_px, height_px, origin_x, origin_y) =
         if let Some(popup) = &surface.popup {
             let origin = popup_origin(&surface.frame, &popup.frame, cell_width, cell_height);
             (
@@ -167,6 +226,7 @@ pub fn wheel_target(
                     width: popup.frame.width,
                     height: popup.frame.height,
                 },
+                popup.mouse_reporting,
                 popup.sgr_pixel_mouse,
                 popup.pixel_width,
                 popup.pixel_height,
@@ -184,6 +244,7 @@ pub fn wheel_target(
             (
                 InputTarget::Pane(pane.pane_id.clone()),
                 pane.inner_rect,
+                pane.mouse_reporting,
                 pane.sgr_pixel_mouse,
                 pane.pixel_width,
                 pane.pixel_height,
@@ -220,6 +281,14 @@ pub fn wheel_target(
     };
     Some(WheelTarget {
         target,
+        mouse_reporting,
+        bounds: Bounds::new(
+            point(px(origin_x), px(origin_y)),
+            size(
+                px(rect.width as f32 * cell_width),
+                px(rect.height as f32 * cell_height),
+            ),
+        ),
         position,
         geometry,
     })
@@ -366,6 +435,111 @@ mod tests {
             event.delta = ScrollDelta::Lines(point(0., 0.));
             assert_eq!(wheel.lines(&pane, &event, CELL_HEIGHT), 0);
         }
+    }
+
+    #[test]
+    fn pane_context_hit_testing_uses_canvas_origin_and_rects_not_focus() {
+        use herdr_client::protocol::*;
+        let frame = FrameData {
+            cells: vec![],
+            width: 80,
+            height: 24,
+            cursor: None,
+            hyperlinks: vec![],
+            graphics: vec![],
+        };
+        let pane = PaneSurfacePane {
+            pane_id: "left".into(),
+            content_revision: 1,
+            rect: SurfaceRect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 24,
+            },
+            inner_rect: SurfaceRect {
+                x: 1,
+                y: 1,
+                width: 38,
+                height: 22,
+            },
+            scrollbar_rect: None,
+            scroll: None,
+            focused: true,
+            mouse_reporting: false,
+            sgr_pixel_mouse: false,
+            alternate_screen_active: false,
+            pixel_width: 380,
+            pixel_height: 440,
+        };
+        let mut right = pane.clone();
+        right.pane_id = "right".into();
+        right.rect.x = 40;
+        right.inner_rect.x = 41;
+        right.focused = false;
+        let mut surface = PaneSurfaceFrame {
+            boot_id: "boot".into(),
+            projection_revision: 1,
+            surface_revision: 1,
+            frame: frame.clone(),
+            panes: vec![pane, right],
+            splits: vec![],
+            popup: None,
+            graphics: Default::default(),
+        };
+        let origin = point(px(217.), px(93.));
+        let bounds = Bounds::new(origin, size(px(700.), px(500.)));
+        let hit = |surface: &PaneSurfaceFrame, x, y| {
+            pane_at(surface, bounds, origin + point(px(x), px(y)), 8.5, 20.).map(str::to_owned)
+        };
+        // Border cells belong to the pane; the exact split edge belongs to its neighbor.
+        assert_eq!(hit(&surface, 0., 0.).as_deref(), Some("left"));
+        assert_eq!(hit(&surface, 339.9, 20.).as_deref(), Some("left"));
+        assert_eq!(hit(&surface, 340., 20.).as_deref(), Some("right"));
+        assert_eq!(hit(&surface, 679.9, 479.9).as_deref(), Some("right"));
+        for (x, y) in [
+            (-0.1, 20.),
+            (10., -0.1),
+            (680., 20.),
+            (10., 480.),
+            (f32::NAN, 20.),
+            (10., f32::INFINITY),
+        ] {
+            assert!(hit(&surface, x, y).is_none());
+        }
+        for invalid in [0., -1., f32::NAN, f32::INFINITY] {
+            assert!(pane_at(&surface, bounds, origin, invalid, 20.).is_none());
+            assert!(pane_at(&surface, bounds, origin, 8.5, invalid).is_none());
+        }
+        let clipped = Bounds::new(origin, size(px(350.), px(300.)));
+        assert!(
+            pane_at(
+                &surface,
+                clipped,
+                origin + point(px(351.), px(20.)),
+                8.5,
+                20.
+            )
+            .is_none()
+        );
+        surface.popup = Some(Box::new(ClientShellPopupSurface {
+            terminal_id: "popup".into(),
+            title: String::new(),
+            width: None,
+            height: None,
+            frame: FrameData {
+                width: 20,
+                height: 10,
+                ..frame
+            },
+            mouse_reporting: true,
+            sgr_pixel_mouse: false,
+            pixel_width: 170,
+            pixel_height: 200,
+        }));
+        // Even outside the popup, covered panes must not receive context actions.
+        assert!(hit(&surface, 0., 0.).is_none());
+        assert!(hit(&surface, 400., 200.).is_none());
     }
 
     #[test]

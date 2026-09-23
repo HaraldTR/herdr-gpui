@@ -21,6 +21,9 @@ pub enum Command {
     CloseTab,
     TabNumber(u8),
     ToggleSidebar,
+    IncreaseFontSize,
+    DecreaseFontSize,
+    ResetFontSize,
     Settings,
     Keybinds,
     Themes,
@@ -30,6 +33,7 @@ pub enum Command {
     Quit,
     Logs,
     About,
+    OpenNotificationTarget,
 }
 
 pub struct CommandInfo {
@@ -39,6 +43,11 @@ pub struct CommandInfo {
 }
 
 pub const COMMANDS: &[CommandInfo] = &[
+    CommandInfo {
+        command: Command::OpenNotificationTarget,
+        label: "Open Notification Target",
+        shortcut: "cmd-alt-n",
+    },
     CommandInfo {
         command: Command::Logs,
         label: "GPUI Logs",
@@ -173,6 +182,21 @@ pub const COMMANDS: &[CommandInfo] = &[
         command: Command::ToggleSidebar,
         label: "Toggle Sidebar",
         shortcut: "cmd-b",
+    },
+    CommandInfo {
+        command: Command::IncreaseFontSize,
+        label: "Increase Font Size",
+        shortcut: "cmd-=",
+    },
+    CommandInfo {
+        command: Command::DecreaseFontSize,
+        label: "Decrease Font Size",
+        shortcut: "cmd--",
+    },
+    CommandInfo {
+        command: Command::ResetFontSize,
+        label: "Reset Font Size",
+        shortcut: "cmd-0",
     },
     CommandInfo {
         command: Command::Settings,
@@ -314,6 +338,9 @@ pub fn request(command: Command, snapshot: &ClientShellSnapshot) -> Option<(Meth
         }
         Command::NewWindow
         | Command::ToggleSidebar
+        | Command::IncreaseFontSize
+        | Command::DecreaseFontSize
+        | Command::ResetFontSize
         | Command::Settings
         | Command::Keybinds
         | Command::Themes
@@ -322,7 +349,8 @@ pub fn request(command: Command, snapshot: &ClientShellSnapshot) -> Option<(Meth
         | Command::Reconnect
         | Command::Quit
         | Command::Logs
-        | Command::About => return None,
+        | Command::About
+        | Command::OpenNotificationTarget => return None,
     })
 }
 
@@ -342,6 +370,7 @@ mod tests {
     fn catalog_has_all_native_commands_and_gpui_shortcuts() {
         use Command::*;
         let expected = [
+            (OpenNotificationTarget, "cmd-alt-n"),
             (Logs, ""),
             (NewWindow, "cmd-shift-n"),
             (Workspace, "cmd-n"),
@@ -369,6 +398,9 @@ mod tests {
             (TabNumber(8), "cmd-8"),
             (TabNumber(9), "cmd-9"),
             (ToggleSidebar, "cmd-b"),
+            (IncreaseFontSize, "cmd-="),
+            (DecreaseFontSize, "cmd--"),
+            (ResetFontSize, "cmd-0"),
             (Settings, "cmd-,"),
             (Keybinds, "cmd-/"),
             (Themes, ""),
@@ -379,6 +411,18 @@ mod tests {
             (About, ""),
         ];
         assert_eq!(COMMANDS.len(), expected.len());
+        let shortcuts: std::collections::HashSet<_> = COMMANDS
+            .iter()
+            .filter(|info| !info.shortcut.is_empty())
+            .map(|info| info.shortcut)
+            .collect();
+        assert_eq!(
+            shortcuts.len(),
+            COMMANDS
+                .iter()
+                .filter(|info| !info.shortcut.is_empty())
+                .count()
+        );
         for (info, (command, shortcut)) in COMMANDS.iter().zip(expected) {
             assert_eq!(info.command, command);
             assert_eq!(info.shortcut, shortcut);
@@ -391,13 +435,32 @@ mod tests {
         }
     }
 
+    /// `cmd--` is the one shortcut whose key is itself the separator, so it
+    /// exercises a parser branch no other entry reaches. Binding an unparseable
+    /// keystroke would fail at startup rather than here.
+    #[test]
+    fn every_catalog_shortcut_parses_as_a_keystroke() {
+        for info in COMMANDS.iter().filter(|info| !info.shortcut.is_empty()) {
+            let keystroke = gpui::Keystroke::parse(info.shortcut)
+                .unwrap_or_else(|error| panic!("{}: {error}", info.shortcut));
+            assert!(keystroke.modifiers.platform, "{}", info.shortcut);
+        }
+        let minus = gpui::Keystroke::parse("cmd--").unwrap();
+        assert_eq!(minus.key, "-");
+        assert!(!minus.modifiers.shift);
+    }
+
     #[test]
     fn gui_commands_never_send_daemon_requests() {
         let s = snapshot();
         for command in [
+            Command::OpenNotificationTarget,
             Command::Logs,
             Command::NewWindow,
             Command::ToggleSidebar,
+            Command::IncreaseFontSize,
+            Command::DecreaseFontSize,
+            Command::ResetFontSize,
             Command::Settings,
             Command::Keybinds,
             Command::Themes,

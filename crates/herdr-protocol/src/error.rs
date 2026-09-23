@@ -14,6 +14,12 @@ pub enum Error {
     FrameLimit,
     #[error("empty frame")]
     EmptyFrame,
+    #[error("clipboard image must contain 1 byte through 16 MiB")]
+    ClipboardImageSize,
+    #[error("unsupported clipboard image extension")]
+    ClipboardImageExtension,
+    #[error("clipboard image target must contain 1 through 1024 bytes")]
+    ClipboardImageTarget,
     #[error("trailing frame bytes")]
     TrailingBytes,
     #[error("cell count does not match frame dimensions")]

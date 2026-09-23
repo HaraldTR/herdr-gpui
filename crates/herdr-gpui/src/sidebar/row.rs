@@ -5,8 +5,8 @@
 #[cfg(any(test, feature = "integration-test"))]
 use super::layout_tests;
 use super::{
-    ARROW_RESERVE, CHILD_INDENT, ICON_RESERVE, LABEL_GAP, ROW_PADDING, STATUS_WIDTH, TREE_GUTTER,
-    agents::Indicators, glyph_width, line_height, segment_budgets, status_indicator,
+    ARROW_RESERVE, ICON_RESERVE, STATUS_WIDTH, agents::Indicators, glyph_width,
+    layout::SidebarLayout, line_height, segment_budgets, status_indicator,
 };
 use crate::config::{FontConfig, Theme};
 use gpui::{prelude::*, *};
@@ -76,6 +76,7 @@ pub(super) fn tree_lines(
     gutter: Bounds<Pixels>,
     tree: RowTree,
     font: &FontConfig,
+    padding: f32,
     scale: f32,
 ) -> [Bounds<Pixels>; 2] {
     let device = |value: Pixels| f32::from(value) * scale;
@@ -85,8 +86,9 @@ pub(super) fn tree_lines(
     // The trunk runs down the gutter's leading edge; the tick crosses it at the
     // status dot's middle row and stops where the dot begins.
     let x = snap(gutter.origin.x);
-    let middle =
-        logical((device(gutter.origin.y + px(4. + line_height(font) / 2.)) - weight / 2.).round());
+    let middle = logical(
+        (device(gutter.origin.y + px(padding + line_height(font) / 2.)) - weight / 2.).round(),
+    );
     let end = if tree == RowTree::LastChild {
         middle + logical(weight)
     } else {
@@ -118,8 +120,8 @@ impl RowBadge {
         (pr.is_some() || dirty).then_some(Self { pr, dirty })
     }
 
-    pub(super) fn width(&self, font: &FontConfig) -> f32 {
-        let pr = self.pr.as_ref().map_or(0., |pr| pr.width(font));
+    pub(super) fn width(&self, font: &FontConfig, layout: &dyn SidebarLayout) -> f32 {
+        let pr = self.pr.as_ref().map_or(0., |pr| pr.width(font, layout));
         // The dot sits on the number's line, a glyph of space ahead of it.
         pr + if self.dirty {
             2. * glyph_width(font)
@@ -151,12 +153,12 @@ impl PrBadge {
     /// Reserved width. Sidebar labels are monospace by default and digits are
     /// near-uniform elsewhere, so an em-fraction per glyph bounds both lines;
     /// a wider face truncates the counts rather than eating the label.
-    pub(super) fn width(&self, font: &FontConfig) -> f32 {
-        let glyphs = self
-            .number
-            .chars()
-            .count()
-            .max(self.additions.chars().count() + self.deletions.chars().count() + 1);
+    pub(super) fn width(&self, font: &FontConfig, layout: &dyn SidebarLayout) -> f32 {
+        let mut glyphs = self.number.chars().count();
+        if layout.workspace_details() {
+            glyphs =
+                glyphs.max(self.additions.chars().count() + self.deletions.chars().count() + 1);
+        }
         (glyph_width(font) * glyphs as f32).ceil()
     }
 }
@@ -250,9 +252,14 @@ pub(super) fn row(
     workspace_icon: RowIcon,
     arrow: Option<Stateful<Div>>,
     badge: Option<RowBadge>,
+    layout: &dyn SidebarLayout,
     appearance: (&FontConfig, &Theme),
 ) -> Div {
     let (font, theme) = appearance;
+    let padding = layout.padding();
+    let gap = layout.gap();
+    let vertical_padding = layout.row_padding();
+    let show_detail = layout.workspace_details() || kind == RowKind::Agent;
     let (name_color, weight, detail_color) = row_text(kind, focused, theme);
     let icon_reserve = match workspace_icon {
         RowIcon::None => 0.,
@@ -264,36 +271,38 @@ pub(super) fn row(
     let indent = if tree == RowTree::None {
         0.
     } else {
-        CHILD_INDENT + extra_status_width
+        layout.child_indent() + extra_status_width
     };
-    let pr_reserve = badge
-        .as_ref()
-        .map(|badge| badge.width(font) + LABEL_GAP)
-        .unwrap_or_default();
     let arrow_reserve = if reserve_arrow { ARROW_RESERVE } else { 0. };
     let arrow_absent = arrow.is_none();
-    let label_width = (width
-        - 1.
-        - 2. * ROW_PADDING
-        - status_width
-        - LABEL_GAP
-        - indent
-        - pr_reserve
-        - arrow_reserve)
-        .max(0.);
+    let available =
+        (width - 1. - 2. * padding - status_width - gap - indent - arrow_reserve).max(0.);
+    // Narrow sidebars and large fonts can leave less room than a badge needs.
+    // Clip its column within the row rather than painting over the terminal.
+    let badge_width = badge.as_ref().map_or(0., |badge| {
+        badge.width(font, layout).min((available - gap).max(0.))
+    });
+    let pr_reserve = if badge.is_some() {
+        badge_width + gap
+    } else {
+        0.
+    };
+    let label_width = (available - pr_reserve).max(0.);
     div()
         .debug_selector(|| format!("row-{key}"))
-        .h(px(2. * line_height(font) + 8.))
+        .h(px(
+            line_height(font) * if show_detail { 2. } else { 1. } + 2. * vertical_padding
+        ))
         .w_full()
         .min_w_0()
         .flex_none()
         .relative()
-        .pl(px(ROW_PADDING + indent))
-        .pr(px(ROW_PADDING))
+        .pl(px(padding + indent))
+        .pr(px(padding))
         .flex()
         .items_start()
-        .gap(px(LABEL_GAP))
-        .py(px(4.))
+        .gap(px(gap))
+        .py(px(vertical_padding))
         .cursor_pointer()
         .when(focused, |s| s.bg(rgb(theme.active)))
         .hover(|s| s.bg(rgb(theme.active)))
@@ -301,20 +310,27 @@ pub(super) fn row(
         // tied to its parent without box-drawing glyphs in the label.
         .when(tree != RowTree::None, |row| {
             let (color, font) = (theme.muted, font.clone());
+            let gutter = layout.tree_gutter() + extra_status_width;
             row.child(
                 div()
                     .debug_selector(|| format!("tree-{key}"))
                     .absolute()
                     // Between the parent's label column and this row's own dot.
-                    .left(px(TREE_GUTTER + extra_status_width))
-                    .w(px(ROW_PADDING + CHILD_INDENT - TREE_GUTTER))
+                    .left(px(gutter))
+                    .w(px(padding + indent - gutter))
                     .top_0()
                     .bottom_0()
                     .child(
                         canvas(
                             |_, _, _| (),
                             move |bounds, _, window, _| {
-                                for line in tree_lines(bounds, tree, &font, window.scale_factor()) {
+                                for line in tree_lines(
+                                    bounds,
+                                    tree,
+                                    &font,
+                                    vertical_padding,
+                                    window.scale_factor(),
+                                ) {
                                     window.paint_quad(fill(line, rgb(color)));
                                 }
                             },
@@ -375,28 +391,29 @@ pub(super) fn row(
                             .ml(px(icon_reserve)),
                         ),
                 )
-                .child(
-                    div()
-                        .debug_selector(|| format!("detail-{key}"))
-                        .w(px(label_width))
-                        .truncate()
-                        .text_color(rgb(detail_color))
-                        .child(label_text(detail)),
-                ),
+                .when(show_detail, |column| {
+                    column.child(
+                        div()
+                            .debug_selector(|| format!("detail-{key}"))
+                            .w(px(label_width))
+                            .truncate()
+                            .text_color(rgb(detail_color))
+                            .child(label_text(detail)),
+                    )
+                }),
         )
         // The collapse column comes first so the badge can hug the row's edge;
         // a reserved-but-empty column keeps every badge on the same right edge.
         .when_some(arrow, |row, arrow| row.child(arrow))
         .when(arrow_absent && reserve_arrow, |row| {
-            row.child(div().w(px(ARROW_RESERVE - LABEL_GAP)).flex_none())
+            row.child(div().w(px(ARROW_RESERVE - gap)).flex_none())
         })
         .when_some(badge, |row, badge| {
-            let width = badge.width(font);
             let RowBadge { pr, dirty } = badge;
             row.child(
                 div()
                     .debug_selector(|| format!("pr-{key}"))
-                    .w(px(width))
+                    .w(px(badge_width))
                     .flex_none()
                     .flex()
                     .flex_col()
@@ -432,32 +449,35 @@ pub(super) fn row(
                                 )
                             }),
                     )
-                    .when_some(pr, |column, badge| {
-                        column.child(
-                            div()
-                                .flex()
-                                .flex_none()
-                                .overflow_hidden()
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_color(rgb(theme.palette[2]))
-                                        .child(label_text(&badge.additions)),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_color(rgb(theme.muted))
-                                        .child(label_text("/")),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_color(rgb(theme.palette[1]))
-                                        .child(label_text(&badge.deletions)),
-                                ),
-                        )
-                    }),
+                    .when_some(
+                        pr.filter(|_| layout.workspace_details()),
+                        |column, badge| {
+                            column.child(
+                                div()
+                                    .flex()
+                                    .flex_none()
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(rgb(theme.palette[2]))
+                                            .child(label_text(&badge.additions)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(rgb(theme.muted))
+                                            .child(label_text("/")),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(rgb(theme.palette[1]))
+                                            .child(label_text(&badge.deletions)),
+                                    ),
+                            )
+                        },
+                    ),
             )
         })
 }

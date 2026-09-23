@@ -142,10 +142,12 @@ fn the_agent_note_is_written_inside_the_checkouts_git_directory() {
     let origin = origin();
     let items = parse(&response(), &origin, Kind::Issue).unwrap();
     let directory = write_context(&checkout, &items[0], &origin).unwrap();
-    // macOS reports the temporary directory through a symlink, so the Git
-    // directory is compared against the resolved checkout.
-    let resolved = checkout.canonicalize().unwrap().join(".git");
-    assert!(directory.starts_with(&resolved), "{directory:?}");
+    // Resolve symlinks and Windows verbatim prefixes on both sides of Git output.
+    let resolved = checkout.join(".git").canonicalize().unwrap();
+    assert!(
+        directory.canonicalize().unwrap().starts_with(&resolved),
+        "{directory:?}"
+    );
     assert!(directory.ends_with("herdr"), "{directory:?}");
 
     let json: serde_json::Value =

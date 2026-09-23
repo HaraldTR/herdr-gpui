@@ -2,6 +2,10 @@
 /dist/
 .DS_Store
 
+# Generated from git history at release time; never tracked.
+/CHANGELOG.md
+/release-notes/
+
 # Local signing configuration and credential backups must never be committed.
 .env
 .env.*

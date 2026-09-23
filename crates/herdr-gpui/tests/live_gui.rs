@@ -1,4 +1,6 @@
 //! Requires an active native desktop and an explicitly selected daemon executable.
+//! The daemon and its sandbox are POSIX, so the harness compiles on Unix only.
+#![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #[path = "../../test-support/sandbox.rs"]
 mod sandbox;
@@ -42,12 +44,25 @@ fn gui_command(sandbox: &Sandbox, mut env: impl FnMut(&str) -> Option<OsString>)
 #[test]
 #[ignore = "requires active native desktop; GUI-only fixtures, no daemon"]
 fn native_sidebar() {
+    native_fixture(false);
+}
+
+#[test]
+#[ignore = "requires active native desktop; notification fixtures, no daemon"]
+fn native_notifications() {
+    native_fixture(true);
+}
+
+fn native_fixture(notifications_only: bool) {
     let mut isolated = Isolated {
         sandbox: Sandbox::new(),
         daemon: None,
         gui: None,
     };
     let mut command = gui_command(&isolated.sandbox, |name| std::env::var_os(name));
+    if notifications_only {
+        command.env("HERDR_TEST_NOTIFICATIONS_ONLY", "1");
+    }
     isolated.gui = Some(command.arg("--sidebar-test").spawn().unwrap());
     let gui = isolated.gui.as_mut().unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -63,7 +78,11 @@ fn native_sidebar() {
     let log = fs::read_to_string(isolated.sandbox.dir.join("gui.log")).unwrap();
     eprintln!("{log}");
     assert!(status.success(), "native sidebar failed");
-    assert!(log.contains("SIDEBAR native PASS:"));
+    assert!(log.contains(if notifications_only {
+        "NOTIFICATIONS native PASS:"
+    } else {
+        "SIDEBAR native PASS:"
+    }));
 }
 
 impl Drop for Isolated {

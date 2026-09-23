@@ -192,11 +192,12 @@ commands on trusted build outputs first.
    exact JSON, verify the signature, and require 64 raw bytes. Upload the DMG,
    macOS updater archive, JSON and raw signature for the attestation job.
 5. In the separate protected OIDC job, combine these with both Linux artifact
-   pairs and the locked four-target SBOM. Require the exact nine-file base set,
-   then checksum, Sigstore-sign and attest all nine files. Each has four sidecars
-   (`.sha256`, `.sha512`, `.sig`, `.crt`); `SHA256SUMS` covers all 45 files.
+   pairs, the Windows zip (manual download only, never in the update manifest),
+   and the locked five-target SBOM. Require the exact ten-file base set, then
+   checksum, Sigstore-sign and attest all ten files. Each has four sidecars
+   (`.sha256`, `.sha512`, `.sig`, `.crt`); `SHA256SUMS` covers all 50 files.
 6. The protected publication job refuses existing tags/releases, creates a
-   `vVERSION` tag at the validated SHA and a draft, uploads all 46 assets, then
+   `vVERSION` tag at the validated SHA and a draft, uploads all 51 assets, then
    re-downloads and verifies the exact set and hashes before publication. The
    separately approved Homebrew job uses only the verified published DMG.
 
@@ -272,6 +273,10 @@ tests are included in the standalone harness, not disabled integration fixtures.
 Release builds check on startup, every hour while idle, and on request.
 Local builds without a valid release version and embedded key never check.
 Checking/downloading/extraction and subprocess waits run off the UI thread.
+The panel shows download progress when the archive size is known, and an animated
+activity bar while checking, verifying, installing, or running Homebrew. A full
+bar means the update is ready to install or Homebrew has finished installing it;
+Homebrew's output is shown without inventing a completion percentage.
 Cancel is acknowledged after the current operation releases its staging resources;
 a stalled HTTP read can delay cancellation until its request deadline (up to ten
 minutes for an archive). No cancelled download is installed.
@@ -311,17 +316,25 @@ verifies the cask's own SHA-256; this path therefore does not perform the signed
 manifest and designated-requirement checks used by standalone installs, and trust
 moves to Homebrew and the tap. Release detection still uses the signed manifest.
 
-Auto-update stays enabled, or Homebrew could not know the release exists. The tap
-is published after the GitHub release, so the cask can briefly lag: the installed
-version is re-read afterwards and an upgrade that did not move past the running
-version is reported as such rather than as a completed update. Homebrew is never
-interrupted once started, because killing it mid-move can leave no installed app
-at all; the 30-minute deadline is the only bound.
+Auto-update stays enabled on the first attempt. The installed version is then
+re-read: if it is not newer than the running app or is below the offered release,
+the updater automatically runs `brew update` and retries the cask upgrade once.
+The retry skips redundant auto-update. Command failures are not retried. The tap
+is published after the GitHub release, so it can briefly lag even after a refresh;
+that is reported with the installed and expected versions, not as a completed
+update. Homebrew is never cancelled mid-upgrade, because killing it mid-move can
+leave no installed app at all. The sequence shares one 30-minute command budget,
+plus bounded output-draining time.
 
 Homebrew trashes the running bundle as it upgrades, so bundle resources can be
 gone until restart. Restart is offered as soon as the upgrade lands and launches
 the upgraded bundle with `open -n` before this instance quits. The daemon and its
 terminals are untouched.
+
+For an explicitly approved real upgrade, use
+`just test-brew-upgrade /absolute/path/to/Herdr.app YYYYMMDD.COUNTER`, supplying
+the release version the cask should install. This changes the installed app;
+the ordinary test suite uses fake Homebrew processes instead.
 
 ## Native QA
 
@@ -330,6 +343,10 @@ update state for version `9999.0.0`, without network requests, installing files,
 or changing real update preferences. Verify modal focus, keyboard isolation, dismissal, long labels, and
 narrow-window clipping. Preview actions must not initiate a real update. No
 external framework or signing credentials should be needed for synthetic QA.
+Use **QA > Show update download progress (50%)** to inspect a half-filled bar,
+or **QA > Show Homebrew update progress** for the animated activity bar. These
+previews stay visible until dismissed with Close or Escape; neither starts an
+updater operation.
 
 Before declaring installation production-ready, exercise two distinct signed,
 notarized versions on both macOS architectures with an active desktop. Use an

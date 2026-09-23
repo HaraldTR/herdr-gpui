@@ -24,27 +24,74 @@ const STABLE_CONNECTION_PERIOD: Duration = Duration::from_secs(60);
 pub(super) struct Release {
     inbox: Arc<Mutex<LiveState>>,
     drained: Arc<AtomicBool>,
-    request: String,
+    phase: ReleasePhase,
     boot: String,
 }
 
+enum ReleasePhase {
+    Deferred(ClientHandle),
+    Sent(String),
+    Disconnecting,
+}
+
 impl Release {
-    fn resolved(&self) -> bool {
+    fn resolved(&mut self) -> bool {
         // Disconnect() requests shutdown; only the event receiver closing proves
         // that this generation's transport is gone. Catalog removal alone is not
         // sufficient evidence to let another surface take ownership.
         if self.drained.load(Ordering::Acquire) {
             return true;
         }
-        self.inbox.try_lock().is_ok_and(|state| {
-            state.activation.as_ref().is_some_and(|a| {
-                a.request == self.request
+        let Ok(mut state) = self.inbox.try_lock() else {
+            return false;
+        };
+        if let ReleasePhase::Deferred(handle) = &self.phase {
+            // Queue and register under the same lock, but never wait for that lock
+            // on the UI thread. The destination stays fenced until acknowledgement.
+            if !state.status.is_connected()
+                || state
+                    .snapshot
+                    .as_ref()
+                    .is_none_or(|s| s.boot_id != self.boot)
+            {
+                handle.disconnect();
+                self.phase = ReleasePhase::Disconnecting;
+                return false;
+            }
+            state.set_outer_focus(false);
+            state.surface = None;
+            state.dirty = true;
+            let result = handle
+                .set_focus(&self.boot, false)
+                .and_then(|()| handle.set_surface_active(&self.boot, false));
+            match result {
+                Ok(request) => {
+                    state.activation = Some(super::state::SurfaceActivation {
+                        request: request.clone(),
+                        boot: self.boot.clone(),
+                        revision: None,
+                        failed: false,
+                        focus: None,
+                        active: false,
+                    });
+                    self.phase = ReleasePhase::Sent(request);
+                }
+                Err(_) => {
+                    handle.disconnect();
+                    self.phase = ReleasePhase::Disconnecting;
+                }
+            }
+        }
+        match &self.phase {
+            ReleasePhase::Sent(request) => state.activation.as_ref().is_some_and(|a| {
+                a.request == *request
                     && a.boot == self.boot
                     && !a.active
                     && !a.failed
                     && a.revision.is_some()
-            })
-        })
+            }),
+            _ => false,
+        }
     }
 }
 
@@ -57,11 +104,13 @@ pub(super) struct Endpoint {
     pub collapsed_repos: HashSet<String>,
     pub live: LiveState,
     pub generation: u64,
+    pub(crate) toasts: crate::notifications::Toasts,
     retry_at: Instant,
     attempts: u32,
     online_since: Option<Instant>,
     detached: bool,
     initial_surface: bool,
+    sounds: crate::sound::Policy,
 }
 
 impl Endpoint {
@@ -78,15 +127,18 @@ impl Endpoint {
             collapsed_repos: HashSet::new(),
             live: LiveState::default(),
             generation: 0,
+            toasts: Default::default(),
             retry_at: Instant::now(),
             attempts: 0,
             online_since: None,
             detached: false,
             initial_surface: false,
+            sounds: Default::default(),
         }
     }
 
     fn stop(&mut self) {
+        self.toasts.entries.clear();
         self.connection.detach(false);
         self.initial_surface = false;
         self.online_since = None;
@@ -101,12 +153,25 @@ impl Endpoint {
         self.attempts = self.attempts.saturating_add(1);
         self.connection.reconnect(options, false, active);
         self.live = self.connection.take_update().unwrap_or_default();
+        self.toasts.receive(self.live.notifications.drain(..));
         self.retry_at = Instant::now() + self.retry_delay();
     }
 
     fn poll(&mut self, now: Instant) -> bool {
         let mut changed = false;
-        if let Some(state) = self.connection.take_update() {
+        if let Some(mut state) = self.connection.take_update() {
+            if state.notifications_lost
+                || !state.status.is_connected()
+                || self
+                    .live
+                    .snapshot
+                    .as_ref()
+                    .zip(state.snapshot.as_ref())
+                    .is_some_and(|(old, new)| old.boot_id != new.boot_id)
+            {
+                self.toasts.entries.clear();
+            }
+            self.toasts.receive(state.notifications.drain(..));
             self.live = state;
             changed = true;
         }
@@ -310,6 +375,12 @@ impl HerdrWindow {
     }
 
     fn reset_selected(&mut self) {
+        if let Some(transfer) = &self.file_transfer {
+            transfer.cancel();
+        }
+        for image in &self.pending_images {
+            image.cancel();
+        }
         self.menu.reset();
         self.selection_epoch += 1;
         let endpoint = &self.endpoints[self.selected_endpoint];
@@ -321,6 +392,10 @@ impl HerdrWindow {
         // Another connection's picture is not this one's, so a reconnect, a
         // detach, or a switch of endpoint starts from an empty terminal area.
         self.presentation.clear();
+        self.selection = None;
+        self.terminal_mouse = None;
+        self.pressed_terminal_link = None;
+        self.copy_feedback = None;
         self.local_error = None;
         self.marked.clear();
         self.last_queued_options = None;
@@ -329,6 +404,7 @@ impl HerdrWindow {
         self.activation_deadline = (self.selected_endpoint != 0 && !endpoint.detached)
             .then(|| Instant::now() + ACTIVATION_TIMEOUT);
         self.pending_navigation = None;
+        self.pending_toast = None;
     }
 
     pub(super) fn select_endpoint(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
@@ -362,8 +438,14 @@ impl HerdrWindow {
             return false;
         }
         self.release_selected();
-        self.notifications.reset();
         if index == 0 {
+            // Local is the escape hatch and never waits on a remote release. An
+            // unsent release must still retire its exact source transport.
+            for release in &self.pending_releases {
+                if let ReleasePhase::Deferred(handle) = &release.phase {
+                    handle.disconnect();
+                }
+            }
             self.pending_releases.clear();
         }
         self.selected_endpoint = index;
@@ -385,37 +467,22 @@ impl HerdrWindow {
             endpoint.retry_at = Instant::now();
             return;
         }
-        if let Ok(mut state) = endpoint.connection.inbox.lock() {
+        if endpoint.initial_surface
+            && let (Some(handle), Some(snapshot)) =
+                (&endpoint.connection.handle, &endpoint.live.snapshot)
+        {
+            let mut release = Release {
+                inbox: endpoint.connection.inbox.clone(),
+                drained: endpoint.connection.drained.clone(),
+                phase: ReleasePhase::Deferred(handle.clone()),
+                boot: snapshot.boot_id.clone(),
+            };
+            if !release.resolved() {
+                self.pending_releases.push(release);
+            }
+        } else if let Ok(mut state) = endpoint.connection.inbox.try_lock() {
             state.set_outer_focus(false);
             state.surface = None;
-            if endpoint.initial_surface
-                && let (Some(handle), Some(snapshot)) =
-                    (&endpoint.connection.handle, &endpoint.live.snapshot)
-            {
-                // Focus loss must precede deactivation on older servers.
-                let result = handle
-                    .set_focus(&snapshot.boot_id, false)
-                    .and_then(|()| handle.set_surface_active(&snapshot.boot_id, false));
-                match result {
-                    Ok(request) => {
-                        state.activation = Some(super::state::SurfaceActivation {
-                            request: request.clone(),
-                            boot: snapshot.boot_id.clone(),
-                            revision: None,
-                            failed: false,
-                            focus: None,
-                            active: false,
-                        });
-                        self.pending_releases.push(Release {
-                            inbox: endpoint.connection.inbox.clone(),
-                            drained: endpoint.connection.drained.clone(),
-                            request,
-                            boot: snapshot.boot_id.clone(),
-                        });
-                    }
-                    Err(_) => handle.disconnect(),
-                }
-            }
         }
         endpoint.initial_surface = false;
         endpoint.live.surface = None;
@@ -426,21 +493,30 @@ impl HerdrWindow {
         endpoint: &str,
         target: NavigationTarget<&str>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if self.menu.page.is_some() {
-            return;
+            return false;
         }
         if !self.select_endpoint(endpoint, cx) {
-            return;
+            return false;
         }
+        self.pending_toast = None;
+        self.pending_navigation = None;
         if self.input_ready() {
             self.navigate(target, cx);
         } else {
             self.pending_navigation = Some((&target).into());
         }
+        true
     }
 
     pub(super) fn input_ready(&self) -> bool {
+        self.pending_toast.is_none() && self.navigation_ready()
+    }
+
+    // A coherent surface permits the deferred navigation attempt, not terminal
+    // input while its toast target is still waiting for inbox validation.
+    pub(crate) fn navigation_ready(&self) -> bool {
         self.endpoints[self.selected_endpoint]
             .connection
             .handle
@@ -474,6 +550,12 @@ impl HerdrWindow {
         let mut changed = false;
         for (index, endpoint) in self.endpoints.iter_mut().enumerate() {
             let updated = endpoint.poll(Instant::now());
+            self.sound.poll(
+                &mut endpoint.sounds,
+                &mut endpoint.live,
+                index == self.selected_endpoint && self.active,
+                Instant::now(),
+            );
             changed |= updated;
             // Remote cwd strings must never be resolved against this machine's Git repos.
             if updated
@@ -495,6 +577,10 @@ impl HerdrWindow {
             }
         }
         self.restore_selection(cx);
+        changed |= self.tick_toasts(
+            self.menu.page.is_some() || self.toasts_hidden,
+            Instant::now(),
+        );
         let endpoint = &mut self.endpoints[self.selected_endpoint];
         if self.selected_generation != endpoint.generation {
             self.reset_selected();
@@ -506,7 +592,8 @@ impl HerdrWindow {
                 self.local_error = None;
             }
         }
-        self.pending_releases.retain(|release| !release.resolved());
+        self.pending_releases
+            .retain_mut(|release| !release.resolved());
         if !endpoint.initial_surface
             && self.pending_releases.is_empty()
             && let (Some(handle), Some(snapshot)) =
@@ -544,10 +631,12 @@ impl HerdrWindow {
             }
             changed = true;
         }
-        if self.input_ready() {
+        if self.navigation_ready() {
             self.activation_deadline = None;
-            if let Some(target) = self.pending_navigation.take() {
-                self.navigate(target.as_deref(), cx);
+            if let Some(id) = self.pending_toast {
+                self.navigate_toast(id, cx);
+            } else if let Some(target) = self.pending_navigation.take() {
+                self.dispatch_navigation(target.as_deref(), cx);
             }
         } else if self
             .activation_deadline
@@ -657,7 +746,8 @@ fn same_target(target: &ConnectTarget, host: &SavedHost) -> bool {
     matches!(target, ConnectTarget::Ssh { target, session } if target == &host.target && session == &host.session)
 }
 
-#[cfg(test)]
+// The fixtures drive the real client over bound Unix sockets and POSIX processes.
+#[cfg(all(test, unix))]
 mod lifecycle_tests;
 
 #[cfg(test)]
@@ -674,6 +764,170 @@ mod tests {
             session: "default".into(),
             enabled,
         }
+    }
+
+    #[test]
+    fn notifications_stay_endpoint_owned_and_expire_without_new_updates() {
+        use crate::notifications::tests::notification;
+        use herdr_client::protocol::ServerMessage;
+        let mut local = Endpoint::new(LOCAL.into(), "Local".into(), ConnectTarget::Local, true);
+        let mut remote = Endpoint::new(
+            "ssh:test".into(),
+            "Remote".into(),
+            ConnectTarget::Local,
+            true,
+        );
+        for endpoint in [&mut local, &mut remote] {
+            let mut state = endpoint.connection.inbox.lock().unwrap();
+            state.apply(ClientEvent::Snapshot(Arc::new(
+                crate::sidebar::layout_tests::snapshot(1),
+            )));
+            state.apply(ClientEvent::Message(ServerMessage::SemanticNotification(
+                notification(&endpoint.label),
+            )));
+            state.apply(ClientEvent::Snapshot(Arc::new(
+                crate::sidebar::layout_tests::snapshot(2),
+            )));
+        }
+        let now = Instant::now();
+        assert!(local.poll(now));
+        assert!(remote.poll(now));
+        assert!(local.live.notifications.is_empty());
+        assert!(remote.live.notifications.is_empty());
+        assert_eq!(local.toasts.entries[0].1.title, "Local");
+        assert_eq!(remote.toasts.entries[0].1.title, "Remote");
+        assert!(!remote.poll(now));
+        local.stop();
+        assert!(local.toasts.entries.is_empty());
+        assert_eq!(remote.toasts.entries.len(), 1);
+        let mut endpoints = [local, remote];
+        let config = crate::config::NotificationConfig {
+            enabled: true,
+            delay_seconds: 0,
+            ..Default::default()
+        };
+        assert!(crate::notifications::tick(
+            &mut endpoints,
+            0,
+            config,
+            false,
+            None,
+            now
+        ));
+        let deadline = endpoints[1].toasts.entries[0].1.expires;
+        assert!(crate::notifications::tick(
+            &mut endpoints,
+            0,
+            config,
+            false,
+            None,
+            deadline
+        ));
+        assert!(endpoints[1].toasts.entries.is_empty());
+    }
+
+    #[test]
+    fn lost_ingress_retires_predecessors_even_when_replacement_was_evicted() {
+        use crate::notifications::{Notice, PENDING_LIMIT, tests::notification};
+        use herdr_client::protocol::{SemanticNotificationKind, ServerMessage};
+        let mut endpoint = Endpoint::new(LOCAL.into(), "Local".into(), ConnectTarget::Local, true);
+        let mut wire = notification("old attention");
+        wire.pane_id = Some("p".into());
+        let mut old = Notice::new(wire.clone(), Instant::now()).preview();
+        old.promote(Instant::now());
+        endpoint.toasts.receive([old]);
+        let inbox = endpoint.connection.inbox.clone();
+        {
+            let mut state = inbox.lock().unwrap();
+            state.status = ConnectionStatus::Connected;
+            wire.kind = SemanticNotificationKind::Finished;
+            state.apply(ClientEvent::Message(ServerMessage::SemanticNotification(
+                wire,
+            )));
+            for index in 0..PENDING_LIMIT {
+                state.apply(ClientEvent::Message(ServerMessage::SemanticNotification(
+                    notification(&index.to_string()),
+                )));
+            }
+            assert!(state.notifications_lost);
+            assert_eq!(state.notifications.len(), PENDING_LIMIT);
+            assert!(state.notifications.iter().all(|n| n.pane_id.is_none()));
+        }
+        assert!(endpoint.poll(Instant::now()));
+        assert_eq!(endpoint.toasts.entries.len(), PENDING_LIMIT);
+        assert!(
+            endpoint
+                .toasts
+                .entries
+                .iter()
+                .all(|(_, n)| n.title != "old attention")
+        );
+        // The loss marker moves with the batch exactly once, not every snapshot.
+        inbox.lock().unwrap().dirty = true;
+        assert!(endpoint.poll(Instant::now()));
+        assert!(!endpoint.live.notifications_lost);
+        assert_eq!(endpoint.toasts.entries.len(), PENDING_LIMIT);
+    }
+
+    #[test]
+    fn notifications_clear_on_boot_change_and_disconnect() {
+        use crate::notifications::tests::notification;
+        use herdr_client::protocol::ServerMessage;
+        let mut endpoint = Endpoint::new(LOCAL.into(), "Local".into(), ConnectTarget::Local, true);
+        let mut snapshot = crate::sidebar::layout_tests::snapshot(1);
+        endpoint
+            .connection
+            .inbox
+            .lock()
+            .unwrap()
+            .apply(ClientEvent::Snapshot(Arc::new(snapshot.clone())));
+        endpoint
+            .connection
+            .inbox
+            .lock()
+            .unwrap()
+            .apply(ClientEvent::Message(ServerMessage::SemanticNotification(
+                notification("old"),
+            )));
+        endpoint.poll(Instant::now());
+        assert_eq!(endpoint.toasts.entries.len(), 1);
+        endpoint
+            .connection
+            .inbox
+            .lock()
+            .unwrap()
+            .apply(ClientEvent::Message(ServerMessage::SemanticNotification(
+                notification("pending old"),
+            )));
+        snapshot.boot_id = "replacement-boot".into();
+        endpoint
+            .connection
+            .inbox
+            .lock()
+            .unwrap()
+            .apply(ClientEvent::Snapshot(Arc::new(snapshot)));
+        endpoint.poll(Instant::now());
+        assert!(endpoint.toasts.entries.is_empty());
+        endpoint
+            .connection
+            .inbox
+            .lock()
+            .unwrap()
+            .apply(ClientEvent::Message(ServerMessage::SemanticNotification(
+                notification("new"),
+            )));
+        endpoint.poll(Instant::now());
+        assert_eq!(endpoint.toasts.entries.len(), 1);
+        endpoint
+            .connection
+            .inbox
+            .lock()
+            .unwrap()
+            .apply(ClientEvent::Disconnected {
+                reason: "test".into(),
+            });
+        endpoint.poll(Instant::now());
+        assert!(endpoint.toasts.entries.is_empty());
     }
 
     #[test]
@@ -780,10 +1034,10 @@ mod tests {
             focus: None,
             active: false,
         });
-        let release = Release {
+        let mut release = Release {
             inbox: inbox.clone(),
             drained: Arc::new(AtomicBool::new(false)),
-            request: "off".into(),
+            phase: ReleasePhase::Sent("off".into()),
             boot: "boot".into(),
         };
         assert!(!release.resolved());
@@ -904,7 +1158,7 @@ mod tests {
                     .inbox
                     .clone(),
                 drained: Arc::new(AtomicBool::new(false)),
-                request: "never-acked".into(),
+                phase: ReleasePhase::Sent("never-acked".into()),
                 boot: "boot".into(),
             });
             view.activation_deadline = Some(Instant::now());

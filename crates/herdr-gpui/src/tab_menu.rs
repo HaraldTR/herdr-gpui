@@ -201,7 +201,7 @@ mod tests {
 
     #[gpui::test]
     fn rename_response_is_correlated_and_survives_surface_invalidation(cx: &mut TestAppContext) {
-        use crate::state::TabRenameResult;
+        use crate::state::RenameResult;
         use herdr_client::ClientEvent;
         let (view, cx) = cx.add_window_view(|window, cx| {
             let mut view = crate::sidebar::layout_tests::fixture_window(window, cx);
@@ -219,7 +219,7 @@ mod tests {
                 view.open_tab_menu(&id, Point::default(), window, cx);
                 view.activate_tab_menu(Action::Rename, window, cx);
                 view.menu.tab.as_mut().unwrap().pending = Some("rename-1".into());
-                view.live.tab_rename = Some(TabRenameResult {
+                view.live.tab_rename = Some(RenameResult {
                     request: "rename-1".into(),
                     result: None,
                 });
@@ -240,7 +240,7 @@ mod tests {
                 );
                 assert!(view.menu.tab.as_ref().unwrap().pending.is_none());
                 view.menu.tab.as_mut().unwrap().pending = Some("rename-error".into());
-                view.live.tab_rename = Some(TabRenameResult {
+                view.live.tab_rename = Some(RenameResult {
                     request: "rename-error".into(),
                     result: None,
                 });
@@ -265,7 +265,7 @@ mod tests {
                         .contains("Invalid label")
                 );
                 view.menu.tab.as_mut().unwrap().pending = Some("rename-2".into());
-                view.live.tab_rename = Some(TabRenameResult {
+                view.live.tab_rename = Some(RenameResult {
                     request: "rename-2".into(),
                     result: None,
                 });
@@ -435,7 +435,7 @@ impl HerdrWindow {
                 .map_err(|_| crate::Error::ConnectionBusy)?;
             // Install correlation under the same lock used by the event reducer.
             let request = handle.request(&target.boot, Method::TabRename, params)?;
-            inbox.tab_rename = Some(crate::state::TabRenameResult {
+            inbox.tab_rename = Some(crate::state::RenameResult {
                 request: request.clone(),
                 result: None,
             });

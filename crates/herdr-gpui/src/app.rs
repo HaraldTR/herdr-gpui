@@ -3,14 +3,42 @@
 //! ever creating a window.
 
 use crate::{
-    APP_VERSION, HerdrWindow, Quit, ShowLogs, WINDOW_TITLE, app_icon, bind_keys, cli, diagnostics,
-    icons, log_window, menus, titlebar, updater,
+    APP_VERSION, HerdrWindow, Quit, ShowLogs, WINDOW_TITLE, app_icon, bind_keys, cli,
+    config::{Config, Theme},
+    diagnostics, icons, log_window, menus, titlebar, updater,
 };
 #[cfg(feature = "integration-test")]
 use crate::{performance, smoke};
 use anyhow::Result;
 use gpui::{prelude::*, *};
 use herdr_client::ConnectTarget;
+
+/// The first frame must not use default density while disk settings load.
+/// Load before the UI event loop; later windows reuse the last validated pair.
+#[derive(Clone, Default)]
+pub(crate) struct InitialAppearance {
+    pub config: Config,
+    pub theme: Theme,
+    pub error: Option<String>,
+}
+
+impl Global for InitialAppearance {}
+
+impl InitialAppearance {
+    fn load(load: impl FnOnce() -> crate::Result<Config>) -> Self {
+        match load().and_then(|config| Ok((config.theme()?, config))) {
+            Ok((theme, config)) => Self {
+                config,
+                theme,
+                error: None,
+            },
+            Err(error) => Self {
+                error: Some(format!("Load GUI config: {error}")),
+                ..Self::default()
+            },
+        }
+    }
+}
 
 /// Opens one main window onto `target`. Every window is an independent client
 /// of that daemon: its own connection, surface lease, and workspace focus.
@@ -65,7 +93,10 @@ pub(crate) fn open_additional_window(target: ConnectTarget, cx: &mut App) {
         );
         match opened {
             Ok(handle) => {
-                let _ = handle.update(cx, |_, window, _| window.activate_window());
+                let _ = handle.update(cx, |view, window, _| {
+                    view.sound = crate::sound::Service::new();
+                    window.activate_window();
+                });
             }
             Err(_) => tracing::error!("Unable to open an additional Herdr window"),
         }
@@ -125,9 +156,25 @@ pub(crate) fn run() -> std::process::ExitCode {
         arch = std::env::consts::ARCH,
         "GPUI client starting"
     );
+    // Only read first-frame settings here. Migration, defaults refresh, and font
+    // discovery run after opening; CLI and fixtures skip personal settings.
+    let appearance = if mode == LaunchMode::Normal {
+        let started = std::time::Instant::now();
+        let appearance = InitialAppearance::load(Config::load_startup);
+        tracing::debug!(
+            elapsed_us = started.elapsed().as_micros() as u64,
+            "Startup appearance loaded"
+        );
+        appearance
+    } else {
+        InitialAppearance::default()
+    };
     let failed = startup_failed.clone();
     Application::new().with_assets(icons::Icons).run(move |cx| {
+        cx.set_global(appearance);
         app_icon::install();
+        #[cfg(target_os = "macos")]
+        crate::app_badge::install(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_action(|_: &ShowLogs, cx| log_window::open(cx));
         bind_keys(cx);
@@ -159,6 +206,11 @@ pub(crate) fn run() -> std::process::ExitCode {
         );
         match opened {
             Ok(_window) => {
+                if mode == LaunchMode::Normal {
+                    let _ = _window.update(cx, |view, _, _| {
+                        view.sound = crate::sound::Service::new();
+                    });
+                }
                 #[cfg(feature = "integration-test")]
                 if performance_test {
                     performance::start(_window, cx);
@@ -189,5 +241,85 @@ pub(crate) fn run() -> std::process::ExitCode {
         std::process::ExitCode::FAILURE
     } else {
         std::process::ExitCode::SUCCESS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, InitialAppearance, Theme};
+    #[cfg(feature = "integration-test")]
+    use super::{ConnectTarget, HerdrWindow};
+    use crate::config::LayoutMode;
+    #[cfg(feature = "integration-test")]
+    use gpui::px;
+
+    #[test]
+    fn startup_appearance_loads_a_coherent_pair_and_reports_errors() {
+        let appearance = InitialAppearance::load(|| {
+            let mut config = Config {
+                theme: "Nord".into(),
+                ..Default::default()
+            };
+            config.layout.mode = LayoutMode::Compact;
+            Ok(config)
+        });
+        assert_eq!(appearance.config.layout.mode, LayoutMode::Compact);
+        assert_eq!(Some(appearance.theme), Theme::builtin("Nord"));
+        assert!(appearance.error.is_none());
+        for appearance in [
+            InitialAppearance::load(|| Err(crate::Error::MissingHome)),
+            InitialAppearance::load(|| {
+                Ok(Config {
+                    theme: "../invalid".into(),
+                    ..Default::default()
+                })
+            }),
+        ] {
+            assert_eq!(appearance.config.layout.mode, LayoutMode::Normal);
+            assert_eq!(appearance.theme, Theme::default());
+            assert!(appearance.error.is_some());
+        }
+    }
+
+    #[cfg(feature = "integration-test")]
+    #[gpui::test]
+    fn first_window_frame_uses_startup_layout(cx: &mut gpui::TestAppContext) {
+        for mode in [LayoutMode::Compact, LayoutMode::Normal] {
+            let (view, cx) = cx.add_window_view(|window, cx| {
+                let mut appearance = InitialAppearance::load(|| {
+                    Ok(Config {
+                        theme: "Nord".into(),
+                        ..Default::default()
+                    })
+                });
+                appearance.config.layout.mode = mode;
+                cx.set_global(appearance);
+                HerdrWindow::new(
+                    ConnectTarget::Socket("/unused-startup.sock".into()),
+                    window,
+                    cx,
+                    true,
+                )
+            });
+            // Draw immediately, without polling a background config completion.
+            cx.update(|window, cx| {
+                let state = view.read(cx);
+                assert_eq!(state.config.layout.mode, mode);
+                assert_eq!(Some(state.theme.clone()), Theme::builtin("Nord"));
+                assert!(state.config_load.is_none());
+                window.draw(cx).clear();
+            });
+            let row = cx
+                .debug_bounds("row-herdr")
+                .unwrap_or_else(|| panic!("missing first-frame row"));
+            assert_eq!(
+                row.size.height,
+                px(if mode == LayoutMode::Compact {
+                    16.
+                } else {
+                    40.
+                })
+            );
+        }
     }
 }

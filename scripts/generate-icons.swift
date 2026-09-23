@@ -1,4 +1,4 @@
-// Build native icons and red worktree variants from the supplied raster exports.
+// Render each native icon resolution directly from the vector artwork.
 import AppKit
 import CoreImage
 import Foundation
@@ -6,23 +6,38 @@ import Foundation
 let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
 let assets = root.appendingPathComponent("assets/icons")
 let variants: [(String, String, String?)] = [
-  ("herdr-ui-icon-clean.png", "herdr-worktree-1024.png", "Herdr"),
-  ("herdr-icon-square-clean.png", "herdr-square-worktree-1024.png", nil),
+  ("herdr-ui-icon-clean.svg", "herdr-worktree-1024.png", "Herdr"),
+  ("herdr-icon-square-clean.svg", "herdr-square-worktree-1024.png", nil),
 ]
 let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
 try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
 defer { try? FileManager.default.removeItem(at: temporary) }
 
-for (sourceName, redName, bundleName) in variants {
-  let source = try Data(contentsOf: assets.appendingPathComponent(sourceName))
-  guard let image = NSBitmapImageRep(data: source)?.cgImage,
-    image.width == 1024, image.height == 1024
+func render(_ sourceName: String, pixels: Int) throws -> Data {
+  let output = temporary.appendingPathComponent("render.png")
+  let renderer = Process()
+  renderer.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+  renderer.arguments = [
+    "rsvg-convert", "--width", String(pixels), "--height", String(pixels),
+    "--output", output.path, assets.appendingPathComponent(sourceName).path,
+  ]
+  try renderer.run()
+  renderer.waitUntilExit()
+  precondition(renderer.terminationStatus == 0, "rsvg-convert failed; install with brew install librsvg")
+  let png = try Data(contentsOf: output)
+  guard let image = NSBitmapImageRep(data: png),
+    image.pixelsWide == pixels, image.pixelsHigh == pixels
   else {
-    fatalError("Expected a 1024x1024 PNG icon")
+    fatalError("Unexpected SVG render dimensions")
   }
+  return png
+}
 
+let colorContext = CIContext()
+func worktreePNG(_ source: Data) -> Data {
+  let image = NSBitmapImageRep(data: source)!.cgImage!
   // Map luminance to a saturated red palette while retaining the original alpha
-  // and shading. The supplied stable PNG remains unchanged.
+  // and shading at this resolution.
   let red = CIImage(cgImage: image).applyingFilter(
     "CIColorMatrix",
     parameters: [
@@ -32,30 +47,28 @@ for (sourceName, redName, bundleName) in variants {
       "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
       "inputBiasVector": CIVector(x: 0.25, y: 0.02, z: 0.035, w: 0),
     ])
-  guard let redImage = CIContext().createCGImage(red, from: red.extent) else {
+  guard let redImage = colorContext.createCGImage(red, from: red.extent) else {
     fatalError("Unable to generate the red worktree icon")
   }
-  let redPNG = NSBitmapImageRep(cgImage: redImage).representation(using: .png, properties: [:])!
+  return NSBitmapImageRep(cgImage: redImage).representation(using: .png, properties: [:])!
+}
+
+for (sourceName, redName, bundleName) in variants {
+  let source = try render(sourceName, pixels: 1024)
+  let redPNG = worktreePNG(source)
+  let pngURL = assets.appendingPathComponent(sourceName).deletingPathExtension().appendingPathExtension("png")
+  try source.write(to: pngURL)
   try redPNG.write(to: assets.appendingPathComponent(redName))
 
   guard let bundleName else { continue }
-  for (name, image, source) in [
-    (bundleName, image, source), ("\(bundleName)-worktree", redImage, redPNG),
-  ] {
+  for (name, isWorktree) in [(bundleName, false), ("\(bundleName)-worktree", true)] {
     let iconset = temporary.appendingPathComponent("\(name).iconset")
     try FileManager.default.createDirectory(at: iconset, withIntermediateDirectories: true)
     for size in [16, 32, 128, 256, 512] {
       for scale in [1, 2] {
         let pixels = size * scale
-        let context = CGContext(
-          data: nil, width: pixels, height: pixels,
-          bitsPerComponent: 8, bytesPerRow: pixels * 4,
-          space: CGColorSpace(name: CGColorSpace.sRGB)!,
-          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        context.interpolationQuality = .high
-        context.draw(image, in: CGRect(x: 0, y: 0, width: pixels, height: pixels))
-        let bitmap = NSBitmapImageRep(cgImage: context.makeImage()!)
-        let png = pixels == 1024 ? source : bitmap.representation(using: .png, properties: [:])!
+        let rendered = try render(sourceName, pixels: pixels)
+        let png = isWorktree ? worktreePNG(rendered) : rendered
         let suffix = scale == 2 ? "@2x" : ""
         try png.write(to: iconset.appendingPathComponent("icon_\(size)x\(size)\(suffix).png"))
       }

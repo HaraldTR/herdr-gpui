@@ -4,6 +4,7 @@
 
 use crate::{
     Error, Result, SendError,
+    clipboard::{ClipboardImageUpload, ImageLease, ImageSlot},
     event::ClientEvent,
     method::Method,
     options::{ConnectOptions, validate_options},
@@ -28,6 +29,7 @@ pub(crate) struct HandleInner {
     pub(crate) commands: Sender<Command>,
     pub(crate) stop: Arc<AtomicBool>,
     pub(crate) next_request: AtomicU64,
+    pub(crate) image_busy: Arc<AtomicBool>,
 }
 impl Drop for HandleInner {
     fn drop(&mut self) {
@@ -39,6 +41,7 @@ pub(crate) struct Command {
     pub(crate) bytes: Vec<u8>,
     /// Set when this command is an API request awaiting a correlated response.
     pub(crate) request: Option<PendingRequest>,
+    pub(crate) image: Option<ImageSlot>,
 }
 
 /// A queued API request, waiting on the single in-flight lease.
@@ -48,6 +51,74 @@ pub(crate) struct PendingRequest {
 }
 
 impl ClientHandle {
+    /// Reserve FIFO position now, before reading an image in the background.
+    /// Only one image may be preparing, queued, or writing per connection.
+    pub fn reserve_clipboard_image(
+        &self,
+        boot_id: &str,
+        target: ClientClipboardImageTarget,
+    ) -> Result<ClipboardImageUpload> {
+        self.reserve_clipboard(boot_id, target, true)
+    }
+
+    /// Reserve FIFO position for unknown clipboard content without claiming the
+    /// image lease. `complete_input` can publish while another image is active;
+    /// `complete` must claim the single-image lease before encoding.
+    pub fn reserve_clipboard_input(
+        &self,
+        boot_id: &str,
+        target: ClientClipboardImageTarget,
+    ) -> Result<ClipboardImageUpload> {
+        self.reserve_clipboard(boot_id, target, false)
+    }
+
+    fn reserve_clipboard(
+        &self,
+        boot_id: &str,
+        target: ClientClipboardImageTarget,
+        claim_image: bool,
+    ) -> Result<ClipboardImageUpload> {
+        if self.is_disconnected() {
+            return Err(Error::Disconnected);
+        }
+        if boot_id.is_empty() {
+            return Err(Error::MissingBootId);
+        }
+        validate_clipboard_image_target(&target)?;
+        // The Windows pipe wrapper cannot bound writes. Do not expose an upload
+        // that could indefinitely prevent cancellation and inbound processing.
+        if cfg!(windows) {
+            return Err(Error::ClipboardImageUnsupported);
+        }
+        let lease = Arc::new(ImageLease {
+            busy: self.inner.image_busy.clone(),
+            claimed: AtomicBool::new(false),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            finished: Arc::new(AtomicBool::new(false)),
+            reserved_at: std::time::Instant::now(),
+        });
+        if claim_image {
+            lease.claim_image()?;
+        }
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        self.queue(Command {
+            boot_id: boot_id.into(),
+            bytes: Vec::new(),
+            request: None,
+            image: Some(ImageSlot {
+                receiver,
+                lease: lease.clone(),
+                writer: Default::default(),
+            }),
+        })?;
+        Ok(ClipboardImageUpload {
+            target,
+            sender,
+            lease,
+            stop: self.inner.stop.clone(),
+        })
+    }
+
     pub fn disconnect(&self) {
         tracing::debug!("disconnect requested");
         self.inner.stop.store(true, Ordering::Release);
@@ -69,20 +140,22 @@ impl ClientHandle {
             return Err(Error::MissingBootId);
         }
         let bytes = encode_message(&message, MAX_FRAME_SIZE)?;
-        self.inner
-            .commands
-            .try_send(Command {
-                boot_id: boot_id.into(),
-                bytes,
-                request,
-            })
-            .map_err(|e| match e {
-                TrySendError::Full(_) => {
-                    tracing::warn!(category = "command_queue", "client backpressure");
-                    SendError::Full
-                }
-                TrySendError::Disconnected(_) => SendError::Disconnected,
-            })
+        self.queue(Command {
+            boot_id: boot_id.into(),
+            bytes,
+            request,
+            image: None,
+        })
+    }
+
+    fn queue(&self, command: Command) -> Result<()> {
+        self.inner.commands.try_send(command).map_err(|e| match e {
+            TrySendError::Full(_) => {
+                tracing::warn!(category = "command_queue", "client backpressure");
+                SendError::Full
+            }
+            TrySendError::Disconnected(_) => SendError::Disconnected,
+        })
     }
     pub fn send_input(
         &self,

@@ -3,6 +3,7 @@
 
 mod agents;
 mod hover;
+mod layout;
 mod metrics;
 mod render;
 mod row;
@@ -31,3 +32,9 @@ use agents::{agents_sort, sorted_agents, status_indicator};
 use metrics::*;
 use row::{RowBadge, first_text};
 use workspaces::visible_workspace_entries;
+
+#[derive(Clone, Copy)]
+pub(crate) enum SidebarDrag {
+    Width { start: f32, width: f32 },
+    Split,
+}

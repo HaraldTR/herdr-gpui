@@ -46,8 +46,10 @@ brew install herdr-gpui
 The cask is published from the [tap](https://github.com/penso/homebrew-tap) by the
 release workflow. A cask install updates itself through Homebrew: the in-app
 updater detects that Homebrew owns the bundle and runs `brew upgrade --cask
-herdr-gpui` for you, so Homebrew's records stay correct. macOS `.dmg` and experimental Linux tarballs are also published
-on [Releases](https://github.com/penso/herdr-gpui/releases).
+herdr-gpui` for you, so Homebrew's records stay correct. If its metadata is stale,
+the updater runs `brew update` and retries once. The update panel shows progress
+throughout. macOS `.dmg`, experimental Linux tarballs, and an experimental Windows `.zip`
+are also published on [Releases](https://github.com/penso/herdr-gpui/releases).
 
 ### From source
 
@@ -68,6 +70,37 @@ Install the Herdr daemon separately. The app starts an already-installed local
 `herdr server` when the target session is absent, but never installs, stops, or
 upgrades a daemon; removing the GUI leaves daemon sessions and shared Herdr
 configuration intact.
+
+### Linux Builds
+
+On Ubuntu 24.04 (x86_64 or ARM64), run `bash scripts/install-linux-deps.sh`
+before building. This installs GPUI's X11/Wayland/font development dependencies
+and `libasound2-dev` for Rodio/CPAL native audio. CI and release builds use the
+same script. Linux binaries require the system ALSA shared library (`libasound2t64`
+on Ubuntu 24.04), a configured default audio device, and Vulkan for rendering.
+Audio normally routes through the desktop's ALSA plugin configuration; no CLI
+audio player is required. Custom notification sounds are MP3 only. See
+[notification sounds](crates/herdr-gpui/README.md#notification-sounds).
+
+### Windows
+
+Windows is experimental, not a supported platform: CI checks formatting, lints
+every target and feature, and runs workspace tests with default and all features
+on `windows-2025`, including headless UI and CLI tests. The release workflow also
+builds and CLI-tests the optimized executable, but no native window, renderer,
+or live daemon has been exercised. Local
+connections use the named pipe the Windows daemon binds, and configuration and
+state follow its `%APPDATA%` / `%LOCALAPPDATA%` layout. Saved SSH
+hosts, in-app updates, saved GitHub credentials, and the avatar disk cache are
+unavailable and report that plainly; see
+[the GUI README](crates/herdr-gpui/README.md#windows).
+
+Each release publishes `Herdr-VERSION-x86_64-pc-windows-msvc.zip` containing
+`herdr-gpui.exe` and its license notices. It carries the same checksums,
+Sigstore signatures, and build provenance as the other assets, but it is not
+Authenticode-signed, so SmartScreen warns on first launch, and it never updates
+itself: download each new release manually. It is a console-subsystem
+executable, so launching it from Explorer also opens a console window.
 
 ## How it connects
 
@@ -92,6 +125,14 @@ The daemon owns the terminals and all session state. The GUI attaches to the
 binary **client** socket, renders the surfaces it is sent, and sends semantic
 input back. Closing or detaching the GUI leaves the daemon and its terminals
 running.
+
+## Audio Test
+
+To manually test native audio, choose **QA > Play Sound**. It plays the built-in
+Done sound on the background Rodio worker, even without a daemon or active pane
+and even with notifications muted. `HERDR_DISABLE_SOUND` and `NEXTEST` still
+suppress playback. See [notification sounds](crates/herdr-gpui/README.md#notification-sounds)
+for queue limits and playback details.
 
 ## Performance
 

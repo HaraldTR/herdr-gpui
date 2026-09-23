@@ -3,11 +3,21 @@
 //! split by responsibility across the submodules below; the fields live here
 //! because every one of them describes this window's own presentation state.
 
+mod clipboard;
 mod commands;
+mod file_drop;
+mod image_source;
+mod images;
 mod input;
 mod lifecycle;
+mod mouse;
 mod render;
+mod selection;
+mod toasts;
+mod transfers;
 
+#[cfg(test)]
+mod font_size_tests;
 #[cfg(all(test, feature = "integration-test"))]
 mod resize_tests;
 #[cfg(test)]
@@ -17,8 +27,13 @@ mod tests;
 use crate::smoke;
 use crate::{
     WINDOW_TITLE, avatars, config, endpoint, git, log_window, menu,
-    navigation::OwnedNavigationTarget, preferences, presentation::Presentation, sidebar,
-    state::LiveState, terminal::WheelAccumulator, terminal_painter, updater,
+    navigation::OwnedNavigationTarget,
+    preferences,
+    presentation::Presentation,
+    sidebar,
+    state::LiveState,
+    terminal::{Selection, WheelAccumulator},
+    terminal_painter, updater,
 };
 use gpui::{prelude::*, *};
 use herdr_client::{ConnectOptions, ConnectTarget};
@@ -27,20 +42,26 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) struct HerdrWindow {
+    pub(crate) sound: crate::sound::Service,
     pub(crate) updater: updater::Updater,
     pub(crate) update_preview: Option<updater::State>,
     pub(crate) config: config::Config,
+    /// The terminal size the last loaded config asked for. Increase/decrease
+    /// write straight to `config.terminal.size`, so this is what Reset Font
+    /// Size restores; a session adjustment never reaches disk.
+    pub(crate) configured_terminal_size: f32,
     pub(crate) theme: config::Theme,
     pub(crate) config_load: Option<Task<()>>,
     pub(crate) settings: crate::settings_panel::SettingsPanel,
     pub(crate) integrations: crate::integrations::Integrations,
-    pub(crate) notifications: crate::notifications::Notifications,
     pub(crate) endpoints: Vec<endpoint::Endpoint>,
     pub(crate) selected_endpoint: usize,
     pub(crate) selection_epoch: u64,
     pub(crate) catalog: endpoint::Catalog,
     pub(crate) activation_deadline: Option<std::time::Instant>,
     pub(crate) pending_navigation: Option<OwnedNavigationTarget>,
+    pub(crate) pending_toast: Option<u64>,
+    pub(crate) toasts_hidden: bool,
     pub(crate) pending_releases: Vec<endpoint::Release>,
     pub(crate) selected_generation: u64,
     pub(crate) live: LiveState,
@@ -55,6 +76,14 @@ pub(crate) struct HerdrWindow {
     pub(crate) cell_width: f32,
     pub(crate) hovered_terminal_link: bool,
     pub(crate) pressed_terminal_link: Option<(String, Point<Pixels>)>,
+    pub(crate) terminal_mouse: Option<mouse::Gesture>,
+    pub(crate) pending_images: Vec<images::PendingImage>,
+    pub(crate) file_transfer: Option<transfers::FileTransfer>,
+    /// The terminal cells the pointer is choosing. A release copies them and
+    /// clears this, so a highlight only ever belongs to a drag in progress.
+    pub(crate) selection: Option<Selection>,
+    /// When the "copied to clipboard" flash stops showing.
+    pub(crate) copy_feedback: Option<std::time::Instant>,
     /// The frame on screen, kept across the gap between two projections.
     pub(crate) presentation: Presentation,
     pub(crate) painter: std::rc::Rc<std::cell::RefCell<terminal_painter::TerminalPainter>>,
@@ -73,7 +102,9 @@ pub(crate) struct HerdrWindow {
     pub(crate) sidebar_visible: bool,
     pub(crate) wheel: WheelAccumulator,
     pub(crate) sidebar_width: Option<f32>,
-    pub(crate) sidebar_drag: Option<(f32, f32)>,
+    pub(crate) sidebar_drag: Option<sidebar::SidebarDrag>,
+    pub(crate) sidebar_split: Option<f32>,
+    pub(crate) sidebar_split_modified: bool,
     pub(crate) sidebar_preferences: Option<preferences::Preferences>,
     pub(crate) sidebar_modified: bool,
     pub(crate) agent_sort: preferences::AgentSort,
@@ -93,21 +124,6 @@ pub(crate) struct HerdrWindow {
 }
 
 impl HerdrWindow {
-    fn prepare_notifications(&mut self, cx: &mut Context<Self>) {
-        let endpoint = &self.endpoints[self.selected_endpoint];
-        if let Ok(live) = endpoint.connection.inbox.try_lock()
-            && self.notifications.prepare(
-                &endpoint.connection,
-                &live,
-                self.selection_epoch,
-                self.active,
-                std::time::Instant::now(),
-            )
-        {
-            cx.notify();
-        }
-    }
-
     pub(crate) fn new(
         target: ConnectTarget,
         window: &mut Window,
@@ -148,6 +164,9 @@ impl HerdrWindow {
                             if !this.sidebar_modified {
                                 this.sidebar_width = chrome.sidebar_width;
                             }
+                            if !this.sidebar_split_modified {
+                                this.sidebar_split = chrome.sidebar_split;
+                            }
                             if !this.agent_sort_modified {
                                 this.agent_sort = chrome.agent_sort;
                             }
@@ -160,18 +179,6 @@ impl HerdrWindow {
                             .and_then(|s| s.focused_pane_id.clone());
                         this.poll_endpoints(cx);
                         this.poll_integrations(cx);
-                        // Register every main window before any external effect,
-                        // even when another window's config is still loading.
-                        this.prepare_notifications(cx);
-                        for handle in cx.windows() {
-                            if handle != window.window_handle()
-                                && let Some(handle) = handle.downcast::<HerdrWindow>()
-                            {
-                                let _ = handle.update(cx, |other, _, cx| {
-                                    other.prepare_notifications(cx);
-                                });
-                            }
-                        }
                         if this.settings.task.is_none() {
                             let mut reload = false;
                             for endpoint in &this.endpoints {
@@ -181,30 +188,22 @@ impl HerdrWindow {
                                 this.load_shared_settings(cx);
                             }
                         }
-                        for (index, endpoint) in this.endpoints.iter().enumerate() {
-                            if index != this.selected_endpoint {
-                                drop(endpoint.connection.take_notifications());
-                            }
-                        }
-                        let endpoint = &this.endpoints[this.selected_endpoint];
-                        if let Some(settings) = &this.settings.shared {
-                            if this.notifications.tick(
-                                &endpoint.connection,
-                                &endpoint.live,
-                                this.selection_epoch,
-                                this.active,
-                                settings,
-                                std::time::Instant::now(),
-                            ) {
-                                cx.notify();
-                            }
-                        } else {
-                            drop(endpoint.connection.take_notifications());
-                        }
+                        #[cfg(target_os = "macos")]
+                        crate::app_badge::sync(
+                            window.window_handle().window_id(),
+                            &this.endpoints,
+                            cx,
+                        );
+                        this.cancel_stale_image();
+                        this.poll_file_transfer(cx);
                         this.update_workspace_dialog(window, cx);
                         this.poll_worktree_source(cx);
                         this.poll_hover_menu(std::time::Instant::now(), window, cx);
+                        if this.tick_copy_feedback(std::time::Instant::now()) {
+                            cx.notify();
+                        }
                         this.poll_tab_rename(window, cx);
+                        this.poll_pane_rename(window, cx);
                         if old_pane
                             != this
                                 .live
@@ -234,15 +233,25 @@ impl HerdrWindow {
                 }
             }
         });
+        let appearance = cx
+            .try_global::<crate::app::InitialAppearance>()
+            .cloned()
+            .unwrap_or_default();
+        let crate::app::InitialAppearance {
+            config,
+            theme,
+            error,
+        } = appearance;
         let mut this = Self {
+            sound: crate::sound::Service::default(),
             updater: updater::Updater::default(),
             update_preview: None,
-            config: config::Config::default(),
-            theme: config::Theme::default(),
+            configured_terminal_size: config.terminal.size,
+            config,
+            theme,
             config_load: None,
             settings: Default::default(),
             integrations: Default::default(),
-            notifications: Default::default(),
             catalog: endpoint::Catalog::new(&target),
             endpoints: vec![endpoint::Endpoint::new(
                 endpoint::LOCAL.into(),
@@ -254,6 +263,8 @@ impl HerdrWindow {
             selection_epoch: 0,
             activation_deadline: None,
             pending_navigation: None,
+            pending_toast: None,
+            toasts_hidden: false,
             pending_releases: Vec::new(),
             selected_generation: 0,
             live: LiveState::default(),
@@ -267,12 +278,17 @@ impl HerdrWindow {
             cell_width: 9.,
             hovered_terminal_link: false,
             pressed_terminal_link: None,
+            terminal_mouse: None,
+            pending_images: Vec::new(),
+            file_transfer: None,
+            selection: None,
+            copy_feedback: None,
             presentation: Default::default(),
             painter: Default::default(),
             marked: String::new(),
             hover: None,
             hover_menu: None,
-            local_error: None,
+            local_error: error,
             menu: menu::MenuState::new(cx),
             removal: None,
             git: git::Git::default(),
@@ -282,6 +298,8 @@ impl HerdrWindow {
             wheel: WheelAccumulator::default(),
             sidebar_width: None,
             sidebar_drag: None,
+            sidebar_split: None,
+            sidebar_split_modified: false,
             sidebar_preferences: None,
             sidebar_modified: false,
             agent_sort: preferences::AgentSort::default(),
@@ -294,7 +312,11 @@ impl HerdrWindow {
             _poll: poll,
             _activation: cx.observe_window_activation(window, |this, window, cx| {
                 this.active = window.is_window_active();
-                this.prepare_notifications(cx);
+                if !this.active {
+                    this.cancel_terminal_mouse(cx);
+                    this.selection = None;
+                    this.pressed_terminal_link = None;
+                }
                 this.report_focus();
                 cx.notify();
             }),

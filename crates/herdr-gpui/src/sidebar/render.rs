@@ -3,9 +3,11 @@
 //! caches only.
 
 use super::{
-    ARROW_RESERVE, HOST_ARROW_WIDTH, HOST_GAP, LABEL_GAP, ROW_PADDING,
+    ARROW_RESERVE, HOST_ARROW_WIDTH, HOST_GAP, SidebarDrag,
     agents::{Indicators, agent_labels},
-    agents_sort, label_text, line_height,
+    agents_sort, label_text,
+    layout::{self, SidebarLayout},
+    line_height,
     row::first_text,
     row::{RowIcon, RowKind, RowTree, row},
     sidebar_width, sorted_agents, visible_workspace_entries,
@@ -25,11 +27,15 @@ impl HerdrWindow {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let width = sidebar_width(self.sidebar_width, f32::from(window.viewport_size().width));
+        let split = self.sidebar_split.unwrap_or(0.5).clamp(0.1, 0.9);
+        let layout = layout::for_mode(self.config.layout.mode);
+        let padding = layout.padding();
+        let gap = layout.gap();
         // Hide secondary status in narrow windows, retaining useful host label space.
         let show_host_status = width >= 200.;
         let host_label_width = (width
             - 1.
-            - 2. * ROW_PADDING
+            - 2. * padding
             - HOST_ARROW_WIDTH
             - HOST_GAP
             - if show_host_status { HOST_GAP + 67. } else { 0. })
@@ -78,12 +84,12 @@ impl HerdrWindow {
                     div()
                         .id(SharedString::from(format!("host-{endpoint_id}")))
                         .debug_selector(|| format!("host-{endpoint_id}"))
-                        .h(px(line_height(font) + 16.))
+                        .h(px(line_height(font) + 2. * layout.host_padding()))
                         .flex_none()
                         .flex()
                         .items_center()
                         .gap(px(HOST_GAP))
-                        .px(px(12.))
+                        .px(px(padding))
                         .when(selected, |row| row.bg(rgb(theme.active)))
                         .text_color(rgb(if endpoint.enabled {
                             theme.foreground
@@ -184,8 +190,10 @@ impl HerdrWindow {
                     div()
                         .id(SharedString::from(format!("collapse-{endpoint_id}-{id}")))
                         .debug_selector(move || format!("collapse-{index}"))
-                        .w(px(ARROW_RESERVE - LABEL_GAP))
-                        .h(px(2. * line_height(font)))
+                        .w(px(ARROW_RESERVE - gap))
+                        .h(px(
+                            line_height(font) * if layout.workspace_details() { 2. } else { 1. }
+                        ))
                         .flex_none()
                         .text_size(px(16.))
                         .text_color(rgb(theme.muted))
@@ -234,18 +242,75 @@ impl HerdrWindow {
                         },
                         arrow,
                         workspace_badge(workspace, &self.menu.pr_cache, &self.git, theme),
+                        layout,
                         (font, theme),
                     )
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
-                            if this.menu.page.is_none()
-                                && this.select_endpoint(&context_endpoint, cx)
-                            {
+                            if this.navigate_endpoint(
+                                &context_endpoint,
+                                NavigationTarget::Workspace(&context_id),
+                                cx,
+                            ) {
                                 this.open_workspace_menu(&context_id, event.position, window, cx);
+                                this.menu.opening_right_click =
+                                    this.menu.page == Some(crate::menu::Page::Workspace);
                             }
                         }),
+                    )
+                    .when(
+                        self.menu.page == Some(crate::menu::Page::Workspace),
+                        |row| {
+                            let view = cx.entity().downgrade();
+                            let endpoint = endpoint_id.clone();
+                            let workspace = id.clone();
+                            row.child(
+                                canvas(
+                                    |_, _, _| (),
+                                    move |bounds, _, window, _| {
+                                        let bounds =
+                                            bounds.intersect(&window.content_mask().bounds);
+                                        window.on_mouse_event(
+                                            move |event: &MouseDownEvent, phase, window, cx| {
+                                                // The overlay dismisses first in bubble order. Use
+                                                // clipped row geometry because it occludes our hitbox.
+                                                if phase == DispatchPhase::Bubble
+                                                    && event.button == MouseButton::Right
+                                                    && bounds.contains(&event.position)
+                                                {
+                                                    let _ = view.update(cx, |this, cx| {
+                                                        cx.stop_propagation();
+                                                        if this.navigate_endpoint(
+                                                            &endpoint,
+                                                            NavigationTarget::Workspace(&workspace),
+                                                            cx,
+                                                        ) {
+                                                            this.open_workspace_menu(
+                                                                &workspace,
+                                                                event.position,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                            this.menu.opening_right_click = this
+                                                                .menu
+                                                                .page
+                                                                == Some(
+                                                                    crate::menu::Page::Workspace,
+                                                                );
+                                                        }
+                                                    });
+                                                }
+                                            },
+                                        );
+                                    },
+                                )
+                                .absolute()
+                                .inset_0()
+                                .size_full(),
+                            )
+                        },
                     )
                     .id(SharedString::from(format!("workspace-{endpoint_id}-{id}")))
                     .when(multi, |row| {
@@ -301,6 +366,7 @@ impl HerdrWindow {
                         RowIcon::None,
                         None,
                         None,
+                        layout,
                         (font, theme),
                     )
                     .id(SharedString::from(format!("agent-{endpoint_id}-{id}")))
@@ -330,7 +396,7 @@ impl HerdrWindow {
         if agent_count == 0 {
             agents = agents.child(
                 div()
-                    .px(px(12.))
+                    .px(px(padding))
                     .text_color(rgb(theme.muted))
                     .truncate()
                     .child("no agents"),
@@ -357,18 +423,24 @@ impl HerdrWindow {
             // Zero flex bases keep long workspace lists from displacing agents.
             .child(
                 div()
+                    .debug_selector(|| "spaces-section".into())
                     .flex()
                     .flex_col()
                     .flex_1()
+                    .map(|mut section| {
+                        section.style().flex_grow =
+                            Some(if self.config.show_agents { split } else { 1. });
+                        section
+                    })
                     .min_h_0()
                     .overflow_hidden()
-                    .child(header("spaces", font, theme))
+                    .child(header("spaces", font, theme, layout))
                     .child(spaces)
                     .child(
                         div()
                             .flex_none()
-                            .h(px(line_height(font) + 10.))
-                            .px(px(12.))
+                            .h(px(line_height(font) + 2. * layout.footer_padding()))
+                            .px(px(padding))
                             .flex()
                             .items_center()
                             // Menu hugs the sidebar's edge, as in the terminal client.
@@ -403,16 +475,46 @@ impl HerdrWindow {
             )
             .when(self.config.show_agents, |sidebar| {
                 sidebar
-                    .child(div().h(px(1.)).flex_none().bg(rgb(theme.active)))
                     .child(
                         div()
+                            .id("sidebar-split-resize")
+                            .debug_selector(|| "sidebar-split-resize".into())
+                            .h(px(6.))
+                            .flex_none()
+                            .cursor(CursorStyle::ResizeUpDown)
+                            .border_t_1()
+                            .border_color(rgb(theme.active))
+                            .hover(|s| s.bg(rgba(0x78a9ff44)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.sidebar_split_modified = true;
+                                    if event.click_count == 2 {
+                                        this.sidebar_drag = None;
+                                        this.sidebar_split = None;
+                                        this.save_chrome();
+                                    } else {
+                                        this.sidebar_drag = Some(SidebarDrag::Split);
+                                    }
+                                    cx.notify();
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "agents-section".into())
                             .flex()
                             .flex_col()
                             .flex_1()
+                            .map(|mut section| {
+                                section.style().flex_grow = Some(1. - split);
+                                section
+                            })
                             .min_h_0()
                             .overflow_hidden()
                             .child(
-                                header("agents", font, theme)
+                                header("agents", font, theme, layout)
                                     .justify_between()
                                     .child(agents_sort(self, cx)),
                             )
@@ -440,7 +542,10 @@ impl HerdrWindow {
                                 this.sidebar_width = None;
                                 this.save_sidebar_width();
                             } else {
-                                this.sidebar_drag = Some((f32::from(event.position.x), width));
+                                this.sidebar_drag = Some(SidebarDrag::Width {
+                                    start: f32::from(event.position.x),
+                                    width,
+                                });
                             }
                             cx.notify();
                         }),
@@ -449,18 +554,35 @@ impl HerdrWindow {
             .child(
                 canvas(
                     |_, _, _| (),
-                    move |_, _, window, _| {
+                    move |bounds, _, window, _| {
                         // Capture globally so dragging continues outside the narrow divider,
                         // and terminal handlers never receive the resize gesture's release.
                         let moving = view.clone();
                         window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
                             if phase == DispatchPhase::Capture {
                                 let _ = moving.update(cx, |this, cx| {
-                                    if let Some((start, width)) = this.sidebar_drag {
-                                        this.sidebar_width = Some(sidebar_width(
-                                            Some(width + f32::from(event.position.x) - start),
-                                            f32::from(window.viewport_size().width),
-                                        ));
+                                    if let Some(drag) = this.sidebar_drag {
+                                        match drag {
+                                            SidebarDrag::Width { start, width } => {
+                                                this.sidebar_width = Some(sidebar_width(
+                                                    Some(
+                                                        width + f32::from(event.position.x) - start,
+                                                    ),
+                                                    f32::from(window.viewport_size().width),
+                                                ));
+                                            }
+                                            SidebarDrag::Split => {
+                                                let height =
+                                                    (f32::from(bounds.size.height) - 6.).max(1.);
+                                                this.sidebar_split = Some(
+                                                    ((f32::from(
+                                                        event.position.y - bounds.origin.y,
+                                                    ) - 3.)
+                                                        / height)
+                                                        .clamp(0.1, 0.9),
+                                                );
+                                            }
+                                        }
                                         cx.stop_propagation();
                                         cx.notify();
                                     }
@@ -473,7 +595,7 @@ impl HerdrWindow {
                             {
                                 let _ = released.update(cx, |this, cx| {
                                     if this.sidebar_drag.take().is_some() {
-                                        this.save_sidebar_width();
+                                        this.save_chrome();
                                         cx.stop_propagation();
                                         cx.notify();
                                     }
@@ -488,11 +610,16 @@ impl HerdrWindow {
     }
 }
 
-pub(super) fn header(label: &'static str, font: &FontConfig, theme: &Theme) -> Div {
+pub(super) fn header(
+    label: &'static str,
+    font: &FontConfig,
+    theme: &Theme,
+    layout: &dyn SidebarLayout,
+) -> Div {
     div()
         .flex_none()
-        .h(px(line_height(font) + 12.))
-        .px(px(12.))
+        .h(px(line_height(font) + 2. * layout.header_padding()))
+        .px(px(layout.padding()))
         .flex()
         .items_center()
         .text_size(px(font.size))

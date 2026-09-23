@@ -4,6 +4,7 @@
 
 use super::HerdrWindow;
 use crate::{
+    config::{FONT_SIZE_RANGE, FONT_SIZE_STEP},
     controls::{self, Command},
     log_window,
     navigation::{NavigationTarget, OwnedNavigationTarget},
@@ -13,21 +14,37 @@ use gpui::{Context, Window};
 use std::time::Duration;
 
 impl HerdrWindow {
-    pub(crate) fn navigate(&mut self, target: NavigationTarget<&str>, cx: &mut Context<Self>) {
-        if self.menu.page.is_some() || !self.input_ready() {
-            return;
+    pub(crate) fn navigate(
+        &mut self,
+        target: NavigationTarget<&str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.menu.page.is_some() {
+            return false;
         }
-        self.request_focus_change(
-            "Navigate",
-            Some((&target).into()),
-            |handle, boot| match target {
-                NavigationTarget::Workspace(id) => handle.focus_workspace(boot, id),
-                NavigationTarget::Tab(id) => handle.focus_tab(boot, id),
-                NavigationTarget::Pane(id) => handle.focus_pane(boot, id),
-            },
-        );
+        self.dispatch_navigation(target, cx)
+    }
+
+    /// Complete an accepted navigation even if its context menu has since opened.
+    pub(crate) fn dispatch_navigation(
+        &mut self,
+        target: NavigationTarget<&str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.input_ready() {
+            return false;
+        }
+        let queued =
+            self.request_focus_change("Navigate", Some((&target).into()), |handle, boot| {
+                match target {
+                    NavigationTarget::Workspace(id) => handle.focus_workspace(boot, id),
+                    NavigationTarget::Tab(id) => handle.focus_tab(boot, id),
+                    NavigationTarget::Pane(id) => handle.focus_pane(boot, id),
+                }
+            });
         self.marked.clear();
         cx.notify();
+        queued
     }
 
     /// `label` is what a failure is reported as, not a method name: navigation
@@ -40,7 +57,7 @@ impl HerdrWindow {
             &herdr_client::ClientHandle,
             &str,
         ) -> Result<String, herdr_client::SendError>,
-    ) {
+    ) -> bool {
         if let (Some(handle), Some(snapshot)) = (
             &self.endpoints[self.selected_endpoint].connection.handle,
             &self.live.snapshot,
@@ -49,8 +66,10 @@ impl HerdrWindow {
                 self.local_error = Some(format!("{label}: {error}"));
             } else {
                 self.fence_focus_change(focus);
+                return true;
             }
         }
+        false
     }
 
     pub(crate) fn fence_focus_change(&mut self, focus: Option<OwnedNavigationTarget>) {
@@ -97,6 +116,26 @@ impl HerdrWindow {
         }
     }
 
+    /// Applies a session terminal size. Painting, hit testing, and IME
+    /// placement all read `config.terminal.size` and its derived line height,
+    /// so writing that one field keeps the three in agreement; render
+    /// re-measures the cell and the canvas resends the geometry.
+    ///
+    /// A pending config load is deliberately left alone. Cancelling it the way
+    /// the theme picker does would strand the very first load, which has no
+    /// retry, on default fonts; a landing reload merely discards the
+    /// adjustment, which is what reloading is for.
+    pub(crate) fn set_terminal_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
+        let size = size.clamp(*FONT_SIZE_RANGE.start(), *FONT_SIZE_RANGE.end());
+        if size == self.config.terminal.size {
+            return;
+        }
+        self.config.terminal.size = size;
+        // The console follows the rendered terminal face, as a reload makes it.
+        log_window::set_appearance(&self.config, &self.theme, cx);
+        cx.notify();
+    }
+
     pub(crate) fn command(
         &mut self,
         command: Command,
@@ -111,6 +150,23 @@ impl HerdrWindow {
             self.input_probe.actions += 1;
         }
         match command {
+            Command::OpenNotificationTarget => {
+                if let Some((endpoint, id)) = self.endpoints.iter().find_map(|e| {
+                    e.toasts
+                        .entries
+                        .iter()
+                        .find(|(_, n)| n.visible)
+                        .map(|(id, _)| (e, *id))
+                }) {
+                    let (origin, generation, inbox) = (
+                        endpoint.id.clone(),
+                        endpoint.generation,
+                        endpoint.connection.inbox.clone(),
+                    );
+                    self.click_toast(&origin, generation, &inbox, id, cx);
+                }
+                return;
+            }
             Command::Logs => {
                 log_window::open(cx);
                 return;
@@ -145,6 +201,17 @@ impl HerdrWindow {
                 return;
             }
             Command::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
+            Command::IncreaseFontSize | Command::DecreaseFontSize => {
+                let step = if command == Command::IncreaseFontSize {
+                    FONT_SIZE_STEP
+                } else {
+                    -FONT_SIZE_STEP
+                };
+                self.set_terminal_font_size(self.config.terminal.size + step, cx);
+            }
+            Command::ResetFontSize => {
+                self.set_terminal_font_size(self.configured_terminal_size, cx);
+            }
             Command::Reconnect => self.reconnect(),
             Command::Quit => {
                 cx.quit();

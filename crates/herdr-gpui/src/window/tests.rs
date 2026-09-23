@@ -81,3 +81,59 @@ fn window_title_follows_the_focused_space_of_that_window(cx: &mut gpui::TestAppC
         WINDOW_TITLE
     );
 }
+
+#[gpui::test]
+fn the_sidebar_gap_narrows_the_terminal_only_while_the_sidebar_shows(
+    cx: &mut gpui::TestAppContext,
+) {
+    use gpui::{px, size};
+
+    let (view, cx) = cx.add_window_view(fixture_window);
+    cx.simulate_resize(size(px(900.), px(600.)));
+    let draw = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+    };
+    let set_gap = |cx: &mut gpui::VisualTestContext, gap: f32, visible: bool| {
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.config.layout.sidebar_gap = gap;
+                view.sidebar_visible = visible;
+                cx.notify();
+            });
+        });
+    };
+
+    // The shipped default already separates the two panes.
+    draw(cx);
+    let sidebar = cx.debug_bounds("sidebar").unwrap();
+    assert_eq!(
+        view.read_with(cx, |view, _| view.bounds.origin.x),
+        sidebar.right() + px(crate::config::Layout::default().sidebar_gap),
+    );
+
+    set_gap(cx, 0., true);
+    draw(cx);
+    let flush = view.read_with(cx, |view, _| view.bounds);
+    assert_eq!(cx.debug_bounds("sidebar").unwrap(), sidebar);
+    assert_eq!(flush.origin.x, sidebar.right());
+
+    set_gap(cx, 16., true);
+    draw(cx);
+    let padded = view.read_with(cx, |view, _| view.bounds);
+    // The same bounds feed painting, hit testing, and the resize the daemon
+    // sees, so the gap must come out of the terminal's own width.
+    assert_eq!(padded.origin.x, flush.origin.x + px(16.));
+    assert_eq!(padded.size.width, flush.size.width - px(16.));
+    assert_eq!(padded.size.height, flush.size.height);
+    assert_eq!(cx.debug_bounds("sidebar").unwrap(), sidebar);
+
+    // Hiding the sidebar leaves nothing to separate the terminal from.
+    set_gap(cx, 16., false);
+    draw(cx);
+    let hidden = view.read_with(cx, |view, _| view.bounds);
+    assert_eq!(hidden.origin.x, px(0.));
+    assert_eq!(hidden.size.width, flush.size.width + sidebar.size.width);
+}

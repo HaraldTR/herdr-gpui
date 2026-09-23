@@ -557,6 +557,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::{Page, PrState, Row, summary};
     use crate::git::Status;
+    use crate::sidebar::layout_tests::REPO_KEY;
     use gpui::{TestAppContext, point, px, size};
     use std::sync::Arc;
 
@@ -589,7 +590,7 @@ mod tests {
                 snapshot.focused_workspace_id = Some("w3".into());
                 view.live.snapshot = Some(Arc::new(snapshot));
                 let input = view.git_input().unwrap();
-                assert_eq!(input.repo_key, "/fixture/agent-launcher/.git");
+                assert_eq!(input.repo_key, REPO_KEY);
                 assert_eq!(input.branch, "develop");
                 assert_eq!(input.checkout, None, "the checkout is resolved by Git");
                 // A workspace without worktree metadata cannot be acted on.
@@ -620,7 +621,7 @@ mod tests {
         let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
         let input = crate::pull_request::Input {
             checkout: None,
-            repo_key: "/fixture/agent-launcher/.git".into(),
+            repo_key: REPO_KEY.into(),
             branch: "develop".into(),
         };
         cx.update(|window, cx| {
@@ -677,7 +678,7 @@ mod tests {
                 view.git = crate::git::Git::fixture(
                     crate::pull_request::Input {
                         checkout: None,
-                        repo_key: "/fixture/agent-launcher/.git".into(),
+                        repo_key: REPO_KEY.into(),
                         branch: "develop".into(),
                     },
                     status(12, 3, 1),
@@ -713,7 +714,7 @@ mod tests {
         let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
         let input = crate::pull_request::Input {
             checkout: None,
-            repo_key: "/fixture/agent-launcher/.git".into(),
+            repo_key: REPO_KEY.into(),
             branch: "develop".into(),
         };
         cx.update(|window, cx| {

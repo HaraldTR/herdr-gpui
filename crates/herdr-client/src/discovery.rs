@@ -4,8 +4,30 @@
 use crate::{Error, Result};
 use std::{
     env,
+    ffi::OsString,
     path::{Path, PathBuf},
 };
+
+/// Upstream's configuration root, before the `herdr`/`herdr-dev` directory.
+/// Windows has no XDG layout by default, so upstream falls back to `%APPDATA%`
+/// there; matching that order is what makes both ends dial the same endpoint.
+fn config_root(var: &impl Fn(&str) -> Option<OsString>) -> PathBuf {
+    if let Some(dir) = var("XDG_CONFIG_HOME") {
+        return dir.into();
+    }
+    #[cfg(windows)]
+    {
+        if let Some(dir) = var("APPDATA") {
+            return dir.into();
+        }
+        if let Some(profile) = var("USERPROFILE") {
+            return PathBuf::from(profile).join("AppData").join("Roaming");
+        }
+    }
+    var("HOME")
+        .map(|home| PathBuf::from(home).join(".config"))
+        .unwrap_or_else(env::temp_dir)
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ConnectTarget {
@@ -51,7 +73,7 @@ impl ConnectTarget {
 
     fn local_session_socket_path_with(
         &self,
-        var: impl Fn(&str) -> Option<std::ffi::OsString>,
+        var: impl Fn(&str) -> Option<OsString>,
     ) -> Result<PathBuf> {
         let target = if matches!(self, Self::Socket(_)) {
             &Self::Local
@@ -64,10 +86,7 @@ impl ConnectTarget {
         })
     }
 
-    fn socket_path_with(
-        &self,
-        var: impl Fn(&str) -> Option<std::ffi::OsString>,
-    ) -> Result<PathBuf> {
+    fn socket_path_with(&self, var: impl Fn(&str) -> Option<OsString>) -> Result<PathBuf> {
         if matches!(self, Self::Ssh { .. }) {
             return Err(Error::NoLocalSocket);
         }
@@ -94,11 +113,7 @@ impl ConnectTarget {
                 ..
             }
         );
-        let base = var("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| var("HOME").map(|p| PathBuf::from(p).join(".config")))
-            .unwrap_or_else(env::temp_dir)
-            .join(if development { "herdr-dev" } else { "herdr" });
+        let base = config_root(&var).join(if development { "herdr-dev" } else { "herdr" });
         let name = match self {
             Self::Session { name, .. } => name.clone(),
             _ => var("HERDR_SESSION")
@@ -113,10 +128,12 @@ impl ConnectTarget {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    // Non-UTF-8 configuration roots only exist on POSIX; Windows paths are UTF-16.
+    #[cfg(unix)]
     #[test]
     fn local_origin_ignores_overrides_but_preserves_session_and_os_paths() {
         use std::os::unix::ffi::OsStringExt;
-        let root = std::ffi::OsString::from_vec(b"/config-\xff".to_vec());
+        let root = OsString::from_vec(b"/config-\xff".to_vec());
         let var = |name: &str| match name {
             "XDG_CONFIG_HOME" => Some(root.clone()),
             "HERDR_SESSION" => Some("work".into()),
@@ -204,6 +221,45 @@ mod tests {
             Path::new("/config/herdr/herdr-client.sock")
         );
     }
+    // Windows has no XDG layout by default, and the daemon binds the endpoint
+    // under the same root, so the fallbacks must stay in upstream's order.
+    #[cfg(windows)]
+    #[test]
+    fn windows_config_falls_back_to_roaming_app_data() {
+        let environment = |names: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                names
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| OsString::from(*value))
+            }
+        };
+        assert_eq!(
+            ConnectTarget::Local
+                .socket_path_with(environment(&[
+                    ("APPDATA", r"C:\Roaming"),
+                    ("HOME", r"C:\Home")
+                ]))
+                .unwrap(),
+            PathBuf::from(r"C:\Roaming").join("herdr/herdr-client.sock")
+        );
+        assert_eq!(
+            ConnectTarget::Local
+                .socket_path_with(environment(&[("USERPROFILE", r"C:\Users\a")]))
+                .unwrap(),
+            PathBuf::from(r"C:\Users\a").join("AppData/Roaming/herdr/herdr-client.sock")
+        );
+        assert_eq!(
+            ConnectTarget::Session {
+                name: "work".into(),
+                development: true,
+            }
+            .socket_path_with(environment(&[("HOME", r"C:\Home")]))
+            .unwrap(),
+            PathBuf::from(r"C:\Home").join(".config/herdr-dev/sessions/work/herdr-client.sock")
+        );
+    }
+
     #[test]
     fn sessions_are_contained_and_default_is_not_nested() {
         let root = Path::new("/config/herdr");

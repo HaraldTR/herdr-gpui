@@ -52,7 +52,11 @@ impl HerdrWindow {
     }
 
     pub(crate) fn report_focus(&mut self) {
-        let focused = self.active && self.endpoints[self.selected_endpoint].surface_requested();
+        // The first positive report acknowledges the daemon's active tab. Wait
+        // until its surface is ready, but do not flap focus on later frame gaps.
+        let focused = self.active
+            && self.endpoints[self.selected_endpoint].surface_requested()
+            && (self.sent_focus == Some(true) || self.input_ready());
         // Update the authoritative event inbox, not just the rendered clone.
         if let Ok(mut state) = self.endpoints[self.selected_endpoint]
             .connection

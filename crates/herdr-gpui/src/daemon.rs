@@ -1,9 +1,8 @@
 #![forbid(unsafe_code)]
 
-use herdr_client::ConnectTarget;
+use herdr_client::{ConnectTarget, Stream};
 use std::{
     env, io,
-    os::unix::{net::UnixStream, process::CommandExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
@@ -25,7 +24,7 @@ pub fn connect(
     target: &ConnectTarget,
     stop: &AtomicBool,
     on_start: impl FnOnce(),
-) -> io::Result<(UnixStream, bool)> {
+) -> io::Result<(Stream, bool)> {
     let socket = target
         .socket_path()
         .map_err(|error| io::Error::new(error.kind(), error))?;
@@ -55,29 +54,45 @@ pub fn connect(
     Ok((stream, local))
 }
 
+/// Windows resolves a bare command name to `herdr.exe`; an explicit probe has to
+/// name the extension itself.
+const NAME: &str = if cfg!(windows) { "herdr.exe" } else { "herdr" };
+
 fn executable() -> PathBuf {
     // Finder launches have a minimal PATH, which often omits Homebrew and Cargo.
     let path = env::var_os("PATH").unwrap_or_default();
     let candidates = env::split_paths(&path)
-        .map(|dir| dir.join("herdr"))
-        .chain(env::var_os("HOME").into_iter().flat_map(|home| {
-            let home = PathBuf::from(home);
-            [home.join(".local/bin/herdr"), home.join(".cargo/bin/herdr")]
-        }))
-        .chain([
-            PathBuf::from("/opt/homebrew/bin/herdr"),
-            PathBuf::from("/usr/local/bin/herdr"),
-        ]);
+        .map(|dir| dir.join(NAME))
+        .chain(
+            env::var_os("HOME")
+                .or_else(|| cfg!(windows).then(|| env::var_os("USERPROFILE")).flatten())
+                .into_iter()
+                .flat_map(|home| {
+                    let home = PathBuf::from(home);
+                    [
+                        home.join(".local").join("bin").join(NAME),
+                        home.join(".cargo").join("bin").join(NAME),
+                    ]
+                }),
+        )
+        .chain(
+            [
+                PathBuf::from("/opt/homebrew/bin/herdr"),
+                PathBuf::from("/usr/local/bin/herdr"),
+            ]
+            .into_iter()
+            .filter(|_| cfg!(unix)),
+        );
     candidates
         .into_iter()
         .find(|path| path.is_file())
-        .unwrap_or_else(|| "herdr".into())
+        .unwrap_or_else(|| NAME.into())
 }
 
 /// Trust the user's standard local endpoint, not an upgrade-sensitive executable.
 /// A same-user proxy deliberately installed at that endpoint is within this trust
 /// boundary; this is not remote-origin attestation.
-fn is_local_peer(stream: &UnixStream, target: &ConnectTarget, socket: &Path) -> bool {
+fn is_local_peer(stream: &Stream, target: &ConnectTarget, socket: &Path) -> bool {
     #[cfg(target_os = "macos")]
     {
         target
@@ -92,7 +107,7 @@ fn is_local_peer(stream: &UnixStream, target: &ConnectTarget, socket: &Path) -> 
 }
 
 #[cfg(target_os = "macos")]
-fn peer_matches_local_endpoint(stream: &UnixStream, socket: &Path, expected: &Path) -> bool {
+fn peer_matches_local_endpoint(stream: &Stream, socket: &Path, expected: &Path) -> bool {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let uid = nix::unistd::geteuid();
     if !nix::unistd::getpeereid(stream).is_ok_and(|(peer, _)| peer == uid) {
@@ -121,14 +136,31 @@ fn peer_matches_local_endpoint(stream: &UnixStream, socket: &Path, expected: &Pa
         && std::fs::metadata(parent).is_ok_and(|metadata| metadata.is_dir() && owned(&metadata))
 }
 
+/// The daemon outlives this window, so it must not share the GUI's signal or
+/// console group: closing or quitting the GUI cannot take the server with it.
+#[cfg(unix)]
+fn detach(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(windows)]
+fn detach(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    // The server is a console program; launched from the GUI it must not flash one.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+}
+
 fn connect_or_start(
     socket: &Path,
     stop: &AtomicBool,
     timeout: Duration,
     command: impl FnOnce() -> Command,
     auto_start: bool,
-) -> io::Result<UnixStream> {
-    match UnixStream::connect(socket) {
+) -> io::Result<Stream> {
+    match Stream::connect(socket) {
         Ok(stream) => return Ok(stream),
         Err(error)
             if auto_start
@@ -144,19 +176,19 @@ fn connect_or_start(
             crate::Error::DaemonCancelled,
         ));
     }
-    let mut child = command()
+    let mut command = command();
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                io::Error::new(error.kind(), MissingInstallation(error))
-            } else {
-                io::Error::new(error.kind(), crate::Error::DaemonSpawn { source: error })
-            }
-        })?;
+        .stderr(Stdio::null());
+    detach(&mut command);
+    let mut child = command.spawn().map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            io::Error::new(error.kind(), MissingInstallation(error))
+        } else {
+            io::Error::new(error.kind(), crate::Error::DaemonSpawn { source: error })
+        }
+    })?;
     // The daemon outlives the window. Reap it if it exits while the GUI is alive.
     let (exit_tx, exit_rx) = std::sync::mpsc::channel();
     thread::Builder::new()
@@ -172,7 +204,7 @@ fn connect_or_start(
                 crate::Error::DaemonCancelled,
             ));
         }
-        match UnixStream::connect(socket) {
+        match Stream::connect(socket) {
             Ok(stream) => return Ok(stream),
             Err(error)
                 if matches!(
@@ -194,7 +226,8 @@ fn connect_or_start(
     }
 }
 
-#[cfg(test)]
+// The fixtures bind real sockets and launch POSIX helper executables.
+#[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
@@ -230,7 +263,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn local_endpoint_survives_executable_removal_and_replacement() {
-        use std::os::unix::fs::PermissionsExt;
+        // Only this test dials the endpoint; the rest just bind one.
+        use std::os::unix::{fs::PermissionsExt, net::UnixStream};
         let root = socket();
         std::fs::create_dir(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();

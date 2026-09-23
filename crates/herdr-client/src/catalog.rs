@@ -1,12 +1,14 @@
 //! Upstream client/endpoint/catalog.rs schema and config/io.rs paths.
 use crate::{Error, Result, StorageOperation, session_socket};
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::{
     collections::HashSet,
     env,
+    ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -34,11 +36,7 @@ struct Catalog {
 /// Load profiles only, like upstream `load_profiles`; selection is client-local.
 /// This performs bounded filesystem I/O; call it from a background task.
 pub fn load_saved_hosts(development: bool) -> Result<Vec<SavedHost>> {
-    load_path(&catalog_path(
-        development,
-        env::var("XDG_STATE_HOME").ok(),
-        env::var("HOME").ok(),
-    ))
+    load_path(&catalog_path(development, |name| env::var_os(name)))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -52,11 +50,7 @@ struct Selection {
 /// malformed or stale selection files retain the catalog's legacy selection.
 /// Live clients should subsequently use `load_saved_hosts`, not reload selection.
 pub fn load_saved_host_selection(development: bool) -> Result<(Vec<SavedHost>, Option<String>)> {
-    load_with_selection(&catalog_path(
-        development,
-        env::var("XDG_STATE_HOME").ok(),
-        env::var("HOME").ok(),
-    ))
+    load_with_selection(&catalog_path(development, |name| env::var_os(name)))
 }
 
 fn load_with_selection(path: &Path) -> Result<(Vec<SavedHost>, Option<String>)> {
@@ -126,11 +120,7 @@ fn read_selection(path: &Path) -> Result<Option<Selection>> {
 /// All selection APIs perform filesystem I/O and belong on a background worker.
 pub fn store_saved_host_selection(development: bool, selected: Option<&str>) -> Result<()> {
     store_selection(
-        &catalog_path(
-            development,
-            env::var("XDG_STATE_HOME").ok(),
-            env::var("HOME").ok(),
-        ),
+        &catalog_path(development, |name| env::var_os(name)),
         selected,
     )
 }
@@ -180,10 +170,12 @@ fn store_selection(catalog: &Path, selected: Option<&str>) -> Result<()> {
         std::process::id(),
         NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
     ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    // Windows has no mode bits; the file inherits the private state directory's ACL.
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
         .open(&temp)
         .map_err(|error| Error::storage(StorageOperation::Create, &temp, error))?;
     let result = (|| {
@@ -201,10 +193,14 @@ fn store_selection(catalog: &Path, selected: Option<&str>) -> Result<()> {
                 error,
             )
         })?;
+        // A directory handle cannot be opened for fsync on Windows, where the
+        // replacement is already ordered by the filesystem.
+        #[cfg(unix)]
         File::open(parent)
             .map_err(|error| Error::storage(StorageOperation::Open, parent, error))?
             .sync_all()
-            .map_err(|error| Error::storage(StorageOperation::Sync, parent, error))
+            .map_err(|error| Error::storage(StorageOperation::Sync, parent, error))?;
+        Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(temp);
@@ -212,11 +208,27 @@ fn store_selection(catalog: &Path, selected: Option<&str>) -> Result<()> {
     result
 }
 
-fn catalog_path(development: bool, xdg: Option<String>, home: Option<String>) -> PathBuf {
+/// Upstream's state root for the endpoint catalog. Windows has no XDG layout by
+/// default, so upstream falls back to `%LOCALAPPDATA%` there; the catalog is
+/// shared with the daemon, so both must agree on where it lives.
+fn catalog_path(development: bool, var: impl Fn(&str) -> Option<OsString>) -> PathBuf {
     let app = if development { "herdr-dev" } else { "herdr" };
-    xdg.map(PathBuf::from)
-        .or_else(|| home.map(|home| PathBuf::from(home).join(".local/state")))
-        .map(|base| base.join(app))
+    let root = (|| {
+        if let Some(dir) = var("XDG_STATE_HOME") {
+            return Some(PathBuf::from(dir));
+        }
+        #[cfg(windows)]
+        {
+            if let Some(dir) = var("LOCALAPPDATA") {
+                return Some(PathBuf::from(dir));
+            }
+            if let Some(profile) = var("USERPROFILE") {
+                return Some(PathBuf::from(profile).join("AppData").join("Local"));
+            }
+        }
+        var("HOME").map(|home| PathBuf::from(home).join(".local/state"))
+    })();
+    root.map(|base| base.join(app))
         .unwrap_or_else(|| env::temp_dir().join(format!("{app}-state")))
         .join("client/endpoints.json")
 }
@@ -318,6 +330,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // Symlink and permission fixtures require POSIX semantics.
+    #[cfg(unix)]
     #[test]
     fn storage_errors_retain_operation_paths_sources_and_redacted_display() {
         use std::error::Error as _;
@@ -427,6 +441,8 @@ mod tests {
         ));
     }
 
+    // Symlink and permission fixtures require POSIX semantics.
+    #[cfg(unix)]
     #[test]
     fn selection_roundtrip_fallbacks_and_independent_clients() {
         use std::os::unix::fs::PermissionsExt;
@@ -485,6 +501,8 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    // Symlink and permission fixtures require POSIX semantics.
+    #[cfg(unix)]
     #[test]
     fn selection_write_refuses_nonfiles_without_touching_other_state() {
         let root = env::temp_dir().join(format!("herdr-selection-failure-{}", std::process::id()));
@@ -505,25 +523,63 @@ mod tests {
     }
     #[test]
     fn paths_use_state_and_explicit_development() {
+        let environment = |state: Option<&str>, home: Option<&str>| {
+            let (state, home) = (state.map(OsString::from), home.map(OsString::from));
+            move |name: &str| match name {
+                "XDG_STATE_HOME" => state.clone(),
+                "HOME" => home.clone(),
+                _ => None,
+            }
+        };
         assert_eq!(
-            catalog_path(false, Some("/state".into()), Some("/home".into())),
+            catalog_path(false, environment(Some("/state"), Some("/home"))),
             PathBuf::from("/state/herdr/client/endpoints.json")
         );
         assert_eq!(
-            catalog_path(true, None, Some("/home".into())),
+            catalog_path(true, environment(None, Some("/home"))),
             PathBuf::from("/home/.local/state/herdr-dev/client/endpoints.json")
         );
         for (development, app) in [(false, "herdr"), (true, "herdr-dev")] {
             assert_eq!(
-                catalog_path(development, Some("/state".into()), None)
+                catalog_path(development, environment(Some("/state"), None))
                     .with_file_name("endpoint-selection.json"),
                 PathBuf::from(format!("/state/{app}/client/endpoint-selection.json"))
             );
             assert_eq!(
-                catalog_path(development, None, None),
+                catalog_path(development, environment(None, None)),
                 env::temp_dir().join(format!("{app}-state/client/endpoints.json"))
             );
         }
+    }
+
+    // Windows has no XDG layout by default, and the daemon reads the catalog
+    // from the same place, so the fallbacks must stay in upstream's order.
+    #[cfg(windows)]
+    #[test]
+    fn windows_state_falls_back_to_local_app_data() {
+        let environment = |names: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                names
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| OsString::from(*value))
+            }
+        };
+        assert_eq!(
+            catalog_path(
+                false,
+                environment(&[("LOCALAPPDATA", r"C:\Local"), ("HOME", r"C:\Home")])
+            ),
+            PathBuf::from(r"C:\Local").join("herdr/client/endpoints.json")
+        );
+        assert_eq!(
+            catalog_path(false, environment(&[("USERPROFILE", r"C:\Users\a")])),
+            PathBuf::from(r"C:\Users\a").join("AppData/Local/herdr/client/endpoints.json")
+        );
+        assert_eq!(
+            catalog_path(true, environment(&[("HOME", r"C:\Home")])),
+            PathBuf::from(r"C:\Home").join(".local/state/herdr-dev/client/endpoints.json")
+        );
     }
     #[test]
     fn schema_limits_and_security() {

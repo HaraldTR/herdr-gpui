@@ -111,8 +111,8 @@ Linux targets are `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`.
 The release workflow builds both natively on Ubuntu 24.04 architecture runners,
 using the same `scripts/install-linux-deps.sh` library setup as CI. Both archives
 are mandatory in the single immutable asset manifest; signing, provenance and
-consumer verification cover both. The SBOM unions both Linux and both macOS
-target graphs. No separate per-platform manifest or publication job is used.
+consumer verification cover both. The SBOM unions both Linux, both macOS, and
+the Windows target graphs. No separate per-platform manifest or publication job is used.
 The caller must supply the matching release binary; packaging does not cross-build
 or resolve shared libraries. Output is `Herdr-VERSION-TARGET.tar.gz`, with a
 same-named root containing `bin/herdr-gpui`, a PNG icon, desktop entry, license and
@@ -126,6 +126,17 @@ replace or alter the manual archive's desktop/icon/license tree. Both native
 Linux builds and both macOS builds embed `HERDR_UPDATE_PUBLIC_KEY` and the
 validated `HERDR_RELEASE_VERSION` before packaging.
 
+The experimental Windows target is `x86_64-pc-windows-msvc`, built natively on
+`windows-2025` after clippy, the protocol/client suites and the CLI tests pass
+there. `scripts/release/package-windows.py VERSION TARGET BINARY OUTPUT_DIR
+THIRD_PARTY_NOTICES` (standard-library Python, since the runner has no zip tool)
+writes `Herdr-VERSION-TARGET.zip` with a same-named root containing
+`herdr-gpui.exe` and `licenses/` holding the same license and notice files as
+the Linux tree. Entries carry a fixed timestamp. The zip is mandatory in the
+asset manifest and receives checksums, Sigstore sidecars and provenance like
+every other asset, but it is not Authenticode-signed and has no updater archive
+or update-manifest entry: Windows installs update by manual download.
+
 ## Updater Signing
 
 Configure `HERDR_UPDATE_PUBLIC_KEY` as a repository Actions variable (64 lowercase
@@ -135,14 +146,14 @@ signing step of `sign` receives it; builds, tests, metadata, OIDC and publicatio
 never do. The public key is validated before builds and matched against the
 private key before signing exact JSON bytes. See [updater setup](../../docs/updating.md).
 
-The exact release base set is nine files: the DMG, two manual Linux archives,
-SBOM, three updater archives, `update-manifest.json`, and its raw 64-byte Ed25519
-`update-manifest.sig`. All nine receive checksum and Sigstore sidecars and GitHub
+The exact release base set is ten files: the DMG, two manual Linux archives,
+the Windows zip, SBOM, three updater archives, `update-manifest.json`, and its
+raw 64-byte Ed25519 `update-manifest.sig`. All ten receive checksum and Sigstore sidecars and GitHub
 provenance in the separate protected OIDC job. The raw signature is not overwritten:
 its Sigstore sidecar is `update-manifest.sig.sig`; the JSON's is
-`update-manifest.json.sig`. `SHA256SUMS` covers all 45 base/sidecar files; the
-immutable release has exactly 46 assets. Missing or additional files fail closed.
-`artifact-manifest.py base-names VERSION DIRECTORY` lists the nine base names.
+`update-manifest.json.sig`. `SHA256SUMS` covers all 50 base/sidecar files; the
+immutable release has exactly 51 assets. Missing or additional files fail closed.
+`artifact-manifest.py base-names VERSION DIRECTORY` lists the ten base names.
 The publication job verifies downloaded draft bytes and the complete exact asset
 set before making it public; Homebrew still verifies and uses only the final DMG.
 
@@ -193,13 +204,14 @@ retrieved evidence, so byte-identical reports across machines are not guaranteed
 
 `about.toml` filters to the union of `aarch64-apple-darwin`,
 `x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`, and
-`x86_64-unknown-linux-gnu`, matching supported packaging targets. Windows GUI is
-not shipped. All features and build/dev dependencies remain included, a
+`x86_64-unknown-linux-gnu`, and `x86_64-pc-windows-msvc`, matching the packaging
+targets. All features and build/dev dependencies remain included, a
 conservative superset of any one release binary, not its exact linked inventory.
 The accepted-license list covers the current graph's reviewed choices; Apache is
 preferred for dual licenses. `CDLA-Permissive-2.0` covers `webpki-roots` trust data
 and requires its agreement text with redistribution. MPL is accepted only for
-`cbindgen 0.28.0` (build tool) and `option-ext 0.2.0`. The wrapper rejects version
+`cbindgen 0.28.0` (build tool), `option-ext 0.2.0`, the `symphonia` MP3 crates, and
+`dwrote 0.11.5` (Windows only). The wrapper rejects version
 changes to those exceptions until reviewed. The report gives version-specific
 crate-source download links, including these unmodified MPL sources. Keep those
 sources available and re-review obligations if dependencies are modified.
@@ -218,14 +230,15 @@ when cargo-about resolves a standard SPDX license. No report is written until
 resolution and collection succeed; existing reports are refused to prevent stale
 reuse. Neither Cargo.lock nor dependency versions are updated by this command.
 
-Both package interfaces require a nonempty report. macOS includes it in
+All package interfaces require a nonempty report. macOS includes it in
 `Contents/Resources/THIRD-PARTY-NOTICES.txt`; Linux includes it in
-`share/licenses/herdr-gpui/THIRD-PARTY-NOTICES.txt`. Secret-free build jobs generate
+`share/licenses/herdr-gpui/THIRD-PARTY-NOTICES.txt`; Windows includes it in
+`licenses/THIRD-PARTY-NOTICES.txt`. Secret-free build jobs generate
 reports before packaging. Each macOS binary artifact carries its report; assembly
 requires the two reports to match byte-for-byte before signing. Local DMG builds
 also generate notices before sourcing signing configuration.
 
-Both bundles also preserve root `LICENSE`, `NOTICE`, protocol `LICENSE-APACHE`
+All bundles also preserve root `LICENSE`, `NOTICE`, protocol `LICENSE-APACHE`
 and `NOTICE.md`, and `assets/icons/LICENSE-octicons` as separate files.
 
 **Public release review is required:** generation is an inventory, not legal

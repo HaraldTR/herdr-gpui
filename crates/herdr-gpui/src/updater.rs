@@ -2,9 +2,15 @@
 mod error;
 pub use error::UpdateError;
 use error::{Result, UpdateError as Error};
+#[cfg(unix)]
 mod brew;
+#[cfg(unix)]
 mod install;
 mod release;
+#[cfg(not(unix))]
+mod unsupported;
+#[cfg(not(unix))]
+use unsupported::{brew, install};
 
 use std::{
     ffi::OsString,
@@ -435,12 +441,19 @@ fn worker(
                 },
                 None => Err(Error::MissingPrepared),
             },
-            Operation::Upgrade => match cask() {
-                Some(cask) => brew::upgrade(&cask, crate::APP_VERSION, &cancelled, |detail| {
-                    publish(&mailbox, generation, State::Upgrading { detail }, None);
-                })
+            Operation::Upgrade => match (&offer, cask()) {
+                (Some(offer), Some(cask)) => brew::upgrade(
+                    &cask,
+                    crate::APP_VERSION,
+                    &offer.manifest.version,
+                    &cancelled,
+                    |detail| {
+                        publish(&mailbox, generation, State::Upgrading { detail }, None);
+                    },
+                )
                 .map(|version| State::Restart { version }),
-                None => Err(Error::MissingCask),
+                (None, _) => Err(Error::MissingOffer),
+                (_, None) => Err(Error::MissingCask),
             },
             Operation::Restart => match cask()
                 .ok_or(Error::MissingCask)

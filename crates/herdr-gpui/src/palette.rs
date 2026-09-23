@@ -525,6 +525,44 @@ mod tests {
     }
 
     #[gpui::test]
+    fn notification_command_is_searchable_and_targetless_activation_is_inert(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.show_toast_preview(
+                    herdr_client::protocol::SemanticNotificationKind::Custom,
+                    cx,
+                );
+                let selected = view.selected_endpoint;
+                view.open_palette(false, window, cx);
+                let palette = view.menu.palette.as_mut().unwrap();
+                palette.filter("Open Notification Target");
+                assert_eq!(palette.filtered.len(), 1);
+                let action = palette.entries[palette.filtered[0]].action.clone();
+                assert!(matches!(
+                    action,
+                    Action::Native(Command::OpenNotificationTarget)
+                ));
+                view.activate_palette(action, window, cx);
+                assert!(view.menu.page.is_none());
+                assert!(view.pending_navigation.is_none());
+                assert_eq!(view.selected_endpoint, selected);
+                assert_eq!(view.endpoints[selected].toasts.entries.len(), 1);
+            })
+        });
+        cx.update(|window, cx| {
+            crate::bind_keys(cx);
+            window.focus(&view.read(cx).focus);
+            window.draw(cx).clear();
+            window.dispatch_keystroke(Keystroke::parse("cmd-alt-n").unwrap(), cx);
+            assert!(view.read(cx).pending_navigation.is_none());
+            assert_eq!(view.read(cx).endpoints[0].toasts.entries.len(), 1);
+        });
+    }
+
+    #[gpui::test]
     fn only_mixed_palettes_carry_badges(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
         cx.update(|_, cx| {

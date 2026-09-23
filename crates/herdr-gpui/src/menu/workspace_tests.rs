@@ -9,6 +9,9 @@ pub(crate) fn target_id(view: &HerdrWindow) -> Option<&str> {
     view.menu.target.as_ref().map(|target| target.id.as_str())
 }
 
+// Drives the workspace menu for `endpoint::lifecycle_tests`, which needs POSIX
+// sockets and processes and is therefore compiled there only.
+#[cfg(unix)]
 pub(crate) fn submit_focus_change(
     view: &mut HerdrWindow,
     method: Method,
@@ -18,6 +21,7 @@ pub(crate) fn submit_focus_change(
     let action = match method {
         Method::WorkspaceClose => WorkspaceAction::Close,
         Method::WorktreeCreate => WorkspaceAction::NewWorktree,
+        Method::WorktreeOpen => WorkspaceAction::OpenWorktree,
         Method::WorktreeRemove => WorkspaceAction::DeleteWorktree,
         _ => panic!("unexpected fixture action"),
     };
@@ -39,6 +43,18 @@ pub(crate) fn submit_focus_change(
             force: false,
         });
     }
+    if action == WorkspaceAction::OpenWorktree {
+        use gpui::AppContext;
+        let mut picker =
+            super::worktree_open::Picker::new(cx.new(crate::search_input::SearchInput::new));
+        picker.pending = Some("list".into());
+        view.menu.worktree_open = Some(picker);
+        view.menu.apply_worktree_list_response("list", Ok(serde_json::json!({"result": {
+            "type": "worktree_list", "source": {"repo_key":"/fixture/agent-launcher/.git", "repo_name":"agent-launcher", "source_workspace_id":"w3"},
+            "worktrees": [{"path": "/endpoint/existing checkout ",
+                "label": "existing", "is_bare": false, "is_prunable": false, "is_detached": true}]
+        }})));
+    }
     view.submit_workspace_dialog(window, cx);
     assert!(view.menu.error.is_none() && view.local_error.is_none());
     // A creation waits for its correlated response in the open dialog; a
@@ -48,7 +64,7 @@ pub(crate) fn submit_focus_change(
             assert!(view.menu.page.is_none());
             view.removal.as_ref().unwrap().pending.clone()
         }
-        WorkspaceAction::NewWorktree => view.menu.creation.clone(),
+        WorkspaceAction::NewWorktree | WorkspaceAction::OpenWorktree => view.menu.creation.clone(),
         _ => None,
     };
     if pending.is_some() {
@@ -107,7 +123,7 @@ fn workspace_dialogs_and_prs_are_fenced_by_host_and_generation(cx: &mut gpui::Te
             remote.live.local_daemon_peer = true;
             view.endpoints.push(remote);
             view.open_workspace_menu("w3", Default::default(), window, cx);
-            view.open_workspace_dialog(WorkspaceAction::Rename, cx);
+            view.open_workspace_dialog(WorkspaceAction::Rename, window, cx);
             view.endpoints[0].generation += 1;
             view.submit_workspace_dialog(window, cx);
             assert_eq!(
@@ -126,7 +142,7 @@ fn workspace_dialogs_and_prs_are_fenced_by_host_and_generation(cx: &mut gpui::Te
                     .unwrap()
                     .contains("requires your owned local session socket")
             );
-            view.open_workspace_dialog(WorkspaceAction::DeleteWorktree, cx);
+            view.open_workspace_dialog(WorkspaceAction::DeleteWorktree, window, cx);
             assert!(view.select_endpoint(crate::endpoint::LOCAL, cx));
             assert!(view.menu.deletion.is_none());
         });
@@ -389,7 +405,9 @@ fn workspace_dialogs_centre_on_the_window_rather_than_the_pointer(cx: &mut gpui:
                 "{anchor:?}: {menu:?}"
             );
             cx.update(|window, cx| {
-                view.update(cx, |view, cx| view.open_workspace_dialog(action, cx));
+                view.update(cx, |view, cx| {
+                    view.open_workspace_dialog(action, window, cx)
+                });
                 window.draw(cx).clear();
             });
             let panel = cx.debug_bounds("menu-panel").unwrap();
@@ -428,7 +446,7 @@ fn workspace_dialog_sections_and_buttons_stay_inside_the_panel(cx: &mut gpui::Te
                         "w4"
                     };
                     view.open_workspace_menu(id, Default::default(), window, cx);
-                    view.open_workspace_dialog(action, cx);
+                    view.open_workspace_dialog(action, window, cx);
                     if action == WorkspaceAction::DeleteWorktree {
                         // Ready to confirm: the daemon has named the
                         // checkout and nothing is in flight.
@@ -511,7 +529,7 @@ fn new_worktree_dialog_proposes_a_branch_and_previews_its_checkout(cx: &mut gpui
             snapshot.worktree_directory = "/endpoint/.herdr/worktrees".into();
             view.live.status = crate::state::ConnectionStatus::Connected;
             view.open_workspace_menu("w3", Default::default(), window, cx);
-            view.open_workspace_dialog(WorkspaceAction::NewWorktree, cx);
+            view.open_workspace_dialog(WorkspaceAction::NewWorktree, window, cx);
             let branch = view.menu.input.as_ref().unwrap().text.clone();
             assert!(branch.starts_with("worktree/"), "{branch}");
             // Selected, so the first keystroke replaces the proposal.
@@ -553,7 +571,7 @@ fn worktree_creation_reports_failures_and_follows_the_created_checkout(
             snapshot.workspaces = sidebar::layout_tests::snapshot(7).workspaces;
             view.live.status = crate::state::ConnectionStatus::Connected;
             view.open_workspace_menu("w3", Default::default(), window, cx);
-            view.open_workspace_dialog(WorkspaceAction::NewWorktree, cx);
+            view.open_workspace_dialog(WorkspaceAction::NewWorktree, window, cx);
             view.menu.creation = Some("create".into());
             let dialog = Some(super::Page::Dialog(WorkspaceAction::NewWorktree));
 
@@ -599,7 +617,7 @@ fn worktree_creation_reports_failures_and_follows_the_created_checkout(
             // Only the correlated response closes the dialog and navigates.
             let created = serde_json::json!({"result":{"type":"worktree_created","workspace":{"workspace_id":"w6"},"tab":{"tab_id":"t9"}}});
             view.collapsed_repos
-                .insert("/fixture/agent-launcher/.git".to_owned());
+                .insert(sidebar::layout_tests::REPO_KEY.to_owned());
             view.menu.creation = Some("create".into());
             view.live.dialog_response = Some(("unrelated".into(), Some(Ok(created.clone()))));
             view.update_workspace_dialog(window, cx);
@@ -731,7 +749,7 @@ fn queued_removal_closes_the_dialog_and_reports_refusals(cx: &mut gpui::TestAppC
             assert!(refused.force && refused.pending.is_none());
             assert_eq!(view.local_error.as_deref(), Some("Remove worktree: dirty_worktree_requires_force: modified or untracked files"));
             view.open_workspace_menu("w4", Default::default(), window, cx);
-            view.open_workspace_dialog(WorkspaceAction::DeleteWorktree, cx);
+            view.open_workspace_dialog(WorkspaceAction::DeleteWorktree, window, cx);
             assert!(view.menu.deletion.as_ref().unwrap().force);
             view.dismiss_menu(window, cx);
             // An accepted removal leaves nothing behind for the next dialog.
@@ -758,7 +776,7 @@ fn deletion_dialog_confirms_without_a_text_field(cx: &mut gpui::TestAppContext) 
         view.update(cx, |view, cx| {
             view.live.status = crate::state::ConnectionStatus::Connected;
             view.open_workspace_menu("w4", Default::default(), window, cx);
-            view.open_workspace_dialog(WorkspaceAction::DeleteWorktree, cx);
+            view.open_workspace_dialog(WorkspaceAction::DeleteWorktree, window, cx);
             assert!(view.menu.input.is_none());
             view.menu.error = None;
             view.menu.deletion = Some(Deletion {
@@ -830,7 +848,8 @@ fn reset_drops_target_draft_composition_and_error(cx: &mut gpui::TestAppContext)
 
 #[test]
 fn actions_target_clicked_workspace_and_match_daemon_schemas() {
-    let snapshot = sidebar::layout_tests::snapshot(7);
+    let mut snapshot = sidebar::layout_tests::snapshot(7);
+    snapshot.workspaces[0].branch = None;
     let target = WorkspaceTarget::new(&snapshot, &snapshot.workspaces[3]);
     assert!(target.can_create());
     assert_eq!(target.close_label(), "Close group");
@@ -882,6 +901,41 @@ fn actions_target_clicked_workspace_and_match_daemon_schemas() {
     let target = WorkspaceTarget::new(&standalone, &standalone.workspaces[3]);
     assert!(target.can_create());
     assert_eq!(target.close_label(), "Close");
+}
+
+#[test]
+fn branch_only_workspace_can_create_until_git_identity_disappears() {
+    let mut snapshot = sidebar::layout_tests::snapshot(7);
+    snapshot.workspaces[3].worktree = None;
+    snapshot.workspaces[3].branch = Some("main".into());
+    let target = WorkspaceTarget::new(&snapshot, &snapshot.workspaces[3]);
+    assert!(target.can_create());
+    assert!(!target.can_delete());
+    assert_eq!(
+        target
+            .request(&snapshot, WorkspaceAction::NewWorktree, "feature/test")
+            .unwrap(),
+        (
+            Method::WorktreeCreate,
+            serde_json::json!({"workspace_id": "w3", "base": "HEAD", "focus": true,
+                "trust_repository": false, "branch": "feature/test"})
+        )
+    );
+
+    snapshot.workspaces[3].branch = None;
+    assert!(!WorkspaceTarget::new(&snapshot, &snapshot.workspaces[3]).can_create());
+    assert!(matches!(
+        target.request(&snapshot, WorkspaceAction::NewWorktree, ""),
+        Err(crate::Error::WorkspaceRepositoryChanged)
+    ));
+
+    snapshot.workspaces[3].branch = Some("main".into());
+    snapshot.workspaces[3].worktree = snapshot.workspaces[4].worktree.clone();
+    assert!(!WorkspaceTarget::new(&snapshot, &snapshot.workspaces[3]).can_create());
+    assert!(matches!(
+        target.request(&snapshot, WorkspaceAction::NewWorktree, ""),
+        Err(crate::Error::WorkspaceRepositoryChanged)
+    ));
 }
 
 #[test]

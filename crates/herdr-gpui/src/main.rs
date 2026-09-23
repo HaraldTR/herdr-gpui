@@ -4,6 +4,8 @@
 mod about;
 mod actions;
 mod app;
+#[cfg(any(target_os = "macos", test))]
+mod app_badge;
 mod app_icon;
 mod avatars;
 mod cli;
@@ -30,6 +32,7 @@ mod menus;
 mod navigation;
 mod notifications;
 mod palette;
+mod pane_menu;
 mod preferences;
 mod presentation;
 mod pull_request;
@@ -37,6 +40,7 @@ mod repo_items;
 mod search_input;
 mod settings_panel;
 mod sidebar;
+mod sound;
 mod state;
 mod tab_menu;
 mod terminal;
@@ -58,8 +62,8 @@ pub use error::{Error, Result};
 
 pub(crate) use {
     actions::{
-        CheckForUpdates, Quit, RunCommand, ShowHerdrNotDetected, ShowLogs, ShowUpdatePreview,
-        bind_keys,
+        CheckForUpdates, PlaySound, Quit, RunCommand, ShowHerdrNotDetected, ShowLogs,
+        ShowUpdatePreview, bind_keys,
     },
     app::open_additional_window,
     constants::{APP_VERSION, RELEASE_BUILD, TAB_HEIGHT, TAB_WIDTH, WINDOW_TITLE},

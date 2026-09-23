@@ -34,10 +34,12 @@ export CARGO_HOME=/cache/cargo RUSTUP_HOME=/cache/rustup CARGO_TARGET_DIR=/cache
 # System packages live in the container and are gone every run; the toolchain
 # lives in the cache and survives. Installing both on the same condition left
 # later runs without a linker, so they are decided separately.
-apt-get update -qq >/dev/null
-apt-get install --no-install-recommends -y -qq \
-    build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
-    libfreetype6-dev libfontconfig1-dev fonts-dejavu-core curl ca-certificates git >/dev/null
+# What the workspace links against comes from the script CI runs, so this
+# container cannot drift from it: a hand-kept copy here went stale the moment
+# the notification sounds added ALSA, and every run failed to build.
+bash /tree/scripts/install-linux-deps.sh >/dev/null
+# Only what fetching the toolchain into the cache needs.
+apt-get install --no-install-recommends -y -qq curl ca-certificates git >/dev/null
 if ! command -v cargo >/dev/null; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --no-modify-path --default-toolchain none >/dev/null 2>&1
