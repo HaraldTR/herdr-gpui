@@ -20,6 +20,7 @@ impl HerdrWindow {
             return false;
         }
         self.menu.reset();
+        self.apply_shared_theme(cx);
         self.menu.endpoint_target = (
             self.selection_epoch,
             self.endpoints[self.selected_endpoint].generation,
@@ -40,6 +41,7 @@ impl HerdrWindow {
         self.hover_menu = None;
         self.update_preview = None;
         self.menu.reset();
+        self.apply_shared_theme(cx);
         window.focus(&self.focus);
         cx.notify();
     }
@@ -228,7 +230,13 @@ impl HerdrWindow {
                 page != Page::Menu && !pointer_anchored && !matches!(page, Page::Dialog(_)),
                 |panel| {
                     panel
-                        .w((viewport.width - px(32.)).max(px(0.)).min(px(480.)))
+                        .w((viewport.width - px(32.)).max(px(0.)).min(px(
+                            if page == Page::Preferences {
+                                620. * (font.size / 12.)
+                            } else {
+                                480.
+                            },
+                        )))
                         .max_h((viewport.height - px(32.)).max(px(0.)))
                 },
             )
@@ -513,6 +521,9 @@ impl HerdrWindow {
                 }),
             )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.settings_key(event, window, cx) {
+                    return;
+                }
                 // A listing has its own search field, so the branch draft must
                 // not consume the keys typed into it.
                 if this.worktree_source_key(event, window, cx) {

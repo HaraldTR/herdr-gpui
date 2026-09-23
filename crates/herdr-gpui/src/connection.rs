@@ -16,6 +16,55 @@ pub(crate) struct ConnectionBridge {
     pub handle: Option<ClientHandle>,
     pub inbox: Arc<Mutex<LiveState>>,
     pub drained: Arc<AtomicBool>,
+    pub integrations: Arc<Mutex<IntegrationInbox>>,
+    pub(crate) notification_active: Arc<AtomicBool>,
+}
+
+/// One integration operation, independent of the modal dialog response slot.
+#[derive(Default)]
+pub(crate) struct IntegrationInbox {
+    pub list: bool,
+    pub install: bool,
+    pub pending: Option<(String, Option<crate::Result<serde_json::Value>>)>,
+}
+
+impl IntegrationInbox {
+    fn apply(&mut self, event: ClientEvent) -> Option<ClientEvent> {
+        match &event {
+            ClientEvent::Connected(welcome) => {
+                self.list = Method::IntegrationList.advertised_in(&welcome.methods);
+                self.install = Method::IntegrationInstall.advertised_in(&welcome.methods);
+            }
+            ClientEvent::Disconnected { .. } => {
+                self.list = false;
+                self.install = false;
+                if let Some((_, result)) = &mut self.pending {
+                    *result = Some(Err(crate::Error::NotConnected));
+                }
+            }
+            _ => {}
+        }
+        let Some((id, result)) = &mut self.pending else {
+            return Some(event);
+        };
+        match event {
+            ClientEvent::Response {
+                request_id,
+                response,
+            } if request_id == *id => {
+                *result = Some(Ok(response));
+                None
+            }
+            ClientEvent::CommandRejected {
+                request_id: Some(request_id),
+                reason,
+            } if request_id == *id => {
+                *result = Some(Err(crate::Error::Client(reason)));
+                None
+            }
+            event => Some(event),
+        }
+    }
 }
 
 impl ConnectionBridge {
@@ -25,10 +74,14 @@ impl ConnectionBridge {
             handle: None,
             inbox: Arc::new(Mutex::new(LiveState::default())),
             drained: Arc::new(AtomicBool::new(true)),
+            integrations: Arc::default(),
+            notification_active: Arc::new(AtomicBool::new(true)),
         }
     }
 
     fn reset(&mut self, status: ConnectionStatus, active: bool) {
+        self.notification_active.store(false, Ordering::Release);
+        self.notification_active = Arc::new(AtomicBool::new(true));
         if let Some(handle) = self.handle.take() {
             handle.disconnect();
         }
@@ -38,6 +91,7 @@ impl ConnectionBridge {
         // Old readers and deferred paint acknowledgements retain only the old inbox.
         self.inbox = Arc::new(Mutex::new(state));
         self.drained = Arc::new(AtomicBool::new(true));
+        self.integrations = Arc::default();
     }
 
     pub fn detach(&mut self, active: bool) {
@@ -106,6 +160,7 @@ impl ConnectionBridge {
                 self.handle = Some(client.handle);
                 let inbox = self.inbox.clone();
                 let drained = self.drained.clone();
+                let integrations = self.integrations.clone();
                 // Drain ordered events even while GPUI is busy; retain only coherent state.
                 spawn(Box::new(move || {
                     while let Ok(event) = client.events.recv() {
@@ -114,7 +169,12 @@ impl ConnectionBridge {
                             ClientEvent::Disconnected { .. } => tracing::debug!(category = "transport_disconnected", "Connection bridge disconnected"),
                             _ => {}
                         }
-                        if let Ok(mut state) = inbox.lock() {
+                        let event = match integrations.lock() {
+                            Ok(mut integrations) => integrations.apply(event),
+                            Err(_) => Some(event),
+                        };
+                        if let Some(event) = event
+                            && let Ok(mut state) = inbox.lock() {
                             state.apply(event);
                         }
                     }
@@ -152,11 +212,33 @@ impl ConnectionBridge {
             .dialog_response
             .as_mut()
             .and_then(|(_, result)| result.take());
+        // Notifications have their own consume-once drain, not snapshot copies.
+        let notifications = std::mem::take(&mut state.notifications);
         let mut update = state.clone();
+        update.settings_reload = false;
+        state.notifications = notifications;
         if let Some((_, result)) = &mut update.dialog_response {
             *result = response;
         }
         Some(update)
+    }
+
+    pub(crate) fn take_notifications(
+        &self,
+    ) -> std::collections::VecDeque<crate::state::CapturedNotification> {
+        self.inbox
+            .try_lock()
+            .map(|mut state| std::mem::take(&mut state.notifications))
+            .unwrap_or_default()
+    }
+
+    /// Drain only when the background settings loader can accept a reload.
+    /// Inbox contention leaves the coalesced request pending for the next poll.
+    pub(crate) fn take_settings_reload(&self) -> bool {
+        self.inbox
+            .try_lock()
+            .map(|mut state| std::mem::take(&mut state.settings_reload))
+            .unwrap_or(false)
     }
 
     pub fn request_dialog(
@@ -179,6 +261,37 @@ impl ConnectionBridge {
         Ok(id)
     }
 
+    pub fn request_integration(
+        &self,
+        boot_id: &str,
+        method: Method,
+        params: serde_json::Value,
+    ) -> crate::Result<String> {
+        // Registration and event delivery share this lock, including immediate rejection.
+        let mut inbox = self
+            .integrations
+            .try_lock()
+            .map_err(|_| crate::Error::ConnectionBusy)?;
+        if inbox.pending.is_some() {
+            return Err(crate::Error::ConnectionBusy);
+        }
+        let supported = match method {
+            Method::IntegrationList => inbox.list,
+            Method::IntegrationInstall => inbox.install,
+            _ => false,
+        };
+        if !supported {
+            return Err(herdr_client::Error::UnsupportedMethod.into());
+        }
+        let id = self
+            .handle
+            .as_ref()
+            .ok_or(crate::Error::NotConnected)?
+            .request(boot_id, method, params)?;
+        inbox.pending = Some((id.clone(), None));
+        Ok(id)
+    }
+
     pub fn send_input(
         handle: &ClientHandle,
         boot_id: &str,
@@ -194,6 +307,7 @@ impl ConnectionBridge {
 
 impl Drop for ConnectionBridge {
     fn drop(&mut self) {
+        self.notification_active.store(false, Ordering::Release);
         // Detach this client only; never kill a daemon or PTY.
         if let Some(handle) = &self.handle {
             tracing::debug!("Connection bridge dropping client");
@@ -209,6 +323,166 @@ mod tests {
 
     fn bridge() -> ConnectionBridge {
         ConnectionBridge::new(ConnectTarget::Socket("/unused-connection-test.sock".into()))
+    }
+
+    #[test]
+    fn settings_reload_is_coalesced_consumed_once_and_connection_fenced() {
+        let mut bridge = bridge();
+        for _ in 0..3 {
+            bridge.inbox.lock().unwrap().apply(ClientEvent::Message(
+                herdr_client::protocol::ServerMessage::ReloadSoundConfig,
+            ));
+        }
+        assert!(!bridge.take_update().unwrap().settings_reload);
+        let guard = bridge.inbox.lock().unwrap();
+        assert!(!bridge.take_settings_reload());
+        drop(guard);
+        assert!(bridge.take_settings_reload());
+        assert!(!bridge.take_settings_reload());
+        let old = bridge.inbox.clone();
+        old.lock().unwrap().settings_reload = true;
+        bridge.detach(false);
+        assert!(!bridge.take_settings_reload());
+        old.lock().unwrap().apply(ClientEvent::Message(
+            herdr_client::protocol::ServerMessage::ReloadSoundConfig,
+        ));
+        assert!(!bridge.take_settings_reload());
+        bridge.inbox.lock().unwrap().apply(ClientEvent::Message(
+            herdr_client::protocol::ServerMessage::ReloadSoundConfig,
+        ));
+        bridge
+            .inbox
+            .lock()
+            .unwrap()
+            .apply(ClientEvent::Disconnected {
+                reason: "closed".into(),
+            });
+        assert!(!bridge.take_settings_reload());
+    }
+
+    #[test]
+    fn notifications_are_consumed_once_and_reset_revokes_delivery() {
+        let mut bridge = bridge();
+        bridge
+            .inbox
+            .lock()
+            .unwrap()
+            .notifications
+            .push_back(crate::state::CapturedNotification {
+                boot: "boot".into(),
+                received: std::time::Instant::now(),
+                notification: herdr_client::protocol::SemanticNotification {
+                    kind: herdr_client::protocol::SemanticNotificationKind::Finished,
+                    title: "done".into(),
+                    body: None,
+                    sound: None,
+                    agent: None,
+                    workspace_id: None,
+                    tab_id: None,
+                    pane_id: None,
+                    position: None,
+                },
+            });
+        assert!(bridge.take_update().unwrap().notifications.is_empty());
+        assert_eq!(bridge.take_notifications().len(), 1);
+        assert!(bridge.take_notifications().is_empty());
+        let active = bridge.notification_active.clone();
+        bridge.detach(false);
+        assert!(!active.load(Ordering::Acquire));
+        assert!(bridge.take_notifications().is_empty());
+    }
+
+    #[test]
+    fn integration_responses_do_not_overwrite_dialog_responses() {
+        let mut integrations = IntegrationInbox {
+            pending: Some(("integration".into(), None)),
+            ..Default::default()
+        };
+        let mut state = LiveState::default();
+        state.dialog_response = Some(("dialog".into(), None));
+        for (id, response) in [
+            (
+                "integration",
+                serde_json::json!({"result":{"type":"integration_list"}}),
+            ),
+            (
+                "dialog",
+                serde_json::json!({"result":{"type":"worktree_list"}}),
+            ),
+        ] {
+            if let Some(event) = integrations.apply(ClientEvent::Response {
+                request_id: id.into(),
+                response,
+            }) {
+                state.apply(event);
+            }
+        }
+        assert_eq!(
+            integrations.pending.unwrap().1.unwrap().unwrap()["result"]["type"],
+            "integration_list"
+        );
+        assert_eq!(
+            state.dialog_response.unwrap().1.unwrap().unwrap()["result"]["type"],
+            "worktree_list"
+        );
+    }
+
+    #[test]
+    fn integration_rejections_are_correlated_and_disconnect_revokes_capabilities() {
+        let mut inbox = IntegrationInbox {
+            list: true,
+            install: true,
+            pending: Some(("install".into(), None)),
+        };
+        assert!(
+            inbox
+                .apply(ClientEvent::CommandRejected {
+                    request_id: Some("other".into()),
+                    reason: herdr_client::Error::CommandBoot,
+                })
+                .is_some()
+        );
+        assert!(inbox.pending.as_ref().unwrap().1.is_none());
+        assert!(
+            inbox
+                .apply(ClientEvent::CommandRejected {
+                    request_id: Some("install".into()),
+                    reason: herdr_client::Error::CommandBoot,
+                })
+                .is_none()
+        );
+        assert!(matches!(
+            inbox.pending.as_ref().unwrap().1,
+            Some(Err(crate::Error::Client(herdr_client::Error::CommandBoot)))
+        ));
+        assert!(
+            inbox
+                .apply(ClientEvent::Disconnected {
+                    reason: "closed".into()
+                })
+                .is_some()
+        );
+        assert!(!inbox.list && !inbox.install);
+        assert!(matches!(
+            inbox.pending.unwrap().1,
+            Some(Err(crate::Error::NotConnected))
+        ));
+    }
+
+    #[test]
+    fn integration_mailbox_is_fenced_on_detach() {
+        let mut bridge = bridge();
+        let old = bridge.integrations.clone();
+        old.lock().unwrap().list = true;
+        old.lock().unwrap().pending = Some(("old".into(), None));
+        bridge.detach(false);
+        old.lock().unwrap().apply(ClientEvent::Response {
+            request_id: "old".into(),
+            response: serde_json::json!({"result":{}}),
+        });
+        assert!(!Arc::ptr_eq(&old, &bridge.integrations));
+        let inbox = bridge.integrations.lock().unwrap();
+        assert!(!inbox.list && !inbox.install && inbox.pending.is_none());
     }
 
     #[test]

@@ -1,15 +1,47 @@
-//! GUI-only settings; no daemon settings are read or changed.
+//! Native GUI settings; shared Herdr settings are read only when explicitly selected.
 use crate::{Error, Result, error::ThemeParseError};
 use gpui::{Font, FontFallbacks};
 use serde::Deserialize;
 use std::{
     env, fs,
     io::{ErrorKind, Write},
+    os::unix::fs::MetadataExt,
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
 const DEFAULT_CONFIG: &str = include_str!("../config-gpui.example.toml");
+const FOLLOW_HERDR: &str = "Follow Herdr";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FontRole {
+    Sidebar,
+    Tabs,
+    Terminal,
+    Ui,
+}
+
+impl FontRole {
+    pub(crate) const ALL: [Self; 4] = [Self::Sidebar, Self::Tabs, Self::Terminal, Self::Ui];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Sidebar => "Sidebar",
+            Self::Tabs => "Tabs",
+            Self::Terminal => "Terminal",
+            Self::Ui => "UI",
+        }
+    }
+
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::Sidebar => "sidebar",
+            Self::Tabs => "tabs",
+            Self::Terminal => "terminal",
+            Self::Ui => "ui",
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -239,6 +271,15 @@ fn theme_directories() -> Result<Vec<PathBuf>> {
 }
 
 impl Config {
+    pub(crate) fn font(&self, role: FontRole) -> &FontConfig {
+        match role {
+            FontRole::Sidebar => &self.sidebar,
+            FontRole::Tabs => &self.tabs,
+            FontRole::Terminal => &self.terminal,
+            FontRole::Ui => &self.ui,
+        }
+    }
+
     pub fn path() -> Result<PathBuf> {
         Ok(config_root()?.join("herdr/config-gpui.toml"))
     }
@@ -358,7 +399,9 @@ impl Config {
     fn available_themes_in(&self, directories: &[PathBuf]) -> Result<Vec<String>> {
         let mut names: Vec<String> = Theme::BUILTIN_NAMES
             .iter()
-            .map(|name| (*name).into())
+            .copied()
+            .chain([FOLLOW_HERDR])
+            .map(str::to_owned)
             .collect();
         for directory in directories {
             let entries = match fs::read_dir(directory) {
@@ -401,23 +444,118 @@ impl Config {
             ..self.clone()
         };
         selected.theme()?;
-        let result = (|| -> Result<()> {
-            let text = match fs::read_to_string(path) {
-                Ok(text) => text,
-                Err(error) if error.kind() == ErrorKind::NotFound => DEFAULT_CONFIG.into(),
-                Err(error) => return Err(error.into()),
-            };
-            let mut document = text.parse::<toml_edit::DocumentMut>()?;
+        Self::save_path(path, |document| {
             let mut value = toml_edit::Value::from(name);
             if let Some(previous) = document.get("theme").and_then(toml_edit::Item::as_value) {
                 *value.decor_mut() = previous.decor().clone();
             }
             document["theme"] = toml_edit::Item::Value(value);
+            Ok(())
+        })
+    }
+
+    /// Persist only this face's family and size, leaving fallbacks unchanged.
+    /// Synchronous disk I/O: call from a worker, not the UI thread.
+    pub(crate) fn save_font(&self, role: FontRole, family: &str, size: f32) -> Result<()> {
+        self.save_font_path(role, family, size, &Self::path()?)
+    }
+
+    fn save_font_path(&self, role: FontRole, family: &str, size: f32, path: &Path) -> Result<()> {
+        let key = role.key();
+        if family.trim().is_empty() {
+            return Err(Error::EmptyFontFamily(key));
+        }
+        if !size.is_finite() || !(8.0..=48.0).contains(&size) {
+            return Err(Error::InvalidFontSize(key));
+        }
+        Self::save_path(path, |document| {
+            if !document.contains_key(key) {
+                document[key] = toml_edit::Item::Table(toml_edit::Table::new());
+            }
+            let table = document[key].as_table_like_mut().ok_or_else(|| {
+                Error::Toml(<toml::de::Error as serde::de::Error>::custom(format!(
+                    "{key} must be a table"
+                )))
+            })?;
+            for (field, mut value) in [
+                ("family", toml_edit::Value::from(family)),
+                ("size", toml_edit::Value::from(f64::from(size))),
+            ] {
+                if let Some(previous) = table.get(field).and_then(toml_edit::Item::as_value) {
+                    *value.decor_mut() = previous.decor().clone();
+                }
+                table.insert(field, toml_edit::Item::Value(value));
+            }
+            Ok(())
+        })
+    }
+
+    fn save_path(
+        path: &Path,
+        edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<()>,
+    ) -> Result<()> {
+        let result = (|| -> Result<()> {
             let parent = path
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
                 .unwrap_or_else(|| Path::new("."));
             fs::create_dir_all(parent)?;
+            let parent = fs::canonicalize(parent)?;
+            let denied = || {
+                std::io::Error::new(
+                    ErrorKind::PermissionDenied,
+                    "native config saves require an owned, non-shared directory and regular files; symlink targets are refused",
+                )
+            };
+            let uid = rustix::process::geteuid().as_raw();
+            let metadata = fs::metadata(&parent)?;
+            if metadata.uid() != uid || metadata.mode() & 0o022 != 0 {
+                return Err(denied().into());
+            }
+            let name = path.file_name().ok_or_else(denied)?;
+            let path = parent.join(name);
+            let mut lock_name = std::ffi::OsString::from(".");
+            lock_name.push(name);
+            lock_name.push(".gpui-lock");
+            // Never unlink this inode: waiters must lock the same file even after
+            // the config is replaced. Closing the descriptor releases the lock.
+            let lock = fs::File::from(
+                rustix::fs::open(
+                    parent.join(lock_name),
+                    rustix::fs::OFlags::RDWR
+                        | rustix::fs::OFlags::CREATE
+                        | rustix::fs::OFlags::NOFOLLOW
+                        | rustix::fs::OFlags::NONBLOCK
+                        | rustix::fs::OFlags::CLOEXEC,
+                    rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+                )
+                .map_err(std::io::Error::from)?,
+            );
+            let validate_file = |metadata: fs::Metadata| -> std::io::Result<()> {
+                if !metadata.is_file()
+                    || metadata.uid() != uid
+                    || metadata.nlink() != 1
+                    || metadata.mode() & 0o022 != 0
+                {
+                    return Err(denied());
+                }
+                Ok(())
+            };
+            validate_file(lock.metadata()?)?;
+            lock.lock()?;
+            let check_target = || match fs::symlink_metadata(&path) {
+                Ok(metadata) => validate_file(metadata),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            };
+            check_target()?;
+            let text = match fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == ErrorKind::NotFound => DEFAULT_CONFIG.into(),
+                Err(error) => return Err(error.into()),
+            };
+            let mut document = text.parse::<toml_edit::DocumentMut>()?;
+            edit(&mut document)?;
             static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
             let (temporary, mut file) = loop {
                 let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
@@ -437,7 +575,9 @@ impl Config {
                 file.write_all(document.to_string().as_bytes())?;
                 file.sync_all()?;
                 drop(file);
-                fs::rename(&temporary, path)
+                // Advisory locking coordinates native saves, not arbitrary editors.
+                check_target()?;
+                fs::rename(&temporary, &path)
             })();
             if let Err(error) = write_result {
                 if let Err(cleanup) = fs::remove_file(&temporary) {
@@ -463,6 +603,9 @@ impl Config {
         directories: impl FnOnce() -> Result<Vec<PathBuf>>,
     ) -> Result<Theme> {
         let name = self.theme.trim();
+        if name == FOLLOW_HERDR {
+            return crate::herdr_settings::Settings::load()?.theme(false);
+        }
         if let Some(theme) = Theme::builtin(name) {
             return Ok(theme);
         }
@@ -868,6 +1011,7 @@ mod tests {
                 "Catppuccin Mocha",
                 "Default",
                 "Dracula",
+                "Follow Herdr",
                 "Nord",
                 "zebra",
             ]
@@ -924,6 +1068,107 @@ mod tests {
     }
 
     #[test]
+    fn saves_only_font_fields_and_preserves_latest_settings_and_comments() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config.toml");
+        let config = Config::default();
+        for (role, label) in FontRole::ALL
+            .into_iter()
+            .zip(["Sidebar", "Tabs", "Terminal", "UI"])
+        {
+            assert_eq!(role.label(), label);
+            let original = format!(
+                "# heading\ntheme = 'Nord' # selection\nfuture = true\n\n[{}] # fonts\nfamily = 'Old Font' # family\nsize = 19 # size\nfallback = ['Symbols Nerd Font Mono'] # keep cascade\nfuture_font = true\n\n[github]\noauth_client_id = 'Iv1.fixture'\n",
+                role.key()
+            );
+            fs::write(&path, &original)?;
+            config.save_font_path(role, "New Font", 20.5, &path)?;
+            assert_eq!(
+                fs::read_to_string(&path)?,
+                original
+                    .replace("'Old Font'", "\"New Font\"")
+                    .replace("size = 19", "size = 20.5")
+            );
+            assert_ne!(config.font(role).family, "New Font");
+            assert_ne!(config.font(role).size, 20.5);
+            assert_eq!(fs::read_dir(&temp.0)?.count(), 2);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn font_saves_create_missing_fields_and_preserve_inline_tables() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("nested/config.toml");
+        let config = Config::default();
+        let family = "Font \"Quoted\" \\ Face";
+        config.save_font_path(FontRole::Terminal, family, 8.0, &path)?;
+        let saved = Config::load_path(&path)?;
+        assert_eq!(saved.terminal.family, family);
+        assert_eq!(saved.terminal.size, 8.0);
+        assert_eq!(saved.terminal.fallbacks, None);
+        assert_eq!(saved.theme, "Default");
+        for text in [
+            "# no fonts\ntheme = 'Dracula'\n",
+            "theme = 'Dracula'\n[ui]\nfallback = [] # no cascade\n",
+            "theme = 'Dracula'\nui = { fallback = [] } # inline\n",
+        ] {
+            fs::write(&path, text)?;
+            config.save_font_path(FontRole::Ui, family, 48.0, &path)?;
+            let saved_text = fs::read_to_string(&path)?;
+            let saved = Config::parse(&saved_text)?;
+            assert_eq!(saved.font(FontRole::Ui).family, family);
+            assert_eq!(saved.font(FontRole::Ui).size, 48.0);
+            assert_eq!(saved.theme, "Dracula");
+            if text.contains("fallback") {
+                assert_eq!(saved.ui.fallbacks, Some(vec![]));
+            } else {
+                assert_eq!(saved.ui.fallbacks, None);
+            }
+            assert!(saved_text.contains(text.split_once('#').context("missing comment")?.1.trim()));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn font_save_validation_leaves_files_unchanged() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config.toml");
+        let config = Config::default();
+        for role in FontRole::ALL {
+            for family in ["", " \t\n"] {
+                assert!(matches!(
+                    config.save_font_path(role, family, 12.0, &path),
+                    Err(Error::EmptyFontFamily(key)) if key == role.key()
+                ));
+                assert!(!path.exists());
+            }
+            for size in [7.9, 48.1, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                assert!(matches!(
+                    config.save_font_path(role, "Menlo", size, &path),
+                    Err(Error::InvalidFontSize(key)) if key == role.key()
+                ));
+                assert!(!path.exists());
+            }
+        }
+        for text in [
+            "ui = [",
+            "[ui]\nsize = 12\nsize = 14\n",
+            "ui = 'not a table'",
+            "ui = []",
+            "[[ui]]\nsize = 12\n",
+        ] {
+            fs::write(&path, text)?;
+            let error = config.save_font_path(FontRole::Ui, "Menlo", 12.0, &path);
+            assert!(matches!(error, Err(Error::Path { path: actual, source })
+                if actual == path && matches!(*source, Error::Toml(_) | Error::TomlEdit(_))));
+            assert_eq!(fs::read_to_string(&path)?, text);
+            assert_eq!(fs::read_dir(&temp.0)?.count(), 2);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn saves_only_theme_and_preserves_latest_settings_and_comments() -> anyhow::Result<()> {
         let temp = TempDirectory::new()?;
         let path = temp.0.join("config.toml");
@@ -938,7 +1183,7 @@ mod tests {
             original.replace("'Default'", "\"Nord\"")
         );
         assert_eq!(config.theme, "Default");
-        assert_eq!(fs::read_dir(&temp.0)?.count(), 1);
+        assert_eq!(fs::read_dir(&temp.0)?.count(), 2);
 
         fs::write(
             &path,
@@ -973,7 +1218,7 @@ mod tests {
             fs::write(&path, text)?;
             assert!(config.save_theme_path("Nord", &path).is_err());
             assert_eq!(fs::read_to_string(&path)?, text);
-            assert_eq!(fs::read_dir(&temp.0)?.count(), 2);
+            assert_eq!(fs::read_dir(&temp.0)?.count(), 3);
         }
         fs::write(&custom, "background=112233")?;
         let new_path = temp.0.join("nested/config.toml");
@@ -981,8 +1226,147 @@ mod tests {
         assert_eq!(Config::load_path(&new_path)?.theme()?.background, 0x112233);
         assert_eq!(
             fs::read_dir(new_path.parent().context("missing parent")?)?.count(),
-            1
+            2
         );
+        Ok(())
+    }
+
+    #[test]
+    fn native_config_writer_child() -> anyhow::Result<()> {
+        let Some(path) = env::var_os("HERDR_NATIVE_CONFIG_WRITER_TEST") else {
+            return Ok(());
+        };
+        let path = PathBuf::from(path);
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path.with_file_name(".config.toml.gpui-lock"))?;
+        assert!(matches!(lock.try_lock(), Err(fs::TryLockError::WouldBlock)));
+        println!("native writer ready");
+        std::io::stdout().flush()?;
+        if env::var_os("HERDR_NATIVE_CONFIG_WRITER_THEME").is_some() {
+            Config::default().save_theme_path("Dracula", &path)?;
+        } else {
+            Config::default().save_font_path(FontRole::Terminal, "Child Font", 21.0, &path)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_native_saves_read_after_acquiring_the_process_lock() -> anyhow::Result<()> {
+        use std::{
+            io::{BufRead as _, BufReader},
+            process::{Child, Command, Stdio},
+            sync::mpsc,
+            time::{Duration, Instant},
+        };
+
+        struct Writer(Child);
+        impl Drop for Writer {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config.toml");
+        for theme in [false, true] {
+            fs::write(&path, "theme = 'Nord'\n[sidebar]\nsize = 12\n")?;
+            let mut writer = None;
+            Config::save_path(&path, |document| {
+                let mut command = Command::new(env::current_exe()?);
+                command
+                    .args([
+                        "--exact",
+                        "config::tests::native_config_writer_child",
+                        "--nocapture",
+                    ])
+                    .env("HERDR_NATIVE_CONFIG_WRITER_TEST", &path)
+                    .env_remove("HERDR_NATIVE_CONFIG_WRITER_THEME")
+                    .stdout(Stdio::piped());
+                if theme {
+                    command.env("HERDR_NATIVE_CONFIG_WRITER_THEME", "1");
+                }
+                let mut child = Writer(command.spawn()?);
+                let stdout = child
+                    .0
+                    .stdout
+                    .take()
+                    .ok_or_else(|| std::io::Error::other("missing child stdout"))?;
+                let (ready_tx, ready_rx) = mpsc::channel();
+                std::thread::spawn(move || {
+                    for line in BufReader::new(stdout).lines() {
+                        if line.is_ok_and(|line| line == "native writer ready") {
+                            let _ = ready_tx.send(());
+                        }
+                    }
+                });
+                ready_rx
+                    .recv_timeout(Duration::from_secs(10))
+                    .map_err(|error| std::io::Error::new(ErrorKind::TimedOut, error))?;
+                // The other process has proved this transaction owns the lock.
+                // Its narrow edit must read the document only after this commits.
+                document["sidebar"]["family"] = toml_edit::value("Parent Font");
+                document["sidebar"]["size"] = toml_edit::value(18.0);
+                writer = Some(child);
+                Ok(())
+            })?;
+            let mut writer = writer.context("missing child")?;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(status) = writer.0.try_wait()? {
+                    assert!(status.success(), "child failed: {status}");
+                    break;
+                }
+                anyhow::ensure!(Instant::now() < deadline, "child save timed out");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let saved = Config::load_path(&path)?;
+            assert_eq!(saved.sidebar.family, "Parent Font");
+            assert_eq!(saved.sidebar.size, 18.0);
+            if theme {
+                assert_eq!(saved.theme, "Dracula");
+            } else {
+                assert_eq!(saved.terminal.family, "Child Font");
+                assert_eq!(saved.terminal.size, 21.0);
+                assert_eq!(saved.theme, "Nord");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_saves_refuse_symlinks_and_release_locks_on_errors() -> anyhow::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDirectory::new()?;
+        let target = temp.0.join("target.toml");
+        let path = temp.0.join("config.toml");
+        let config = Config::default();
+        fs::write(&target, "theme = 'Nord'\n")?;
+        symlink(&target, &path)?;
+        assert!(config.save_theme_path("Dracula", &path).is_err());
+        assert!(
+            config
+                .save_font_path(FontRole::Ui, "Menlo", 14.0, &path)
+                .is_err()
+        );
+        assert!(fs::symlink_metadata(&path)?.file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&target)?, "theme = 'Nord'\n");
+        fs::remove_file(&target)?;
+        assert!(config.save_theme_path("Dracula", &path).is_err());
+        assert!(!target.exists());
+        fs::remove_file(&path)?;
+        config.save_theme_path("Dracula", &path)?;
+        assert_eq!(Config::load_path(&path)?.theme, "Dracula");
+
+        let lock_path = temp.0.join(".config.toml.gpui-lock");
+        fs::remove_file(&lock_path)?;
+        symlink(&path, &lock_path)?;
+        let original = fs::read_to_string(&path)?;
+        assert!(config.save_theme_path("Nord", &path).is_err());
+        assert_eq!(fs::read_to_string(&path)?, original);
         Ok(())
     }
 

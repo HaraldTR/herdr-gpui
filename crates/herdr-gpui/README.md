@@ -10,7 +10,7 @@ and an already trusted host key.
 Runtime dependencies include GPUI, `herdr-client`, `serde_json` for API parameters,
 `ureq` for background GitHub owner avatar downloads, and `serde`/`config` (aliased
 as `config_loader`, TOML-only) for GUI configuration. `toml` preserves strict
-field types during deserialization; `toml_edit` preserves comments on theme saves.
+field types during deserialization; `toml_edit` preserves comments on settings saves.
 
 ```sh
 cargo run -p herdr-gpui
@@ -95,6 +95,52 @@ GUI settings live in `$XDG_CONFIG_HOME/herdr/config-gpui.toml`, falling back to
 [`config-gpui.example.toml`](config-gpui.example.toml) for a complete example.
 Font sizes use logical pixels (finite 8..48), not typographic points. Restart the
 GUI or invoke GUI config reload after edits; daemon config reload is separate.
+
+Preferences has **Theme, Indicators, Sound, Toasts, Integrations, Font, and General**
+tabs on one row, horizontally scrollable in narrow windows. Tab/Shift-Tab
+switches sections and reveals the selected tab when a font field is not focused.
+Font family and size controls save each native font role independently, retaining
+configured fallbacks and unrelated settings. Esc leaves a font editor before
+closing the modal.
+
+Theme, indicator style, sound, and toast delivery are **shared with the local
+Herdr TUI**. They read `HERDR_CONFIG_PATH`, otherwise
+`$XDG_CONFIG_HOME/herdr/config.toml` or `~/.config/herdr/config.toml`. The GUI uses
+the release `herdr` namespace even in debug builds; select a `herdr-dev` config
+explicitly with `HERDR_CONFIG_PATH` when needed. These are local preferences,
+not a remote daemon's configuration: a socket does not expose the daemon's config
+path or effective settings. General displays the shared file and reload control.
+
+Shared saves preserve comments and unknown keys, reject conflicting external
+edits and unsafe paths, and run off the UI thread. Symlinked config files and
+user-controlled symlink ancestors are refused rather than replaced. Save success
+is separate from the local daemon reload request, which is reported as queued,
+not acknowledged. Opening Preferences, its Reload button, and the daemon's reload
+signal reread the local file; there is no filesystem watcher.
+
+Existing native theme selections remain overrides. Choose **Follow Herdr** to
+use the shared theme, all 18 upstream palettes, custom colors, and automatic
+light/dark selection. Selecting a shared theme disables upstream auto-switching,
+as in the TUI. Status indicators always use the shared indicator style and shared
+status colors, independent of a native terminal theme override. Terminal/default
+reset colors are projected to opaque native colors.
+
+Sound respects the shared global and per-agent settings and custom local paths.
+On macOS it uses `afplay`; absent or unusable custom audio falls back to the OS
+Glass/Ping sounds, not Herdr's bundled MP3s. Herdr toasts render in-app, System
+uses macOS notifications (subject to OS permissions and Focus), and Terminal
+delivery is not executed in the native app. Native audio/system delivery is not
+implemented on Linux. Semantic events are bounded, target-validated, and fenced
+by connection/boot; external effects are coordinated across app windows to avoid
+duplicate sounds/system notifications. Clipboard feedback remains a separate TUI
+preference and does not authorize remote clipboard writes.
+
+Integrations are managed on the **selected daemon's host** through advertised
+`integration.list`/`integration.install` methods. Installation is only triggered
+by an explicit button click, modifies agent hook/plugin configuration on that
+host, and refreshes the list afterward. No uninstall action is offered because
+the upstream binary endpoint does not advertise it. Native GitHub sign-in remains
+separate from agent integrations.
 
 Set top-level `confirm_close_tab = false` to close tabs without confirmation
 (including their running processes), and `show_agents = false` to hide the Agents
@@ -196,10 +242,9 @@ and local file paths are not activated.
   stale-while-refresh behavior; see [avatar caching](../../README.md#native-github-sign-in)
   for limits, location, and the startup authentication requirement. Neither cache
   reads nor downloads block rendering; sign-out discards profile refresh results.
-- In-app sidebar menu for settings information, keybinds, config reload, update
-  information, and detach/reconnect. Styled Preferences include Appearance,
-  Fonts, Configuration, and Connection sections, with theme selection and GUI
-  config reload; font values remain read-only and are edited in the config file.
+- In-app sidebar menu for settings, keybinds, config reload, update information,
+  and detach/reconnect. Tabbed Preferences combines shared Herdr settings,
+  daemon agent integrations, editable native fonts, and general configuration.
 - A searchable theme picker previews the available names from built-ins and
   Herdr/Ghostty theme folders. Selecting a theme applies and saves it while
   preserving other GUI config settings and comments.
@@ -381,7 +426,8 @@ GPUI native action/menu/keybinding patterns.
   composition appears in the status bar rather than inline. Key releases and
   physical-key/extended keyboard protocol metadata are not reported.
 - Popups have a basic centered text presentation, without native title/border
-  chrome. Server notifications/clipboard writes are not executed.
+  chrome. Only semantic notifications are delivered under local sound/toast
+  policy; legacy terminal escapes and remote clipboard writes are not executed.
 - Rendering is a simple two-pass cell painter, not an optimized damaged-row
   renderer. Large/high-frequency surfaces can consume significant CPU.
 

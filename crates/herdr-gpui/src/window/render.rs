@@ -496,6 +496,7 @@ impl Render for HerdrWindow {
                             })),
                     ),
             )
+            .child(self.notifications.render_notifications(&self.theme))
             .when(self.menu.page.is_some(), |root| {
                 root.child(self.render_menu(window, cx))
             })

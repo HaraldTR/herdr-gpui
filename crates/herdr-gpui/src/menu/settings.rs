@@ -35,10 +35,12 @@ impl HerdrWindow {
         }
         self.menu.page = Some(Page::Preferences);
         self.menu.preferences_scroll.set_offset(Point::default());
+        self.load_shared_settings(cx);
+        self.select_settings_tab(self.settings.tab, window, cx);
     }
 
     pub(crate) fn reload_gui_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.theme_save_in_flight() {
+        if self.theme_save_in_flight() || self.native_settings_save_in_flight() {
             return;
         }
         self.load_gui_config(cx);
@@ -46,6 +48,9 @@ impl HerdrWindow {
     }
 
     pub(crate) fn load_gui_config(&mut self, cx: &mut Context<Self>) {
+        if self.native_settings_save_in_flight() {
+            return;
+        }
         // Enumerating installed families is slow, so it rides the same
         // background load as parsing rather than the UI thread.
         let text_system = cx.text_system().clone();
@@ -53,14 +58,19 @@ impl HerdrWindow {
             move || {
                 let mut config = Config::load()?;
                 config.resolve_font_fallbacks(|| text_system.all_font_names());
-                let theme = config.theme()?;
+                // Follow Herdr is resolved from the latest prepared snapshot on completion.
+                let theme = if config.theme == "Follow Herdr" {
+                    Default::default()
+                } else {
+                    config.theme()?
+                };
                 Ok((config, theme))
             },
             cx,
         );
     }
 
-    pub(super) fn load_gui_config_with(
+    pub(crate) fn load_gui_config_with(
         &mut self,
         load: impl FnOnce() -> crate::Result<(Config, crate::config::Theme)> + Send + 'static,
         cx: &mut Context<Self>,
@@ -73,6 +83,7 @@ impl HerdrWindow {
             let loaded = load.await;
             let _ = this.update(cx, |this, cx| {
                 this.config_load = None;
+                let native_reload = std::mem::take(&mut this.settings.native_reloading);
                 // Apply a coherent pair only after both have loaded successfully.
                 match loaded {
                     Ok((config, theme)) => {
@@ -82,14 +93,30 @@ impl HerdrWindow {
                             this.menu.pr_connection = None;
                         }
                         this.config = config;
-                        this.theme = theme;
+                        if this.config.theme != "Follow Herdr" {
+                            this.theme = theme;
+                        }
+                        this.apply_shared_theme(cx);
+                        if native_reload {
+                            this.settings.native_status =
+                                Some("GUI config saved and applied".into());
+                        }
                         crate::log_window::set_appearance(&this.config, &this.theme, cx);
                         this.wheel = Default::default();
                         this.last_queued_options = None;
                         this.local_error = None;
                     }
-                    Err(error) => this.local_error = Some(format!("Load GUI config: {error}")),
+                    Err(error) => {
+                        let message = format!("Load GUI config: {error}");
+                        if native_reload {
+                            this.settings.native_status =
+                                Some("GUI config saved; appearance reload failed".into());
+                            this.settings.native_error = Some(message.clone());
+                        }
+                        this.local_error = Some(message);
+                    }
                 }
+                this.refresh_deferred_font_inputs(cx);
                 cx.notify();
             });
         }));

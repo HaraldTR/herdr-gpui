@@ -3,7 +3,11 @@
 //! at terminal output.
 
 use super::{STATUS_DOT_UNKNOWN, STATUS_WIDTH, first_text, label_text, line_height};
-use crate::{HerdrWindow, config::FontConfig};
+use crate::{
+    HerdrWindow,
+    config::FontConfig,
+    herdr_settings::{IndicatorStyle, Settings},
+};
 use gpui::{prelude::*, *};
 use herdr_client::protocol::{AgentStatus, ClientShellAgent, ClientShellSnapshot};
 
@@ -113,26 +117,100 @@ pub(super) fn agent_labels<'a>(
     (segments, name)
 }
 
-// Match the expanded upstream shell order, including orphaned linked worktrees.
+/// Resolve the shared palette once per sidebar render, not once per row.
+#[derive(Clone, Copy)]
+pub(super) struct Indicators {
+    pub(super) style: IndicatorStyle,
+    colors: [u32; 5],
+}
 
-pub(super) fn status_indicator(status: AgentStatus, font: &FontConfig) -> Div {
+impl Indicators {
+    pub(super) fn new(settings: Option<&Settings>, light: bool) -> Self {
+        Self {
+            style: settings.map_or(IndicatorStyle::Dots, |settings| settings.indicators),
+            colors: [
+                AgentStatus::Unknown,
+                AgentStatus::Idle,
+                AgentStatus::Working,
+                AgentStatus::Done,
+                AgentStatus::Blocked,
+            ]
+            .map(|status| {
+                settings.map_or_else(
+                    || status_style(status).2,
+                    |settings| settings.status_color(status, light),
+                )
+            }),
+        }
+    }
+
+    pub(super) fn color(self, status: AgentStatus) -> u32 {
+        self.colors[match status {
+            AgentStatus::Unknown => 0,
+            AgentStatus::Idle => 1,
+            AgentStatus::Working => 2,
+            AgentStatus::Done => 3,
+            AgentStatus::Blocked => 4,
+        }]
+    }
+
+    pub(super) fn width(self, font: &FontConfig) -> f32 {
+        match self.style {
+            IndicatorStyle::Dots => STATUS_WIDTH,
+            IndicatorStyle::Symbols => font.size.ceil().max(STATUS_WIDTH),
+        }
+    }
+}
+
+pub(super) fn status_symbol(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Working => "\u{25d0}",
+        AgentStatus::Blocked => "\u{d7}",
+        AgentStatus::Done => "\u{2713}",
+        AgentStatus::Idle => "\u{25cb}",
+        AgentStatus::Unknown => "\u{b7}",
+    }
+}
+
+pub(super) fn status_indicator(
+    status: AgentStatus,
+    font: &FontConfig,
+    indicators: Indicators,
+) -> Div {
     // Upstream dots: working/blocked/done filled, idle hollow, unknown a small dot.
-    let (diameter, filled, color) = status_style(status);
+    let (diameter, filled, _) = status_style(status);
+    let color = indicators.color(status);
+    let symbol = indicators.style == IndicatorStyle::Symbols;
+    let height = if symbol {
+        line_height(font)
+    } else {
+        STATUS_WIDTH
+    };
     div()
-        .size(px(STATUS_WIDTH))
-        .mt(px((line_height(font) - STATUS_WIDTH) / 2.))
+        .w(px(indicators.width(font)))
+        .h(px(height))
+        .mt(px((line_height(font) - height) / 2.))
         .flex_none()
         .flex()
         .items_center()
         .justify_center()
-        .child(
-            div()
-                .size(px(diameter))
-                .rounded_full()
-                .border_1()
-                .border_color(rgb(color))
-                .when(filled, |dot| dot.bg(rgb(color))),
-        )
+        .when(symbol, |slot| {
+            slot.overflow_hidden()
+                .text_size(px(font.size))
+                .line_height(px(line_height(font)))
+                .text_color(rgb(color))
+                .child(status_symbol(status))
+        })
+        .when(!symbol, |slot| {
+            slot.child(
+                div()
+                    .size(px(diameter))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(rgb(color))
+                    .when(filled, |dot| dot.bg(rgb(color))),
+            )
+        })
 }
 
 /// Upstream draws status from its own palette, defaulting to Catppuccin Mocha,
@@ -146,5 +224,44 @@ pub(super) fn status_style(status: AgentStatus) -> (f32, bool, u32) {
         AgentStatus::Done => (STATUS_WIDTH, true, 0x94e2d5),
         AgentStatus::Idle => (STATUS_WIDTH, false, 0xa6e3a1),
         AgentStatus::Unknown => (STATUS_DOT_UNKNOWN, true, 0x6c7086),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Indicators, status_indicator};
+    use crate::{config::FontConfig, herdr_settings::IndicatorStyle};
+    use gpui::{Styled, rgb};
+    use herdr_client::protocol::AgentStatus;
+
+    #[test]
+    fn prepared_custom_palette_keeps_each_authoritative_status_color() {
+        let font = FontConfig {
+            family: "Menlo".into(),
+            size: 16.,
+            fallbacks: None,
+        };
+        for style in [IndicatorStyle::Dots, IndicatorStyle::Symbols] {
+            let indicators = Indicators {
+                style,
+                colors: [0x112233, 0x223344, 0x334455, 0x445566, 0x556677],
+            };
+            for (status, expected) in [
+                (AgentStatus::Unknown, 0x112233),
+                (AgentStatus::Idle, 0x223344),
+                (AgentStatus::Working, 0x334455),
+                (AgentStatus::Done, 0x445566),
+                (AgentStatus::Blocked, 0x556677),
+            ] {
+                assert_eq!(indicators.color(status), expected);
+                if style == IndicatorStyle::Symbols {
+                    let mut slot = status_indicator(status, &font, indicators);
+                    assert_eq!(
+                        slot.text_style().as_ref().and_then(|text| text.color),
+                        Some(rgb(expected).into())
+                    );
+                }
+            }
+        }
     }
 }

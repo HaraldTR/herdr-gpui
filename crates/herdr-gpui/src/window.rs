@@ -32,6 +32,9 @@ pub(crate) struct HerdrWindow {
     pub(crate) config: config::Config,
     pub(crate) theme: config::Theme,
     pub(crate) config_load: Option<Task<()>>,
+    pub(crate) settings: crate::settings_panel::SettingsPanel,
+    pub(crate) integrations: crate::integrations::Integrations,
+    pub(crate) notifications: crate::notifications::Notifications,
     pub(crate) endpoints: Vec<endpoint::Endpoint>,
     pub(crate) selected_endpoint: usize,
     pub(crate) selection_epoch: u64,
@@ -86,9 +89,25 @@ pub(crate) struct HerdrWindow {
     pub(crate) sidebar_revealed: [std::cell::Cell<Option<usize>>; 2],
     pub(crate) _poll: Task<()>,
     pub(crate) _activation: Subscription,
+    pub(crate) _appearance: Subscription,
 }
 
 impl HerdrWindow {
+    fn prepare_notifications(&mut self, cx: &mut Context<Self>) {
+        let endpoint = &self.endpoints[self.selected_endpoint];
+        if let Ok(live) = endpoint.connection.inbox.try_lock()
+            && self.notifications.prepare(
+                &endpoint.connection,
+                &live,
+                self.selection_epoch,
+                self.active,
+                std::time::Instant::now(),
+            )
+        {
+            cx.notify();
+        }
+    }
+
     pub(crate) fn new(
         target: ConnectTarget,
         window: &mut Window,
@@ -140,6 +159,48 @@ impl HerdrWindow {
                             .as_ref()
                             .and_then(|s| s.focused_pane_id.clone());
                         this.poll_endpoints(cx);
+                        this.poll_integrations(cx);
+                        // Register every main window before any external effect,
+                        // even when another window's config is still loading.
+                        this.prepare_notifications(cx);
+                        for handle in cx.windows() {
+                            if handle != window.window_handle()
+                                && let Some(handle) = handle.downcast::<HerdrWindow>()
+                            {
+                                let _ = handle.update(cx, |other, _, cx| {
+                                    other.prepare_notifications(cx);
+                                });
+                            }
+                        }
+                        if this.settings.task.is_none() {
+                            let mut reload = false;
+                            for endpoint in &this.endpoints {
+                                reload |= endpoint.connection.take_settings_reload();
+                            }
+                            if reload {
+                                this.load_shared_settings(cx);
+                            }
+                        }
+                        for (index, endpoint) in this.endpoints.iter().enumerate() {
+                            if index != this.selected_endpoint {
+                                drop(endpoint.connection.take_notifications());
+                            }
+                        }
+                        let endpoint = &this.endpoints[this.selected_endpoint];
+                        if let Some(settings) = &this.settings.shared {
+                            if this.notifications.tick(
+                                &endpoint.connection,
+                                &endpoint.live,
+                                this.selection_epoch,
+                                this.active,
+                                settings,
+                                std::time::Instant::now(),
+                            ) {
+                                cx.notify();
+                            }
+                        } else {
+                            drop(endpoint.connection.take_notifications());
+                        }
                         this.update_workspace_dialog(window, cx);
                         this.poll_worktree_source(cx);
                         this.poll_hover_menu(std::time::Instant::now(), window, cx);
@@ -179,6 +240,9 @@ impl HerdrWindow {
             config: config::Config::default(),
             theme: config::Theme::default(),
             config_load: None,
+            settings: Default::default(),
+            integrations: Default::default(),
+            notifications: Default::default(),
             catalog: endpoint::Catalog::new(&target),
             endpoints: vec![endpoint::Endpoint::new(
                 endpoint::LOCAL.into(),
@@ -230,7 +294,12 @@ impl HerdrWindow {
             _poll: poll,
             _activation: cx.observe_window_activation(window, |this, window, cx| {
                 this.active = window.is_window_active();
+                this.prepare_notifications(cx);
                 this.report_focus();
+                cx.notify();
+            }),
+            _appearance: cx.observe_window_appearance(window, |this, _, cx| {
+                this.apply_shared_theme(cx);
                 cx.notify();
             }),
         };
@@ -254,6 +323,7 @@ impl HerdrWindow {
         this.reconnect();
         log_window::set_appearance(&this.config, &this.theme, cx);
         this.load_gui_config(cx);
+        this.load_shared_settings(cx);
         this
     }
 }

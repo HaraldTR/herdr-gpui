@@ -1,4 +1,4 @@
-# Herdr GUI settings, independent of the daemon config.
+# Herdr GUI settings, independent of the daemon config unless opted in below.
 # Save at $XDG_CONFIG_HOME/herdr/config-gpui.toml (default ~/.config/herdr/).
 # Omitted settings use defaults. Font sizes are logical pixels, inclusive 8..48.
 # Font families below are examples; leave them commented to use platform defaults.
@@ -11,6 +11,7 @@
 
 # Built-ins: Default, Nord, Dracula, Catppuccin Mocha, Catppuccin Latte.
 # Also accepts a Ghostty theme name, an absolute path, or a ~/ path.
+# Set "Follow Herdr" to use the local Herdr theme (without changing its config).
 theme = "Default"
 
 # Ask before closing a tab (closing terminates its terminal processes).

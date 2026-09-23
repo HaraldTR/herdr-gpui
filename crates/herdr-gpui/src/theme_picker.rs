@@ -41,6 +41,9 @@ impl ThemePicker {
 
 impl HerdrWindow {
     pub(super) fn open_theme_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.native_settings_save_in_flight() {
+            return;
+        }
         if !self.open_menu(window, cx) {
             return;
         }

@@ -1,7 +1,6 @@
 use crate::{
     HerdrWindow,
     config::{Config, Features},
-    fonts::StyledFont,
 };
 use gpui::{prelude::*, *};
 use std::env;
@@ -23,7 +22,7 @@ pub(crate) fn feature_rows(features: &Features) -> [(&'static str, &'static str,
 }
 
 impl HerdrWindow {
-    pub(super) fn render_preferences(&self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_general_preferences(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = &self.theme;
         let font = &self.config.ui;
         let accent = crate::menu::accent(theme);
@@ -88,7 +87,7 @@ impl HerdrWindow {
             .track_scroll(&self.menu.preferences_scroll)
             .px(px(16.))
             .py(px(8.))
-            .child(section("APPEARANCE"))
+            .child(section("GENERAL"))
             .child(row(
                 "preferences-show-agents",
                 "Show agents",
@@ -99,36 +98,6 @@ impl HerdrWindow {
                 "Confirm tab close",
                 self.config.confirm_close_tab.to_string(),
             ))
-            .child(row("preferences-theme", "Theme", self.config.theme.clone()))
-            .child(div().py(px(10.)).child(
-                button("preferences-choose-theme", "Choose theme").on_click(cx.listener(
-                    |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.open_theme_picker(window, cx);
-                    },
-                )),
-            ))
-            .child(section("FONTS"));
-        for (id, label, value) in [
-            ("preferences-font-sidebar", "Sidebar", &self.config.sidebar),
-            ("preferences-font-tabs", "Tabs", &self.config.tabs),
-            (
-                "preferences-font-terminal",
-                "Terminal",
-                &self.config.terminal,
-            ),
-            ("preferences-font-ui", "UI", &self.config.ui),
-        ] {
-            body = body.child(row(
-                id,
-                label,
-                format!("{}, {} px", value.family, value.size),
-            ));
-        }
-        body = body
-            .child(note(
-                "Font families and sizes are read-only here. Sizes are logical pixels, independent of display scaling.",
-            ))
             .child(section("FEATURES"));
         for (id, label, enabled) in feature_rows(&self.config.features) {
             body = body.child(row(id, label, if enabled { "On" } else { "Off" }.into()));
@@ -138,6 +107,22 @@ impl HerdrWindow {
                 "Optional behaviors, off by default. Turn one on in the [features] table of the GUI config file, then reload GUI config.",
             ))
             .child(section("CONFIGURATION"))
+            .child(note("Theme, indicators, sound, and toasts share this computer's Herdr configuration, not a remote daemon's settings."))
+            .child(
+                div()
+                    .debug_selector(|| "preferences-shared-path".into())
+                    .py(px(7.))
+                    .child(
+                        self.settings.shared.as_ref()
+                            .map(|settings| settings.path.display().to_string())
+                            .unwrap_or_else(|| "Shared config path unavailable".into()),
+                    ),
+            )
+            .child(
+                button("preferences-reload-shared", "Reload shared settings")
+                    .when(self.settings.task.is_some(), |button| button.opacity(0.5))
+                    .on_click(cx.listener(|this, _, _, cx| this.load_shared_settings(cx))),
+            )
             .child(
                 div()
                     .text_color(rgb(theme.muted))
@@ -186,84 +171,7 @@ impl HerdrWindow {
                 format!("{:?}", self.endpoints[self.selected_endpoint].connection.target),
             ));
 
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .min_h_0()
-            .min_w_0()
-            .text_font(font)
-            .text_size(px(font.size))
-            .line_height(px(font.line_height()))
-            .text_color(rgb(theme.foreground))
-            .child(
-                div()
-                    .debug_selector(|| "preferences-header".into())
-                    .flex()
-                    .items_center()
-                    .flex_none()
-                    .gap(px(12.))
-                    .p(px(16.))
-                    .border_b_1()
-                    .border_color(rgb(theme.active))
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(3.))
-                            .h(px(font.size * 2.5))
-                            .rounded_full()
-                            .bg(accent),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(px(font.size * 1.35))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Preferences"),
-                            )
-                            .child(
-                                div()
-                                    .text_color(rgb(theme.muted))
-                                    .child("Current GUI settings"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("preferences-close")
-                            .debug_selector(|| "preferences-close".into())
-                            .flex_none()
-                            .px(px(8.))
-                            .py(px(4.))
-                            .rounded(px(4.))
-                            .cursor_pointer()
-                            .text_color(rgb(theme.muted))
-                            .hover(|style| {
-                                style
-                                    .bg(rgb(theme.active))
-                                    .text_color(rgb(theme.foreground))
-                            })
-                            .child("Close")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.dismiss_menu(window, cx);
-                            })),
-                    ),
-            )
-            .child(body)
-            .child(
-                div()
-                    .debug_selector(|| "preferences-footer".into())
-                    .flex_none()
-                    .px(px(16.))
-                    .py(px(10.))
-                    .border_t_1()
-                    .border_color(rgb(theme.active))
-                    .text_color(rgb(theme.muted))
-                    .child("Esc to close  /  click outside to dismiss"),
-            )
+        body
     }
 }
 

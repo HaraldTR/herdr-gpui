@@ -12,6 +12,8 @@
 pub enum Method {
     ClientShellSurfaceSet,
     CommandInvoke,
+    IntegrationList,
+    IntegrationInstall,
     PaneClose,
     PaneFocus,
     PaneFocusDirection,
@@ -37,6 +39,8 @@ impl Method {
         match self {
             Self::ClientShellSurfaceSet => "client_shell.surface.set",
             Self::CommandInvoke => "command.invoke",
+            Self::IntegrationList => "integration.list",
+            Self::IntegrationInstall => "integration.install",
             Self::PaneClose => "pane.close",
             Self::PaneFocus => "pane.focus",
             Self::PaneFocusDirection => "pane.focus_direction",
@@ -68,5 +72,25 @@ impl Method {
 impl std::fmt::Display for Method {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn integration_methods_require_exact_advertisement() {
+        for (method, name) in [
+            (Method::IntegrationList, "integration.list"),
+            (Method::IntegrationInstall, "integration.install"),
+        ] {
+            assert_eq!(method.as_str(), name);
+            assert_eq!(method.to_string(), name);
+            assert!(!method.advertised_in(&[]));
+            assert!(!method.advertised_in(&[format!("{name}.extra")]));
+            assert!(method.advertised_in(&["unknown.future".into(), name.into()]));
+        }
+        assert!(!Method::IntegrationInstall.advertised_in(&["integration.list".into()]));
     }
 }

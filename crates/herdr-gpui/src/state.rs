@@ -2,7 +2,16 @@ use herdr_client::{
     ClientEvent, Method,
     protocol::{ClientShellSnapshot, PaneSurfaceFrame, ServerMessage},
 };
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc, time::Instant};
+
+pub(crate) const NOTIFICATION_CAPACITY: usize = 32;
+
+#[derive(Clone)]
+pub(crate) struct CapturedNotification {
+    pub boot: String,
+    pub received: Instant,
+    pub notification: herdr_client::protocol::SemanticNotification,
+}
 
 pub(crate) type DialogResponse = Result<serde_json::Value, Arc<crate::Error>>;
 
@@ -37,6 +46,8 @@ impl std::fmt::Display for ConnectionStatus {
 
 #[derive(Clone)]
 pub struct LiveState {
+    pub(crate) notifications: VecDeque<CapturedNotification>,
+    pub(crate) settings_reload: bool,
     pub snapshot: Option<Arc<ClientShellSnapshot>>,
     pub surface: Option<Arc<PaneSurfaceFrame>>,
     pub status: ConnectionStatus,
@@ -73,6 +84,8 @@ pub struct SurfaceActivation {
 impl Default for LiveState {
     fn default() -> Self {
         Self {
+            notifications: VecDeque::new(),
+            settings_reload: false,
             snapshot: None,
             surface: None,
             status: ConnectionStatus::Connecting,
@@ -144,6 +157,8 @@ impl LiveState {
     pub fn apply(&mut self, event: ClientEvent) {
         match event {
             ClientEvent::Connected(welcome) => {
+                self.notifications.clear();
+                self.settings_reload = false;
                 self.supports_workspace_get = Method::WorkspaceGet.advertised_in(&welcome.methods);
                 self.supports_surface = Method::ClientShellSurfaceSet
                     .advertised_in(&welcome.methods)
@@ -157,6 +172,8 @@ impl LiveState {
                 self.error = None;
             }
             ClientEvent::Snapshot(snapshot) => {
+                self.notifications
+                    .retain(|event| event.boot == snapshot.boot_id);
                 if let Some(activation) = &mut self.activation
                     && activation.boot != snapshot.boot_id
                 {
@@ -183,6 +200,8 @@ impl LiveState {
                 }
             }
             ClientEvent::Disconnected { reason } => {
+                self.notifications.clear();
+                self.settings_reload = false;
                 self.status = ConnectionStatus::Disconnected;
                 self.error = Some(reason);
                 self.snapshot = None;
@@ -248,6 +267,40 @@ impl LiveState {
                     *result = Some(Ok(response));
                 }
             }
+            ClientEvent::Message(ServerMessage::ReloadSoundConfig) => {
+                self.settings_reload = true;
+            }
+            ClientEvent::Message(ServerMessage::SemanticNotification(mut notification)) => {
+                let Some(snapshot) = &self.snapshot else {
+                    return;
+                };
+                if self.status != ConnectionStatus::Connected {
+                    return;
+                }
+                // Bound retained remote text as well as the number of events.
+                for value in [
+                    Some(&mut notification.title),
+                    notification.body.as_mut(),
+                    notification.agent.as_mut(),
+                    notification.workspace_id.as_mut(),
+                    notification.tab_id.as_mut(),
+                    notification.pane_id.as_mut(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    let end = value.floor_char_boundary(2048.min(value.len()));
+                    value.truncate(end);
+                }
+                if self.notifications.len() == NOTIFICATION_CAPACITY {
+                    self.notifications.pop_front();
+                }
+                self.notifications.push_back(CapturedNotification {
+                    boot: snapshot.boot_id.clone(),
+                    received: Instant::now(),
+                    notification,
+                });
+            }
             ClientEvent::Message(ServerMessage::ClientShellError { message }) => {
                 self.error = Some(message)
             }
@@ -275,6 +328,51 @@ mod tests {
     use super::*;
     use herdr_client::protocol::AgentStatus;
     use herdr_client::protocol::FrameData;
+
+    #[test]
+    fn semantic_notifications_are_bounded_and_boot_fenced() {
+        let mut state = LiveState::default();
+        state.apply(ClientEvent::Snapshot(snapshot()));
+        for index in 0..NOTIFICATION_CAPACITY + 5 {
+            state.apply(ClientEvent::Message(ServerMessage::SemanticNotification(
+                herdr_client::protocol::SemanticNotification {
+                    kind: herdr_client::protocol::SemanticNotificationKind::Custom,
+                    title: index.to_string(),
+                    body: Some("a".repeat(3000)),
+                    sound: None,
+                    agent: None,
+                    workspace_id: None,
+                    tab_id: None,
+                    pane_id: None,
+                    position: None,
+                },
+            )));
+        }
+        assert_eq!(state.notifications.len(), NOTIFICATION_CAPACITY);
+        assert_eq!(state.notifications.front().unwrap().notification.title, "5");
+        assert_eq!(
+            state
+                .notifications
+                .front()
+                .unwrap()
+                .notification
+                .body
+                .as_ref()
+                .unwrap()
+                .len(),
+            2048
+        );
+        state.apply(ClientEvent::Message(ServerMessage::Notify {
+            kind: herdr_client::protocol::NotifyKind::Sound,
+            message: "/untrusted/sound;command".into(),
+            body: None,
+        }));
+        assert_eq!(state.notifications.len(), NOTIFICATION_CAPACITY);
+        let mut reboot = snapshot();
+        Arc::make_mut(&mut reboot).boot_id = "new-boot".into();
+        state.apply(ClientEvent::Snapshot(reboot));
+        assert!(state.notifications.is_empty());
+    }
 
     #[test]
     fn dialog_response_is_correlated_and_survives_coalescing() {

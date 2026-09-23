@@ -4,7 +4,7 @@
 
 use super::{
     ARROW_RESERVE, HOST_ARROW_WIDTH, HOST_GAP, LABEL_GAP, ROW_PADDING,
-    agents::agent_labels,
+    agents::{Indicators, agent_labels},
     agents_sort, label_text, line_height,
     row::first_text,
     row::{RowIcon, RowKind, RowTree, row},
@@ -37,6 +37,13 @@ impl HerdrWindow {
         let view = cx.entity().downgrade();
         let font = &self.config.sidebar;
         let theme = &self.theme;
+        let indicators = Indicators::new(
+            self.settings.shared.as_ref(),
+            matches!(
+                cx.window_appearance(),
+                WindowAppearance::Light | WindowAppearance::VibrantLight
+            ),
+        );
         let mut spaces = div()
             .id("spaces-scroll")
             .debug_selector(|| "spaces-scroll".into())
@@ -211,6 +218,7 @@ impl HerdrWindow {
                         first_text([workspace.branch.as_deref()], ""),
                         RowKind::Workspace,
                         workspace.agent_status,
+                        indicators,
                         selected && workspace.focused,
                         tree,
                         reserve_arrow,
@@ -285,6 +293,7 @@ impl HerdrWindow {
                         detail,
                         RowKind::Agent,
                         agent.agent_status,
+                        indicators,
                         selected && agent.focused,
                         RowTree::None,
                         false,

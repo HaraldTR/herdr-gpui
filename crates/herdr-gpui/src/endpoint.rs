@@ -362,6 +362,7 @@ impl HerdrWindow {
             return false;
         }
         self.release_selected();
+        self.notifications.reset();
         if index == 0 {
             self.pending_releases.clear();
         }

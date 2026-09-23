@@ -2,14 +2,17 @@
 
 use super::{
     STATUS_DOT_UNKNOWN, STATUS_WIDTH,
-    agents::{agent_labels, status_style},
+    agents::{Indicators, agent_labels, status_indicator, status_style, status_symbol},
     layout_tests,
     render::header,
     row::first_text,
     workspace_label,
     workspaces::workspace_entries,
 };
-use crate::config::{FontConfig, Theme};
+use crate::{
+    config::{FontConfig, Theme},
+    herdr_settings::IndicatorStyle,
+};
 use herdr_client::protocol::{
     AgentStatus, ClientShellAgent, ClientShellSnapshot, ClientShellWorkspace,
 };
@@ -233,7 +236,7 @@ fn rows_weight_and_dim_their_text_like_upstream() {
 }
 
 #[test]
-fn status_colors_match_upstream_and_ignore_the_theme() {
+fn unloaded_status_colors_match_upstream_defaults_in_both_appearances() {
     // The literals are upstream's default palette (Catppuccin Mocha), which
     // its status dots use whatever terminal colors are loaded.
     for (status, color) in [
@@ -243,22 +246,63 @@ fn status_colors_match_upstream_and_ignore_the_theme() {
         (AgentStatus::Idle, 0xa6e3a1),
         (AgentStatus::Unknown, 0x6c7086),
     ] {
-        assert_eq!(status_style(status).2, color);
+        for light in [false, true] {
+            let indicators = Indicators::new(None, light);
+            assert_eq!(indicators.style, IndicatorStyle::Dots);
+            assert_eq!(indicators.color(status), color);
+        }
     }
-    for name in Theme::BUILTIN_NAMES {
-        let theme = Theme::builtin(name).unwrap();
-        for status in [
-            AgentStatus::Working,
-            AgentStatus::Blocked,
-            AgentStatus::Done,
-            AgentStatus::Idle,
-            AgentStatus::Unknown,
-        ] {
-            let color = status_style(status).2;
-            assert!(
-                !theme.palette.contains(&color) || theme.palette[..16].contains(&color),
-                "{name}: dots must not be read out of the theme"
-            );
+}
+
+#[test]
+fn status_symbols_match_upstream_without_changing_status_colors() {
+    let mut indicators = Indicators::new(None, false);
+    indicators.style = IndicatorStyle::Symbols;
+    for (status, symbol) in [
+        (AgentStatus::Working, "\u{25d0}"),
+        (AgentStatus::Blocked, "\u{d7}"),
+        (AgentStatus::Done, "\u{2713}"),
+        (AgentStatus::Idle, "\u{25cb}"),
+        (AgentStatus::Unknown, "\u{b7}"),
+    ] {
+        assert_eq!(status_symbol(status), symbol);
+        assert_eq!(indicators.color(status), status_style(status).2);
+    }
+}
+
+#[test]
+fn status_slots_are_fixed_for_each_style_and_font_size() {
+    use gpui::{Styled, px};
+    for size in [8., 12., 16., 20., 32.] {
+        let font = FontConfig {
+            family: "Menlo".into(),
+            size,
+            fallbacks: None,
+        };
+        for style in [IndicatorStyle::Dots, IndicatorStyle::Symbols] {
+            let mut indicators = Indicators::new(None, false);
+            indicators.style = style;
+            let width = match style {
+                IndicatorStyle::Dots => STATUS_WIDTH,
+                IndicatorStyle::Symbols => size,
+            };
+            assert_eq!(indicators.width(&font), width);
+            for status in [
+                AgentStatus::Working,
+                AgentStatus::Blocked,
+                AgentStatus::Done,
+                AgentStatus::Idle,
+                AgentStatus::Unknown,
+            ] {
+                let mut slot = status_indicator(status, &font, indicators);
+                assert_eq!(slot.style().size.width, Some(px(width).into()));
+                if style == IndicatorStyle::Symbols {
+                    assert_eq!(
+                        slot.text_style().as_ref().unwrap().font_size,
+                        Some(px(size).into())
+                    );
+                }
+            }
         }
     }
 }

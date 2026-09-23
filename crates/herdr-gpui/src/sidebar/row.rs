@@ -6,7 +6,7 @@
 use super::layout_tests;
 use super::{
     ARROW_RESERVE, CHILD_INDENT, ICON_RESERVE, LABEL_GAP, ROW_PADDING, STATUS_WIDTH, TREE_GUTTER,
-    glyph_width, line_height, segment_budgets, status_indicator,
+    agents::Indicators, glyph_width, line_height, segment_budgets, status_indicator,
 };
 use crate::config::{FontConfig, Theme};
 use gpui::{prelude::*, *};
@@ -242,6 +242,7 @@ pub(super) fn row(
     detail: &str,
     kind: RowKind,
     status: AgentStatus,
+    indicators: Indicators,
     focused: bool,
     tree: RowTree,
     reserve_arrow: bool,
@@ -258,10 +259,12 @@ pub(super) fn row(
         _ => ICON_RESERVE,
     };
     let muted = theme.muted;
+    let status_width = indicators.width(font);
+    let extra_status_width = status_width - STATUS_WIDTH;
     let indent = if tree == RowTree::None {
         0.
     } else {
-        CHILD_INDENT
+        CHILD_INDENT + extra_status_width
     };
     let pr_reserve = badge
         .as_ref()
@@ -272,7 +275,7 @@ pub(super) fn row(
     let label_width = (width
         - 1.
         - 2. * ROW_PADDING
-        - STATUS_WIDTH
+        - status_width
         - LABEL_GAP
         - indent
         - pr_reserve
@@ -303,7 +306,7 @@ pub(super) fn row(
                     .debug_selector(|| format!("tree-{key}"))
                     .absolute()
                     // Between the parent's label column and this row's own dot.
-                    .left(px(TREE_GUTTER))
+                    .left(px(TREE_GUTTER + extra_status_width))
                     .w(px(ROW_PADDING + CHILD_INDENT - TREE_GUTTER))
                     .top_0()
                     .bottom_0()
@@ -320,7 +323,7 @@ pub(super) fn row(
                     ),
             )
         })
-        .child(status_indicator(status, font))
+        .child(status_indicator(status, font, indicators))
         .child(
             div()
                 .flex()
