@@ -252,14 +252,39 @@ impl From<Option<String>> for Outcome {
 }
 
 impl PullRequest {
-    /// Lifecycle color, shared by the workspace menu and the sidebar badge so
-    /// one legend covers both: merged, closed, draft, open.
+    /// Shared by sidebar and titlebar badges and the workspace menu. Lifecycle
+    /// takes precedence; an open PR is green only when no known blocker remains.
     pub fn color(&self, theme: &crate::config::Theme) -> u32 {
         match self.state {
-            State::Merged => theme.palette[5],
-            State::Closed => theme.palette[1],
-            _ if self.is_draft => theme.muted,
-            _ => theme.palette[2],
+            State::Merged => return theme.palette[5],
+            State::Closed => return theme.palette[1],
+            State::Unknown => return theme.muted,
+            State::Open if self.is_draft => return theme.muted,
+            State::Open => {}
+        }
+        let has_check = |outcome| {
+            self.status_check_rollup
+                .iter()
+                .flatten()
+                .any(|check| check.outcome() == outcome)
+        };
+        if matches!(
+            self.merge_state_status,
+            MergeState::Dirty | MergeState::Unstable
+        ) || self.review_decision == ReviewDecision::ChangesRequested
+            || has_check(Outcome::Failed)
+        {
+            return theme.palette[1];
+        }
+        if has_check(Outcome::Pending) || self.review_decision == ReviewDecision::ReviewRequired {
+            return theme.palette[3];
+        }
+        match self.merge_state_status {
+            MergeState::Clean => theme.palette[2],
+            // ANSI's extended orange distinguishes a blocked/behind branch
+            // from pending checks without borrowing a lifecycle color.
+            MergeState::Blocked | MergeState::Behind => theme.palette[208],
+            _ => theme.palette[3],
         }
     }
 

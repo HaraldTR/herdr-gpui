@@ -6,6 +6,28 @@
 /// Namespace the daemon gives every branch it generates for a new checkout.
 const PREFIX: &str = "worktree";
 
+/// Validate a literal branch name, without resolving checkout shorthand or
+/// consulting a repository (which may live on a remote endpoint).
+pub(super) fn validate_branch(branch: &str) -> crate::Result<()> {
+    let invalid = branch.is_empty()
+        || branch == "@"
+        || branch == "HEAD"
+        || branch.starts_with('-')
+        || branch.ends_with('.')
+        || branch.contains("..")
+        || branch.contains("@{")
+        || branch
+            .bytes()
+            .any(|byte| byte <= b' ' || byte == 0x7f || b"~^:?*[\\".contains(&byte))
+        || branch
+            .split('/')
+            .any(|part| part.is_empty() || part.starts_with('.') || part.ends_with(".lock"));
+    if invalid {
+        return Err(crate::Error::InvalidBranchName);
+    }
+    Ok(())
+}
+
 /// The branch the daemon would generate for `seed`. Pure, so the proposal is
 /// reproducible in tests; callers supply the clock.
 pub(super) fn generated_branch_slug(seed: u64) -> String {
@@ -71,6 +93,55 @@ pub(super) fn checkout_preview(root: &str, repo: &str, branch: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn literal_branch_names_follow_git_ref_rules() {
+        for branch in [
+            "config reload",
+            "feature\tbranch",
+            "feature\nbranch",
+            "bad\u{7f}",
+            "",
+            "@",
+            "HEAD",
+            "-option",
+            "a..b",
+            "a@{b",
+            "a~b",
+            "a^b",
+            "a:b",
+            "a?b",
+            "a*b",
+            "a[b",
+            "a\\b",
+            "/a",
+            "a/",
+            "a//b",
+            ".hidden",
+            "a/.b",
+            "a.lock",
+            "a.lock/b",
+            "a.",
+        ] {
+            assert!(
+                matches!(
+                    validate_branch(branch),
+                    Err(crate::Error::InvalidBranchName)
+                ),
+                "{branch:?}"
+            );
+        }
+        for branch in [
+            "config-reload",
+            "feature/test",
+            "fix.v2",
+            "a./b",
+            "日本語",
+            "a@b",
+        ] {
+            assert!(validate_branch(branch).is_ok(), "{branch:?}");
+        }
+    }
 
     #[test]
     fn generated_branches_are_namespaced_and_reproducible() {

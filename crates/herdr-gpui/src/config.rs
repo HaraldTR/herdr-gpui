@@ -3,6 +3,7 @@
 //! to change daemon behavior. Managed defaults are refreshed from the binary;
 //! `config-gpui.local.toml` holds persistent user overrides.
 use crate::{Error, Result, error::ThemeParseError};
+pub(crate) mod watch;
 use gpui::{Font, FontFallbacks};
 use serde::Deserialize;
 use std::{
@@ -46,7 +47,7 @@ impl FontRole {
 }
 // Compare the first line so Windows checkouts and editors can use CRLF.
 const MANAGED_HEADER: &str = "# DO NOT EDIT -- WILL BE OVERWRITTEN";
-const LOCAL_CONFIG: &str = "# Herdr GPUI overrides. Edit this file, then reload GUI config.\n# Unset keys inherit config-gpui.toml; tables merge key by key.\n";
+const LOCAL_CONFIG: &str = "# Herdr GPUI overrides. Saved changes reload automatically.\n# Unset keys inherit config-gpui.toml; tables merge key by key.\n";
 
 /// Every face is held to this range, whether it comes from the config file or
 /// from a runtime adjustment, so the two can never disagree on what is valid.

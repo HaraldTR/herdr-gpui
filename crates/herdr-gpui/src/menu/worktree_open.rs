@@ -18,12 +18,23 @@ pub(super) struct Source {
 #[derive(serde::Deserialize)]
 pub(super) struct Entry {
     pub(super) path: String,
-    branch: Option<String>,
-    label: String,
+    pub(super) branch: Option<String>,
+    pub(super) label: String,
     is_bare: bool,
     is_prunable: bool,
-    is_detached: bool,
-    open_workspace_id: Option<String>,
+    pub(super) is_detached: bool,
+    pub(super) open_workspace_id: Option<String>,
+}
+
+impl Entry {
+    /// Whether a lowercased search matches the checkout's path, label or branch.
+    pub(super) fn matches(&self, query: &str) -> bool {
+        [&self.path, &self.label]
+            .into_iter()
+            .map(String::as_str)
+            .chain(self.branch.as_deref())
+            .any(|text| text.to_lowercase().contains(query))
+    }
 }
 
 pub(super) struct Picker {
@@ -59,13 +70,7 @@ impl Picker {
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, entry)| {
-                [&entry.path, &entry.label]
-                    .into_iter()
-                    .map(String::as_str)
-                    .chain(entry.branch.as_deref())
-                    .any(|text| text.to_lowercase().contains(&self.query))
-            })
+            .filter(|(_, entry)| entry.matches(&self.query))
             .map(|(index, _)| index)
             .collect();
         self.selected = 0;
@@ -77,7 +82,7 @@ impl Picker {
     }
 }
 
-fn listing(response: &serde_json::Value) -> crate::Result<(Source, Vec<Entry>)> {
+pub(super) fn listing(response: &serde_json::Value) -> crate::Result<(Source, Vec<Entry>)> {
     let result = &response["result"];
     let rows = result["worktrees"]
         .as_array()

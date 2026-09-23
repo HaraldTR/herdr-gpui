@@ -1,13 +1,14 @@
 //! The native menu bar. Every item dispatches the same `Command` the palette
 //! and the keymap use, so a command exists in one place only.
 
+use crate::{CheckForUpdates, Quit, RunCommand, ShowLogs, controls::Command};
+#[cfg(feature = "qa-menu")]
 use crate::{
-    CheckForUpdates, PlaySound, Quit, RunCommand, ShowHerdrNotDetected, ShowLogs,
-    ShowUpdatePreview,
+    PlaySound, ShowHerdrNotDetected, ShowUpdatePreview,
     actions::{ShowToastPreview, ShowUpdateDownloadPreview, ShowUpdateHomebrewPreview},
-    controls::Command,
 };
 use gpui::{Menu, MenuItem};
+#[cfg(feature = "qa-menu")]
 use herdr_client::protocol::SemanticNotificationKind;
 
 pub(crate) fn menus() -> Vec<Menu> {
@@ -173,6 +174,7 @@ pub(crate) fn menus() -> Vec<Menu> {
                 MenuItem::action("GPUI Logs", ShowLogs),
             ],
         },
+        #[cfg(feature = "qa-menu")]
         Menu {
             name: "QA".into(),
             items: vec![
@@ -230,6 +232,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "qa-menu")]
     fn badge_preview_is_available_only_in_the_macos_qa_menu() {
         let menus = menus();
         let qa = menus
@@ -254,6 +257,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "qa-menu")]
     fn qa_menu_carries_update_progress_previews() {
         let menus = menus();
         let qa = menus
@@ -280,15 +284,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn qa_menu_requires_explicit_feature() {
+        let menus = menus();
+        let names: Vec<_> = menus.iter().map(|menu| menu.name.as_ref()).collect();
+        let mut expected = vec!["Herdr", "File", "View", "Terminal", "Window"];
+        if cfg!(feature = "qa-menu") {
+            expected.push("QA");
+        }
+        assert_eq!(names, expected);
+    }
+
     /// The font size items are the only way to reach these commands from the
     /// macOS menu bar, and each must dispatch the catalog command rather than
     /// an action of its own.
     #[test]
     fn view_menu_carries_the_font_size_commands() {
         let menus = menus();
-        let names: Vec<_> = menus.iter().map(|menu| menu.name.as_ref()).collect();
-        assert_eq!(names, ["Herdr", "File", "View", "Terminal", "Window", "QA"]);
-
         let view = menus
             .iter()
             .find(|menu| menu.name.as_ref() == "View")

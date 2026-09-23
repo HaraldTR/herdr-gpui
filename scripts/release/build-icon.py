@@ -30,15 +30,23 @@ def identity(path):
 
 
 def main():
-    if len(sys.argv) < 3 or sys.argv[1] not in ("png", "icns"):
-        raise ValueError("Usage: python3 build-icon.py png|icns BINARY [BINARY ...]")
+    if len(sys.argv) < 3 or sys.argv[1] not in ("linux", "icns"):
+        raise ValueError("Usage: python3 build-icon.py linux|icns BINARY [BINARY ...]")
     identities = {identity(path) for path in sys.argv[2:]}
     if len(identities) != 1:
         raise ValueError("Input binaries have different build identities")
     worktree, _, _ = identities.pop()
-    suffix = "-worktree" if worktree == b"1" else ""
-    name = ("herdr-square-worktree-1024.png" if worktree == b"1" else "herdr-icon-square-clean.png") if sys.argv[1] == "png" else f"Herdr{suffix}.icns"
-    print(Path(__file__).resolve().parents[2] / "assets/icons" / name)
+    icons = Path(__file__).resolve().parents[2] / "assets/icons"
+    if sys.argv[1] == "icns":
+        print(icons / ("Herdr-worktree.icns" if worktree == b"1" else "Herdr.icns"))
+    # Linux: the source, then its path under the install prefix. Icon themes
+    # only search the sizes their index lists, which stop at 512x512, so a
+    # release installs the vector artwork as the scalable icon. The worktree
+    # tint exists only as a PNG, so it goes to pixmaps, where lookup falls back.
+    elif worktree == b"1":
+        print(icons / "herdr-square-worktree-1024.png", "share/pixmaps/herdr-gpui.png", sep="\n")
+    else:
+        print(icons / "herdr-icon-square-clean.svg", "share/icons/hicolor/scalable/apps/herdr-gpui.svg", sep="\n")
 
 
 if __name__ == "__main__":

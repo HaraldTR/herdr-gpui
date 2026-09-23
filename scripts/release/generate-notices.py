@@ -65,7 +65,7 @@ def render(evidence, lock_bytes):
         "Herdr GPUI - Third-Party Notices\n",
         f"Generated with {ABOUT_VERSION}.\n"
         "Scope: locked workspace, all features, including build/dev dependencies;\n"
-        "union of aarch64/x86_64 macOS and GNU/Linux and x86_64 Windows packaging\n"
+        "union of aarch64/x86_64 macOS, GNU/Linux, and Windows packaging\n"
         "targets (about.toml).\n"
         "Includes packages not linked into every binary. System libraries, nested\n"
         "vendored code and non-Cargo assets require separate review. This report\n"

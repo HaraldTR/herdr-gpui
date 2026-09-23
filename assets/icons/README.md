@@ -15,7 +15,8 @@ Transparent margins keep the rounded tile aligned with other macOS Dock icons.
 `herdr-ui-icon-clean.svg` is the rounded tile source artwork;
 `herdr-icon-square-clean.svg` is the full-square variant.
 Their generated 1024x1024 PNG exports serve the README and unbundled macOS runs
-(rounded), and Linux packages (square). On macOS, install the SVG renderer with
+(rounded); Linux packages install the square SVG itself as the scalable icon.
+On macOS, install the SVG renderer with
 `brew install librsvg`, then run `just icons` after changing either SVG.
 The generator uses `rsvg-convert` to rasterize the vector artwork directly at
 each iconset resolution, rather than downsampling a PNG, and Apple's `iconutil`

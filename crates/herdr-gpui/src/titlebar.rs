@@ -130,18 +130,26 @@ impl HerdrWindow {
                                 status.filter(|status| status.dirty()),
                                 |button, status| {
                                     button
-                                        .child(
-                                            div()
-                                                .debug_selector(|| "titlebar-git-additions".into())
-                                                .text_color(rgb(theme.palette[2]))
-                                                .child(format!("+{}", status.additions)),
-                                        )
-                                        .child(
-                                            div()
-                                                .debug_selector(|| "titlebar-git-deletions".into())
-                                                .text_color(rgb(theme.palette[1]))
-                                                .child(format!("-{}", status.deletions)),
-                                        )
+                                        .when(status.additions > 0, |button| {
+                                            button.child(
+                                                div()
+                                                    .debug_selector(|| {
+                                                        "titlebar-git-additions".into()
+                                                    })
+                                                    .text_color(rgb(theme.palette[2]))
+                                                    .child(format!("+{}", status.additions)),
+                                            )
+                                        })
+                                        .when(status.deletions > 0, |button| {
+                                            button.child(
+                                                div()
+                                                    .debug_selector(|| {
+                                                        "titlebar-git-deletions".into()
+                                                    })
+                                                    .text_color(rgb(theme.palette[1]))
+                                                    .child(format!("-{}", status.deletions)),
+                                            )
+                                        })
                                         // Untracked files are staged by a commit
                                         // too, but have no diff against HEAD.
                                         .when(status.untracked > 0, |button| {
@@ -151,7 +159,15 @@ impl HerdrWindow {
                                                         "titlebar-git-untracked".into()
                                                     })
                                                     .text_color(rgb(theme.muted))
-                                                    .child("*"),
+                                                    .child(
+                                                        if status.additions == 0
+                                                            && status.deletions == 0
+                                                        {
+                                                            "Uncommitted"
+                                                        } else {
+                                                            "*"
+                                                        },
+                                                    ),
                                             )
                                         })
                                 },
@@ -478,6 +494,51 @@ mod git_button_tests {
                     cx.notify();
                 })
             });
+        }
+    }
+
+    #[gpui::test]
+    fn uncommitted_changes_hide_zero_counts(cx: &mut TestAppContext) {
+        for (additions, deletions, untracked) in [(0, 0, 1), (12, 0, 0), (0, 3, 0)] {
+            let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+            cx.simulate_resize(size(px(360.), px(600.)));
+            cx.update(|_, cx| {
+                view.update(cx, |view, cx| {
+                    view.git = Git::fixture(
+                        Input {
+                            checkout: None,
+                            repo_key: REPO_KEY.into(),
+                            branch: "develop".into(),
+                        },
+                        Status {
+                            additions,
+                            deletions,
+                            untracked,
+                        },
+                    );
+                    cx.notify();
+                });
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            });
+            assert_eq!(
+                cx.debug_bounds("titlebar-git-additions").is_some(),
+                additions > 0
+            );
+            assert_eq!(
+                cx.debug_bounds("titlebar-git-deletions").is_some(),
+                deletions > 0
+            );
+            assert_eq!(
+                cx.debug_bounds("titlebar-git-untracked").is_some(),
+                untracked > 0
+            );
+            let button = cx.debug_bounds("titlebar-git").unwrap();
+            assert!(button.left() >= cx.debug_bounds("titlebar").unwrap().left());
+            assert!(button.right() <= cx.debug_bounds("titlebar-avatar").unwrap().left());
         }
     }
 

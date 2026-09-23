@@ -90,6 +90,23 @@ impl Cache {
         self.next_scan.is_none_or(|next| now >= next)
     }
 
+    /// Request fresh details without discarding the visible value or interrupting
+    /// an in-flight lookup. The poll task still owns dispatch and account backoff.
+    pub fn refresh(&mut self, input: Input, now: Instant) {
+        if self.active.as_ref() == Some(&input) {
+            return;
+        }
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.input == input) {
+            entry.due = now;
+        }
+        self.queue.retain(|queued| queued != &input);
+        self.queue.truncate(CACHE_LIMIT - 1);
+        self.queue.push_front(input);
+        // Let the next poll dispatch this priority request before a routine scan
+        // replaces the queue with the snapshot's round-robin order.
+        self.next_scan = Some(now + Duration::from_secs(1));
+    }
+
     pub fn schedule(&mut self, inputs: impl IntoIterator<Item = Input>, now: Instant) {
         self.next_scan = Some(now + Duration::from_secs(1));
         // Replace queued metadata, not an unbounded history of snapshot changes.

@@ -39,6 +39,7 @@ zeroize.workspace              = true
 gpui = { features = ["test-support"], workspace = true }
 
 [features]
+qa-menu = []
 integration-test = [
   "dep:cocoa",
   "dep:core-graphics",

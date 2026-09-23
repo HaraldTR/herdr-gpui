@@ -11,7 +11,11 @@ prerelease/build suffixes, or leading zeros.
 Packaging and `just bundle` require Python 3 and read a versioned identity record
 embedded in the supplied executable, never the packaging checkout's Git state.
 Linked-worktree binaries select `assets/icons/herdr-square-worktree-1024.png` or
-`assets/icons/Herdr-worktree.icns`; other builds use the standard assets. The
+`assets/icons/Herdr-worktree.icns`; other builds use the standard assets. On
+Linux a release installs `herdr-icon-square-clean.svg` as the hicolor `scalable`
+icon, because icon themes list no size above 512x512; the worktree PNG goes to
+`share/pixmaps`, the lookup fallback. Distribution packages are built only from
+the release layout. The
 installed icon keeps its standard filename. No binary is executed, so foreign
 Linux architectures and both macOS slices work on the packaging host. macOS
 inputs must have identical identities (branch and PR included). Missing, malformed,
@@ -115,9 +119,29 @@ consumer verification cover both. The SBOM unions both Linux, both macOS, and
 the Windows target graphs. No separate per-platform manifest or publication job is used.
 The caller must supply the matching release binary; packaging does not cross-build
 or resolve shared libraries. Output is `Herdr-VERSION-TARGET.tar.gz`, with a
-same-named root containing `bin/herdr-gpui`, a PNG icon, desktop entry, license and
+same-named root containing `bin/herdr-gpui`, a scalable SVG icon, desktop entry, license and
 notice under `share/`. Install that tree into a chosen prefix with its `bin` on
 PATH. Archives are not promised to be bit-for-bit reproducible.
+
+`scripts/release/package-linux-distro.py VERSION TARGET ARCHIVE OUTPUT_DIR
+--nfpm NFPM` then repackages that manual archive as `Herdr-VERSION-TARGET.deb`,
+`.rpm` and `.pkg.tar.zst`. It extracts only the expected regular files, installs
+them under `/usr`, and builds all three formats before publishing any, so every
+Linux format ships the tarball's exact bytes. nfpm is the only packaging tool;
+`scripts/release/install-nfpm.sh` downloads its pinned release and checks a
+SHA-256 copied from that release's Sigstore-verified `checksums.txt`. Package
+dependencies are declared explicitly, not inferred: the binary requires
+GLIBC_2.39 (it is built on Ubuntu 24.04), links ALSA, FreeType, xcb and
+xkbcommon, and dlopens the Vulkan loader and libwayland-client. RPM
+requirements are sonames so they resolve on any RPM distribution. Entries are
+stamped with the release date, and the release host name is kept out of the
+RPM header, so repackaging one release produces identical bytes.
+`scripts/release/smoke-linux-packages.sh VERSION TARGET DIST_DIR` then installs
+each package into digest-pinned Ubuntu 24.04, Debian 13 and Fedora 42 containers,
+plus Arch Linux on x86_64 (no official ARM64 image exists), runs `herdr-gpui --help`,
+fails if `ldd` reports a missing library or a dlopened loader is absent, and removes
+the package again. When packaged dependencies change, update `DEPENDS` in
+`package-linux-distro.py` and rerun the smoke script.
 
 The workflow separately packages `herdr-gpui-VERSION-TARGET-update.tar.gz` with
 `scripts/update-manifest.py package-linux`. This bounded USTAR contains exactly
@@ -126,15 +150,16 @@ replace or alter the manual archive's desktop/icon/license tree. Both native
 Linux builds and both macOS builds embed `HERDR_UPDATE_PUBLIC_KEY` and the
 validated `HERDR_RELEASE_VERSION` before packaging.
 
-The experimental Windows target is `x86_64-pc-windows-msvc`, built natively on
-`windows-2025` after clippy, the protocol/client suites and the CLI tests pass
+The experimental Windows targets are `x86_64-pc-windows-msvc` and
+`aarch64-pc-windows-msvc`, built natively on `windows-2025` and
+`windows-11-arm` after clippy, the protocol/client suites and the CLI tests pass
 there. `scripts/release/package-windows.py VERSION TARGET BINARY OUTPUT_DIR
 THIRD_PARTY_NOTICES` (standard-library Python, since the runner has no zip tool)
-writes `Herdr-VERSION-TARGET.zip` with a same-named root containing
+writes one `Herdr-VERSION-TARGET.zip` per target with a same-named root containing
 `herdr-gpui.exe` and `licenses/` holding the same license and notice files as
-the Linux tree. Entries carry a fixed timestamp. The zip is mandatory in the
-asset manifest and receives checksums, Sigstore sidecars and provenance like
-every other asset, but it is not Authenticode-signed and has no updater archive
+the Linux tree. Entries carry a fixed timestamp. Both zips are mandatory in the
+asset manifest and receive checksums, Sigstore sidecars and provenance like
+every other asset, but they are not Authenticode-signed and have no updater archive
 or update-manifest entry: Windows installs update by manual download.
 
 ## Updater Signing
@@ -146,14 +171,14 @@ signing step of `sign` receives it; builds, tests, metadata, OIDC and publicatio
 never do. The public key is validated before builds and matched against the
 private key before signing exact JSON bytes. See [updater setup](../../docs/updating.md).
 
-The exact release base set is ten files: the DMG, two manual Linux archives,
-the Windows zip, SBOM, three updater archives, `update-manifest.json`, and its
-raw 64-byte Ed25519 `update-manifest.sig`. All ten receive checksum and Sigstore sidecars and GitHub
+The exact release base set is seventeen files: the DMG, two manual Linux archives,
+their `.deb`, `.rpm` and Arch packages, two Windows zips, SBOM, three updater archives, `update-manifest.json`, and its
+raw 64-byte Ed25519 `update-manifest.sig`. All seventeen receive checksum and Sigstore sidecars and GitHub
 provenance in the separate protected OIDC job. The raw signature is not overwritten:
 its Sigstore sidecar is `update-manifest.sig.sig`; the JSON's is
-`update-manifest.json.sig`. `SHA256SUMS` covers all 50 base/sidecar files; the
-immutable release has exactly 51 assets. Missing or additional files fail closed.
-`artifact-manifest.py base-names VERSION DIRECTORY` lists the ten base names.
+`update-manifest.json.sig`. `SHA256SUMS` covers all 85 base/sidecar files; the
+immutable release has exactly 86 assets. Missing or additional files fail closed.
+`artifact-manifest.py base-names VERSION DIRECTORY` lists the seventeen base names.
 The publication job verifies downloaded draft bytes and the complete exact asset
 set before making it public; Homebrew still verifies and uses only the final DMG.
 
@@ -204,7 +229,8 @@ retrieved evidence, so byte-identical reports across machines are not guaranteed
 
 `about.toml` filters to the union of `aarch64-apple-darwin`,
 `x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`, and
-`x86_64-unknown-linux-gnu`, and `x86_64-pc-windows-msvc`, matching the packaging
+`x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, and
+`aarch64-pc-windows-msvc`, matching the packaging
 targets. All features and build/dev dependencies remain included, a
 conservative superset of any one release binary, not its exact linked inventory.
 The accepted-license list covers the current graph's reviewed choices; Apache is

@@ -155,7 +155,7 @@ fn item(node: &Value, origin: &Origin, kind: Kind) -> Option<Item> {
 
 /// A remote branch name this client is willing to put in a daemon request.
 /// Git already forbids these shapes, so anything else is a hostile response.
-fn branch_name(value: &str) -> Option<String> {
+pub(super) fn branch_name(value: &str) -> Option<String> {
     let name = value.trim();
     (!name.is_empty()
         && name.len() <= 255

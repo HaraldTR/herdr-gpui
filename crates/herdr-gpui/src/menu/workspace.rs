@@ -115,6 +115,7 @@ impl WorkspaceTarget {
                 self.validate_repository(snapshot)?;
                 let mut params = serde_json::json!({"workspace_id": self.id, "base": "HEAD", "focus": true, "trust_repository": false});
                 if !text.trim().is_empty() {
+                    crate::worktree::validate_branch(text.trim())?;
                     params["branch"] = text.trim().into();
                 }
                 (Method::WorktreeCreate, params)
@@ -290,7 +291,7 @@ impl HerdrWindow {
             return;
         }
         if action == WorkspaceAction::NewWorktree {
-            self.open_worktree_source(cx);
+            self.open_worktree_source(window, cx);
             cx.notify();
             return;
         }
@@ -448,6 +449,7 @@ impl HerdrWindow {
             }
             return;
         }
+        self.apply_checkout_list(cx);
         if self.menu.deletion.is_none() && self.menu.creation.is_none() {
             return;
         }
@@ -507,7 +509,13 @@ impl HerdrWindow {
             return release(self, format!("{code}: {message}"), cx);
         }
         let result = &response["result"];
-        let opening = self.menu.page == Some(Page::Dialog(WorkspaceAction::OpenWorktree));
+        let opening = self.menu.page == Some(Page::Dialog(WorkspaceAction::OpenWorktree))
+            || self
+                .menu
+                .worktree
+                .as_ref()
+                .and_then(|source| source.pending.as_ref())
+                .is_some_and(|pending| pending.opens());
         let expected = if opening {
             "worktree_opened"
         } else {
@@ -657,6 +665,9 @@ impl HerdrWindow {
                     .request_dialog(&target.boot_id, method, params)?;
                 self.menu.creation = Some(id);
                 self.menu.error = None;
+                if let Some(source) = &mut self.menu.worktree {
+                    source.superseded();
+                }
                 return Ok(Submission::Awaiting {
                     focus_changed: true,
                 });
@@ -817,11 +828,14 @@ impl HerdrWindow {
         };
         // A picker owns the panel's height, so its list scrolls inside the
         // dialog instead of growing it past the window.
-        let listing = action == WorkspaceAction::OpenWorktree || self.worktree_list_tab().is_some();
+        let listing = action == WorkspaceAction::OpenWorktree || self.worktree_listing();
         div()
             .flex()
             .flex_col()
-            .when(listing, |dialog| dialog.size_full().min_h_0())
+            .when(
+                listing || action == WorkspaceAction::NewWorktree,
+                |dialog| dialog.size_full().min_h_0(),
+            )
             .child(
                 div()
                     .debug_selector(|| "dialog-header".into())
@@ -895,9 +909,8 @@ impl HerdrWindow {
                 dialog.child(self.render_worktree_tabs(cx))
             })
             .child(if action == WorkspaceAction::OpenWorktree {
-                self.render_existing_worktrees(cx).when(
-                    creating || self.menu.error.is_some(),
-                    |picker| {
+                self.render_existing_worktrees(cx)
+                    .when(creating || self.menu.error.is_some(), |picker| {
                         picker.child(
                             div()
                                 .id("open-worktree-status")
@@ -907,12 +920,25 @@ impl HerdrWindow {
                                 .overflow_y_scroll()
                                 .child(body),
                         )
-                    },
-                )
+                    })
+                    .into_any_element()
             } else if listing {
-                self.render_worktree_items(cx)
+                self.render_worktree_items(cx).into_any_element()
+            } else if action == WorkspaceAction::NewWorktree {
+                // The branch form shares the listings' settled height, so it
+                // fills the space above the footer and scrolls within it.
+                div()
+                    .id("new-worktree-form")
+                    .debug_selector(|| "new-worktree-form".into())
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(body)
+                    .into_any_element()
             } else {
-                body
+                body.into_any_element()
             })
             .child(
                 div()
@@ -957,12 +983,20 @@ impl HerdrWindow {
                                     } else {
                                         rgb(theme.foreground)
                                     })
-                                    .hover(|button| button.bg(rgb(theme.active)))
                                     .child(if creating { "Waiting..." } else { submit })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.submit_workspace_dialog(window, cx);
-                                    })),
+                                    // Faded and inert until there is something
+                                    // to submit, so it never reads as pressable.
+                                    .when(!armed, |button| {
+                                        button.opacity(0.4).cursor(CursorStyle::OperationNotAllowed)
+                                    })
+                                    .when(armed, |button| {
+                                        button
+                                            .hover(|button| button.bg(rgb(theme.active)))
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                this.submit_workspace_dialog(window, cx);
+                                            }))
+                                    }),
                             )
                         },
                     ),

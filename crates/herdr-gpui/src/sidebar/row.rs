@@ -132,7 +132,7 @@ impl RowBadge {
 }
 
 /// Cached pull request state for a worktree row: the number carries the
-/// lifecycle color, the counts sit under it.
+/// lifecycle/readiness color, the counts sit under it.
 pub(super) struct PrBadge {
     number: String,
     color: u32,

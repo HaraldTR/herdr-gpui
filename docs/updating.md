@@ -10,7 +10,10 @@ both executables into a universal app, and Linux on native Ubuntu 24.04 x86_64 a
 ARM64 runners. Linux remains experimental. Package-managed installs are updated
 through their package manager, never by overwriting managed files: a macOS
 Homebrew cask is upgraded by running Homebrew (see [Homebrew Casks](#homebrew-casks)),
-and Linux AppImage, Snap, and Flatpak containers are refused outright.
+and Linux AppImage, Snap, and Flatpak containers are refused outright. An
+executable under `/usr` (other than `/usr/local`) or in `/nix/store` is reported
+as package-managed too, which covers the `.deb`, `.rpm` and Arch packages; the
+Nix flake also embeds no update key, so it never offers an update.
 
 ## Repository Configuration
 
@@ -114,7 +117,7 @@ here only for readability:
   `herdr-gpui-VERSION-TARGET-update.tar.gz`, distinct from the manual-install
   `Herdr-VERSION-TARGET.tar.gz` trees containing desktop files, icons, licenses,
   and third-party notices. The manual archives require the external
-  [Linux desktop/runtime dependencies](../README.md#linux-and-windows).
+  [Linux desktop/runtime dependencies](../README.md#linux-builds).
 - Each compressed archive is 1 through 268435456 bytes, with its exact byte length
   and lowercase 64-character SHA-256 digest in the manifest.
 - `update-manifest.sig` is a **raw 64-byte Ed25519 signature**, not hex, base64,
@@ -192,12 +195,12 @@ commands on trusted build outputs first.
    exact JSON, verify the signature, and require 64 raw bytes. Upload the DMG,
    macOS updater archive, JSON and raw signature for the attestation job.
 5. In the separate protected OIDC job, combine these with both Linux artifact
-   pairs, the Windows zip (manual download only, never in the update manifest),
-   and the locked five-target SBOM. Require the exact ten-file base set, then
-   checksum, Sigstore-sign and attest all ten files. Each has four sidecars
-   (`.sha256`, `.sha512`, `.sig`, `.crt`); `SHA256SUMS` covers all 50 files.
+   sets (manual tarball, `.deb`, `.rpm`, Arch package and updater archive), both Windows zips (manual download only, never in the update manifest),
+   and the locked six-target SBOM. Require the exact seventeen-file base set, then
+   checksum, Sigstore-sign and attest all seventeen files. Each has four sidecars
+   (`.sha256`, `.sha512`, `.sig`, `.crt`); `SHA256SUMS` covers all 85 files.
 6. The protected publication job refuses existing tags/releases, creates a
-   `vVERSION` tag at the validated SHA and a draft, uploads all 51 assets, then
+   `vVERSION` tag at the validated SHA and a draft, uploads all 86 assets, then
    re-downloads and verifies the exact set and hashes before publication. The
    separately approved Homebrew job uses only the verified published DMG.
 
@@ -337,6 +340,10 @@ the release version the cask should install. This changes the installed app;
 the ordinary test suite uses fake Homebrew processes instead.
 
 ## Native QA
+
+`just run` enables the QA menu automatically. With Cargo, enable it with
+`cargo run --locked --release -p herdr-gpui --features qa-menu`.
+Default Cargo builds and published releases omit this menu.
 
 The GPUI **QA > Show app update available** action presents safe synthetic
 update state for version `9999.0.0`, without network requests, installing files,

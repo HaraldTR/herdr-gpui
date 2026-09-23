@@ -111,6 +111,16 @@ impl Default for LiveState {
 }
 
 impl LiveState {
+    fn has_operation_result(&self, request_id: &str) -> bool {
+        self.dialog_response
+            .as_ref()
+            .is_some_and(|(id, _)| id == request_id)
+            || [&self.tab_rename, &self.pane_rename]
+                .into_iter()
+                .flatten()
+                .any(|rename| rename.request == request_id)
+    }
+
     pub fn surface_ready(&self) -> bool {
         let (Some(snapshot), Some(surface)) = (&self.snapshot, &self.surface) else {
             return false;
@@ -222,7 +232,12 @@ impl LiveState {
                 self.surface = None;
             }
             ClientEvent::CommandRejected { request_id, reason } => {
-                self.error = Some(reason.to_string());
+                if !request_id
+                    .as_deref()
+                    .is_some_and(|id| self.has_operation_result(id))
+                {
+                    self.error = Some(reason.to_string());
+                }
                 let reason = Arc::new(crate::Error::Client(reason));
                 if let Some((id, result)) = &mut self.dialog_response
                     && request_id.as_ref() == Some(id)
@@ -278,8 +293,9 @@ impl LiveState {
                 }
                 if let Some(error) = response.get("error")
                     && !error.is_null()
+                    && !self.has_operation_result(&request_id)
                 {
-                    self.error = Some(error.to_string());
+                    self.error = Some(crate::Error::DaemonResponse(error.clone()).to_string());
                 }
                 if let Some((id, result)) = &mut self.dialog_response
                     && *id == request_id
@@ -351,6 +367,77 @@ mod tests {
     use herdr_client::protocol::FrameData;
 
     #[test]
+    fn worktree_failure_stays_in_dialog_after_snapshots_and_successful_retry() {
+        let mut state = LiveState {
+            status: ConnectionStatus::Connected,
+            dialog_response: Some(("create".into(), None)),
+            ..LiveState::default()
+        };
+        let response = serde_json::json!({"error": {
+            "code": "worktree_create_failed",
+            "message": "fatal: 'config reload' is not a valid branch name"
+        }});
+        state.apply(ClientEvent::Response {
+            request_id: "create".into(),
+            response: response.clone(),
+        });
+        state.apply(ClientEvent::Snapshot(snapshot()));
+        assert_eq!(state.status_text(None), "Connected");
+        assert!(matches!(&state.dialog_response,
+            Some((id, Some(Ok(value)))) if id == "create" && value == &response));
+
+        state.dialog_response = Some(("retry".into(), None));
+        state.apply(ClientEvent::Response {
+            request_id: "retry".into(),
+            response: serde_json::json!({"result": {}}),
+        });
+        state.dialog_response = None;
+        assert_eq!(state.status_text(None), "Connected");
+    }
+
+    #[test]
+    fn rejected_dialog_command_preserves_connection_diagnostic() {
+        let mut state = LiveState {
+            status: ConnectionStatus::Disconnected,
+            error: Some("socket closed".into()),
+            dialog_response: Some(("create".into(), None)),
+            ..LiveState::default()
+        };
+        state.apply(ClientEvent::CommandRejected {
+            request_id: Some("create".into()),
+            reason: herdr_client::Error::Disconnected,
+        });
+        assert_eq!(state.status_text(None), "Disconnected: socket closed");
+        assert!(matches!(&state.dialog_response, Some((_, Some(Err(_))))));
+    }
+
+    #[test]
+    fn untracked_daemon_errors_remain_visible_as_readable_messages() {
+        let mut state = LiveState {
+            status: ConnectionStatus::Connected,
+            ..LiveState::default()
+        };
+        for (payload, expected) in [
+            (
+                serde_json::json!({"code": "failed", "message": "Input failed"}),
+                "Input failed",
+            ),
+            (serde_json::json!("Legacy failure"), "Legacy failure"),
+            (serde_json::json!({"code": "unsupported"}), "unsupported"),
+            (
+                serde_json::json!({"unexpected": true}),
+                "Invalid daemon error",
+            ),
+        ] {
+            state.apply(ClientEvent::Response {
+                request_id: "input".into(),
+                response: serde_json::json!({"error": payload}),
+            });
+            assert_eq!(state.status_text(None), format!("Connected: {expected}"));
+        }
+    }
+
+    #[test]
     fn dialog_response_is_correlated_and_survives_coalescing() {
         let mut state = LiveState {
             dialog_response: Some(("remove".into(), None)),
@@ -399,6 +486,7 @@ mod tests {
             response: serde_json::json!({"error": payload}),
         });
         assert!(state.tab_rename.as_ref().unwrap().result.is_none());
+        assert_eq!(state.error.take().as_deref(), Some("Invalid label"));
         state.apply(ClientEvent::Response {
             request_id: "rename".into(),
             response: serde_json::json!({"error": payload}),
@@ -424,7 +512,7 @@ mod tests {
             .unwrap_err();
         assert!(Arc::ptr_eq(error, shared));
         assert!(matches!(error.as_ref(), crate::Error::DaemonResponse(value) if value == &payload));
-        assert_eq!(error.to_string(), payload.to_string());
+        assert_eq!(error.to_string(), "Invalid label");
         state.apply(ClientEvent::CommandRejected {
             request_id: Some("rename".into()),
             reason: herdr_client::Error::CommandBoot,
@@ -442,10 +530,7 @@ mod tests {
                 .as_ref(),
             crate::Error::Client(herdr_client::Error::CommandBoot)
         ));
-        assert_eq!(
-            state.error.as_deref(),
-            Some("command does not match a ready snapshot boot")
-        );
+        assert!(state.error.is_none());
         state.apply(ClientEvent::CommandRejected {
             request_id: Some("rename".into()),
             reason: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied").into(),

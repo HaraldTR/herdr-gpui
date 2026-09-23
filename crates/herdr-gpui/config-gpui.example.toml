@@ -1,6 +1,6 @@
 # DO NOT EDIT -- WILL BE OVERWRITTEN
 # Managed Herdr GPUI defaults, refreshed on startup and GUI config reload.
-# Put your overrides in config-gpui.local.toml beside this file, then reload.
+# Put your overrides in config-gpui.local.toml beside this file.
 # Herdr GUI settings. Independent of the daemon config, except where a setting
 # below says it starts from one the daemon config already carries.
 # Save at $XDG_CONFIG_HOME/herdr/config-gpui.toml (default ~/.config/herdr/).
@@ -11,7 +11,7 @@
 # no text face covers. Each section falls back to the installed "Nerd Font"
 # families automatically; set fallback to choose them yourself, or to [] for
 # none. Uninstalled names are ignored, and at most 8 are accepted per section.
-# Restart the GUI or use its GUI config reload action after editing the local file.
+# Saved changes to the local file reload automatically in every GUI window.
 
 # Built-ins: Default, Nord, Dracula, Catppuccin Mocha, Catppuccin Latte.
 # Also accepts a Ghostty theme name, an absolute path, or a ~/ path.

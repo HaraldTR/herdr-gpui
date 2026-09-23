@@ -7,6 +7,16 @@ use std::{
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+fn daemon_error_message(error: &serde_json::Value) -> &str {
+    error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| error.as_str())
+        .or_else(|| error.get("code").and_then(serde_json::Value::as_str))
+        .filter(|message| !message.is_empty())
+        .unwrap_or("Invalid daemon error")
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("ui.toast.delay_seconds must be between 0 and 3600")]
@@ -105,6 +115,10 @@ pub enum Error {
     StaleWorkspace,
     #[error("Workspace label must not be empty.")]
     EmptyWorkspaceLabel,
+    #[error(
+        "Invalid Git branch name. Use a name such as config-reload, without spaces or special ref characters."
+    )]
+    InvalidBranchName,
     #[error("Workspace group changed. Dismiss and review the group again.")]
     WorkspaceGroupChanged,
     #[error("Repository changed. Dismiss and reopen the menu.")]
@@ -363,7 +377,7 @@ pub enum Error {
     NoSnapshot,
     #[error("No captured daemon session. Reopen the palette.")]
     NoPaletteSession,
-    #[error("{0}")]
+    #[error("{}", daemon_error_message(.0))]
     DaemonResponse(serde_json::Value),
     #[error("Could not start herdr server: {source}. Use Terminal > Reconnect to retry.")]
     DaemonSpawn {

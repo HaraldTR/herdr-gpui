@@ -54,6 +54,8 @@ pub(crate) struct HerdrWindow {
     pub(crate) config_load: Option<Task<()>>,
     pub(crate) settings: crate::settings_panel::SettingsPanel,
     pub(crate) integrations: crate::integrations::Integrations,
+    pub(crate) config_watch: Option<Task<()>>,
+    pub(crate) config_load_revision: u64,
     pub(crate) endpoints: Vec<endpoint::Endpoint>,
     pub(crate) selected_endpoint: usize,
     pub(crate) selection_epoch: u64,
@@ -252,6 +254,8 @@ impl HerdrWindow {
             config_load: None,
             settings: Default::default(),
             integrations: Default::default(),
+            config_watch: None,
+            config_load_revision: 0,
             catalog: endpoint::Catalog::new(&target),
             endpoints: vec![endpoint::Endpoint::new(
                 endpoint::LOCAL.into(),
@@ -346,6 +350,7 @@ impl HerdrWindow {
         log_window::set_appearance(&this.config, &this.theme, cx);
         this.load_gui_config(cx);
         this.load_shared_settings(cx);
+        this.watch_gui_config(cx);
         this
     }
 }

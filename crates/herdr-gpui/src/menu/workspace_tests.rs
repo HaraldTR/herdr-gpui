@@ -416,7 +416,13 @@ fn workspace_dialogs_centre_on_the_window_rather_than_the_pointer(cx: &mut gpui:
                 offset.x.abs() <= px(1.) && offset.y.abs() <= px(1.),
                 "{anchor:?} {action:?}: {panel:?}"
             );
-            assert!(panel.size.width <= px(480.) && panel.size.width >= px(400.));
+            // The new worktree tabs keep a listing's width on every tab.
+            let widest = if action == WorkspaceAction::NewWorktree {
+                px(560.)
+            } else {
+                px(480.)
+            };
+            assert!(panel.size.width <= widest && panel.size.width >= px(400.));
         }
     }
 }
@@ -883,6 +889,10 @@ fn actions_target_clicked_workspace_and_match_daemon_schemas() {
         }
         assert_eq!(params, expected);
     }
+    assert!(matches!(
+        target.request(&snapshot, WorkspaceAction::NewWorktree, "config reload"),
+        Err(crate::Error::InvalidBranchName)
+    ));
     for index in [0, 4, 5] {
         let target = WorkspaceTarget::new(&snapshot, &snapshot.workspaces[index]);
         assert_eq!(target.close_label(), "Close");

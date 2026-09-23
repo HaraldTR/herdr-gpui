@@ -2793,6 +2793,7 @@ fn notification_command_rejects_ineligible_cards_without_selection_or_requests(
 }
 
 #[gpui::test]
+#[cfg(feature = "qa-menu")]
 fn qa_play_sound_dispatches_without_daemon_or_pane(cx: &mut gpui::TestAppContext) {
     let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
     let (sound, played) = crate::sound::Service::recording();

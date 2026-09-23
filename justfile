@@ -6,9 +6,9 @@ run *args:
     #!/usr/bin/env bash
     set -euo pipefail
     if [ "$(uname -s)" != Darwin ]; then
-        exec cargo run --locked --release -p herdr-gpui -- {{args}}
+        exec cargo run --locked --release -p herdr-gpui --features qa-menu -- {{args}}
     fi
-    {{just_executable()}} bundle release
+    {{just_executable()}} bundle release qa-menu
     exec target/release/Herdr.app/Contents/MacOS/Herdr {{args}}
 
 run-debug *args:
@@ -58,7 +58,7 @@ stress-linux iterations="30" cpus="0.5" filter="":
 
 # Native font/glyph regression across repeated frames and sizes; no daemon needed.
 test-sidebar:
-    cargo test --locked -p herdr-gpui --features integration-test --test live_gui native_sidebar -- --ignored --nocapture
+    cargo test --locked -p herdr-gpui --features integration-test --test live_gui native_sidebar -- --ignored --nocapture --test-threads=1
 
 # Native hover/scroll CPU scene budget in milliseconds, calibrated for this machine.
 test-perf budget="30":
@@ -73,7 +73,7 @@ icons:
     swift scripts/generate-icons.swift
 
 # Local, unsigned GUI-only bundle. Never installs or packages a daemon.
-bundle profile="release":
+bundle profile="release" features="":
     #!/usr/bin/env bash
     set -euo pipefail
     test "$(uname -s)" = Darwin
@@ -83,7 +83,7 @@ bundle profile="release":
         *) echo "Unknown profile: {{profile}} (release or debug)" >&2; exit 2 ;;
     esac
     app=target/{{profile}}/Herdr.app
-    cargo build --locked $flags --target-dir target -p herdr-gpui
+    cargo build --locked $flags --target-dir target -p herdr-gpui --features "{{features}}"
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
     cp target/{{profile}}/herdr-gpui "$app/Contents/MacOS/Herdr"
     cp assets/macos/Info.plist "$app/Contents/Info.plist"

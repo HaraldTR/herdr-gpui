@@ -113,7 +113,7 @@ impl HerdrWindow {
                 format!("{} px", self.config.layout.sidebar_gap),
             ))
             .child(note(
-                "Edit [layout] mode (normal or compact) and sidebar_gap (0-64 logical pixels) in the local override file below, then reload GUI config.",
+                "Edit [layout] mode (normal or compact) and sidebar_gap (0-64 logical pixels) in the local override file below; saved changes reload automatically.",
             ))
             .child(section("FEATURES"));
         for (id, label, enabled) in feature_rows(&self.config.features) {
@@ -121,7 +121,7 @@ impl HerdrWindow {
         }
         body = body
             .child(note(
-                "Optional behaviors, off by default. Turn one on in the [features] table of the GUI local override file, then reload GUI config.",
+                "Optional behaviors, off by default. Turn one on in the [features] table of the local GUI config file; saved changes reload automatically.",
             ))
             .child(section("CONFIGURATION"))
             .child(note("Theme, indicators, sound, and toasts share this computer's Herdr configuration, not a remote daemon's settings."))
@@ -163,7 +163,7 @@ impl HerdrWindow {
                     ),
             )
             .child(note(
-                "Edit this local file, then reload GUI config. Unset keys inherit config-gpui.toml, which is overwritten with current defaults on startup and reload. Invalid overrides leave the current appearance unchanged.",
+                "Edit this local file; saved changes reload automatically. Unset keys inherit config-gpui.toml, which is overwritten with current defaults on startup and reload. Invalid overrides leave the current appearance unchanged.",
             ))
             .child(
                 button("preferences-reload-config", "Reload GUI config").on_click(cx.listener(

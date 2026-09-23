@@ -44,24 +44,42 @@ fn gui_command(sandbox: &Sandbox, mut env: impl FnMut(&str) -> Option<OsString>)
 #[test]
 #[ignore = "requires active native desktop; GUI-only fixtures, no daemon"]
 fn native_sidebar() {
-    native_fixture(false);
+    native_fixture(Fixture::Sidebar);
+}
+
+#[test]
+#[ignore = "requires active native desktop; intentionally invalid paint fixture, no daemon"]
+fn native_sidebar_probe_failure_exits_without_aborting() {
+    native_fixture(Fixture::InvalidChildWidth);
 }
 
 #[test]
 #[ignore = "requires active native desktop; notification fixtures, no daemon"]
 fn native_notifications() {
-    native_fixture(true);
+    native_fixture(Fixture::Notifications);
 }
 
-fn native_fixture(notifications_only: bool) {
+enum Fixture {
+    Sidebar,
+    Notifications,
+    InvalidChildWidth,
+}
+
+fn native_fixture(fixture: Fixture) {
     let mut isolated = Isolated {
         sandbox: Sandbox::new(),
         daemon: None,
         gui: None,
     };
     let mut command = gui_command(&isolated.sandbox, |name| std::env::var_os(name));
-    if notifications_only {
-        command.env("HERDR_TEST_NOTIFICATIONS_ONLY", "1");
+    match fixture {
+        Fixture::Sidebar => {}
+        Fixture::Notifications => {
+            command.env("HERDR_TEST_NOTIFICATIONS_ONLY", "1");
+        }
+        Fixture::InvalidChildWidth => {
+            command.env("HERDR_TEST_SIDEBAR_PROBE_FAILURE", "1");
+        }
     }
     isolated.gui = Some(command.arg("--sidebar-test").spawn().unwrap());
     let gui = isolated.gui.as_mut().unwrap();
@@ -77,11 +95,26 @@ fn native_fixture(notifications_only: bool) {
     let status = gui.wait().unwrap();
     let log = fs::read_to_string(isolated.sandbox.dir.join("gui.log")).unwrap();
     eprintln!("{log}");
-    assert!(status.success(), "native sidebar failed");
-    assert!(log.contains(if notifications_only {
-        "NOTIFICATIONS native PASS:"
-    } else {
-        "SIDEBAR native PASS:"
+    if matches!(fixture, Fixture::InvalidChildWidth) {
+        assert_eq!(
+            status.code(),
+            Some(1),
+            "probe must fail without a signal: {status}"
+        );
+        assert!(
+            log.contains("native paint probe \"sidebar-child\""),
+            "{log}"
+        );
+        assert!(log.contains("child label width: actual"), "{log}");
+        assert!(log.contains("expected"), "{log}");
+        assert!(!log.contains("panicked at"), "{log}");
+        assert!(!log.contains("SIDEBAR native PASS:"), "{log}");
+        return;
+    }
+    assert!(status.success(), "native sidebar failed: {status}");
+    assert!(log.contains(match fixture {
+        Fixture::Notifications => "NOTIFICATIONS native PASS:",
+        _ => "SIDEBAR native PASS:",
     }));
 }
 

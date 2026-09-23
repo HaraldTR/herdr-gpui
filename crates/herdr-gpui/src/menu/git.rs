@@ -131,6 +131,12 @@ impl HerdrWindow {
         self.menu.reset();
         self.menu.anchor = anchor;
         self.menu.page = Some(Page::Git);
+        if self.menu.github.connected()
+            && let Some(input) = self.git_input()
+        {
+            self.sync_pr_scope();
+            self.menu.pr_cache.refresh(input, std::time::Instant::now());
+        }
         self.marked.clear();
         window.focus(&self.menu.focus);
         cx.notify();
@@ -314,6 +320,34 @@ impl HerdrWindow {
                             ),
                     ),
             );
+            if pr.state == PrState::Open {
+                panel = panel.child(
+                    div()
+                        .debug_selector(|| "git-menu-pr-readiness".into())
+                        .px(px(8.))
+                        .child(if pr.is_draft {
+                            "Draft — not ready for review"
+                        } else {
+                            "Ready for review"
+                        }),
+                );
+            }
+            for (selector, label) in [
+                ("git-menu-pr-review", pr.review().to_owned()),
+                ("git-menu-pr-merge", pr.merge_status().to_owned()),
+                (
+                    "git-menu-pr-checks",
+                    format!("Checks: {}", pr.checks_summary),
+                ),
+            ] {
+                panel = panel.child(
+                    div()
+                        .debug_selector(move || selector.into())
+                        .px(px(8.))
+                        .text_color(rgb(theme.muted))
+                        .child(label),
+                );
+            }
         }
         panel = panel.child(
             div()
@@ -649,6 +683,25 @@ mod tests {
             let _ = window.draw(cx);
         });
         assert!(cx.debug_bounds("git-menu-pr").is_some());
+        for width in [1200., 360.] {
+            cx.simulate_resize(size(px(width), px(600.)));
+            cx.update(|window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            });
+            let panel = cx.debug_bounds("menu-panel").unwrap();
+            for selector in [
+                "git-menu-pr-readiness",
+                "git-menu-pr-review",
+                "git-menu-pr-merge",
+                "git-menu-pr-checks",
+            ] {
+                let row = cx.debug_bounds(selector).unwrap();
+                assert!(row.size.height > px(0.));
+                assert!(row.left() >= panel.left() && row.right() <= panel.right());
+                assert!(row.top() >= panel.top() && row.bottom() <= panel.bottom());
+            }
+        }
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
                 view.dismiss_menu(window, cx);

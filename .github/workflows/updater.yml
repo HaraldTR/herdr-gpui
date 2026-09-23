@@ -2,8 +2,28 @@ name: Updater Packaging
 
 on:
   pull_request:
+    paths:
+      - 'crates/**'
+      - 'scripts/**'
+      - 'assets/**'
+      - '.cargo/**'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/**'
+      - '!**/*.md'
   push:
     branches: [main]
+    paths:
+      - 'crates/**'
+      - 'scripts/**'
+      - 'assets/**'
+      - '.cargo/**'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/**'
+      - '!**/*.md'
   workflow_dispatch:
 
 permissions: {}

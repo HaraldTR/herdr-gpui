@@ -201,8 +201,16 @@ fn installation_parent(path: &Path, mode: Mode, uid: u32) -> Result<()> {
     Ok(())
 }
 
+/// Distribution packages install under `/usr` (never `/usr/local`, which is
+/// the administrator's), and Nix into its read-only store. Neither may be
+/// overwritten, and naming the owner is clearer than "outside HOME".
+fn system_managed(executable: &Path) -> bool {
+    (executable.starts_with("/usr") && !executable.starts_with("/usr/local"))
+        || executable.starts_with("/nix/store")
+}
+
 fn linux_location(executable: &Path, home: &Path, uid: u32, packaged: bool) -> Result<()> {
-    if packaged {
+    if packaged || system_managed(executable) {
         return Err(Error::PackageManaged);
     }
     no_links(executable)?;
@@ -1295,6 +1303,32 @@ mod tests {
             Path::new("Herdr.app/link"),
             Path::new("../outside")
         ));
+    }
+
+    #[test]
+    fn system_package_locations_are_package_managed() {
+        for managed in [
+            "/usr/bin/herdr-gpui",
+            "/usr/lib/herdr-gpui/herdr-gpui",
+            "/nix/store/abc-herdr-gpui/bin/herdr-gpui",
+        ] {
+            assert!(system_managed(Path::new(managed)), "{managed}");
+            assert!(
+                matches!(
+                    linux_location(Path::new(managed), Path::new("/home/user"), 1000, false),
+                    Err(Error::PackageManaged)
+                ),
+                "{managed}"
+            );
+        }
+        for unmanaged in [
+            "/usr/local/bin/herdr-gpui",
+            "/home/user/.local/bin/herdr-gpui",
+            "/opt/herdr/bin/herdr-gpui",
+            "/usrlocal/herdr-gpui",
+        ] {
+            assert!(!system_managed(Path::new(unmanaged)), "{unmanaged}");
+        }
     }
 
     #[test]

@@ -44,7 +44,7 @@ impl HerdrWindow {
         }
     }
 
-    fn sync_pr_scope(&mut self) {
+    pub(super) fn sync_pr_scope(&mut self) {
         let endpoint = &self.endpoints[self.selected_endpoint];
         let same_connection = self
             .menu

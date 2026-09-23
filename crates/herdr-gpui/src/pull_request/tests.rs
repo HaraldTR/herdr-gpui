@@ -55,6 +55,56 @@ fn input(branch: &str) -> Input {
 }
 
 #[test]
+fn explicit_refresh_keeps_cached_details_and_coalesces_in_flight_requests() {
+    let mut peer = Peer::new();
+    let now = Instant::now();
+    let input = input("feature");
+    peer.cache.seed(input.clone(), fixture().unwrap(), now);
+    peer.cache.refresh(input.clone(), now);
+    peer.cache.refresh(input.clone(), now);
+    assert_eq!(peer.cache.queue.len(), 1);
+    assert!(!peer.cache.scan_due(now));
+    assert!(peer.incoming.try_recv().is_err(), "input only queues work");
+    peer.cache.poll(now);
+    assert_eq!(
+        peer.cache
+            .peek(&input.repo_key, &input.branch)
+            .unwrap()
+            .number,
+        8
+    );
+    peer.cache.refresh(input.clone(), now);
+    assert!(peer.cache.queue.is_empty(), "reuse the in-flight lookup");
+    let mut updated = fixture().unwrap();
+    updated.is_draft = true;
+    updated.checks_summary = "2 pending".into();
+    peer.complete(now, Ok(Some(updated)), None);
+    let pr = peer.cache.peek(&input.repo_key, &input.branch).unwrap();
+    assert!(pr.is_draft);
+    assert_eq!(pr.checks_summary, "2 pending");
+    assert!(peer.incoming.try_recv().is_err());
+}
+
+#[test]
+fn explicit_refresh_respects_account_backoff_and_bounds_the_queue() {
+    let mut peer = Peer::new();
+    let now = Instant::now();
+    let input = input("feature");
+    peer.cache.seed(input.clone(), fixture().unwrap(), now);
+    peer.cache.paused_until = Some(now + ERROR_BACKOFF);
+    peer.cache
+        .schedule((0..CACHE_LIMIT).map(|i| self::input(&i.to_string())), now);
+    peer.cache.refresh(input.clone(), now);
+    assert_eq!(peer.cache.queue.len(), CACHE_LIMIT);
+    assert_eq!(peer.cache.queue.front(), Some(&input));
+    peer.cache.poll(now);
+    assert!(peer.incoming.try_recv().is_err());
+    peer.cache.poll(now + ERROR_BACKOFF);
+    assert_eq!(peer.complete(now + ERROR_BACKOFF, Ok(None), None), input);
+    assert!(peer.cache.peek(&input.repo_key, &input.branch).is_none());
+}
+
+#[test]
 fn cache_prefetches_without_menu_and_refreshes_at_ttl_with_stale_data() {
     let mut peer = Peer::new();
     let now = Instant::now();
@@ -237,6 +287,68 @@ fn local_failures_do_not_starve_other_repos_but_rate_limits_pause_account() {
             .branch,
         "waiting"
     );
+}
+
+#[test]
+fn badge_colors_report_readiness_and_preserve_terminal_lifecycles() {
+    let theme = crate::config::Theme::default();
+    for (merge, review, checks, expected) in [
+        ("CLEAN", "APPROVED", vec![], theme.palette[2]),
+        ("CLEAN", "", vec!["SUCCESS", "SKIPPED"], theme.palette[2]),
+        ("CLEAN", "", vec!["PENDING"], theme.palette[3]),
+        ("CLEAN", "REVIEW_REQUIRED", vec![], theme.palette[3]),
+        ("CLEAN", "CHANGES_REQUESTED", vec![], theme.palette[1]),
+        (
+            "CLEAN",
+            "APPROVED",
+            vec!["PENDING", "FAILURE"],
+            theme.palette[1],
+        ),
+        (
+            "DIRTY",
+            "REVIEW_REQUIRED",
+            vec!["PENDING"],
+            theme.palette[1],
+        ),
+        ("UNSTABLE", "", vec![], theme.palette[1]),
+        ("BLOCKED", "", vec![], theme.palette[208]),
+        ("BEHIND", "", vec![], theme.palette[208]),
+        ("BLOCKED", "", vec!["PENDING"], theme.palette[3]),
+        ("HAS_HOOKS", "", vec![], theme.palette[3]),
+        ("UNKNOWN", "", vec![], theme.palette[3]),
+        ("FUTURE_STATE", "", vec![], theme.palette[3]),
+        ("DRAFT", "", vec![], theme.palette[3]),
+    ] {
+        let mut wire = response();
+        wire[0]["mergeStateStatus"] = merge.into();
+        wire[0]["reviewDecision"] = review.into();
+        wire[0]["statusCheckRollup"] = checks
+            .iter()
+            .map(|state| serde_json::json!({"__typename": "StatusContext", "state": state}))
+            .collect::<Vec<_>>()
+            .into();
+        let mut pr = parse(&wire.to_string(), "example", "project", "feature")
+            .unwrap()
+            .unwrap();
+        assert_eq!(pr.color(&theme), expected, "{merge}, {review}, {checks:?}");
+        pr.is_draft = true;
+        assert_eq!(pr.color(&theme), theme.muted);
+        pr.state = State::Merged;
+        assert_eq!(pr.color(&theme), theme.palette[5]);
+        pr.state = State::Closed;
+        assert_eq!(pr.color(&theme), theme.palette[1]);
+    }
+    // CheckRun status takes priority over a conclusion until completion, and a
+    // failed check wins over pending checks and a nominally clean merge state.
+    let mut pr = fixture().unwrap();
+    pr.merge_state_status = MergeState::Clean;
+    pr.review_decision = Default::default();
+    assert_eq!(pr.color(&theme), theme.palette[1]);
+    pr.status_check_rollup = serde_json::from_value(serde_json::json!([
+        {"__typename":"CheckRun", "status":"IN_PROGRESS", "conclusion":"SUCCESS"}
+    ]))
+    .unwrap();
+    assert_eq!(pr.color(&theme), theme.palette[3]);
 }
 
 #[test]

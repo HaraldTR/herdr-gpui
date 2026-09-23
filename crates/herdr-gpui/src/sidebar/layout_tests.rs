@@ -5,6 +5,7 @@
 use crate::HerdrWindow;
 #[cfg(test)]
 use crate::{LiveState, WheelAccumulator};
+use anyhow::{Context as _, Result, ensure};
 use gpui::{
     App, Bounds, ElementId, Global, GlobalElementId, InspectorElementId, LayoutId, Pixels,
     SharedString, TextLayout, Window, prelude::*, px,
@@ -22,8 +23,33 @@ struct TextProbes(std::collections::BTreeMap<String, (Bounds<Pixels>, String, Pi
 impl Global for TextProbes {}
 
 #[derive(Default)]
-pub(crate) struct PaintedProbes(pub std::collections::BTreeMap<String, PaintedText>);
+pub(crate) struct PaintedProbes(
+    pub std::collections::BTreeMap<String, PaintedText>,
+    Option<anyhow::Error>,
+);
 impl Global for PaintedProbes {}
+
+impl PaintedProbes {
+    fn record(&mut self, text: String, result: Result<PaintedText>) {
+        match result {
+            Ok(probe) => {
+                self.0.entry(text).or_insert(probe);
+            }
+            Err(error) if self.1.is_none() => {
+                let error = error.context(format!("native paint probe {text:?}"));
+                eprintln!("SIDEBAR native paint FAIL: {error:#}");
+                self.1 = Some(error);
+            }
+            Err(_) => {}
+        }
+    }
+
+    // Retain the first failure even when a later frame clears the paint cache.
+    // The smoke driver consumes it before reporting success, outside paint/FFI.
+    pub(crate) fn check(&mut self) -> Result<()> {
+        self.1.take().map_or(Ok(()), Err)
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct VerifyChildGeometry(pub bool);
@@ -96,11 +122,16 @@ impl Element for ProbeText {
     ) {
         self.0
             .paint(id, inspector_id, bounds, state, prepaint, window, cx);
-        let width = state
-            .line_layout_for_index(0)
-            .unwrap()
-            .unwrapped_layout
-            .width;
+        let Some(line) = state.line_layout_for_index(0) else {
+            if cx.has_global::<PaintedProbes>() {
+                cx.default_global::<PaintedProbes>().record(
+                    self.0.to_string(),
+                    Err(anyhow::anyhow!("missing first text line")),
+                );
+            }
+            return;
+        };
+        let width = line.unwrapped_layout.width;
         cx.default_global::<TextProbes>().0.insert(
             self.0.to_string(),
             (state.bounds(), state.wrapped_text(), width),
@@ -108,9 +139,25 @@ impl Element for ProbeText {
         if !cx.has_global::<PaintedProbes>() {
             return;
         }
+        let result = self.inspect(bounds, state, window, cx);
+        cx.default_global::<PaintedProbes>()
+            .record(self.0.to_string(), result);
+    }
+}
+
+impl ProbeText {
+    fn inspect(
+        &self,
+        bounds: Bounds<Pixels>,
+        state: &TextLayout,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<PaintedText> {
         // Inspect the actual native glyph stream consumed by WrappedLine::paint.
         // Its backing string can be longer than the shaped font runs (GPUI 0.2.2).
-        let line = state.line_layout_for_index(0).unwrap();
+        let line = state
+            .line_layout_for_index(0)
+            .context("missing first text line")?;
         let layout = &line.unwrapped_layout;
         let text = state.text();
         let mask = window.content_mask().bounds;
@@ -121,11 +168,13 @@ impl Element for ProbeText {
             + layout.ascent;
         for run in &layout.runs {
             for glyph in &run.glyphs {
-                let ch = text[glyph.index..].chars().next().unwrap();
+                let ch = text
+                    .get(glyph.index..)
+                    .and_then(|text| text.chars().next())
+                    .with_context(|| format!("invalid glyph source index {}", glyph.index))?;
                 let ink = cx
                     .text_system()
-                    .typographic_bounds(run.font_id, layout.font_size, ch)
-                    .unwrap();
+                    .typographic_bounds(run.font_id, layout.font_size, ch)?;
                 let left = bounds.origin.x + glyph.position.x + ink.origin.x;
                 let right = left + ink.size.width;
                 let top = baseline + glyph.position.y - ink.bottom();
@@ -143,13 +192,28 @@ impl Element for ProbeText {
                     &[window.text_style().to_run(ch.len_utf8())],
                     None,
                 );
-                assert_eq!(
-                    expected.runs[0].glyphs[0].id, glyph.id,
-                    "painted glyph ID for {ch:?}"
+                let expected = expected
+                    .runs
+                    .first()
+                    .and_then(|run| run.glyphs.first())
+                    .context("independent glyph shaping produced no glyph")?;
+                ensure!(
+                    expected.id == glyph.id,
+                    "painted glyph ID for {ch:?}: actual {:?}, expected {:?}",
+                    glyph.id,
+                    expected.id
                 );
                 glyph_text.push(ch);
             }
         }
+        let probe = PaintedText {
+            bounds,
+            mask,
+            cached: state.wrapped_text(),
+            glyph_text,
+            width: layout.width,
+            clipped,
+        };
         // These extra fixture rows leave the original smoke/performance labels
         // untouched. Check their native glyphs whenever the whole row is visible.
         if cx.default_global::<VerifyChildGeometry>().0
@@ -165,52 +229,150 @@ impl Element for ProbeText {
                 .flatten()
                 .map(|view| view.read(cx).config.layout.mode)
                 .unwrap_or_default();
-            let layout = super::layout::for_mode(mode);
-            // Compute the sidebar column directly: menu labels share text keys,
-            // and retained paint probes can still describe the previous layout.
-            assert_eq!(
-                bounds.left(),
-                px(layout.padding() + layout.child_indent() + super::STATUS_WIDTH + layout.gap())
-            );
-            assert_eq!(
-                bounds.size.width,
-                px(super::SIDEBAR_WIDTH
-                    - 1.
-                    - 2. * layout.padding()
-                    - super::STATUS_WIDTH
-                    - layout.gap()
-                    - layout.child_indent()
-                    - super::ARROW_RESERVE)
-            );
-            assert_eq!(mask.size.width, bounds.size.width);
-            assert_eq!(glyph_text, state.wrapped_text());
-            assert!(!clipped, "child glyphs clipped: {glyph_text}");
-            if self.0.as_ref() == "sidebar-child" {
-                assert_eq!(glyph_text, "sidebar-child");
-            } else {
-                assert!(glyph_text.starts_with("sidebar-child"));
-                assert!(glyph_text.ends_with('\u{2026}'));
-                // Truncation fills the column it was given, whatever the indent.
-                assert!(width > bounds.size.width - px(12.), "{width:?}");
-            }
-            eprintln!("SIDEBAR child verified: {glyph_text}");
+            probe.verify_child(&self.0, mode)?;
+            eprintln!("SIDEBAR child verified: {}", probe.glyph_text);
         }
-        cx.default_global::<PaintedProbes>()
-            .0
-            .entry(self.0.to_string())
-            .or_insert(PaintedText {
-                bounds,
-                mask,
-                cached: state.wrapped_text(),
-                glyph_text,
-                width,
-                clipped,
-            });
+        Ok(probe)
+    }
+}
+
+impl PaintedText {
+    fn verify_child(&self, input: &str, mode: crate::config::LayoutMode) -> Result<()> {
+        let layout = super::layout::for_mode(mode);
+        // Menu labels share text keys, and retained paint probes can still
+        // describe the previous layout. Compute the sidebar column directly.
+        let left =
+            px(layout.padding() + layout.child_indent() + super::STATUS_WIDTH + layout.gap());
+        let width = px(super::SIDEBAR_WIDTH
+            - 1.
+            - 2. * layout.padding()
+            - super::STATUS_WIDTH
+            - layout.gap()
+            - layout.child_indent()
+            - super::ARROW_RESERVE);
+        ensure!(
+            self.bounds.left() == left,
+            "child label left: actual {:?}, expected {left:?}",
+            self.bounds.left()
+        );
+        ensure!(
+            self.bounds.size.width == width,
+            "child label width: actual {:?}, expected {width:?}",
+            self.bounds.size.width
+        );
+        ensure!(
+            self.mask.size.width == self.bounds.size.width,
+            "child mask width: actual {:?}, expected {:?}",
+            self.mask.size.width,
+            self.bounds.size.width
+        );
+        ensure!(
+            self.glyph_text == self.cached,
+            "child glyphs {:?} differ from cached text {:?}",
+            self.glyph_text,
+            self.cached
+        );
+        ensure!(!self.clipped, "child glyphs clipped: {}", self.glyph_text);
+        if input == "sidebar-child" {
+            ensure!(
+                self.glyph_text == input,
+                "short child label changed: {:?}",
+                self.glyph_text
+            );
+        } else {
+            ensure!(
+                self.glyph_text.starts_with("sidebar-child")
+                    && self.glyph_text.ends_with('\u{2026}'),
+                "long child label did not truncate correctly: {:?}",
+                self.glyph_text
+            );
+            ensure!(
+                self.width > self.bounds.size.width - px(12.),
+                "child glyph width {:?} did not fill label width {:?}",
+                self.width,
+                self.bounds.size.width
+            );
+        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 struct SidebarFixture(Entity<HerdrWindow>);
+
+#[test]
+fn native_child_probe_reports_geometry_and_glyph_failures_without_panicking() {
+    use crate::config::LayoutMode;
+    for (mode, left, width) in [
+        (LayoutMode::Normal, 56., 145.),
+        (LayoutMode::Compact, 38., 169.),
+    ] {
+        let bounds = Bounds::new(point(px(left), px(100.)), size(px(width), px(16.)));
+        let mut probe = PaintedText {
+            bounds,
+            mask: bounds,
+            cached: "sidebar-child".into(),
+            glyph_text: "sidebar-child".into(),
+            width: px(94.),
+            clipped: false,
+        };
+        probe.verify_child("sidebar-child", mode).unwrap();
+        probe.bounds.size.width -= px(1.);
+        let error = probe.verify_child("sidebar-child", mode).unwrap_err();
+        assert!(error.to_string().contains("child label width: actual"));
+        assert!(error.to_string().contains("expected"));
+        probe.bounds = bounds;
+        probe.clipped = true;
+        assert!(
+            probe
+                .verify_child("sidebar-child", mode)
+                .unwrap_err()
+                .to_string()
+                .contains("clipped")
+        );
+        probe.clipped = false;
+        probe.glyph_text = "sidebar-chil".into();
+        assert!(
+            probe
+                .verify_child("sidebar-child", mode)
+                .unwrap_err()
+                .to_string()
+                .contains("cached text")
+        );
+        probe.glyph_text = "sidebar-child-with-…".into();
+        probe.cached.clone_from(&probe.glyph_text);
+        probe.width = px(width - 5.);
+        probe
+            .verify_child("sidebar-child-with-a-long-readable-branch-name", mode)
+            .unwrap();
+        probe.width = px(50.);
+        assert!(
+            probe
+                .verify_child("sidebar-child-with-a-long-readable-branch-name", mode)
+                .unwrap_err()
+                .to_string()
+                .contains("did not fill")
+        );
+    }
+}
+
+#[test]
+fn native_probe_failure_survives_later_frames_and_keeps_its_source() {
+    let mut probes = PaintedProbes::default();
+    probes.record(
+        "first label".into(),
+        Err(std::io::Error::from(std::io::ErrorKind::InvalidData).into()),
+    );
+    probes.0.clear();
+    probes.record("later label".into(), Err(anyhow::anyhow!("later failure")));
+    let error = probes.check().unwrap_err();
+    assert!(error.to_string().contains("first label"));
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+    assert!(probes.check().is_ok());
+}
 
 #[cfg(test)]
 impl Render for SidebarFixture {
@@ -468,6 +630,8 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         config: Default::default(),
         theme: Default::default(),
         config_load: None,
+        config_watch: None,
+        config_load_revision: 0,
         git: Default::default(),
         sidebar_visible: true,
         endpoints: vec![crate::endpoint::Endpoint::new(
@@ -577,10 +741,7 @@ fn palette_rejects_changed_endpoint_epoch_or_generation(cx: &mut gpui::TestAppCo
 }
 
 #[cfg(test)]
-fn check_sidebar(
-    fixture: Entity<SidebarFixture>,
-    cx: &mut gpui::VisualTestContext,
-) -> anyhow::Result<()> {
+fn check_sidebar(fixture: Entity<SidebarFixture>, cx: &mut gpui::VisualTestContext) -> Result<()> {
     use anyhow::Context as _;
     use gpui::{Modifiers, MouseButton, MouseDownEvent, point};
     cx.simulate_resize(size(px(800.), px(600.)));
@@ -1630,7 +1791,7 @@ fn check_sidebar(
             )
         );
     }
-    Ok(())
+    cx.update(|_, cx| cx.default_global::<PaintedProbes>().check())
 }
 
 #[gpui::test]

@@ -101,14 +101,23 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
         return;
     }
     EXIT_CODE.store(1, Ordering::SeqCst);
+    // AppKit may exit(0) inside cx.quit(), bypassing main's ExitCode. These
+    // daemon-free fixtures exit explicitly, like the performance driver.
     #[cfg(target_os = "macos")]
     if let Err(error) = app_icon::verify_native().and_then(|()| crate::app_badge::verify_native()) {
         eprintln!("ICON native FAIL: {error:#}");
-        cx.quit();
-        return;
+        std::process::exit(1);
     }
     cx.set_global(sidebar::layout_tests::PaintedProbes::default());
     cx.set_global(sidebar::layout_tests::VerifyChildGeometry(true));
+    if std::env::var_os("HERDR_TEST_SIDEBAR_PROBE_FAILURE").is_some() {
+        let _ = handle.update(cx, |view, _, cx| {
+            // Exercise the real native paint failure path with a column that
+            // intentionally violates the fixed-width initial fixture.
+            view.sidebar_width = Some(180.);
+            cx.notify();
+        });
+    }
     let timer = cx.background_executor().clone();
     cx.spawn(async move |cx| {
         // Shaping first: the cascade is independent of every layout probe below.
@@ -116,8 +125,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
             Ok(Ok(summary)) => summary,
             other => {
                 eprintln!("SIDEBAR native symbol cascade FAIL: {other:?}");
-                let _ = cx.update(|cx| cx.quit());
-                return;
+                std::process::exit(1);
             }
         };
         eprintln!("SIDEBAR native symbol cascade: {cascade}");
@@ -157,6 +165,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                         });
                     window.refresh();
                     window.draw(cx).clear();
+                    cx.default_global::<PaintedProbes>().check()?;
                     let probes = &cx.global::<PaintedProbes>().0;
                     let mut failed = false;
                     for input in [
@@ -209,8 +218,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
             );
             if !matches!(result, Ok(Ok(()))) {
                 eprintln!("SIDEBAR native FAIL: {result:?}");
-                let _ = cx.update(|cx| cx.quit());
-                return;
+                std::process::exit(1);
             }
         }
         let _ = handle.update(cx, |view, _, cx| {
@@ -321,8 +329,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
             );
             if !matches!(verified, Ok(Ok(()))) {
                 eprintln!("SIDEBAR native interaction FAIL: {verified:?}");
-                let _ = cx.update(|cx| cx.quit());
-                return;
+                std::process::exit(1);
             }
         }
         for show_agents in [false, true] {
@@ -347,8 +354,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
             });
             if !matches!(result, Ok(Ok(()))) {
                 eprintln!("SIDEBAR native visibility FAIL: {result:?}");
-                let _ = cx.update(|cx| cx.quit());
-                return;
+                std::process::exit(1);
             }
         }
         #[cfg(target_os = "macos")]
@@ -371,8 +377,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                 });
                 if let Err(error) = point {
                     eprintln!("SIDEBAR native dialog setup FAIL: {error}");
-                    let _ = cx.update(|cx| cx.quit());
-                    return;
+                    std::process::exit(1);
                 }
                 let point = AnyWindowHandle::from(handle).update(cx, |_, window, cx| {
                     window.draw(cx).clear();
@@ -450,8 +455,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                 });
                 if !matches!(verified, Ok(Ok(()))) {
                     eprintln!("SIDEBAR native dialog FAIL: {verified:?}");
-                    let _ = cx.update(|cx| cx.quit());
-                    return;
+                    std::process::exit(1);
                 }
             }
         }
@@ -495,20 +499,22 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                 });
                 if !matches!(result, Ok(Ok(()))) {
                     eprintln!("SIDEBAR native GitHub auth FAIL: {result:?}");
-                    let _ = cx.update(|cx| cx.quit());
-                    return;
+                    std::process::exit(1);
                 }
             }
         }
         #[cfg(target_os = "macos")]
         if let Err(error) = sidebar_hosts(handle, cx).await {
             eprintln!("SIDEBAR native hosts FAIL: {error:#}");
-            let _ = cx.update(|cx| cx.quit());
-            return;
+            std::process::exit(1);
+        }
+        let probes = cx.update(|cx| cx.default_global::<sidebar::layout_tests::PaintedProbes>().check());
+        if !matches!(probes, Ok(Ok(()))) {
+            eprintln!("SIDEBAR native paint FAIL: {probes:?}");
+            std::process::exit(1);
         }
         eprintln!("SIDEBAR native PASS: {cascade}; 24 Menlo draws, normal/compact layouts at 4 sizes, collapse/expand, menu isolation, PR title/stats glyphs, GitHub auth fixtures, right-click dialogs and Unicode fields at 2 sizes; host routing, disabled selection, scoped repositories, resized host/agent glyphs, independent scroll and decoy key window");
-        EXIT_CODE.store(0, Ordering::SeqCst);
-        let _ = cx.update(|cx| cx.quit());
+        std::process::exit(0);
     })
     .detach();
 }
@@ -547,14 +553,12 @@ fn start_notifications(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                 let drawn = AnyWindowHandle::from(handle).update(cx, |_, window, cx| window.draw(cx).clear());
                 if !matches!(result, Ok(Ok(()))) || drawn.is_err() {
                     eprintln!("NOTIFICATIONS native FAIL: {result:?} {drawn:?}");
-                    let _ = cx.update(|cx| cx.quit());
-                    return;
+                    std::process::exit(1);
                 }
             }
         }
         eprintln!("NOTIFICATIONS native PASS: all four offline previews drawn at narrow/wide sizes; disabled/delayed policy bypass and inert offline command verified");
-        EXIT_CODE.store(0, Ordering::SeqCst);
-        let _ = cx.update(|cx| cx.quit());
+        std::process::exit(0);
     })
     .detach();
 }

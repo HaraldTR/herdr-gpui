@@ -64,7 +64,7 @@ class ReleaseTests(unittest.TestCase):
                     files = {m.name: m for m in archive.getmembers() if m.isfile()}
                     self.assertEqual(set(files), {base + p for p in [
                         "bin/herdr-gpui", "share/applications/herdr-gpui.desktop",
-                        "share/icons/hicolor/1024x1024/apps/herdr-gpui.png",
+                        "share/icons/hicolor/scalable/apps/herdr-gpui.svg",
                         "share/licenses/herdr-gpui/LICENSE-APACHE", "share/licenses/herdr-gpui/NOTICE.md",
                         "share/licenses/herdr-gpui/LICENSE", "share/licenses/herdr-gpui/NOTICE",
                         "share/licenses/herdr-gpui/LICENSE-octicons",
@@ -73,7 +73,7 @@ class ReleaseTests(unittest.TestCase):
                     ]})
                     self.assertEqual(files[base + "bin/herdr-gpui"].mode & 0o777, 0o755)
                     self.assertEqual(archive.extractfile(base + "bin/herdr-gpui").read(), binary.read_bytes())
-                    self.assertEqual(archive.extractfile(base + "share/icons/hicolor/1024x1024/apps/herdr-gpui.png").read(), (ROOT / "assets/icons/herdr-icon-square-clean.png").read_bytes())
+                    self.assertEqual(archive.extractfile(base + "share/icons/hicolor/scalable/apps/herdr-gpui.svg").read(), (ROOT / "assets/icons/herdr-icon-square-clean.svg").read_bytes())
                     self.assertEqual(archive.extractfile(base + "share/licenses/herdr-gpui/THIRD-PARTY-NOTICES.txt").read(), self.notices.read_bytes())
                     for source in ("LICENSE", "NOTICE", "assets/icons/LICENSE-octicons", "crates/herdr-protocol/NOTICE.md", "crates/herdr-gpui/SOUND-NOTICE.md"):
                         self.assertEqual(archive.extractfile(base + "share/licenses/herdr-gpui/" + Path(source).name).read(), (ROOT / source).read_bytes())
@@ -119,6 +119,9 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("Output already exists", result.stderr)
         self.assertEqual(output.read_bytes(), before)
         output.unlink()
+        arm = Path(self.run_windows("20260920.3", "aarch64-pc-windows-msvc", binary, self.work, self.notices).stdout.strip())
+        self.assertEqual(arm, self.work.resolve() / "Herdr-20260920.3-aarch64-pc-windows-msvc.zip")
+        arm.unlink()
         for args in [("20260920.03", target, binary, self.work, self.notices),
                      ("v20260920.3", target, binary, self.work, self.notices),
                      ("20260920.3", "x86_64-pc-windows-gnu", binary, self.work, self.notices),
@@ -211,7 +214,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual((self.work / "Herdr.app/Contents/Resources/Herdr.icns").read_bytes(), (fixture / "assets/icons/Herdr-worktree.icns").read_bytes())
         result = self.run_script("package-linux.sh", "20260920.3", "aarch64-unknown-linux-gnu", arm, self.work, self.notices)
         with tarfile.open(result.stdout.strip()) as archive:
-            self.assertEqual(archive.extractfile("Herdr-20260920.3-aarch64-unknown-linux-gnu/share/icons/hicolor/1024x1024/apps/herdr-gpui.png").read(), (fixture / "assets/icons/herdr-square-worktree-1024.png").read_bytes())
+            self.assertEqual(archive.extractfile("Herdr-20260920.3-aarch64-unknown-linux-gnu/share/pixmaps/herdr-gpui.png").read(), (fixture / "assets/icons/herdr-square-worktree-1024.png").read_bytes())
 
     def test_missing_malformed_conflicting_identity_fails_closed(self):
         binary = self.work / "binary"

@@ -215,11 +215,23 @@ jobs:
           bash scripts/release/package-linux.sh "$VERSION" "$TARGET" "target/$TARGET/release/herdr-gpui" dist "target/$TARGET/release/THIRD-PARTY-NOTICES.txt"
           python3 scripts/update-manifest.py package-linux "target/$TARGET/release/herdr-gpui" "$TARGET" "$VERSION" \
             "dist/herdr-gpui-$VERSION-$TARGET-update.tar.gz"
+      # The .deb, .rpm and Arch packages repackage the manual archive's exact
+      # files under /usr, so every Linux format ships the same binary.
+      - name: Package distribution formats from the manual archive
+        run: |
+          nfpm=$(bash scripts/release/install-nfpm.sh "$RUNNER_TEMP/nfpm")
+          python3 scripts/release/package-linux-distro.py "$VERSION" "$TARGET" \
+            "dist/Herdr-$VERSION-$TARGET.tar.gz" dist --nfpm "$nfpm"
+      - name: Install each package on its distribution and check its libraries
+        run: bash scripts/release/smoke-linux-packages.sh "$VERSION" "$TARGET" dist
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: linux-package-${{ matrix.target }}
           path: |
             dist/Herdr-${{ needs.validate.outputs.version }}-${{ matrix.target }}.tar.gz
+            dist/Herdr-${{ needs.validate.outputs.version }}-${{ matrix.target }}.deb
+            dist/Herdr-${{ needs.validate.outputs.version }}-${{ matrix.target }}.rpm
+            dist/Herdr-${{ needs.validate.outputs.version }}-${{ matrix.target }}.pkg.tar.zst
             dist/herdr-gpui-${{ needs.validate.outputs.version }}-${{ matrix.target }}-update.tar.gz
           if-no-files-found: error
           retention-days: 7
@@ -236,6 +248,8 @@ jobs:
         include:
           - runner: windows-2025
             target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
@@ -455,6 +469,10 @@ jobs:
           path: dist
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          name: windows-package-aarch64-pc-windows-msvc
+          path: dist
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
           name: release-sbom
           path: dist
       - run: python3 scripts/release/artifact-manifest.py base "$VERSION" dist
@@ -471,14 +489,21 @@ jobs:
       - uses: ./.github/actions/sign-artifacts # zizmor: ignore[self-repository]
         with:
           working-directory: dist
-          files: Herdr-${{ needs.validate.outputs.version }}-universal-apple-darwin.dmg Herdr-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz Herdr-${{ needs.validate.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz Herdr-${{ needs.validate.outputs.version }}-x86_64-pc-windows-msvc.zip Herdr-${{ needs.validate.outputs.version }}.cdx.json herdr-gpui-${{ needs.validate.outputs.version }}-macos-universal.app.tar.gz herdr-gpui-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu-update.tar.gz herdr-gpui-${{ needs.validate.outputs.version }}-aarch64-unknown-linux-gnu-update.tar.gz update-manifest.json update-manifest.sig
+          files: Herdr-${{ needs.validate.outputs.version }}-universal-apple-darwin.dmg Herdr-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz Herdr-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu.deb Herdr-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu.rpm Herdr-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu.pkg.tar.zst Herdr-${{ needs.validate.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz Herdr-${{ needs.validate.outputs.version }}-aarch64-unknown-linux-gnu.deb Herdr-${{ needs.validate.outputs.version }}-aarch64-unknown-linux-gnu.rpm Herdr-${{ needs.validate.outputs.version }}-aarch64-unknown-linux-gnu.pkg.tar.zst Herdr-${{ needs.validate.outputs.version }}-x86_64-pc-windows-msvc.zip Herdr-${{ needs.validate.outputs.version }}-aarch64-pc-windows-msvc.zip Herdr-${{ needs.validate.outputs.version }}.cdx.json herdr-gpui-${{ needs.validate.outputs.version }}-macos-universal.app.tar.gz herdr-gpui-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu-update.tar.gz herdr-gpui-${{ needs.validate.outputs.version }}-aarch64-unknown-linux-gnu-update.tar.gz update-manifest.json update-manifest.sig
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             dist/Herdr-${{ needs.validate.outputs.version }}-universal-apple-darwin.dmg
             dist/Herdr-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz
+            dist/Herdr-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu.deb
+            dist/Herdr-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu.rpm
+            dist/Herdr-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu.pkg.tar.zst
             dist/Herdr-${{ needs.validate.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz
+            dist/Herdr-${{ needs.validate.outputs.version }}-aarch64-unknown-linux-gnu.deb
+            dist/Herdr-${{ needs.validate.outputs.version }}-aarch64-unknown-linux-gnu.rpm
+            dist/Herdr-${{ needs.validate.outputs.version }}-aarch64-unknown-linux-gnu.pkg.tar.zst
             dist/Herdr-${{ needs.validate.outputs.version }}-x86_64-pc-windows-msvc.zip
+            dist/Herdr-${{ needs.validate.outputs.version }}-aarch64-pc-windows-msvc.zip
             dist/Herdr-${{ needs.validate.outputs.version }}.cdx.json
             dist/herdr-gpui-${{ needs.validate.outputs.version }}-macos-universal.app.tar.gz
             dist/herdr-gpui-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu-update.tar.gz

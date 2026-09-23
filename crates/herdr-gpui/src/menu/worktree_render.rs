@@ -1,10 +1,10 @@
-//! Painting the new worktree dialog's tab strip and its two GitHub listings.
-//! Rows are drawn from the prepared filter, never from a query made while
-//! rendering.
+//! Painting the new worktree dialog: the shared search, the tab strip, and the
+//! listings behind it. Rows are drawn from the prepared filter, never from a
+//! query made while rendering.
 
 use super::{
     Page, WorkspaceAction,
-    worktree_source::{Tab, WorktreeSource},
+    worktree_source::{Row, Tab},
 };
 use crate::{
     HerdrWindow,
@@ -13,21 +13,17 @@ use crate::{
 use gpui::{prelude::*, *};
 
 impl HerdrWindow {
-    /// The tab strip. The GitHub tabs are inert until an account is connected,
-    /// because neither listing can be fetched without one.
+    /// The search every tab shares, then the tab strip. Each listed tab counts
+    /// what the search kept in it, so a match elsewhere is visible from any
+    /// tab. The GitHub tabs are inert until an account is connected, because
+    /// neither listing can be fetched without one, and look it.
     pub(super) fn render_worktree_tabs(&self, cx: &mut Context<Self>) -> Div {
         let theme = &self.theme;
         let connected = self.menu.github.connected();
-        let current = self
-            .menu
-            .worktree
-            .as_ref()
-            .map_or(Tab::Branch, |source| source.tab);
-        let busy = self
-            .menu
-            .worktree
-            .as_ref()
-            .is_some_and(WorktreeSource::busy);
+        let Some(source) = &self.menu.worktree else {
+            return div();
+        };
+        let busy = source.busy();
         let mut strip = div()
             .debug_selector(|| "worktree-tabs".into())
             .flex()
@@ -37,28 +33,38 @@ impl HerdrWindow {
         for tab in Tab::ALL {
             let label = tab.label();
             let enabled = connected || tab.kind().is_none();
-            let selected = tab == current;
+            let selected = tab == source.tab;
+            // A tab that cannot be opened drops its outline and fades, so it
+            // never reads as one more button to press.
+            let inert = !selected && (!enabled || busy);
+            let hits = source.hits(tab).filter(|_| enabled);
             strip = strip.child(
                 div()
                     .id(label)
                     .debug_selector(move || format!("worktree-tab-{label}"))
+                    .flex()
+                    .flex_none()
+                    .gap(px(5.))
                     .px(px(10.))
                     .py(px(5.))
                     .rounded(px(4.))
                     .border_1()
-                    .border_color(rgb(if selected {
-                        theme.foreground
-                    } else {
-                        theme.active
-                    }))
-                    .when(selected, |button| button.bg(rgb(theme.active)))
-                    .text_color(rgb(if !enabled {
-                        theme.muted
+                    .border_color(if inert {
+                        transparent_black()
                     } else if selected {
+                        rgb(theme.foreground).into()
+                    } else {
+                        rgb(theme.active).into()
+                    })
+                    .when(selected, |button| button.bg(rgb(theme.active)))
+                    .text_color(rgb(if selected {
                         theme.foreground
                     } else {
                         theme.muted
                     }))
+                    .when(inert, |button| {
+                        button.opacity(0.4).cursor(CursorStyle::OperationNotAllowed)
+                    })
                     .when(enabled && !busy, |button| {
                         button
                             .cursor_pointer()
@@ -68,55 +74,100 @@ impl HerdrWindow {
                                 this.select_worktree_tab(tab, window, cx);
                             }))
                     })
-                    .child(label),
+                    .child(label)
+                    .when_some(hits, |button, hits| {
+                        button.child(
+                            div()
+                                .debug_selector(move || format!("worktree-tab-count-{label}"))
+                                .text_color(rgb(theme.muted))
+                                .child(hits.to_string()),
+                        )
+                    }),
             );
         }
-        if !connected {
-            strip = strip.child(
+        div()
+            .flex_none()
+            .child(
                 div()
-                    .debug_selector(|| "worktree-tabs-note".into())
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .py(px(5.))
-                    .text_color(rgb(theme.muted))
-                    .child("sign in to GitHub to browse"),
-            );
-        }
-        strip
+                    .debug_selector(|| "worktree-search".into())
+                    .px(px(16.))
+                    .pt(px(10.))
+                    .child(source.search.clone()),
+            )
+            .child(strip)
     }
 
-    /// One GitHub listing: its search field, how much of it the search kept,
-    /// the rows themselves, and whatever the worker last had to say.
+    /// The open listing: how much of it the search kept, the rows themselves,
+    /// and whatever its source last had to say.
     pub(super) fn render_worktree_items(&self, cx: &mut Context<Self>) -> Div {
         let theme = &self.theme;
         let font = &self.config.ui;
         let Some(source) = &self.menu.worktree else {
             return div();
         };
-        let Some(kind) = source.tab.kind() else {
-            return div();
-        };
         let (shown, total) = source.counts();
         let rows = source.filtered.len();
-        let status = if let Some(item) = &source.pending {
+        let (noun, loading, message, empty) = match source.tab {
+            Tab::New => return div(),
+            Tab::Existing => (
+                "checkouts not open in Herdr",
+                source.checkouts.request.is_some(),
+                source.checkouts.message.as_ref(),
+                if total > 0 {
+                    "No matching checkouts."
+                } else {
+                    "Every checkout of this repository is already open."
+                },
+            ),
+            Tab::Branches => (
+                "local branches without a checkout",
+                source.branches.loading,
+                source.branches.message.as_ref(),
+                if total > 0 {
+                    "No matching branches."
+                } else {
+                    "Every branch already has a checkout."
+                },
+            ),
+            Tab::Items(kind) => (
+                match kind {
+                    Kind::PullRequest => "open pull requests",
+                    Kind::Issue => "open issues",
+                },
+                source.lookup.loading,
+                source.lookup.message.as_ref(),
+                kind.empty_label(),
+            ),
+        };
+        let status = if let Some(pending) = &source.pending {
             // Dismissing only closes the panel; the daemon keeps queued work,
             // as the branch tab's own waiting note says.
-            format!(
-                "Creating a checkout for {}. Dismissing does not cancel it.",
-                item.label()
-            )
-        } else if let Some(error) = &source.lookup.message {
+            if pending.opens() {
+                format!(
+                    "Opening {}. Dismissing does not cancel it.",
+                    pending.label()
+                )
+            } else {
+                format!(
+                    "Creating a checkout for {}. Dismissing does not cancel it.",
+                    pending.label()
+                )
+            }
+        } else if let Some(error) = message {
             error.clone()
-        } else if source.lookup.loading {
-            "Loading from GitHub...".to_owned()
+        } else if loading {
+            "Loading...".to_owned()
         } else {
-            source
-                .lookup
-                .origin
-                .as_ref()
-                .map(Origin::slug)
-                .unwrap_or_default()
+            match source.tab {
+                Tab::Existing => "Opening adds the checkout to Herdr; nothing is created.".into(),
+                Tab::Branches => "The checkout uses the local branch as it is.".into(),
+                _ => source
+                    .lookup
+                    .origin
+                    .as_ref()
+                    .map(Origin::slug)
+                    .unwrap_or_default(),
+            }
         };
         div()
             .flex()
@@ -125,23 +176,12 @@ impl HerdrWindow {
             .min_h_0()
             .child(
                 div()
+                    .debug_selector(|| "worktree-count".into())
                     .flex_none()
                     .px(px(16.))
-                    .pt(px(10.))
-                    .child(source.search.clone())
-                    .child(
-                        div()
-                            .debug_selector(|| "worktree-count".into())
-                            .pt(px(6.))
-                            .text_color(rgb(theme.muted))
-                            .child(format!(
-                                "{shown} of {total} open {}",
-                                match kind {
-                                    Kind::PullRequest => "pull requests",
-                                    Kind::Issue => "issues",
-                                }
-                            )),
-                    ),
+                    .pt(px(8.))
+                    .text_color(rgb(theme.muted))
+                    .child(format!("{shown} of {total} {noun}")),
             )
             .when(rows == 0, |panel| {
                 panel.child(
@@ -151,11 +191,7 @@ impl HerdrWindow {
                         .px(px(16.))
                         .py(px(12.))
                         .text_color(rgb(theme.muted))
-                        .child(if source.lookup.loading {
-                            "Loading from GitHub..."
-                        } else {
-                            kind.empty_label()
-                        }),
+                        .child(if loading { "Loading..." } else { empty }),
                 )
             })
             .when(rows > 0, |panel| {
@@ -194,26 +230,43 @@ impl HerdrWindow {
         let Some(source) = &self.menu.worktree else {
             return div().into_any_element();
         };
-        let Some(item) = source.item(row) else {
+        let Some(listed) = source.row(row) else {
             return div().into_any_element();
         };
-        let selected = row == source.selected;
-        // A fork's head branch has no ref on `origin`, so the row says why it
-        // cannot be picked rather than failing once it is.
-        let detail = if item.fork_owner.is_some() {
-            "from a fork - check out manually".to_owned()
-        } else {
-            let branch = item.branch();
-            match item.author.is_empty() {
-                true => branch,
-                false => format!("{} - {branch}", item.author),
-            }
+        // A row is a title line with an optional muted tag, and a detail line
+        // when there is more to say than the title. A branch is only its name.
+        let (number, title, tag, detail) = match listed {
+            Row::Checkout(entry) => (
+                None,
+                entry.branch.clone().unwrap_or_else(|| entry.label.clone()),
+                entry.is_detached.then_some("detached"),
+                Some(entry.path.clone()),
+            ),
+            Row::Branch(branch) => (None, branch.name.clone(), None, None),
+            Row::Item(item) => (
+                Some(format!("#{}", item.number)),
+                item.title.clone(),
+                item.draft.then_some("draft"),
+                // A fork's head branch has no ref on `origin`, so the row says
+                // why it cannot be picked rather than failing once it is.
+                Some(if item.fork_owner.is_some() {
+                    "from a fork - check out manually".to_owned()
+                } else {
+                    let branch = item.branch();
+                    match item.author.is_empty() {
+                        true => branch,
+                        false => format!("{} - {branch}", item.author),
+                    }
+                }),
+            ),
         };
+        let lines = if detail.is_some() { 2. } else { 1. };
+        let selected = row == source.selected;
         div()
             .id(row)
             .debug_selector(move || format!("worktree-row-{row}"))
             .w_full()
-            .h(px(font.line_height() * 2. + 14.))
+            .h(px(font.line_height() * lines + 14.))
             .px(px(16.))
             .py(px(5.))
             .flex()
@@ -227,35 +280,23 @@ impl HerdrWindow {
                     .flex()
                     .gap(px(6.))
                     .min_w_0()
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(rgb(theme.muted))
-                            .child(format!("#{}", item.number)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(item.title.clone()),
-                    )
-                    .when(item.draft, |row| {
-                        row.child(
-                            div()
-                                .flex_none()
-                                .text_color(rgb(theme.muted))
-                                .child("draft"),
-                        )
+                    .when_some(number, |line, number| {
+                        line.child(div().flex_none().text_color(rgb(theme.muted)).child(number))
+                    })
+                    .child(div().flex_1().min_w_0().truncate().child(title))
+                    .when_some(tag, |line, tag| {
+                        line.child(div().flex_none().text_color(rgb(theme.muted)).child(tag))
                     }),
             )
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(rgb(theme.muted))
-                    .child(detail),
-            )
+            .when_some(detail, |row, detail| {
+                row.child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(rgb(theme.muted))
+                        .child(detail),
+                )
+            })
             .on_hover(cx.listener(move |this, hovered, _, cx| {
                 if *hovered && let Some(source) = &mut this.menu.worktree {
                     source.selected = row;
@@ -264,12 +305,12 @@ impl HerdrWindow {
             }))
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
-                this.create_from_repo_item(row, cx);
+                this.pick_worktree_row(row, cx);
             }))
             .into_any_element()
     }
 
-    /// Whether a listing's search field is mid-composition, in which case the
+    /// Whether the shared search field is mid-composition, in which case the
     /// platform owns every key until the composition commits.
     pub(super) fn worktree_source_composing(&self, cx: &Context<Self>) -> bool {
         self.menu
@@ -278,8 +319,8 @@ impl HerdrWindow {
             .is_some_and(|source| source.search.read(cx).is_composing())
     }
 
-    /// Keys the new worktree dialog's GitHub tabs own. Reports whether the key
-    /// was consumed, so the branch tab keeps its existing handling untouched.
+    /// Keys the new worktree dialog's listings own. Reports whether the key was
+    /// consumed, so the branch form keeps its existing handling untouched.
     pub(super) fn worktree_source_key(
         &mut self,
         event: &KeyDownEvent,
@@ -304,10 +345,11 @@ impl HerdrWindow {
                 .menu
                 .worktree
                 .as_ref()
-                .map_or(Tab::Branch, |source| source.tab);
+                .map_or(Tab::New, |source| source.tab);
+            let connected = self.menu.github.connected();
             let tabs: Vec<Tab> = Tab::ALL
                 .into_iter()
-                .filter(|tab| tab.kind().is_none() || self.menu.github.connected())
+                .filter(|tab| tab.kind().is_none() || connected)
                 .collect();
             if let Some(index) = tabs.iter().position(|tab| *tab == current) {
                 let next = if forward {
@@ -319,11 +361,14 @@ impl HerdrWindow {
             }
             return true;
         }
+        let search_focused = self.worktree_search_focused(window, cx);
         let Some(source) = &mut self.menu.worktree else {
             return false;
         };
-        if source.tab.kind().is_none() {
-            return false;
+        if source.tab == Tab::New {
+            // From the shared search, the branch form has no rows to move
+            // through and nothing for Enter to pick.
+            return search_focused && matches!(key, "up" | "down" | "enter");
         }
         let rows = source.filtered.len();
         match key {
@@ -340,7 +385,7 @@ impl HerdrWindow {
             "up" | "down" => true,
             "enter" => {
                 let selected = source.selected;
-                self.create_from_repo_item(selected, cx);
+                self.pick_worktree_row(selected, cx);
                 true
             }
             _ => false,

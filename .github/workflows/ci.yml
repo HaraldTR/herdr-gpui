@@ -54,6 +54,8 @@ jobs:
         github.ref == 'refs/heads/main'))
     name: Commit messages
     needs: zizmor
+    outputs:
+      code: ${{ steps.changes.outputs.code }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -76,9 +78,17 @@ jobs:
             BASE="$HEAD_SHA~1"
           fi
           python3 scripts/release/check-commit-messages.py range "$BASE..$HEAD_SHA"
+      - name: Detect build and test inputs
+        id: changes
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: bash scripts/ci-changes.sh >> "$GITHUB_OUTPUT"
 
   checks:
     if: >-
+      needs.commits.outputs.code == 'true' &&
       github.repository == 'penso/herdr-gpui' &&
       github.actor == 'penso' && github.triggering_actor == 'penso' &&
       ((github.event_name == 'pull_request' &&
@@ -87,7 +97,7 @@ jobs:
        ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
         github.ref == 'refs/heads/main'))
     name: Format, lint, and test (${{ matrix.runner }})
-    needs: zizmor
+    needs: [zizmor, commits]
     strategy:
       fail-fast: false
       matrix:
@@ -103,6 +113,10 @@ jobs:
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: bash scripts/install-linux-deps.sh
+      # Lets the release script tests build real .deb, .rpm and Arch packages.
+      - name: Install the pinned Linux package builder
+        if: runner.os == 'Linux'
+        run: echo "HERDR_TEST_NFPM=$(bash scripts/release/install-nfpm.sh "$RUNNER_TEMP/nfpm")" >> "$GITHUB_ENV"
       - name: Test release scripts and security contracts without credentials
         env:
           PYTHONDONTWRITEBYTECODE: '1'
@@ -131,6 +145,7 @@ jobs:
   # in the release workflow.
   windows:
     if: >-
+      needs.commits.outputs.code == 'true' &&
       github.repository == 'penso/herdr-gpui' &&
       github.actor == 'penso' && github.triggering_actor == 'penso' &&
       ((github.event_name == 'pull_request' &&
@@ -138,9 +153,13 @@ jobs:
         github.event.pull_request.head.repo.full_name == 'penso/herdr-gpui') ||
        ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
         github.ref == 'refs/heads/main'))
-    name: Windows check
-    needs: zizmor
-    runs-on: windows-2025
+    name: Windows check (${{ matrix.runner }})
+    needs: [zizmor, commits]
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
       contents: read
@@ -152,7 +171,7 @@ jobs:
         run: rustup show
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          key: windows
+          key: ${{ matrix.runner }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -185,16 +204,24 @@ jobs:
           RESULT: ${{ needs.checks.result }}
           WINDOWS: ${{ needs.windows.result }}
           COMMITS: ${{ needs.commits.result }}
-        run: test "$RESULT" = success && test "$WINDOWS" = success && test "$COMMITS" = success
+          CODE: ${{ needs.commits.outputs.code }}
+        run: |
+          test "$COMMITS" = success || exit 1
+          if [ "$CODE" = true ]; then
+            test "$RESULT" = success && test "$WINDOWS" = success
+          else
+            test "$CODE" = false && test "$RESULT" = skipped && test "$WINDOWS" = skipped
+          fi
 
   build:
     if: >-
+      needs.commits.outputs.code == 'true' &&
       github.repository == 'penso/herdr-gpui' &&
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       github.actor == 'penso' && github.triggering_actor == 'penso'
     name: Release (${{ matrix.runner }}, ${{ matrix.arch }})
-    needs: zizmor
+    needs: [zizmor, commits]
     strategy:
       fail-fast: false
       matrix:

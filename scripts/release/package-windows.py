@@ -12,7 +12,7 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
-TARGETS = ("x86_64-pc-windows-msvc",)
+TARGETS = ("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc")
 LICENSES = ("LICENSE", "NOTICE", "assets/icons/LICENSE-octicons",
             "crates/herdr-protocol/LICENSE-APACHE", "crates/herdr-protocol/NOTICE.md",
             "crates/herdr-gpui/SOUND-NOTICE.md")

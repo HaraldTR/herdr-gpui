@@ -39,6 +39,9 @@ mod tests {
                 assert!(view.read(cx).menu.page.is_none());
                 assert!(view.read(cx).menu.github.connected());
                 assert!(view.read(cx).focus.is_focused(window));
+                cx.default_global::<crate::sidebar::layout_tests::PaintedProbes>()
+                    .check()
+                    .unwrap();
             });
         }
     }

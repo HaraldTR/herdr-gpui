@@ -23,12 +23,16 @@ class AppNameTests(unittest.TestCase):
             launch = f"exec target/{profile}/Herdr.app/Contents/MacOS/Herdr {{{{args}}}}"
             self.assertIn(launch, body.group(1))
             self.assertNotIn(f"target/{profile}/herdr-gpui", body.group(1))
+            if recipe == "run":
+                self.assertIn("{{just_executable()}} bundle release qa-menu", body.group(1))
+                self.assertIn("--features qa-menu -- {{args}}", body.group(1))
 
     def test_bundle_recipe_installs_the_executable_and_icon_as_herdr(self):
         justfile = (ROOT / "justfile").read_text()
-        body = re.search(r"(?m)^bundle profile=\"release\":\n((?:[ \t]+.*\n|\n)+)", justfile)
+        body = re.search(r'(?m)^bundle profile="release" features="":\n((?:[ \t]+.*\n|\n)+)', justfile)
         self.assertIsNotNone(body)
         for expected in (
+            'cargo build --locked $flags --target-dir target -p herdr-gpui --features "{{features}}"',
             'cp target/{{profile}}/herdr-gpui "$app/Contents/MacOS/Herdr"',
             'cp assets/macos/Info.plist "$app/Contents/Info.plist"',
             '"$app/Contents/Resources/Herdr.icns"',

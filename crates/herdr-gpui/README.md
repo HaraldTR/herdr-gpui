@@ -59,7 +59,11 @@ include desktop integration and notices; updater-only
 `herdr-gpui-VERSION-TARGET-update.tar.gz` archives contain one executable.
 Native two-version update/restart QA remains pending.
 
-The macOS **QA** menu offers **Show NeedsAttention toast**, **Show Finished
+The macOS **QA** menu requires the opt-in `qa-menu` Cargo feature and is excluded
+from default Cargo builds and published releases. `just run` enables it
+automatically, or use
+`cargo run --locked --release -p herdr-gpui --features qa-menu`.
+The menu offers **Show NeedsAttention toast**, **Show Finished
 toast**, **Show UpdateInstalled toast**, and **Show Custom toast**. Each adds a
 synthetic in-app toast for the selected endpoint, even when disconnected. Each
 preview replaces the visible card immediately, bypassing disabled delivery,
@@ -135,8 +139,12 @@ settings controls described below explicitly edit that separate file.
 
 See
 [`config-gpui.example.toml`](config-gpui.example.toml) for a complete example.
-Font sizes use logical pixels (finite 8..48), not typographic points. Restart the
-GUI or invoke GUI config reload after edits; daemon config reload is separate.
+Font sizes use logical pixels (finite 8..48), not typographic points. Saving
+`config-gpui.local.toml` automatically reloads every open GUI window, usually
+within half a second. Font family, font size, theme, and layout changes apply
+together; invalid edits keep the last valid settings and show a load error.
+Reload waits while a theme preview/save is active. The manual GUI config reload
+action remains available; daemon config reload is separate.
 
 Preferences has **Theme, Indicators, Sound, Toasts, Integrations, Font, and General**
 tabs on one row, horizontally scrollable in narrow windows. Tab/Shift-Tab
@@ -194,7 +202,7 @@ written to disk, so a reload or a restart returns to the configured size.
 Set top-level `confirm_close_tab = false` to close tabs without confirmation
 (including their running processes), and `show_agents = false` to hide the Agents
 section and give Spaces the full sidebar height. Both default to `true`. Pane
-closures still ask for confirmation. Reload GUI config or restart after editing.
+closures still ask for confirmation. Saved edits apply automatically.
 
 `[notifications]` in `config-gpui.local.toml` overrides shared toast preferences
 for GUI-local in-app delivery, independently per key:
@@ -229,7 +237,7 @@ The default is `layout = "normal"`. Compact mode hides workspace branch lines an
 counts, removes row padding above and below labels, and tightens horizontal and
 heading spacing in both Spaces and Agents. PR numbers, status indicators, tree
 guides, and agent-name lines remain visible; font sizes and terminal spacing are
-unchanged. Reload GUI config or restart to apply it; there is no UI toggle yet.
+unchanged. Saved edits apply automatically; there is no UI toggle yet.
 
 To customize spacing too, use a `[layout]` table **instead of** the top-level
 string. Existing spacing-only tables remain supported and use normal mode:
@@ -612,7 +620,8 @@ attention can keep the badge visible. This QA setting is not saved.
   right-click stays until it is dismissed. Close requires
   confirmation and terminates terminals, not checkout files or branches. New
   worktree proposes the branch name the daemon would generate, previews the
-  checkout path derived from it, reports the daemon's own failures, and selects
+  checkout path derived from it, rejects invalid Git branch names before submission,
+  reports the daemon's own failures in the dialog rather than the connection status, and selects
   and reveals the created checkout once the daemon reports it. Rename and branch
   dialogs support Unicode/IME, grapheme
   editing, Shift-arrow selection, Home/End, and Cmd-A/C/X/V. Escape/outside click
@@ -667,7 +676,18 @@ attention can keep the badge visible. This QA setting is not saved.
   Reconnect rechecks the endpoint. See
   [PR lookup scope and limits](../../README.md) for authentication and remote limits.
    The same worktree-registry path supports both current and older daemons without
-   `workspace.get`. No Git or HTTP requests run from menu-open or render paths.
+    `workspace.get`. No Git or HTTP requests run from menu-open or render paths.
+  Opening the top-right Git/PR dropdown also queues a fresh lookup for the focused
+  local branch, keeping cached details visible while the background worker runs.
+  The dropdown shows draft/ready-for-review status, review decisions, merge
+  conflicts or blockers, and passed/failed/pending/skipped check counts. Repeated
+  opens share an in-flight lookup; account authentication/rate-limit pauses still
+  apply.
+  PR numbers in the sidebar and titlebar share readiness colors: green for a clean
+  merge, red for conflicts, failing checks, or requested changes, yellow for pending
+  checks/reviews or an unknown merge status, and orange for a blocked/behind branch
+  without a more specific check/review status. Drafts remain gray, merged PRs
+  purple, and closed PRs red.
 - The top-right titlebar profile control starts native GitHub device sign-in on
   a signed-out click, shows the authenticated user's avatar, and offers Sign out
   on right-click. Signed-out workspace menus have no GitHub section or requests.
@@ -893,9 +913,11 @@ GPUI native action/menu/keybinding patterns.
 
 Windows is experimental, not a supported platform. CI checks formatting, lints
 every target and feature, and runs workspace tests with default and all features
-on `windows-2025`, including headless UI and CLI tests. The release workflow
-builds and CLI-tests the optimized executable and publishes it as
-`Herdr-VERSION-x86_64-pc-windows-msvc.zip`; native window, rendering, input, and
+on `windows-2025` (x86_64) and `windows-11-arm` (ARM64), including headless UI
+and CLI tests. The release workflow builds and CLI-tests the optimized
+executable natively for each architecture and publishes
+`Herdr-VERSION-x86_64-pc-windows-msvc.zip` and
+`Herdr-VERSION-aarch64-pc-windows-msvc.zip`; native window, rendering, input, and
 live-daemon behavior remain unproven. Local connections use the named pipe the Windows
 daemon binds, derived from the same socket path string upstream uses, so
 discovery and framing are the same code as on Unix. Receive deadlines are
@@ -976,4 +998,10 @@ desktop. On macOS it checks exact-window clicks with a decoy key window, host
 selection/disabled hosts, scoped collapse, duplicate-ID navigation routing,
 composition preservation, menu isolation, and long-label native glyph clipping.
 Scroll independence uses scroll handles and native draws, not trackpad events.
+Native paint-probe failures report the label and geometry/glyph mismatch in the
+captured `gui.log` output and fail the test with a nonzero exit instead of panicking
+inside the native paint callback. The first failure survives subsequent redraws.
+An intentionally wrong-width native fixture verifies exit code 1, useful diagnostics,
+and absence of an abort signal. Sidebar and notification drivers exit explicitly
+so AppKit termination cannot turn a failure into exit code 0.
 See the root README for the full verification scope and remaining limitations.

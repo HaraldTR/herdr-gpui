@@ -48,8 +48,41 @@ release workflow. A cask install updates itself through Homebrew: the in-app
 updater detects that Homebrew owns the bundle and runs `brew upgrade --cask
 herdr-gpui` for you, so Homebrew's records stay correct. If its metadata is stale,
 the updater runs `brew update` and retries once. The update panel shows progress
-throughout. macOS `.dmg`, experimental Linux tarballs, and an experimental Windows `.zip`
+throughout. macOS `.dmg`, experimental Linux packages, and experimental Windows `.zip`s
 are also published on [Releases](https://github.com/penso/herdr-gpui/releases).
+
+### Linux packages
+
+Each release publishes x86_64 and ARM64 builds as a `.deb`, an `.rpm`, an Arch
+Linux package, and a plain tarball, all containing the same executable. They need
+glibc 2.39 or newer (Ubuntu 24.04, Debian 13, Fedora 40, current Arch, or later).
+Download the file for your architecture from
+[Releases](https://github.com/penso/herdr-gpui/releases), then:
+
+```sh
+sudo apt install ./Herdr-VERSION-x86_64-unknown-linux-gnu.deb      # Debian, Ubuntu
+sudo dnf install ./Herdr-VERSION-x86_64-unknown-linux-gnu.rpm      # Fedora
+sudo pacman -U Herdr-VERSION-x86_64-unknown-linux-gnu.pkg.tar.zst  # Arch Linux
+```
+
+The package manager pulls in the runtime libraries, including the Vulkan loader;
+a Vulkan driver for your GPU must also be present. Packages are not in any
+distribution repository, so they never update themselves: install each new
+release the same way. Before a release, CI installs each package on Ubuntu 24.04,
+Debian 13 and Fedora 42, and the x86_64 Arch package on Arch Linux, then checks that
+the executable finds every library. The ARM64 Arch package targets Arch Linux ARM
+and is not install-tested.
+
+On NixOS, or anywhere with Nix, build from source with the repository's flake:
+
+```sh
+nix run github:penso/herdr-gpui
+# or add it to a configuration: inputs.herdr-gpui.url = "github:penso/herdr-gpui";
+# then environment.systemPackages = [ inputs.herdr-gpui.packages.${system}.default ];
+```
+
+The flake builds with the toolchain pinned in `rust-toolchain.toml` on x86_64 and
+ARM64 Linux. Like the packages, it never updates itself.
 
 ### From source
 
@@ -63,8 +96,9 @@ cd herdr-gpui
 just run
 ```
 
-`just run` uses the optimized release build; `just run-debug` is notably slower
-with a dense terminal on screen. Without `just`: `cargo run --locked --release -p herdr-gpui`.
+`just run` uses the optimized release build with the QA menu enabled;
+`just run-debug` is notably slower with a dense terminal on screen.
+Without `just`: `cargo run --locked --release -p herdr-gpui --features qa-menu`.
 
 Install the Herdr daemon separately. The app starts an already-installed local
 `herdr server` when the target session is absent, but never installs, stops, or
@@ -95,12 +129,13 @@ hosts, in-app updates, saved GitHub credentials, and the avatar disk cache are
 unavailable and report that plainly; see
 [the GUI README](crates/herdr-gpui/README.md#windows).
 
-Each release publishes `Herdr-VERSION-x86_64-pc-windows-msvc.zip` containing
-`herdr-gpui.exe` and its license notices. It carries the same checksums,
-Sigstore signatures, and build provenance as the other assets, but it is not
-Authenticode-signed, so SmartScreen warns on first launch, and it never updates
-itself: download each new release manually. It is a console-subsystem
-executable, so launching it from Explorer also opens a console window.
+Each release publishes `Herdr-VERSION-x86_64-pc-windows-msvc.zip` and
+`Herdr-VERSION-aarch64-pc-windows-msvc.zip` (native ARM64), each containing
+`herdr-gpui.exe` and its license notices. They carry the same checksums,
+Sigstore signatures, and build provenance as the other assets, but they are not
+Authenticode-signed, so SmartScreen warns on first launch, and they never update
+themselves: download each new release manually. The executable is
+console-subsystem, so launching it from Explorer also opens a console window.
 
 ## How it connects
 
@@ -128,7 +163,10 @@ running.
 
 ## Audio Test
 
-To manually test native audio, choose **QA > Play Sound**. It plays the built-in
+The QA menu is excluded from default Cargo builds, including published releases.
+`just run` enables it automatically; with Cargo, use
+`cargo run --locked --release -p herdr-gpui --features qa-menu`.
+To manually test native audio in that build, choose **QA > Play Sound**. It plays the built-in
 Done sound on the background Rodio worker, even without a daemon or active pane
 and even with notifications muted. `HERDR_DISABLE_SOUND` and `NEXTEST` still
 suppress playback. See [notification sounds](crates/herdr-gpui/README.md#notification-sounds)
