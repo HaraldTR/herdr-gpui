@@ -441,6 +441,20 @@ impl HerdrWindow {
                     })),
                 )
             })
+            // Sits in the trash column; the whole row is the click target.
+            .when(!removable, |container| {
+                let color = rgb(if spec.enabled {
+                    theme.foreground
+                } else {
+                    theme.muted
+                });
+                container.child(super::action_icon(
+                    "icons/plus.svg",
+                    format!("sessions-add-icon-{row}"),
+                    color,
+                    color,
+                ))
+            })
             .on_hover(cx.listener(move |this, hovered, _, cx| {
                 if *hovered {
                     this.menu.selected = Some(row);

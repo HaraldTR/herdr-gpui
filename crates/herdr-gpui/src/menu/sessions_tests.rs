@@ -419,6 +419,11 @@ fn local_rows_paint_a_dot_and_mark_the_current_session(cx: &mut TestAppContext) 
         bounds(cx, "sessions-delete-icon-0").size,
         size(px(14.), px(14.))
     );
+    // Add ends in a plus, lined up with the trash icons above it.
+    assert_eq!(
+        bounds(cx, "sessions-add-icon-2").center().x,
+        bounds(cx, "sessions-delete-icon-0").center().x
+    );
     // A stopped session says what selecting it does, and the fixture has no
     // saved devices to list.
     assert!(cx.debug_bounds("sessions-stopped").is_some());
