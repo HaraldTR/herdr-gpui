@@ -29,7 +29,8 @@ pub(crate) struct PendingInput {
 }
 
 impl PendingInput {
-    #[cfg(test)]
+    // Only the Unix socket lifecycle tests inspect the queue.
+    #[cfg(all(test, unix))]
     pub(crate) fn len(&self) -> usize {
         self.events.len()
     }
