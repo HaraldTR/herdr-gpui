@@ -37,13 +37,9 @@ impl HerdrWindow {
         let menu_target = self.workspace_menu_target();
         let layout = look.density;
         let content_x = look.content_x();
-        // Hide secondary status in narrow windows, retaining useful host label space.
-        let show_host_status = width >= 200.;
-        let host_label_width = (look.content_width(width)
-            - HOST_ARROW_WIDTH
-            - HOST_GAP
-            - if show_host_status { HOST_GAP + 67. } else { 0. })
-        .max(0.);
+        // The label yields room to the arrow and to the trailing status dot.
+        let host_label_width =
+            (look.content_width(width) - HOST_ARROW_WIDTH - 2. * HOST_GAP - STATUS_WIDTH).max(0.);
         let view = cx.entity().downgrade();
         let font = &self.config.sidebar;
         let theme = &self.theme;
@@ -89,7 +85,7 @@ impl HerdrWindow {
                 let select_id = endpoint_id.clone();
                 let menu_id = endpoint_id.clone();
                 let removing = self.menu.removing_devices.contains(&endpoint.id);
-                // The dot takes its room from the label, not from the status.
+                // The removal pulse takes its room from the label, not from the status.
                 let label_width = if removing {
                     (host_label_width - STATUS_WIDTH - HOST_GAP).max(0.)
                 } else {
@@ -169,21 +165,18 @@ impl HerdrWindow {
                                         .child(label_text(&endpoint.label)),
                                 ),
                         )
-                        .when(show_host_status, |row| {
-                            row.child(
-                                div()
-                                    .w(px(67.))
-                                    .flex_none()
-                                    .text_right()
-                                    .text_size(px(font.size * 0.75))
-                                    .text_color(rgb(theme.muted))
-                                    .child(if removing {
-                                        "removing"
-                                    } else {
-                                        endpoint.status()
-                                    }),
-                            )
-                        })
+                        .child(
+                            div()
+                                .debug_selector(|| format!("host-status-{endpoint_id}"))
+                                .size(px(STATUS_WIDTH))
+                                .flex_none()
+                                .rounded_full()
+                                .bg(rgb(if endpoint.live.status.is_connected() {
+                                    crate::menu::ONLINE
+                                } else {
+                                    theme.muted
+                                })),
+                        )
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.select_endpoint(&select_id, cx);
                             window.focus(&this.focus, cx);
