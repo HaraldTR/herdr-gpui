@@ -204,6 +204,15 @@ impl Cache {
         changed
     }
 
+    /// Whether a lookup for `input` is in flight or queued to dispatch, so the
+    /// chrome can say it is waiting on GitHub. A paused account is not loading.
+    pub fn loading(&self, input: &Input, now: Instant) -> bool {
+        self.active.as_ref() == Some(input)
+            || (self.token.is_some()
+                && self.paused_until.is_none_or(|until| now >= until)
+                && self.queue.contains(input))
+    }
+
     /// Pure cache read for chrome painted every frame: never schedules work and
     /// never reorders the cache, so rendering cannot start a request.
     pub fn peek(&self, repo_key: &str, branch: &str) -> Option<&PullRequest> {
