@@ -27,6 +27,7 @@ mod font_sizes;
 mod fonts;
 mod git;
 mod github;
+mod group_menu;
 mod icons;
 mod input;
 mod keymap;

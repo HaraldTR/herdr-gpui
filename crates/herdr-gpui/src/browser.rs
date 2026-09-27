@@ -1,7 +1,7 @@
-//! Browser tabs: web pages shown in place of the terminal, next to a
-//! workspace's Herdr tabs. Herdr panes are always terminals, so these tabs
-//! belong to this client alone; the daemon and its other clients never see
-//! them. Pages are native web views drawn above the window, which is why the
+//! Browser tabs: web pages shown in place of the terminal, or beside it in a
+//! split window, next to a workspace's Herdr tabs. Herdr panes are always
+//! terminals, so these tabs belong to this client alone; the daemon and its
+//! other clients never see them. Pages are native web views drawn above the window, which is why the
 //! window hides them whenever one of its own overlays is open.
 
 #[cfg(any(target_os = "macos", windows, test))]
@@ -10,6 +10,7 @@ mod annotate;
 #[cfg(any(target_os = "macos", windows))]
 mod annotate_view;
 mod feedback;
+mod groups;
 mod location;
 #[cfg(any(target_os = "macos", windows))]
 mod native;
@@ -25,11 +26,14 @@ mod view_tests;
 #[cfg(any(target_os = "macos", windows))]
 pub(crate) use annotate_view::Annotations;
 pub(crate) use feedback::Feedback;
+pub(crate) use groups::{Content, Side};
 pub(crate) use location::{LocalFile, Location};
 #[cfg(any(target_os = "macos", windows))]
 pub(crate) use native::Pages;
 pub(crate) use store::{Scope, Store, Tab, TabId};
 pub(crate) use view::Browser;
+#[cfg(test)]
+pub(crate) use view::scope;
 
 /// Whether this build can show a page inside the window. Elsewhere a browser
 /// tab request opens the system browser instead.

@@ -290,6 +290,7 @@ impl HerdrWindow {
             Page::Workspace
                 | Page::Tab
                 | Page::RenameTab
+                | Page::Group
                 | Page::Pane
                 | Page::RenamePane
                 | Page::Host
@@ -376,6 +377,7 @@ impl HerdrWindow {
                     page,
                     Page::Tab
                         | Page::RenameTab
+                        | Page::Group
                         | Page::Pane
                         | Page::RenamePane
                         | Page::Host
@@ -386,6 +388,8 @@ impl HerdrWindow {
                         .w((viewport.width - px(24.)).max(px(0.)).min(px(
                             if matches!(page, Page::Tab | Page::Pane | Page::Host) {
                                 180.
+                            } else if page == Page::Group {
+                                240.
                             } else {
                                 360.
                             },
@@ -622,6 +626,8 @@ impl HerdrWindow {
             panel = panel.child(self.render_host_menu(cx));
         } else if matches!(page, Page::Tab | Page::RenameTab) {
             panel = panel.child(self.render_tab_menu(cx));
+        } else if page == Page::Group {
+            panel = panel.child(self.render_group_menu(cx));
         } else if matches!(page, Page::Pane | Page::RenamePane) {
             panel = panel.child(self.render_pane_menu(cx));
         } else if page == Page::Keybinds {
@@ -844,6 +850,10 @@ impl HerdrWindow {
                     this.tab_menu_key(event, window, cx);
                     return;
                 }
+                if this.menu.page == Some(Page::Group) {
+                    this.group_menu_key(event, window, cx);
+                    return;
+                }
                 if matches!(this.menu.page, Some(Page::Pane | Page::RenamePane)) {
                     this.pane_menu_key(event, window, cx);
                     return;
@@ -1034,6 +1044,9 @@ impl HerdrWindow {
                     } else {
                         self.menu.anchor
                     })
+                    // The "…" button sits at a strip's right end, so its menu
+                    // hangs leftward from it, as an editor's does.
+                    .when(page == Page::Group, |menu| menu.anchor(Anchor::TopRight))
                     .snap_to_window_with_margin(Edges::all(px(12.)))
                     .child(panel)
                     .into_any_element()

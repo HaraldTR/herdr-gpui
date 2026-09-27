@@ -39,6 +39,7 @@ pub enum Command {
     OpenNotificationTarget,
     NewBrowserTab,
     InstallBrowserSkill,
+    ToggleSplitEditor,
 }
 
 pub struct CommandInfo {
@@ -315,6 +316,12 @@ pub const COMMANDS: &[CommandInfo] = &[
         label: "Install Browser Skill for Agents",
         shortcuts: &[],
     },
+    CommandInfo {
+        command: Command::ToggleSplitEditor,
+        name: "toggle_split_editor",
+        label: "Toggle Split Editor",
+        shortcuts: &["cmd-\\"],
+    },
 ];
 
 pub fn request(command: Command, snapshot: &ClientShellSnapshot) -> Option<(Method, Value)> {
@@ -432,7 +439,8 @@ pub fn request(command: Command, snapshot: &ClientShellSnapshot) -> Option<(Meth
         | Command::About
         | Command::OpenNotificationTarget
         | Command::NewBrowserTab
-        | Command::InstallBrowserSkill => return None,
+        | Command::InstallBrowserSkill
+        | Command::ToggleSplitEditor => return None,
     })
 }
 
@@ -451,7 +459,7 @@ mod tests {
     #[test]
     fn catalog_has_all_native_commands_and_gpui_shortcuts() {
         use Command::*;
-        let expected: [(Command, &[&str]); 44] = [
+        let expected: [(Command, &[&str]); 45] = [
             (OpenNotificationTarget, &["cmd-alt-n"]),
             (Logs, &[]),
             (NewWindow, &["cmd-alt-shift-n"]),
@@ -496,6 +504,7 @@ mod tests {
             (About, &[]),
             (NewBrowserTab, &[]),
             (InstallBrowserSkill, &[]),
+            (ToggleSplitEditor, &["cmd-\\"]),
         ];
         assert_eq!(COMMANDS.len(), expected.len());
         let shortcuts: std::collections::HashSet<_> =
@@ -560,6 +569,7 @@ mod tests {
             Command::About,
             Command::NewBrowserTab,
             Command::InstallBrowserSkill,
+            Command::ToggleSplitEditor,
         ] {
             assert!(request(command, &s).is_none(), "{command:?}");
         }

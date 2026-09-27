@@ -747,6 +747,29 @@ come back after a restart; closing a workspace in Herdr removes its tabs.
 - Close Tab and Close Pane close the browser tab being shown, without asking.
   Clicking a Herdr tab, or switching Herdr tabs in the workspace, shows its
   terminal again.
+- The **…** button at the right end of the tab strip opens a browser tab and
+  closes browser tabs in bulk: **Close Other Browser Tabs** keeps the ones on
+  show, **Close All Browser Tabs** closes the rest too. Herdr tabs run
+  processes, so these never close them.
+
+### Split Editor
+
+The split button beside **…** (or **Toggle Split Editor**, `Cmd-\`) shows two
+sides, each with the same tab strip, as an editor's split does: keep an agent
+on the left and its page on the right. Splitting over a page moves it right
+and brings the terminal back on the left; over the terminal, the right side
+shows the workspace's latest browser tab, or a new one.
+
+- Herdr projects a single terminal and each page is placed once, so a tab
+  never shows on both sides. Choosing on one side what the other shows swaps
+  the two sides.
+- Pressing in a side gives it the keyboard; its chosen tab carries the accent.
+  New browser tabs and Close Tab act on that side. Closing a side's page moves
+  it to a neighbouring browser tab, and Close Tab on an empty side closes the
+  split.
+- Drag the divider to resize. The split button, lit while split, or **Close
+  Split** in **…**, closes the right side; its tabs stay in the strip.
+- Split needs embedded pages, so it is unavailable on Linux.
 - Only `http` and `https` pages open, plus local files an agent shows (below).
   Pages cannot navigate to other schemes
   (so `file:` and applications' custom URL schemes stay closed), downloads are

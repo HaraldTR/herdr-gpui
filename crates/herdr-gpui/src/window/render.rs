@@ -5,9 +5,14 @@
 use super::HerdrWindow;
 use crate::{
     APP_VERSION, CheckForUpdates, Minimize, PlaySound, RunCommand, ShowHerdrNotDetected,
-    ShowUpdatePreview, TAB_HEIGHT, TAB_WIDTH, actions::ShowToastPreview,
-    config::ClipboardToastPosition, controls::Command, fonts::StyledFont,
-    navigation::NavigationTarget, state::ConnectionStatus, terminal::*, worktree_banner,
+    ShowUpdatePreview,
+    actions::ShowToastPreview,
+    browser::{Content, Side},
+    config::ClipboardToastPosition,
+    fonts::StyledFont,
+    state::ConnectionStatus,
+    terminal::*,
+    worktree_banner,
 };
 use gpui::{prelude::*, *};
 use herdr_client::ConnectOptions;
@@ -33,112 +38,6 @@ impl Render for HerdrWindow {
                 f32::from(window.viewport_size().width),
             )
         });
-        let mut tabs = div()
-            .id("tabs")
-            .flex()
-            .flex_none()
-            .h(px((self.config.tabs.size * 1.6 + 4.).max(TAB_HEIGHT)))
-            .text_font(&self.config.tabs)
-            .text_size(px(self.config.tabs.size))
-            .overflow_x_scroll()
-            .bg(rgb(self.theme.surface))
-            .text_color(rgb(self.theme.foreground))
-            .items_center();
-        // A page covering the terminal takes the selection from its tab.
-        let shown = self.shown_browser_tab(cx);
-        if let Some(snapshot) = &self.live.snapshot {
-            for tab in snapshot
-                .tabs
-                .iter()
-                .filter(|t| Some(&t.workspace_id) == snapshot.focused_workspace_id.as_ref())
-            {
-                let id = tab.tab_id.clone();
-                let context_id = id.clone();
-                let close_id = id.clone();
-                // Selected tabs carry the theme's accent, so the choice reads as
-                // primary rather than as the hover tint used elsewhere; the rest
-                // recede into the strip, as they do in the reference UI.
-                let (background, text) = if tab.focused && shown.is_none() {
-                    let background = self.theme.primary_wash();
-                    (background, self.theme.text_on(background))
-                } else {
-                    (self.theme.surface, self.theme.muted)
-                };
-                tabs = tabs.child(
-                    div()
-                        .id(SharedString::from(format!("tab-{id}")))
-                        .debug_selector({
-                            let id = id.clone();
-                            move || format!("tab-{id}")
-                        })
-                        .pl(px(12.))
-                        // The close button hugs the tab's inner right edge, well
-                        // clear of the label it would otherwise crowd.
-                        .pr(px(3.))
-                        .py(px(2.))
-                        // Even cells divided by a single rule, as in the reference UI.
-                        .min_w(px(TAB_WIDTH))
-                        .border_r_1()
-                        .border_color(rgb(self.theme.active))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .cursor_pointer()
-                        .bg(rgb(background))
-                        .text_color(rgb(text))
-                        .child(tab.label.clone())
-                        .child(
-                            div()
-                                .id("close-tab")
-                                .debug_selector({
-                                    let id = id.clone();
-                                    move || format!("close-tab-{id}")
-                                })
-                                .size(px(18.))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(crate::config::corners::CONTROL))
-                                .hover(move |s| s.bg(rgba((text << 8) | 0x24)))
-                                .child(
-                                    svg()
-                                        .path("icons/close.svg")
-                                        .debug_selector({
-                                            let id = id.clone();
-                                            move || format!("close-tab-icon-{id}")
-                                        })
-                                        .size(px(12.))
-                                        .text_color(rgb(text)),
-                                )
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation();
-                                })
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.open_tab_close(&close_id, window, cx);
-                                })),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                cx.stop_propagation();
-                                this.open_tab_menu(&context_id, event.position, window, cx);
-                                this.menu.opening_right_click =
-                                    this.menu.page == Some(crate::menu::Page::Tab);
-                            }),
-                        )
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.show_terminal(cx);
-                            this.navigate(NavigationTarget::Tab(&id), cx);
-                            window.focus(&this.focus, cx);
-                        })),
-                );
-            }
-        }
-        let browser_tabs = self.browser_tab_entries(shown.as_ref().map(|tab| tab.id), cx);
-        tabs = tabs.children(browser_tabs);
         // Paints the frame on screen, which during a focus change is the one
         // presented before it: the terminal area never blanks between two
         // projections. What the client knows to be current stays in `live`.
@@ -168,10 +67,19 @@ impl Render for HerdrWindow {
         } else {
             0.
         };
+        // Only the left side meets the sidebar, so only it takes the gap.
+        let side_gap = |side: Side| if side == Side::Left { sidebar_gap } else { 0. };
+        let groups = self.browser_groups(cx);
+        let sides = self.visible_sides();
+        let terminal_side = sides
+            .iter()
+            .copied()
+            .find(|side| groups.content(*side) == Content::Terminal);
+        let terminal_gap = terminal_side.map_or(sidebar_gap, side_gap);
         let terminal = div()
             .id("terminal")
             .debug_selector(|| "terminal".into())
-            .pl(px(sidebar_gap))
+            .pl(px(terminal_gap))
             .when(self.hovered_terminal_link, |terminal| {
                 terminal.cursor_pointer()
             })
@@ -445,7 +353,7 @@ impl Render for HerdrWindow {
                         // The pane's own padding is not part of the terminal:
                         // the flash spans the cells, so centering centers on
                         // them and a corner is the corner of the grid.
-                        .left(px(sidebar_gap))
+                        .left(px(terminal_gap))
                         .right_0()
                         .px(px(12.))
                         .flex()
@@ -475,11 +383,36 @@ impl Render for HerdrWindow {
                         ),
                 )
             });
-        let content = match &shown {
-            Some(tab) => self.render_browser(tab, sidebar_gap, cx),
-            None => terminal.into_any_element(),
-        };
-        self.present_browser(shown.as_ref().map(|tab| tab.id), cx);
+        // A focus handle belongs to one element: the terminal when drawn,
+        // otherwise the first side.
+        let keyboard = terminal_side.is_none().then(|| sides[0]);
+        let mut terminal = Some(terminal);
+        let mut columns = Vec::with_capacity(sides.len());
+        for side in sides.iter().copied() {
+            let content = groups.content(side);
+            let tab = match content {
+                Content::Page(id) => cx
+                    .try_global::<crate::browser::Store>()
+                    .and_then(|store| store.get(id))
+                    .cloned(),
+                Content::Terminal | Content::Empty => None,
+            };
+            let body = match (content, tab) {
+                (Content::Terminal, _) => terminal
+                    .take()
+                    .map(IntoElement::into_any_element)
+                    .unwrap_or_else(|| div().into_any_element()),
+                (Content::Page(_), Some(tab)) => {
+                    self.render_browser(side, &tab, side_gap(side), keyboard == Some(side), cx)
+                }
+                (Content::Page(_) | Content::Empty, _) => {
+                    self.render_empty_side(side, side_gap(side), keyboard == Some(side), cx)
+                }
+            };
+            columns.push(self.render_side(side, content, body, cx));
+        }
+        let content = self.render_sides(columns, cx);
+        self.present_browser(cx);
         let status = (!matches!(self.live.status, ConnectionStatus::Connected)
             || self.local_error.is_some()
             || self.live.error.is_some())
@@ -552,43 +485,6 @@ impl Render for HerdrWindow {
                              .flex_1()
                              .min_w_0()
                              .min_h_0()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_none()
-                                    .bg(rgb(self.theme.surface))
-                                    .text_color(rgb(self.theme.foreground))
-                                    // Tabs size to their content and shrink when the
-                                    // row is full, so the button sits after the last
-                                    // tab instead of at the far right of the window.
-                                    .child(tabs.flex_shrink_1().min_w_0())
-                                    .child(
-                                        div()
-                                            .id("new-tab")
-                                            .debug_selector(|| "new-tab".into())
-                                            .w(px(34.))
-                                            .min_h(px(TAB_HEIGHT))
-                                            .border_r_1()
-                                            .border_color(rgb(self.theme.active))
-                                            .flex_none()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .cursor_pointer()
-                                            .hover(|s| s.bg(rgb(self.theme.active)))
-                                            .child(
-                                                svg()
-                                                    .path("icons/plus.svg")
-                                                    .debug_selector(|| "new-tab-icon".into())
-                                                    .size(px(14.))
-                                                    // Quiet like the unselected tabs beside it.
-                                                    .text_color(rgb(self.theme.muted)),
-                                            )
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.command(Command::Tab, window, cx)
-                                            })),
-                                    ),
-                            )
                             .child(content)
                             .child(
                 div()

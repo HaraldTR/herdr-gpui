@@ -28,6 +28,8 @@ pub(crate) enum Page {
     AgentSkill,
     Tab,
     RenameTab,
+    /// A tab strip's "…" menu: browser tabs in bulk and the split.
+    Group,
     Pane,
     RenamePane,
     Workspace,

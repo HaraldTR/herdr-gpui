@@ -16,6 +16,7 @@ mod mouse;
 mod pending_input;
 mod render;
 mod selection;
+mod tab_strip;
 mod toasts;
 mod transfers;
 #[cfg(test)]
