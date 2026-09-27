@@ -236,7 +236,8 @@ impl HerdrWindow {
                 | Command::Zoom
                 | Command::ClearPane
                 | Command::ClosePane
-                | Command::CloseTab => 0,
+                | Command::CloseTab
+                | Command::NewBrowserTab => 0,
                 Command::NextTab
                 | Command::PreviousTab
                 | Command::FocusLeft
@@ -260,7 +261,8 @@ impl HerdrWindow {
                 | Command::Reconnect
                 | Command::Quit
                 | Command::Logs
-                | Command::About => 2,
+                | Command::About
+                | Command::InstallBrowserSkill => 2,
                 Command::OpenNotificationTarget => 1,
             };
             groups[group].1.push((keys, info.label));

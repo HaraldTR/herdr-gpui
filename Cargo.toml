@@ -37,6 +37,9 @@ flate2               = "1"
 foreign-types        = "0.5"
 gpui                 = { package = "gpui-pre", version = "=0.3.6" }
 gpui_platform        = { package = "gpui-pre-platform", version = "=0.3.6" }
+gpui-wry             = "=0.6.5"
+# The same wry gpui-wry builds on; it does not re-export the builder.
+wry                  = { package = "lb-wry", version = "=0.53.3" }
 herdr-client         = { path = "crates/herdr-client" }
 herdr-protocol       = { path = "crates/herdr-protocol" }
 interprocess         = "2.4.2"

@@ -117,11 +117,14 @@ pub(crate) fn run() -> std::process::ExitCode {
         Ok(options) => options,
         Err(error) => {
             eprintln!(
-                "{error}\nUsage: herdr-gpui [--socket CLIENT_SOCKET | --session NAME [--dev]]"
+                "{error}\nUsage: herdr-gpui [--socket CLIENT_SOCKET | --session NAME [--dev]]\n       herdr-gpui browser open URL [--workspace ID] [--no-focus]"
             );
             return std::process::ExitCode::from(2);
         }
     };
+    if let LaunchMode::Browser(command) = mode {
+        return crate::control::run(command);
+    }
     if mode == LaunchMode::BuildInfo {
         print!("{}", cli::build_info());
         return std::process::ExitCode::SUCCESS;
@@ -132,6 +135,9 @@ pub(crate) fn run() -> std::process::ExitCode {
         );
         println!(
             "  --build-info        Print the executable's build identity without starting the GUI"
+        );
+        println!(
+            "  browser open URL    Show URL in a browser tab of the running app (see browser --help)"
         );
         #[cfg(feature = "integration-test")]
         println!(
@@ -175,12 +181,23 @@ pub(crate) fn run() -> std::process::ExitCode {
     };
     let failed = startup_failed.clone();
     let window_state = (mode == LaunchMode::Normal).then(crate::window_state::WindowState::load);
+    // Fixtures start with no tabs and never write the file.
+    let browser_tabs = if mode == LaunchMode::Normal {
+        crate::browser::Store::load()
+    } else {
+        crate::browser::Store::default()
+    };
     gpui_platform::application()
         .with_assets(icons::Icons)
         .run(move |cx| {
             let window_count = window_state.as_ref().map_or(1, |state| state.count());
             if let Some(state) = window_state {
                 state.install(cx);
+            }
+            browser_tabs.install(cx);
+            // Only the user's own app answers agents; native test modes stay private.
+            if mode == LaunchMode::Normal {
+                crate::control::install(cx);
             }
             cx.set_global(appearance);
             app_icon::install();

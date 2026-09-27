@@ -1091,6 +1091,8 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         },
         surface_signal: cx.new(|_| crate::window::SurfaceSignal),
         _sidebar_invalidation: HerdrWindow::invalidate_sidebar(cx),
+        browser: crate::browser::Browser::new(cx),
+        _browser_tabs: cx.observe_global::<crate::browser::Store>(|_, cx| cx.notify()),
     }
 }
 

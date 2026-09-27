@@ -163,6 +163,12 @@ binary **client** socket, renders the surfaces it is sent, and sends semantic
 input back. Closing or detaching the GUI leaves the daemon and its terminals
 running.
 
+[Browser tabs](crates/herdr-gpui/README.md#browser-tabs) are the exception:
+Herdr has no browser panes, so web pages shown beside a workspace's terminals
+belong to the GUI alone. Agents in your panes open them with
+`herdr-gpui browser open URL`, which reaches the running app over a local
+socket of its own.
+
 ## Audio Test
 
 The QA menu is excluded from default Cargo builds, including published releases.

@@ -2,7 +2,7 @@
 //! ordered surface barrier so input cannot reach the previous pane while the
 //! navigation and its projection are still in flight.
 
-use super::HerdrWindow;
+use super::{Flash, HerdrWindow};
 use crate::{
     app::InitialAppearance,
     config::{Config, FONT_SIZE_RANGE, FONT_SIZE_STEP, LayoutMode},
@@ -211,8 +211,21 @@ impl HerdrWindow {
                 open_additional_window(self.endpoints[0].connection.target.clone(), cx);
                 return;
             }
+            // A page has no panes, so either close closes its tab, as in
+            // a web browser; nothing runs in it that needs confirming.
             Command::ClosePane | Command::CloseTab => {
-                self.open_close_confirmation(command, window, cx);
+                match self.shown_browser_tab(cx) {
+                    Some(tab) => self.close_browser_tab(tab.id, cx),
+                    None => self.open_close_confirmation(command, window, cx),
+                }
+                return;
+            }
+            Command::NewBrowserTab => {
+                self.open_browser_tab(None, window, cx);
+                return;
+            }
+            Command::InstallBrowserSkill => {
+                self.install_browser_skill(cx);
                 return;
             }
             Command::Palette | Command::WorkspacePicker => {
@@ -286,5 +299,37 @@ impl HerdrWindow {
         }
         window.focus(&self.focus, cx);
         cx.notify();
+    }
+
+    /// Writes the agent skill for browser tabs where Claude Code and other
+    /// agents look for skills. Only on request: nothing edits agent
+    /// configuration by itself.
+    fn install_browser_skill(&mut self, cx: &mut Context<Self>) {
+        let home = match crate::config::home() {
+            Ok(home) => home,
+            Err(error) => {
+                self.show_flash(Flash::warning(error.to_string()), cx);
+                return;
+            }
+        };
+        let install = cx.background_executor().spawn(async move {
+            let text = crate::control::skill(std::env::current_exe().ok().as_deref());
+            crate::control::install_skill(&home, &text)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = install.await;
+            this.update(cx, |this, cx| {
+                let flash = match result {
+                    Ok(paths) => Flash::success(match paths.as_slice() {
+                        [path] => format!("Installed the browser skill at {}", path.display()),
+                        _ => format!("Installed the browser skill in {} places", paths.len()),
+                    }),
+                    Err(error) => Flash::warning(error.to_string()),
+                };
+                this.show_flash(flash, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 }

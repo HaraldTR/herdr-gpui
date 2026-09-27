@@ -147,6 +147,9 @@ pub(crate) struct HerdrWindow {
     /// the window while the cached sidebar keeps its layout.
     pub(crate) surface_signal: Entity<SurfaceSignal>,
     pub(crate) _sidebar_invalidation: Subscription,
+    /// Browser tabs this window shows, and its pages for them.
+    pub(crate) browser: crate::browser::Browser,
+    pub(crate) _browser_tabs: Subscription,
 }
 
 /// See `HerdrWindow::surface_signal`.
@@ -217,7 +220,23 @@ impl HerdrWindow {
             .snapshot
             .as_ref()
             .and_then(|s| s.focused_pane_id.clone());
+        let focused_tab = |live: &LiveState| {
+            live.snapshot
+                .as_ref()
+                .map(|s| (s.focused_workspace_id.clone(), s.focused_tab_id.clone()))
+        };
+        let old_tab = focused_tab(&self.live);
         self.poll_endpoints(cx);
+        // Switching Herdr tabs within a workspace, from a shortcut or an
+        // agent, brings its terminal back from behind a page.
+        if let (Some((old_workspace, old_tab)), Some((workspace, tab))) =
+            (old_tab, focused_tab(&self.live))
+            && old_workspace == workspace
+            && old_tab != tab
+        {
+            self.show_terminal(cx);
+        }
+        self.poll_browser(window, cx);
         self.poll_sessions(cx);
         self.flush_scrollbar(cx);
         self.flush_split(cx);
@@ -400,6 +419,9 @@ impl HerdrWindow {
             sidebar_view,
             surface_signal: cx.new(|_| SurfaceSignal),
             _sidebar_invalidation: Self::invalidate_sidebar(cx),
+            browser: crate::browser::Browser::new(cx),
+            // Another window, or an agent, may open or close a tab.
+            _browser_tabs: cx.observe_global::<crate::browser::Store>(|_, cx| cx.notify()),
             _activation: cx.observe_window_activation(window, |this, window, cx| {
                 this.active = window.is_window_active();
                 if !this.active {

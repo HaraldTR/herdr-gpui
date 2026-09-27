@@ -5,6 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(any(target_os = "macos", windows))]
+use wry::raw_window_handle::HandleError as WindowHandleError;
+
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 fn daemon_error_message(error: &serde_json::Value) -> &str {
@@ -333,6 +336,45 @@ pub enum Error {
     Client(#[from] herdr_client::Error),
     #[error("neither XDG_STATE_HOME nor HOME is set")]
     MissingStateRoot,
+    #[error("{} exceeds {limit} bytes", path.display())]
+    StateFileSize { path: PathBuf, limit: u64 },
+    #[error("Browser tabs open only http and https addresses with a host, of at most 8 KiB.")]
+    InvalidBrowserUrl,
+    #[error("Invalid saved browser tabs")]
+    InvalidBrowserTabs,
+    #[error("Herdr GPUI is not running, or its control socket {} is unreachable: {source}", path.display())]
+    ControlUnavailable {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("Another Herdr GPUI already serves {}", path.display())]
+    ControlSocketInUse { path: PathBuf },
+    #[error("Control request or response exceeds {limit} bytes")]
+    ControlMessageSize { limit: usize },
+    #[error("Herdr GPUI closed the control connection without answering")]
+    ControlNoResponse,
+    #[error("{message}")]
+    ControlRejected {
+        code: crate::control::ErrorCode,
+        message: String,
+    },
+    #[error(
+        "Controlling a running Herdr GPUI needs a Unix socket, which this platform build does not provide"
+    )]
+    ControlUnsupported,
+    #[cfg(any(target_os = "macos", windows))]
+    #[error("Could not create the page: {0}")]
+    WebView(#[from] wry::Error),
+    #[cfg(any(target_os = "macos", windows))]
+    #[error("Could not reach the native window for the page: {0}")]
+    WindowHandle(#[from] WindowHandleError),
+    #[error("Could not install the agent skill at {}: {source}", path.display())]
+    SkillInstall {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("{0}")]
     DeviceSetupInput(&'static str),
     #[error("Saving the device failed ({status}){}", if detail.is_empty() { String::new() } else { format!(": {detail}") })]
