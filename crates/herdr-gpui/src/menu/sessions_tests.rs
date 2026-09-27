@@ -713,3 +713,31 @@ fn choosing_a_remote_row_selects_that_device(cx: &mut TestAppContext) {
         assert_eq!(view.menu.page, None);
     });
 }
+
+#[gpui::test]
+fn a_device_offers_add_session_only_while_it_is_online(cx: &mut TestAppContext) {
+    let (view, cx) =
+        on_the_first_device(cx, Some(reported(&[("default", true), ("agents", false)])));
+    // The device's two sessions come first, then its Add row.
+    click(cx, "sessions-row-2");
+    cx.update(|_, cx| {
+        let view = view.read(cx);
+        assert!(
+            view.menu.session_edit.is_none(),
+            "an offline host adds nothing"
+        );
+        assert!(view.menu.page.is_some(), "the list stays open");
+    });
+    view.update(cx, |view, cx| {
+        view.endpoints[1].live.status = crate::state::ConnectionStatus::Connected;
+        cx.notify();
+    });
+    draw(cx);
+    click(cx, "sessions-row-2");
+    cx.update(|_, cx| {
+        assert!(matches!(
+            view.read(cx).menu.session_edit,
+            Some(super::sessions::Edit::Create { .. })
+        ));
+    });
+}

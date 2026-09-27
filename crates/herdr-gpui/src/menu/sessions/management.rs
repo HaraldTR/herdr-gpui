@@ -28,16 +28,10 @@ impl HerdrWindow {
             )
     }
 
-    pub(super) fn add_session_entry(target: Target, enabled: bool) -> Entry {
-        let detail = if enabled {
-            "Create and connect"
-        } else {
-            match &target {
-                Target::Local => "Unavailable with --socket or --dev",
-                Target::Device { .. } if cfg!(windows) => "SSH is unavailable on Windows",
-                Target::Device { .. } => "Enable this device to manage sessions",
-            }
-        };
+    pub(super) fn add_session_entry(&self, target: Target) -> Entry {
+        let unavailable = self.create_unavailable(&target);
+        let enabled = unavailable.is_none();
+        let detail = unavailable.unwrap_or("Create and connect");
         Entry::Row {
             row: Row::Add(target),
             spec: Spec {
@@ -68,12 +62,31 @@ impl HerdrWindow {
         }
     }
 
-    fn target_available(&self, target: &Target) -> bool {
+    /// Why a session cannot be created on `target` right now, if it cannot. A
+    /// device must be connected: its sessions are created over the same SSH
+    /// route, and an offline host would only fail after the form is filled in.
+    fn create_unavailable(&self, target: &Target) -> Option<&'static str> {
         match target {
-            Target::Local => self.local_management_available(),
-            Target::Device { id, host } => self.endpoints.iter().any(|e| e.id == *id && e.enabled
-                && matches!(&e.connection.target, ConnectTarget::Ssh { target, .. } if target == host)) && !cfg!(windows),
+            Target::Local => {
+                (!self.local_management_available()).then_some("Unavailable with --socket or --dev")
+            }
+            Target::Device { .. } if cfg!(windows) => Some("SSH is unavailable on Windows"),
+            Target::Device { id, host } => {
+                let Some(endpoint) = self.endpoints.iter().find(|e| {
+                    e.id == *id
+                        && e.enabled
+                        && matches!(&e.connection.target, ConnectTarget::Ssh { target, .. } if target == host)
+                }) else {
+                    return Some("Enable this device to manage sessions");
+                };
+                (!endpoint.live.status.is_connected())
+                    .then_some("Available once this device is online")
+            }
         }
+    }
+
+    fn target_available(&self, target: &Target) -> bool {
+        self.create_unavailable(target).is_none()
     }
 
     pub(super) fn session_delete_reason(&self, row: &Row) -> Option<&'static str> {
