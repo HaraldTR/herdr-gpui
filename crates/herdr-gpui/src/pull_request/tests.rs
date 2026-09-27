@@ -109,6 +109,24 @@ fn explicit_refresh_respects_account_backoff_and_bounds_the_queue() {
 }
 
 #[test]
+fn loading_covers_queued_and_in_flight_lookups_but_not_a_paused_account() {
+    let mut peer = Peer::new();
+    let now = Instant::now();
+    let input = input("feature");
+    assert!(!peer.cache.loading(&input, now));
+    peer.cache.refresh(input.clone(), now);
+    assert!(peer.cache.loading(&input, now), "queued for dispatch");
+    peer.cache.paused_until = Some(now + ERROR_BACKOFF);
+    assert!(!peer.cache.loading(&input, now), "a paused account waits");
+    peer.cache.paused_until = None;
+    peer.cache.poll(now);
+    assert!(peer.cache.loading(&input, now), "in flight");
+    assert!(!peer.cache.loading(&self::input("other"), now));
+    peer.complete(now, Ok(Some(fixture().unwrap())), None);
+    assert!(!peer.cache.loading(&input, now));
+}
+
+#[test]
 fn cache_prefetches_without_menu_and_refreshes_at_ttl_with_stale_data() {
     let mut peer = Peer::new();
     let now = Instant::now();
