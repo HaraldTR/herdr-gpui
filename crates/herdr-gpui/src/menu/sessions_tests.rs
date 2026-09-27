@@ -419,6 +419,11 @@ fn local_rows_paint_a_dot_and_mark_the_current_session(cx: &mut TestAppContext) 
         bounds(cx, "sessions-delete-icon-0").size,
         size(px(14.), px(14.))
     );
+    // Add ends in a plus, lined up with the trash icons above it.
+    assert_eq!(
+        bounds(cx, "sessions-add-icon-2").center().x,
+        bounds(cx, "sessions-delete-icon-0").center().x
+    );
     // A stopped session says what selecting it does, and the fixture has no
     // saved devices to list.
     assert!(cx.debug_bounds("sessions-stopped").is_some());
@@ -706,5 +711,37 @@ fn choosing_a_remote_row_selects_that_device(cx: &mut TestAppContext) {
         assert_eq!(view.selected_endpoint, 1, "the device became current");
         assert_eq!(view.device_filter.as_deref(), Some("ssh:fixture"));
         assert_eq!(view.menu.page, None);
+    });
+}
+
+#[gpui::test]
+fn a_device_offers_add_session_only_while_it_is_online(cx: &mut TestAppContext) {
+    let (view, cx) =
+        on_the_first_device(cx, Some(reported(&[("default", true), ("agents", false)])));
+    // The device's two sessions come first, then its Add row.
+    click(cx, "sessions-row-2");
+    cx.update(|_, cx| {
+        let view = view.read(cx);
+        assert!(
+            view.menu.session_edit.is_none(),
+            "an offline host adds nothing"
+        );
+        assert!(view.menu.page.is_some(), "the list stays open");
+    });
+    view.update(cx, |view, cx| {
+        view.endpoints[1].live.status = crate::state::ConnectionStatus::Connected;
+        cx.notify();
+    });
+    draw(cx);
+    click(cx, "sessions-row-2");
+    cx.update(|_, cx| {
+        // Windows has no SSH route, so even an online device adds nothing there.
+        assert_eq!(
+            matches!(
+                view.read(cx).menu.session_edit,
+                Some(super::sessions::Edit::Create { .. })
+            ),
+            !cfg!(windows)
+        );
     });
 }

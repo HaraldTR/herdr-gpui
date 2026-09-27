@@ -382,6 +382,9 @@ impl HerdrWindow {
                     .when(self.menu.selected == Some(index), |s| {
                         s.bg(rgb(self.theme.active))
                     })
+                    // The current scope is highlighted as the session list marks
+                    // its current session, rather than with a trailing check.
+                    .when(checked, |s| s.bg(rgb(self.theme.primary_wash())))
                     .when(enabled, |s| s.cursor_pointer())
                     .text_color(rgb(if enabled {
                         self.theme.foreground
@@ -420,7 +423,20 @@ impl HerdrWindow {
                                                 })),
                                         )
                                     })
-                                    .child(div().flex_1().min_w_0().truncate().child(label)),
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .when(checked, |label| {
+                                                label
+                                                    .debug_selector(move || {
+                                                        format!("device-current-{index}")
+                                                    })
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                            })
+                                            .child(label),
+                                    ),
                             )
                             .child(
                                 div()
@@ -441,14 +457,6 @@ impl HerdrWindow {
                                 } else {
                                     self.theme.muted
                                 })),
-                        )
-                    })
-                    .when(checked, |row| {
-                        row.child(
-                            div()
-                                .debug_selector(move || format!("device-check-{index}"))
-                                .flex_none()
-                                .child("✓"),
                         )
                     })
                     .on_hover(cx.listener(move |this, hovered, _, cx| {

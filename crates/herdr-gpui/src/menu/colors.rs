@@ -24,9 +24,9 @@ pub(super) fn action_hover(theme: &crate::config::Theme) -> Rgba {
     rgb(theme.active).blend(rgba((theme.foreground << 8) | 0x60))
 }
 
-/// The connected-or-running indicator the device picker and the session list
-/// both green, so one machine's state reads the same in each.
-pub(super) const ONLINE: u32 = 0x63c68b;
+/// The connected-or-running indicator the device picker, the session list, and
+/// the sidebar host headers all share, so one machine's state reads the same in each.
+pub(crate) const ONLINE: u32 = 0x63c68b;
 
 #[cfg(test)]
 mod tests {

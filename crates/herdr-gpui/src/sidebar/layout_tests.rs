@@ -923,6 +923,24 @@ fn multi_host_rows_scope_duplicate_ids_and_keep_agents_when_host_collapses(
     ] {
         assert!(cx.debug_bounds(selector).is_some(), "missing {selector}");
     }
+    // Each host header ends in a status dot, never a status word.
+    for (header, dot) in [
+        ("host-local", "host-status-local"),
+        ("host-ssh:test", "host-status-ssh:test"),
+    ] {
+        let header = cx.debug_bounds(header).unwrap();
+        let dot = cx.debug_bounds(dot).unwrap();
+        assert_eq!(
+            dot.size,
+            size(px(super::STATUS_WIDTH), px(super::STATUS_WIDTH))
+        );
+        assert!(header.contains(&dot.center()));
+    }
+    cx.update(|_, cx| {
+        for word in ["online", "connecting", "reconnecting"] {
+            assert!(!cx.global::<TextProbes>().0.contains_key(word), "{word}");
+        }
+    });
     for (icon, title) in [
         ("github-herdr", "name-herdr"),
         ("github-remote workspace", "name-remote workspace"),
@@ -2838,14 +2856,12 @@ fn device_footer_filters_both_lists_and_opens_settings(cx: &mut gpui::TestAppCon
         assert_eq!(menu.size.width, px(280.));
         assert_eq!(menu.left(), picker_bounds.left());
         assert_eq!(picker_bounds.top() - menu.bottom(), px(12.));
-        for (row, marker) in [
-            ("device-row-0", "device-check-0"),
-            ("device-row-1", "device-dot-1"),
-        ] {
-            let row = cx.debug_bounds(row).unwrap();
-            let marker = cx.debug_bounds(marker).unwrap();
-            assert!((row.center().y - marker.center().y).abs() <= px(0.5));
-        }
+        // The current scope is highlighted, not checked.
+        assert!(cx.debug_bounds("device-current-0").is_some());
+        assert!(cx.debug_bounds("device-current-1").is_none());
+        let row = cx.debug_bounds("device-row-1").unwrap();
+        let dot = cx.debug_bounds("device-dot-1").unwrap();
+        assert!((row.center().y - dot.center().y).abs() <= px(0.5));
         cx.simulate_keystrokes("escape");
         cx.update(|window, cx| full_draw(window, cx).clear(cx));
     }

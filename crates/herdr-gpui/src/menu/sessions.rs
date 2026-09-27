@@ -248,13 +248,10 @@ impl HerdrWindow {
             });
         }
         if let ConnectTarget::Ssh { target, .. } = &endpoint.connection.target {
-            entries.push(Self::add_session_entry(
-                management::Target::Device {
-                    id: endpoint.id.clone(),
-                    host: target.clone(),
-                },
-                endpoint.enabled && !cfg!(windows),
-            ));
+            entries.push(self.add_session_entry(management::Target::Device {
+                id: endpoint.id.clone(),
+                host: target.clone(),
+            }));
         }
     }
 
@@ -288,10 +285,7 @@ impl HerdrWindow {
             row: Row::Local(session.name.clone()),
             spec: self.local_session_spec(session),
         }));
-        entries.push(Self::add_session_entry(
-            management::Target::Local,
-            self.local_management_available(),
-        ));
+        entries.push(self.add_session_entry(management::Target::Local));
     }
 
     /// The child index of each selectable row, which is what navigation and the
@@ -440,6 +434,20 @@ impl HerdrWindow {
                         );
                     })),
                 )
+            })
+            // Sits in the trash column; the whole row is the click target.
+            .when(!removable, |container| {
+                let color = rgb(if spec.enabled {
+                    theme.foreground
+                } else {
+                    theme.muted
+                });
+                container.child(super::action_icon(
+                    "icons/plus.svg",
+                    format!("sessions-add-icon-{row}"),
+                    color,
+                    color,
+                ))
             })
             .on_hover(cx.listener(move |this, hovered, _, cx| {
                 if *hovered {

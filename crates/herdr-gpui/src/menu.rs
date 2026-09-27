@@ -31,7 +31,7 @@ mod worktree_open_tests;
 mod worktree_tests;
 
 pub(crate) use {
-    colors::accent,
+    colors::{ONLINE, accent},
     page::{Page, WorkspaceAction},
     state::{MenuState, Removal},
     worktree_source::WorktreeSource,
