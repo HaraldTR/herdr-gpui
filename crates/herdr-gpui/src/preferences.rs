@@ -359,6 +359,33 @@ impl HerdrWindow {
             .child(note(
                 "Optional behaviors, off by default. Turn one on in the [features] table of the local GUI config file; saved changes reload automatically.",
             ))
+            .child(section("AGENTS"));
+        let installed = crate::agent_skill::AgentSkill::choice(cx)
+            == Some(crate::agent_skill::Choice::Installed);
+        body = body
+            .child(row(
+                "preferences-browser-skill",
+                "Browser skill",
+                if installed { "Installed, kept up to date" } else { "Not installed" }.into(),
+            ))
+            .child(div().py(px(10.)).child(if installed {
+                button("preferences-remove-browser-skill", "Remove browser skill").on_click(
+                    cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.remove_browser_skill(cx);
+                    }),
+                )
+            } else {
+                button("preferences-install-browser-skill", "Install browser skill").on_click(
+                    cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.install_browser_skill(window, cx);
+                    }),
+                )
+            }))
+            .child(note(
+                "Teaches Claude Code and other agents to show you pages in browser tabs and read the notes you send. Lives in ~/.claude/skills and ~/.agents/skills. Remove deletes only the copies this app wrote.",
+            ))
             .child(section("CONFIGURATION"))
             .child(
                 div()

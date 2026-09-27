@@ -21,9 +21,15 @@ pub enum LaunchMode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BrowserCommand {
     Open {
-        url: String,
+        /// A web address or a local file, told apart when it runs.
+        target: String,
         workspace: Option<String>,
         focus: bool,
+    },
+    Reload,
+    /// Waits up to `wait` seconds for notes; zero only checks.
+    Feedback {
+        wait: u64,
     },
     Skill,
     Help,
@@ -51,12 +57,14 @@ pub enum CliError {
     UnknownOption(OsString),
     #[error("--socket cannot be combined with --session or --dev")]
     ConflictingConnectionOptions,
-    #[error("browser requires a command: open URL, skill, or --help")]
+    #[error("browser requires a command: open, reload, feedback, skill, or --help")]
     MissingBrowserCommand,
     #[error("Unknown browser command: {}", .0.to_string_lossy())]
     UnknownBrowserCommand(OsString),
-    #[error("browser open requires one URL")]
+    #[error("browser open requires one URL or file")]
     MissingUrl,
+    #[error("--wait requires a number of seconds")]
+    InvalidWait,
     #[error("browser open accepts one URL; unexpected {}", .0.to_string_lossy())]
     UnexpectedArgument(OsString),
     #[error("--workspace requires an ID")]
@@ -106,16 +114,39 @@ fn parse_browser(mut args: impl Iterator<Item = OsString>) -> Result<BrowserComm
     let command = args.next().ok_or(CliError::MissingBrowserCommand)?;
     match command.to_str() {
         Some("--help" | "-h") => return Ok(BrowserCommand::Help),
-        Some("skill") => {
+        Some(simple @ ("skill" | "reload")) => {
+            let command = if simple == "skill" {
+                BrowserCommand::Skill
+            } else {
+                BrowserCommand::Reload
+            };
             return match args.next() {
-                None => Ok(BrowserCommand::Skill),
+                None => Ok(command),
+                Some(extra) if extra == "--help" || extra == "-h" => Ok(BrowserCommand::Help),
                 Some(extra) => Err(CliError::UnexpectedArgument(extra)),
             };
+        }
+        Some("feedback") => {
+            let mut wait = 0;
+            while let Some(arg) = args.next() {
+                match arg.to_str() {
+                    Some("--help" | "-h") => return Ok(BrowserCommand::Help),
+                    Some("--wait") => {
+                        wait = args
+                            .next()
+                            .and_then(|value| value.to_str()?.parse::<u64>().ok())
+                            .filter(|seconds| *seconds > 0)
+                            .ok_or(CliError::InvalidWait)?;
+                    }
+                    _ => return Err(CliError::UnexpectedArgument(arg)),
+                }
+            }
+            return Ok(BrowserCommand::Feedback { wait });
         }
         Some("open") => {}
         _ => return Err(CliError::UnknownBrowserCommand(command)),
     }
-    let (mut url, mut workspace, mut focus) = (None, None, true);
+    let (mut target, mut workspace, mut focus) = (None, None, true);
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--help" | "-h") => return Ok(BrowserCommand::Help),
@@ -129,14 +160,14 @@ fn parse_browser(mut args: impl Iterator<Item = OsString>) -> Result<BrowserComm
                     .ok_or(CliError::MissingWorkspace)?;
                 workspace = Some(utf8(value)?);
             }
-            _ if url.is_none() && !arg.as_encoded_bytes().starts_with(b"-") => {
-                url = Some(utf8(arg)?);
+            _ if target.is_none() && !arg.as_encoded_bytes().starts_with(b"-") => {
+                target = Some(utf8(arg)?);
             }
             _ => return Err(CliError::UnexpectedArgument(arg)),
         }
     }
     Ok(BrowserCommand::Open {
-        url: url.ok_or(CliError::MissingUrl)?,
+        target: target.ok_or(CliError::MissingUrl)?,
         workspace,
         focus,
     })
@@ -277,7 +308,7 @@ mod tests {
         assert_eq!(
             mode(&["browser", "open", "localhost:3000"]).unwrap(),
             LaunchMode::Browser(BrowserCommand::Open {
-                url: "localhost:3000".into(),
+                target: "localhost:3000".into(),
                 workspace: None,
                 focus: true,
             })
@@ -293,7 +324,7 @@ mod tests {
             ])
             .unwrap(),
             LaunchMode::Browser(BrowserCommand::Open {
-                url: "https://a.test".into(),
+                target: "https://a.test".into(),
                 workspace: Some("w_2".into()),
                 focus: false,
             })
@@ -301,6 +332,18 @@ mod tests {
         assert_eq!(
             mode(&["browser", "skill"]).unwrap(),
             LaunchMode::Browser(BrowserCommand::Skill)
+        );
+        assert_eq!(
+            mode(&["browser", "reload"]).unwrap(),
+            LaunchMode::Browser(BrowserCommand::Reload)
+        );
+        assert_eq!(
+            mode(&["browser", "feedback"]).unwrap(),
+            LaunchMode::Browser(BrowserCommand::Feedback { wait: 0 })
+        );
+        assert_eq!(
+            mode(&["browser", "feedback", "--wait", "300"]).unwrap(),
+            LaunchMode::Browser(BrowserCommand::Feedback { wait: 300 })
         );
         for help in [&["browser", "--help"][..], &["browser", "open", "-h"]] {
             assert_eq!(
@@ -330,6 +373,23 @@ mod tests {
             (
                 &["browser", "skill", "x"],
                 CliError::UnexpectedArgument("x".into()),
+            ),
+            (
+                &["browser", "reload", "x"],
+                CliError::UnexpectedArgument("x".into()),
+            ),
+            (&["browser", "feedback", "--wait"], CliError::InvalidWait),
+            (
+                &["browser", "feedback", "--wait", "0"],
+                CliError::InvalidWait,
+            ),
+            (
+                &["browser", "feedback", "--wait", "soon"],
+                CliError::InvalidWait,
+            ),
+            (
+                &["browser", "feedback", "now"],
+                CliError::UnexpectedArgument("now".into()),
             ),
         ] {
             assert_eq!(mode(args).unwrap_err(), expected, "{args:?}");

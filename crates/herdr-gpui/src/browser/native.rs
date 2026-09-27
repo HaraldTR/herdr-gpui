@@ -1,11 +1,12 @@
 //! One window's native web views, one per browser tab it has shown. A view
 //! is a platform child view layered above the GPUI surface, so at most one is
 //! visible at a time and the window hides it while an overlay is open.
-use super::{Tab, TabId, WebUrl};
+use super::{Location, Tab, TabId, WebUrl, location::PREVIEW_SCHEME, preview::Preview};
 use gpui::{App, AppContext as _, Entity, Window};
 use gpui_wry::WebView;
 use std::{
     collections::HashMap,
+    rc::Rc,
     sync::mpsc::{self, Receiver, SyncSender, TrySendError},
 };
 use wry::raw_window_handle::HasWindowHandle;
@@ -22,13 +23,25 @@ pub(crate) enum Event {
     Loaded(TabId, String),
     /// The page asked for a new window, which becomes a new tab.
     NewWindow(TabId, String),
+    /// A screenshot for a note, as TIFF bytes, or `None` when WebKit had
+    /// none. Only macOS takes them.
+    #[cfg(target_os = "macos")]
+    Captured(TabId, u64, Option<Vec<u8>>),
+    /// A message the annotation picker posted. Any script in the page can
+    /// post one, so it is parsed as untrusted input.
+    Posted(TabId, String),
 }
+
+/// Longer posts are dropped before they are queued.
+const MAX_POST_BYTES: usize = 64 * 1024;
 
 pub(crate) struct Pages {
     pages: HashMap<TabId, Entity<WebView>>,
     shown: Option<TabId>,
     sender: SyncSender<Event>,
     events: Receiver<Event>,
+    /// Reads local pages' files; started with the first page.
+    preview: Option<Rc<Preview>>,
 }
 
 impl Default for Pages {
@@ -39,6 +52,7 @@ impl Default for Pages {
             shown: None,
             sender,
             events,
+            preview: None,
         }
     }
 }
@@ -49,10 +63,14 @@ fn report(sender: &SyncSender<Event>, event: Event) {
     }
 }
 
-/// Pages leave only for web addresses. Anything else, such as `file:` or an
-/// application's custom scheme, stays unopened rather than reaching the OS.
+/// Pages leave only for web addresses and the preview scheme. Anything
+/// else, such as `file:` or an application's custom scheme, stays unopened
+/// rather than reaching the OS.
 fn navigable(url: &str) -> bool {
-    url == "about:blank" || url.starts_with("about:srcdoc") || WebUrl::try_from(url).is_ok()
+    url == "about:blank"
+        || url.starts_with("about:srcdoc")
+        || url.starts_with("herdr-preview://localhost/")
+        || WebUrl::try_from(url).is_ok()
 }
 
 impl Pages {
@@ -77,21 +95,48 @@ impl Pages {
         window: &mut Window,
         cx: &mut App,
     ) -> crate::Result<()> {
-        let Some(url) = tab
-            .url
+        let Some(location) = tab
+            .location
             .as_ref()
             .filter(|_| !self.pages.contains_key(&tab.id))
         else {
             return Ok(());
         };
         let id = tab.id;
-        let (title, loaded, popup) = (
+        let (title, loaded, popup, posted) = (
+            self.sender.clone(),
             self.sender.clone(),
             self.sender.clone(),
             self.sender.clone(),
         );
+        let preview = match &self.preview {
+            Some(preview) => preview.clone(),
+            None => {
+                let preview = Rc::new(Preview::start()?);
+                self.preview = Some(preview.clone());
+                preview
+            }
+        };
+        // The folder this page may read. A web page gets none, and a page
+        // keeps the folder it was created with wherever it navigates.
+        let root = match location {
+            Location::Local { file } => Some(file.root().to_owned()),
+            Location::Web { .. } => None,
+        };
         let builder = wry::WebViewBuilder::new()
-            .with_url(url.as_str())
+            .with_url(location.page_url())
+            .with_asynchronous_custom_protocol(
+                PREVIEW_SCHEME.into(),
+                move |_, request, responder| {
+                    preview.handle(root.as_deref(), &request, responder);
+                },
+            )
+            .with_ipc_handler(move |request| {
+                let body = request.into_body();
+                if body.len() <= MAX_POST_BYTES {
+                    report(&posted, Event::Posted(id, body));
+                }
+            })
             .with_devtools(cfg!(debug_assertions))
             .with_navigation_handler(|url| navigable(&url))
             .with_new_window_req_handler(move |url, _| {
@@ -150,17 +195,20 @@ impl Pages {
         }
     }
 
-    pub(crate) fn load(&self, id: TabId, url: &WebUrl, cx: &mut App) {
+    pub(crate) fn load(&self, id: TabId, location: &Location, cx: &mut App) {
+        let url = location.page_url();
         if let Some(page) = self.pages.get(&id) {
-            page.update(cx, |page, _| page.load_url(url.as_str()));
+            page.update(cx, |page, _| page.load_url(&url));
         }
     }
 
-    fn script(&self, id: TabId, script: &str, cx: &App) {
+    /// Runs one of the app's own scripts in the page. Never page-supplied
+    /// text: data goes in as JSON.
+    pub(crate) fn script(&self, id: TabId, script: &str, cx: &App) {
         if let Some(page) = self.pages.get(&id)
             && let Err(error) = page.read(cx).raw().evaluate_script(script)
         {
-            tracing::debug!(%error, "Browser navigation failed");
+            tracing::debug!(%error, "Browser script failed");
         }
     }
 
@@ -177,6 +225,35 @@ impl Pages {
             && let Err(error) = page.read(cx).raw().reload()
         {
             tracing::debug!(%error, "Browser reload failed");
+        }
+    }
+
+    /// Captures `rect` of the page, reporting it as `Event::Captured` with
+    /// `capture` to match it to its note. Returns whether one was asked for:
+    /// only macOS can take them.
+    pub(crate) fn capture(
+        &self,
+        id: TabId,
+        rect: super::annotate::Rect,
+        capture: u64,
+        cx: &App,
+    ) -> bool {
+        #[cfg(target_os = "macos")]
+        if let Some(page) = self.pages.get(&id) {
+            let sender = self.sender.clone();
+            super::snapshot::capture(page.read(cx).raw(), rect, move |tiff| {
+                report(&sender, Event::Captured(id, capture, tiff));
+            });
+            return true;
+        }
+        let _ = (id, rect, capture, cx);
+        false
+    }
+
+    /// Hands the keyboard back from the page to the window.
+    pub(crate) fn blur(&self, id: TabId, cx: &App) {
+        if let Some(page) = self.pages.get(&id) {
+            let _ = page.read(cx).raw().focus_parent();
         }
     }
 
@@ -199,7 +276,12 @@ mod tests {
 
     #[test]
     fn pages_only_navigate_to_web_addresses() {
-        for allowed in ["https://a.test/", "http://localhost:3000/x", "about:blank"] {
+        for allowed in [
+            "https://a.test/",
+            "http://localhost:3000/x",
+            "about:blank",
+            "herdr-preview://localhost/index.html",
+        ] {
             assert!(navigable(allowed), "{allowed}");
         }
         for denied in [
@@ -207,6 +289,7 @@ mod tests {
             "vscode://file/x",
             "mailto:a@b.test",
             "data:text/html,x",
+            "herdr-preview://elsewhere/x",
         ] {
             assert!(!navigable(denied), "{denied}");
         }

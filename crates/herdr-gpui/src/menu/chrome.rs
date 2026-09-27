@@ -65,6 +65,12 @@ impl HerdrWindow {
         self.hover = None;
         self.hover_menu = None;
         self.update_preview = None;
+        // Closing the offer without an answer is a "not now": it asks once.
+        if self.menu.page == Some(Page::AgentSkill)
+            && crate::agent_skill::AgentSkill::choice(cx).is_none()
+        {
+            crate::agent_skill::AgentSkill::choose(crate::agent_skill::Choice::Declined, cx);
+        }
         self.menu.reset();
         window.focus(&self.focus, cx);
         cx.notify();
@@ -443,7 +449,7 @@ impl HerdrWindow {
                     .overflow_hidden()
                     .shadow_lg()
             })
-            .when(page == Page::Install, |panel| {
+            .when(matches!(page, Page::Install | Page::AgentSkill), |panel| {
                 panel
                     .w((viewport.width - px(24.)).max(px(0.)).min(px(420.)))
                     .max_h((viewport.height - px(24.)).max(px(0.)))
@@ -634,6 +640,8 @@ impl HerdrWindow {
             panel = panel.child(self.render_app_update(window, cx));
         } else if page == Page::About {
             panel = panel.child(self.render_about(cx));
+        } else if page == Page::AgentSkill {
+            panel = panel.child(self.render_agent_skill_offer(cx));
         } else if page == Page::Install {
             panel = panel
                 .child(div().p(px(8.)).child("Herdr must be installed"))
@@ -990,6 +998,9 @@ impl HerdrWindow {
                         let direction = if key.ends_with("up") { 1. } else { -1. };
                         scroll.set_offset(scroll.offset() + point(px(0.), distance * direction));
                         cx.notify();
+                    }
+                    "enter" if this.menu.page == Some(Page::AgentSkill) => {
+                        this.install_browser_skill(window, cx);
                     }
                     "enter" if this.menu.page == Some(Page::Install) => {
                         cx.open_url(crate::about::WEBSITE);

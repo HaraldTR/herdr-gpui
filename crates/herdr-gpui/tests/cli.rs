@@ -20,7 +20,8 @@ fn cli_in(args: &[&str], state: Option<&std::path::Path>) -> Output {
             .env("XDG_STATE_HOME", state)
             .env_remove("HERDR_SOCKET_PATH")
             .env_remove("HERDR_CLIENT_SOCKET_PATH")
-            .env_remove("HERDR_WORKSPACE_ID");
+            .env_remove("HERDR_WORKSPACE_ID")
+            .env_remove("HERDR_PANE_ID");
     }
     let mut child = command
         .args(args)
@@ -224,4 +225,52 @@ fn browser_open_reports_a_missing_app_and_a_refused_address() {
         assert_eq!(output.status.code(), Some(1), "{output:?}");
     }
     assert!(output.stdout.is_empty(), "{output:?}");
+}
+
+#[test]
+fn local_pages_and_feedback_need_the_app_and_a_plain_folder() {
+    let parent = if cfg!(unix) {
+        std::path::PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    let state = tempfile::Builder::new()
+        .prefix("hgs")
+        .tempdir_in(&parent)
+        .unwrap();
+    let site = tempfile::Builder::new()
+        .prefix("hgp")
+        .tempdir_in(&parent)
+        .unwrap();
+    let page = site.path().join("mockup.html");
+    std::fs::write(&page, "<h1>draft</h1>").unwrap();
+    let hidden = site.path().join(".drafts");
+    std::fs::create_dir(&hidden).unwrap();
+    std::fs::write(hidden.join("secret.html"), "x").unwrap();
+    let page = page.to_str().unwrap();
+    let hidden_page = hidden.join("secret.html");
+
+    // A plain file is accepted and only the missing app stops it.
+    let output = cli_in(&["browser", "open", page], Some(state.path()));
+    let expected = if cfg!(unix) { 3 } else { 1 };
+    assert_eq!(output.status.code(), Some(expected), "{output:?}");
+
+    // A file in a hidden folder is never served.
+    let output = cli_in(
+        &["browser", "open", hidden_page.to_str().unwrap()],
+        Some(state.path()),
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+
+    // Feedback belongs to the pane that opened the page.
+    let output = cli_in(&["browser", "feedback"], Some(state.path()));
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("runs in the Herdr pane"),
+        "{output:?}"
+    );
+    usage_error(
+        &["browser", "feedback", "--wait", "soon"],
+        "--wait requires a number of seconds",
+    );
 }

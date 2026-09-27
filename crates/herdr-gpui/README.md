@@ -747,16 +747,68 @@ come back after a restart; closing a workspace in Herdr removes its tabs.
 - Close Tab and Close Pane close the browser tab being shown, without asking.
   Clicking a Herdr tab, or switching Herdr tabs in the workspace, shows its
   terminal again.
-- Only `http` and `https` pages open. Pages cannot navigate to other schemes
+- Only `http` and `https` pages open, plus local files an agent shows (below).
+  Pages cannot navigate to other schemes
   (so `file:` and applications' custom URL schemes stay closed), downloads are
-  refused, and a page's new windows open as new browser tabs. Pages have no
-  script bridge to the app, and the app never runs page-supplied script. On
+  refused, and a page's new windows open as new browser tabs. The only
+  messages a page can send the app are annotation picks, which fill a draft
+  note and nothing else, and the app runs only its own scripts in pages. On
   Windows, a frame inside a page that links to an application's URL scheme
   gets WebView2's own confirmation prompt rather than being refused outright.
 - Pages are native web views (WebKit on macOS, WebView2 on Windows) layered
   above the window, so the app hides the page while a menu or dialog is open.
   Toasts that fall over the page are hidden behind it.
-- Linux has no embedded pages yet: browser tab requests open the system browser.
+- Linux has no embedded pages yet: browser tab requests open the system
+  browser, and local files and annotations are unavailable.
+
+### Annotating A Page
+
+**Annotate** in a browser tab's toolbar lets you pin notes to a page and send
+them to the agent that opened it, so it can change the page.
+
+- Hover to outline an element and click to pick it, or select text. For
+  anything else, draw a region: turn on **Region** in the notes panel and
+  drag, or Shift-drag at any time. Links do not follow while annotating.
+  **Note on page** writes a note about the whole page. Escape drops the
+  current pick; a second Escape stops annotating.
+- On macOS each pick also takes a screenshot of that part of the page, as it
+  looks on screen and without the annotation overlay, shown in the note. It
+  comes from WebKit's own snapshot, the one place the app calls WebKit
+  directly (`browser/snapshot.rs`). Screenshots are saved when you send, as
+  private files in `$XDG_STATE_HOME/herdr/gpui/annotations/`, removed after a
+  week, and the prompt names each file. Windows notes have no screenshots.
+- Notes are written in the panel beside the page, not in the page, so the
+  page never sees them. Queued notes are numbered on the page. Up to 20 wait
+  per tab.
+- **Send to agent** turns them into one prompt: the page, then for each note
+  the element's selector path, text, and a short HTML snippet (for a region:
+  its position, the container and elements it covers, and their text), its
+  screenshot, and your note.
+  Page text is cleaned of control characters and marked as quoted data.
+  **Copy** puts the same prompt on the clipboard instead.
+- The prompt goes to the agent one way only. An agent waiting in
+  `browser feedback --wait` receives it there. Otherwise it is typed into the
+  agent's pane and submitted once Herdr reports the agent idle (or still
+  working after two minutes). It is never typed into a pane where Herdr sees no
+  running agent, since Enter there would run it in a shell, nor into an agent
+  that is asking you a question; those notes wait for `browser feedback`, as
+  do notes for a pane this window does not show.
+- Tabs you open yourself have no agent to send to; **Copy** is offered
+  instead.
+
+### Local Pages
+
+`herdr-gpui browser open ./mockup.html` shows a local file. The app serves it,
+with the other files in its folder, through a private `herdr-preview:` scheme,
+since pages cannot open `file:` addresses:
+
+- Only that folder is served, never a file a link leads out of it, and never a
+  hidden file or folder. A folder holding your home directory is refused.
+- Web pages cannot load the folder's files: requests carrying another origin
+  are refused.
+- Files are read off the UI thread and are never cached, so
+  `herdr-gpui browser reload` shows an edited file. Showing the same file
+  again from the same pane reuses its tab.
 
 ### Letting Agents Open Pages
 
@@ -764,20 +816,36 @@ Agents running in the app's panes can open a page for you:
 
 ```sh
 herdr-gpui browser open http://localhost:3000   # macOS: /Applications/Herdr.app/Contents/MacOS/Herdr
+herdr-gpui browser open design/mockup.html
 herdr-gpui browser open --no-focus https://example.com/docs
+herdr-gpui browser reload                       # reload the pages this pane opened
+herdr-gpui browser feedback --wait 600          # wait for the notes you send it
 herdr-gpui browser --help
 ```
 
 The tab joins the caller's own workspace, which Herdr names in the pane's
-`HERDR_WORKSPACE_ID`. The command talks to the running app over a socket at
+`HERDR_WORKSPACE_ID`, and remembers the caller's `HERDR_PANE_ID` so notes on
+the page go back to it. The command talks to the running app over a socket at
 `$XDG_STATE_HOME/herdr/gpui/control.sock`, readable only by you, and exits with
 3 when the app is not running. Only processes on this machine can reach it:
 agents on saved SSH hosts cannot open browser tabs.
 
-To teach your agents about it, run **Install Browser Skill for Agents** from
-the command palette. It writes a `herdr-gpui-browser` skill, naming this app's
-executable, into `~/.claude/skills/` and `~/.agents/skills/`, for whichever of
-`~/.claude` and `~/.agents` exists. Nothing is installed unless you ask.
+Agents only use what they know about, so the app offers, once, to install a
+`herdr-gpui-browser` skill that teaches them these commands. It goes into
+`~/.claude/skills/` and `~/.agents/skills/`, for whichever of `~/.claude` and
+`~/.agents` exists, and names this app's executable. After you agree, each
+start refreshes it off the UI thread, so it follows the app when it moves or
+updates. Only files carrying the app's managed-skill marker are rewritten or
+removed; a skill of the same name you wrote yourself is left alone.
+
+- The offer appears in the first window after it connects. **Not now**, or
+  closing it, is remembered in `$XDG_STATE_HOME/herdr/gpui/agent-skill.json`
+  and it is not asked again.
+- Preferences > Agents installs or removes it at any time; so does the
+  palette's **Install Browser Skill for Agents**.
+- Only release builds offer or refresh the skill. A development build never
+  points your agents at itself unless you install from it explicitly.
+
 `herdr-gpui browser skill` prints the same text, for example to install it
 elsewhere:
 

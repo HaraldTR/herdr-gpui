@@ -24,6 +24,8 @@ pub(crate) enum Page {
     Update,
     AppUpdate,
     Install,
+    /// The one-time offer to install the agent skill for browser tabs.
+    AgentSkill,
     Tab,
     RenameTab,
     Pane,

@@ -340,6 +340,12 @@ pub enum Error {
     StateFileSize { path: PathBuf, limit: u64 },
     #[error("Browser tabs open only http and https addresses with a host, of at most 8 KiB.")]
     InvalidBrowserUrl,
+    #[error(
+        "Local pages must be a plain file in a folder that is not hidden and does not hold your home directory."
+    )]
+    InvalidLocalPage,
+    #[error("The page reported an invalid annotation")]
+    InvalidAnnotation,
     #[error("Invalid saved browser tabs")]
     InvalidBrowserTabs,
     #[error("Herdr GPUI is not running, or its control socket {} is unreachable: {source}", path.display())]

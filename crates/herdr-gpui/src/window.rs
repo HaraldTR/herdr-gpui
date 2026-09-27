@@ -237,6 +237,7 @@ impl HerdrWindow {
             self.show_terminal(cx);
         }
         self.poll_browser(window, cx);
+        self.offer_browser_skill(window, cx);
         self.poll_sessions(cx);
         self.flush_scrollbar(cx);
         self.flush_split(cx);
