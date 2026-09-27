@@ -174,16 +174,20 @@ fn browser_commands_answer_without_a_window() {
         skill.starts_with("---\nname: herdr-gpui-browser\n"),
         "{skill}"
     );
-    // The skill names this very executable, which need not be on PATH.
-    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_herdr-gpui")).unwrap();
+    // The skill names this very executable, which need not be on PATH. The
+    // path may be shell-quoted, as Windows paths always are.
+    let exe = std::path::Path::new(env!("CARGO_BIN_EXE_herdr-gpui"));
+    let name = exe.file_name().unwrap().to_str().unwrap();
+    let command = skill
+        .lines()
+        .find(|line| line.contains(" browser open http"))
+        .unwrap_or_else(|| panic!("{skill}"));
     assert!(
-        skill.contains(&format!("{} browser open", exe.display()))
-            || skill.contains(&format!(
-                "{} browser open",
-                env!("CARGO_BIN_EXE_herdr-gpui")
-            )),
-        "{skill}"
+        command.contains(&format!("{name} browser open"))
+            || command.contains(&format!("{name}' browser open")),
+        "{command}"
     );
+    assert!(!command.starts_with("herdr-gpui browser"), "{command}");
 
     usage_error(&["browser", "open"], "browser open requires one URL");
     usage_error(&["browser", "eval"], "Unknown browser command: eval");
