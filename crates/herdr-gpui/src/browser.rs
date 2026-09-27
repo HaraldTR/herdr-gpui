@@ -4,13 +4,26 @@
 //! them. Pages are native web views drawn above the window, which is why the
 //! window hides them whenever one of its own overlays is open.
 
+#[cfg(any(target_os = "macos", windows, test))]
+mod annotate;
+// Linux builds show no pages, so there is nothing to annotate there.
+#[cfg(any(target_os = "macos", windows))]
+mod annotate_view;
+mod feedback;
+mod location;
 #[cfg(any(target_os = "macos", windows))]
 mod native;
+#[cfg(any(target_os = "macos", windows))]
+mod preview;
 mod store;
 mod view;
 #[cfg(test)]
 mod view_tests;
 
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) use annotate_view::Annotations;
+pub(crate) use feedback::Feedback;
+pub(crate) use location::{LocalFile, Location};
 #[cfg(any(target_os = "macos", windows))]
 pub(crate) use native::Pages;
 pub(crate) use store::{Scope, Store, Tab, TabId};

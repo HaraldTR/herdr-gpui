@@ -1,6 +1,8 @@
 //! The window side of browser tabs: their entries in the tab strip, the page
 //! and its toolbar in place of the terminal, and requests to open one.
-use super::{Scope, Store, Tab, TabId, WebUrl};
+#[cfg(any(target_os = "macos", windows))]
+use super::Annotations;
+use super::{Location, Scope, Store, Tab, TabId, WebUrl};
 use crate::{HerdrWindow, search_input::SearchInput, window::Flash};
 #[cfg(unix)]
 use crate::{
@@ -16,7 +18,7 @@ pub(crate) struct Browser {
     /// Per workspace, the browser tab shown instead of its terminal.
     focus: HashMap<(Scope, String), TabId>,
     #[cfg(any(target_os = "macos", windows))]
-    pages: super::Pages,
+    pub(super) pages: super::Pages,
     address: Entity<SearchInput>,
     /// The tab whose address the field last showed.
     address_tab: Option<TabId>,
@@ -25,6 +27,8 @@ pub(crate) struct Browser {
     /// The workspaces of the last snapshot and the boot they came from: one
     /// missing from the next snapshot of the same boot was closed.
     workspaces: Option<(Scope, String, HashSet<String>)>,
+    #[cfg(any(target_os = "macos", windows))]
+    pub(super) annotations: Annotations,
 }
 
 impl Browser {
@@ -42,6 +46,8 @@ impl Browser {
             address_tab: None,
             failed: None,
             workspaces: None,
+            #[cfg(any(target_os = "macos", windows))]
+            annotations: Annotations::new(cx),
         }
     }
 }
@@ -106,7 +112,7 @@ impl HerdrWindow {
             self.browser.failed = Some((id, error.to_string().into()));
         }
         self.sync_address(Some(&tab), true, window, cx);
-        if tab.url.is_none() {
+        if tab.location.is_none() {
             let focus = self.browser.address.read(cx).focus.clone();
             window.focus(&focus, cx);
         }
@@ -131,6 +137,17 @@ impl HerdrWindow {
         {
             self.browser.failed = None;
         }
+        #[cfg(any(target_os = "macos", windows))]
+        let annotated: Vec<TabId> = self
+            .browser
+            .annotations
+            .ids()
+            .filter(|id| gone(*id))
+            .collect();
+        #[cfg(any(target_os = "macos", windows))]
+        for id in annotated {
+            self.browser.annotations.forget(id);
+        }
     }
 
     /// Opens a tab in the focused workspace, or tells the user why not.
@@ -151,7 +168,8 @@ impl HerdrWindow {
             self.show_flash(Flash::warning("Open a workspace first"), cx);
             return;
         };
-        match Store::update(cx, |store| store.open(scope, &workspace, url)) {
+        let location = url.map(|url| Location::Web { url });
+        match Store::update(cx, |store| store.open(scope, &workspace, location, None)) {
             Some(id) => self.show_browser_tab(id, window, cx),
             None => self.show_flash(Flash::warning("Too many browser tabs are open"), cx),
         }
@@ -205,16 +223,38 @@ impl HerdrWindow {
         &mut self,
         target: &Target<'_>,
         strict: bool,
-        url: &WebUrl,
+        location: &Location,
         focus: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Placed> {
         let (index, workspace) = self.browser_target(target, strict)?;
         let scope = scope(&self.endpoints[index]);
-        let Some(id) = Store::update(cx, |store| store.open(scope, &workspace, Some(url.clone())))
-        else {
-            return Some(Placed::Full);
+        // An agent showing the same page again gets its tab back, reloaded,
+        // rather than another tab for every revision.
+        let origin = target.pane;
+        let before =
+            store(cx).and_then(|store| store.opened_before(&scope, &workspace, origin, location));
+        let id = match before {
+            Some(id) => {
+                #[cfg(any(target_os = "macos", windows))]
+                self.browser.pages.reload(id, cx);
+                id
+            }
+            None => {
+                let opened = Store::update(cx, |store| {
+                    store.open(
+                        scope,
+                        &workspace,
+                        Some(location.clone()),
+                        origin.map(str::to_owned),
+                    )
+                });
+                let Some(id) = opened else {
+                    return Some(Placed::Full);
+                };
+                id
+            }
         };
         if focus {
             let focused = self
@@ -238,6 +278,18 @@ impl HerdrWindow {
         })
     }
 
+    /// Reloads this window's pages for `tabs`, as an agent asks after
+    /// editing a page it showed.
+    #[cfg(unix)]
+    pub(crate) fn reload_browser_tabs(&mut self, tabs: &[TabId], cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "macos", windows))]
+        for id in tabs {
+            self.browser.pages.reload(*id, cx);
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
+        let _ = (tabs, cx);
+    }
+
     /// Shows `tab`'s address in the field, unless someone is typing there.
     fn sync_address(
         &mut self,
@@ -248,17 +300,17 @@ impl HerdrWindow {
     ) {
         let id = tab.map(|tab| tab.id);
         let text = tab
-            .and_then(|tab| tab.url.as_ref())
-            .map_or("", WebUrl::as_str);
+            .and_then(|tab| tab.location.as_ref())
+            .map(Location::display)
+            .unwrap_or_default();
         let input = self.browser.address.read(cx);
         if !force
             && (input.focus.is_focused(window)
-                || (self.browser.address_tab == id && input.text() == text))
+                || (self.browser.address_tab == id && input.text() == text.as_str()))
         {
             return;
         }
         self.browser.address_tab = id;
-        let text = text.to_owned();
         self.browser
             .address
             .update(cx, |input, cx| input.set_text_selected(&text, cx));
@@ -293,6 +345,8 @@ impl HerdrWindow {
             }
         }
         self.forget_closed_workspaces(cx);
+        #[cfg(any(target_os = "macos", windows))]
+        self.poll_deliveries(cx);
         let shown = self.shown_browser_tab(cx);
         self.sync_address(shown.as_ref(), false, window, cx);
     }
@@ -356,15 +410,25 @@ impl HerdrWindow {
                 // The field follows on the next sync, unless someone is
                 // typing in it.
                 Event::Loaded(id, url) => {
-                    if let Ok(url) = WebUrl::try_from(url.as_str()) {
-                        Store::update(cx, |store| store.visited(id, Some(url), None));
+                    let visited = store(cx)
+                        .and_then(|store| store.get(id))
+                        .and_then(|tab| tab.location.as_ref()?.visited(&url));
+                    if let Some(location) = visited {
+                        Store::update(cx, |store| store.visited(id, Some(location), None));
                     }
+                    self.page_loaded(id, cx);
                 }
+                Event::Posted(id, body) => self.page_posted(id, &body, window, cx),
                 Event::NewWindow(id, url) => {
                     let parent = store(cx).and_then(|store| store.get(id)).cloned();
                     if let (Some(parent), Ok(url)) = (parent, WebUrl::try_from(url.as_str())) {
                         let opened = Store::update(cx, |store| {
-                            store.open(parent.scope, &parent.workspace_id, Some(url))
+                            store.open(
+                                parent.scope,
+                                &parent.workspace_id,
+                                Some(Location::Web { url }),
+                                parent.origin,
+                            )
                         });
                         if let Some(opened) = opened {
                             self.show_browser_tab(opened, window, cx);
@@ -381,10 +445,11 @@ impl HerdrWindow {
             self.show_flash(Flash::warning("Not an http or https address"), cx);
             return;
         };
-        Store::update(cx, |store| store.visited(id, Some(url.clone()), None));
+        let location = Location::Web { url };
+        Store::update(cx, |store| store.visited(id, Some(location.clone()), None));
         #[cfg(any(target_os = "macos", windows))]
         if self.browser.pages.contains(id) {
-            self.browser.pages.load(id, &url, cx);
+            self.browser.pages.load(id, &location, cx);
             self.browser.pages.focus(id, cx);
         }
         self.show_browser_tab(id, window, cx);
@@ -514,8 +579,65 @@ impl HerdrWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = tab.id;
-        let loaded = tab.url.is_some();
-        let external = tab.url.clone();
+        let loaded = tab.location.is_some();
+        let external = match &tab.location {
+            Some(Location::Web { url }) => Some(url.clone()),
+            _ => None,
+        };
+        #[cfg(any(target_os = "macos", windows))]
+        let (annotate_button, panel) = {
+            let annotating = self.browser.annotations.armed(id);
+            let panel = self
+                .browser
+                .annotations
+                .open(id)
+                .then(|| self.render_annotations(tab, cx));
+            let button = {
+                // Annotating needs the page itself, so a blank tab or a
+                // build without pages has nothing to annotate.
+                let enabled = loaded && super::EMBEDDED;
+                let color = if annotating {
+                    self.theme.text_on(self.theme.primary_wash())
+                } else if enabled {
+                    self.theme.foreground
+                } else {
+                    self.theme.muted
+                };
+                div()
+                    .id("browser-annotate")
+                    .debug_selector(|| "browser-annotate".into())
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .h(px(24.))
+                    .px(px(6.))
+                    .rounded(px(crate::config::corners::CONTROL))
+                    .when(annotating, |button| {
+                        button.bg(rgb(self.theme.primary_wash()))
+                    })
+                    .text_color(rgb(color))
+                    .child(
+                        svg()
+                            .path("icons/pencil.svg")
+                            .size(px(13.))
+                            .text_color(rgb(color)),
+                    )
+                    .child("Annotate")
+                    .when(enabled, |button| {
+                        button
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(self.theme.active)))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.toggle_annotating(id, window, cx);
+                            }))
+                    })
+            };
+            (Some(button), panel)
+        };
+        // Linux builds show no pages, so there is nothing to annotate.
+        #[cfg(not(any(target_os = "macos", windows)))]
+        let (annotate_button, panel): (Option<Stateful<Div>>, Option<AnyElement>) = (None, None);
         #[cfg(any(target_os = "macos", windows))]
         let page = self.browser.pages.page(id).cloned();
         #[cfg(not(any(target_os = "macos", windows)))]
@@ -608,10 +730,11 @@ impl HerdrWindow {
                     .text_color(rgb(flash.accent(&self.theme)))
                     .child(flash.text.clone())
             }))
+            .children(annotate_button)
             .child(self.toolbar_button(
                 "browser-external",
                 "icons/external.svg",
-                loaded,
+                external.is_some(),
                 cx,
                 move |_, _, cx| {
                     if let Some(url) = &external {
@@ -650,7 +773,14 @@ impl HerdrWindow {
             // the keyboard; nothing here types into a terminal.
             .track_focus(&self.focus)
             .child(toolbar)
-            .child(content)
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(div().flex().flex_col().flex_1().min_w_0().child(content))
+                    .children(panel),
+            )
             .into_any_element()
     }
 }

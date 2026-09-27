@@ -1,7 +1,7 @@
 //! The app's browser tabs: which page each one shows and the workspace it
 //! belongs to. Herdr has no browser panes, so these live only in this client;
 //! every window shows the same tabs for a workspace, each with its own page.
-use super::WebUrl;
+use super::Location;
 use crate::state_file;
 use gpui::{App, Global};
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,7 @@ const MAX_TITLE_CHARS: usize = 200;
 #[serde(transparent)]
 pub(crate) struct TabId(u64);
 
-#[cfg(all(test, any(target_os = "macos", windows)))]
+#[cfg(test)]
 impl TabId {
     pub(crate) fn test(id: u64) -> Self {
         Self(id)
@@ -52,9 +52,13 @@ pub(crate) struct Tab {
     pub scope: Scope,
     pub workspace_id: String,
     /// `None` for a new tab still waiting for an address.
-    pub url: Option<WebUrl>,
+    pub location: Option<Location>,
     /// The page's own title once it reports one; the host until then.
     pub title: String,
+    /// The Herdr pane whose agent opened the tab, which notes on the page
+    /// go back to.
+    #[serde(default)]
+    pub origin: Option<String>,
 }
 
 impl Tab {
@@ -62,6 +66,10 @@ impl Tab {
         !self.workspace_id.is_empty()
             && self.workspace_id.len() <= 256
             && self.title.chars().count() <= MAX_TITLE_CHARS
+            && self
+                .origin
+                .as_ref()
+                .is_none_or(|pane| !pane.is_empty() && pane.len() <= 256)
     }
 }
 
@@ -198,7 +206,8 @@ impl Store {
         &mut self,
         scope: Scope,
         workspace_id: &str,
-        url: Option<WebUrl>,
+        location: Option<Location>,
+        origin: Option<String>,
     ) -> Option<TabId> {
         if self.tabs.len() >= MAX_TABS {
             return None;
@@ -209,11 +218,43 @@ impl Store {
             id,
             scope,
             workspace_id: workspace_id.to_owned(),
-            title: url.as_ref().map_or("New Tab", WebUrl::host).to_owned(),
-            url,
+            title: location
+                .as_ref()
+                .map_or_else(|| "New Tab".to_owned(), Location::default_title),
+            location,
+            origin,
         });
         self.save();
         Some(id)
+    }
+
+    /// The tab one agent already opened on this page, which showing the page
+    /// again reuses rather than stacking another tab.
+    #[cfg(any(unix, test))]
+    pub(crate) fn opened_before(
+        &self,
+        scope: &Scope,
+        workspace_id: &str,
+        origin: Option<&str>,
+        location: &Location,
+    ) -> Option<TabId> {
+        self.tabs
+            .iter()
+            .find(|tab| {
+                &tab.scope == scope
+                    && tab.workspace_id == workspace_id
+                    && tab.origin.as_deref() == origin
+                    && tab.location.as_ref() == Some(location)
+            })
+            .map(|tab| tab.id)
+    }
+
+    /// The tabs a pane's agent opened.
+    #[cfg(any(unix, test))]
+    pub(crate) fn opened_by<'a>(&'a self, pane_id: &'a str) -> impl Iterator<Item = &'a Tab> + 'a {
+        self.tabs
+            .iter()
+            .filter(move |tab| tab.origin.as_deref() == Some(pane_id))
     }
 
     pub(crate) fn close(&mut self, id: TabId) -> Option<Tab> {
@@ -225,15 +266,20 @@ impl Store {
 
     /// Records where a page went and what it calls itself. Returns whether
     /// anything changed.
-    pub(crate) fn visited(&mut self, id: TabId, url: Option<WebUrl>, title: Option<&str>) -> bool {
+    pub(crate) fn visited(
+        &mut self,
+        id: TabId,
+        location: Option<Location>,
+        title: Option<&str>,
+    ) -> bool {
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else {
             return false;
         };
         let mut changed = false;
-        if let Some(url) = url
-            && tab.url.as_ref() != Some(&url)
+        if let Some(location) = location
+            && tab.location.as_ref() != Some(&location)
         {
-            tab.url = Some(url);
+            tab.location = Some(location);
             changed = true;
         }
         if let Some(title) = title.map(clean_title).filter(|title| !title.is_empty())
@@ -274,8 +320,10 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
 
-    fn url(value: &str) -> Option<WebUrl> {
-        Some(WebUrl::try_from(value).unwrap())
+    fn url(value: &str) -> Option<Location> {
+        Some(Location::Web {
+            url: super::super::WebUrl::try_from(value).unwrap(),
+        })
     }
 
     #[test]
@@ -284,10 +332,10 @@ mod tests {
         let local = Scope::local("/tmp/herdr-client.sock".as_ref());
         let remote = Scope::endpoint("ssh:box");
         let a = store
-            .open(local.clone(), "w_1", url("http://localhost:3000"))
+            .open(local.clone(), "w_1", url("http://localhost:3000"), None)
             .unwrap();
         let b = store
-            .open(remote.clone(), "w_1", url("https://example.com/"))
+            .open(remote.clone(), "w_1", url("https://example.com/"), None)
             .unwrap();
         assert_ne!(a, b);
         let ids = |scope, workspace| {
@@ -300,7 +348,7 @@ mod tests {
         assert_eq!(ids(&remote, "w_1"), [b]);
         assert!(ids(&local, "w_2").is_empty());
         assert_eq!(store.get(a).unwrap().title, "localhost");
-        let blank = store.open(local, "w_1", None).unwrap();
+        let blank = store.open(local, "w_1", None, None).unwrap();
         assert_eq!(store.get(blank).unwrap().title, "New Tab");
     }
 
@@ -308,10 +356,12 @@ mod tests {
     fn visits_update_address_and_a_clean_title() {
         let mut store = Store::default();
         let scope = Scope::endpoint("local");
-        let id = store.open(scope, "w_1", url("https://a.test/")).unwrap();
+        let id = store
+            .open(scope, "w_1", url("https://a.test/"), None)
+            .unwrap();
         assert!(store.visited(id, url("https://b.test/x"), Some(" Docs\u{7}\n ")));
         let tab = store.get(id).unwrap();
-        assert_eq!(tab.url, url("https://b.test/x"));
+        assert_eq!(tab.location, url("https://b.test/x"));
         assert_eq!(tab.title, "Docs");
         assert!(!store.visited(id, None, Some("")));
         assert!(!store.visited(id, None, Some("Docs")));
@@ -327,12 +377,14 @@ mod tests {
         let mut store = Store::default();
         let (one, two) = (Scope::endpoint("local"), Scope::endpoint("ssh:x"));
         let gone = store
-            .open(one.clone(), "w_gone", url("https://a.test/"))
+            .open(one.clone(), "w_gone", url("https://a.test/"), None)
             .unwrap();
         let kept = store
-            .open(one.clone(), "w_1", url("https://a.test/"))
+            .open(one.clone(), "w_1", url("https://a.test/"), None)
             .unwrap();
-        let other = store.open(two, "w_gone", url("https://a.test/")).unwrap();
+        let other = store
+            .open(two, "w_gone", url("https://a.test/"), None)
+            .unwrap();
         let closed = ["w_gone".to_owned()];
         assert!(store.has_workspaces(&one, &closed));
         assert!(store.forget_workspaces(&one, &closed));
@@ -348,7 +400,12 @@ mod tests {
     fn saved_tabs_round_trip_and_invalid_files_are_rejected() {
         let mut store = Store::default();
         let id = store
-            .open(Scope::endpoint("local"), "w_1", url("https://a.test/"))
+            .open(
+                Scope::endpoint("local"),
+                "w_1",
+                url("https://a.test/"),
+                None,
+            )
             .unwrap();
         let bytes = serde_json::to_vec(&Saved {
             tabs: store.tabs.clone(),
@@ -359,12 +416,42 @@ mod tests {
         // New tabs never reuse a restored ID.
         assert!(restored.next > id.0);
         for invalid in [
-            r#"{"tabs":[{"id":0,"scope":"local","workspace_id":"w","url":"file:///etc/passwd","title":""}]}"#,
-            r#"{"tabs":[{"id":0,"scope":"local","workspace_id":"","url":"https://a.test/","title":""}]}"#,
+            r#"{"tabs":[{"id":0,"scope":"local","workspace_id":"w","location":{"kind":"web","url":"file:///etc/passwd"},"title":""}]}"#,
+            r#"{"tabs":[{"id":0,"scope":"local","workspace_id":"","location":{"kind":"web","url":"https://a.test/"},"title":""}]}"#,
+            r#"{"tabs":[{"id":0,"scope":"local","workspace_id":"w","location":null,"title":"","origin":""}]}"#,
             r#"{"tabs":"#,
         ] {
             assert!(parse(invalid.as_bytes()).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn an_agent_reopening_its_page_reuses_the_tab() {
+        let mut store = Store::default();
+        let scope = Scope::endpoint("local");
+        let page = url("https://a.test/");
+        let mine = store
+            .open(scope.clone(), "w_1", page.clone(), Some("w_1:p1".into()))
+            .unwrap();
+        let theirs = store
+            .open(scope.clone(), "w_1", page.clone(), Some("w_1:p2".into()))
+            .unwrap();
+        let page = page.unwrap();
+        assert_eq!(
+            store.opened_before(&scope, "w_1", Some("w_1:p1"), &page),
+            Some(mine)
+        );
+        assert_eq!(
+            store.opened_before(&scope, "w_1", Some("w_1:p2"), &page),
+            Some(theirs)
+        );
+        assert_eq!(store.opened_before(&scope, "w_1", None, &page), None);
+        assert_eq!(
+            store.opened_before(&scope, "w_2", Some("w_1:p1"), &page),
+            None
+        );
+        let ids: Vec<_> = store.opened_by("w_1:p1").map(|tab| tab.id).collect();
+        assert_eq!(ids, [mine]);
     }
 
     #[test]
@@ -373,13 +460,13 @@ mod tests {
         for _ in 0..MAX_TABS {
             assert!(
                 store
-                    .open(Scope::endpoint("local"), "w", url("https://a.test/"))
+                    .open(Scope::endpoint("local"), "w", url("https://a.test/"), None)
                     .is_some()
             );
         }
         assert!(
             store
-                .open(Scope::endpoint("local"), "w", url("https://a.test/"))
+                .open(Scope::endpoint("local"), "w", url("https://a.test/"), None)
                 .is_none()
         );
     }

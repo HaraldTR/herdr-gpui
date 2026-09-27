@@ -181,6 +181,12 @@ pub(crate) fn run() -> std::process::ExitCode {
     };
     let failed = startup_failed.clone();
     let window_state = (mode == LaunchMode::Normal).then(crate::window_state::WindowState::load);
+    // Fixtures never ask about, or touch, agent configuration.
+    let agent_skill = if mode == LaunchMode::Normal {
+        crate::agent_skill::AgentSkill::load()
+    } else {
+        crate::agent_skill::AgentSkill::default()
+    };
     // Fixtures start with no tabs and never write the file.
     let browser_tabs = if mode == LaunchMode::Normal {
         crate::browser::Store::load()
@@ -195,6 +201,7 @@ pub(crate) fn run() -> std::process::ExitCode {
                 state.install(cx);
             }
             browser_tabs.install(cx);
+            agent_skill.install_global(cx);
             // Only the user's own app answers agents; native test modes stay private.
             if mode == LaunchMode::Normal {
                 crate::control::install(cx);
