@@ -5,10 +5,9 @@
 use super::HerdrWindow;
 use crate::{
     connection::ConnectionBridge,
-    terminal::{InputTarget, WheelAccumulator, key_input, wheel_target},
+    terminal::{WheelAccumulator, key_input, wheel_target},
 };
 use gpui::{Context, KeyDownEvent, ScrollWheelEvent, Window};
-use herdr_client::protocol::ClientPaneInputEvent;
 
 impl HerdrWindow {
     pub(crate) fn open_terminal_link(
@@ -78,31 +77,6 @@ impl HerdrWindow {
             self.cell_width,
             self.config.terminal.line_height(),
         )
-    }
-
-    pub(crate) fn send(&mut self, event: ClientPaneInputEvent, cx: &mut Context<Self>) {
-        if self.menu.page.is_some() || !self.input_ready() || self.mouse_focus_pending() {
-            return;
-        }
-        if let (Some(handle), Some(snapshot), Some(surface)) = (
-            &self.endpoints[self.selected_endpoint].connection.handle,
-            &self.live.snapshot,
-            &self.live.surface,
-        ) {
-            let target = if let Some(popup) = &surface.popup {
-                InputTarget::Popup(popup.terminal_id.clone())
-            } else if let Some(pane) = &snapshot.focused_pane_id {
-                InputTarget::Pane(pane.clone())
-            } else {
-                return;
-            };
-            if let Err(error) =
-                ConnectionBridge::send_input(handle, &snapshot.boot_id, &target, event)
-            {
-                self.local_error = Some(format!("Input not sent: {error}"));
-                cx.notify();
-            }
-        }
     }
 
     pub(crate) fn scroll_wheel(
