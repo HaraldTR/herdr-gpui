@@ -15,6 +15,8 @@ mod location;
 mod native;
 #[cfg(any(target_os = "macos", windows))]
 mod preview;
+#[cfg(target_os = "macos")]
+mod snapshot;
 mod store;
 mod view;
 #[cfg(test)]

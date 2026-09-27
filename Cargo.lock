@@ -3310,6 +3310,7 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "anyhow",
+ "block2 0.6.2",
  "cbc",
  "chrono",
  "cocoa 0.27.0",
@@ -3328,7 +3329,9 @@ dependencies = [
  "objc",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
  "objc2-foundation 0.3.2",
+ "objc2-web-kit",
  "pbkdf2",
  "percent-encoding",
  "raw-window-handle",

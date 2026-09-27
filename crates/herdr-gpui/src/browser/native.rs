@@ -23,6 +23,10 @@ pub(crate) enum Event {
     Loaded(TabId, String),
     /// The page asked for a new window, which becomes a new tab.
     NewWindow(TabId, String),
+    /// A screenshot for a note, as TIFF bytes, or `None` when WebKit had
+    /// none. Only macOS takes them.
+    #[cfg(target_os = "macos")]
+    Captured(TabId, u64, Option<Vec<u8>>),
     /// A message the annotation picker posted. Any script in the page can
     /// post one, so it is parsed as untrusted input.
     Posted(TabId, String),
@@ -222,6 +226,28 @@ impl Pages {
         {
             tracing::debug!(%error, "Browser reload failed");
         }
+    }
+
+    /// Captures `rect` of the page, reporting it as `Event::Captured` with
+    /// `capture` to match it to its note. Returns whether one was asked for:
+    /// only macOS can take them.
+    pub(crate) fn capture(
+        &self,
+        id: TabId,
+        rect: super::annotate::Rect,
+        capture: u64,
+        cx: &App,
+    ) -> bool {
+        #[cfg(target_os = "macos")]
+        if let Some(page) = self.pages.get(&id) {
+            let sender = self.sender.clone();
+            super::snapshot::capture(page.read(cx).raw(), rect, move |tiff| {
+                report(&sender, Event::Captured(id, capture, tiff));
+            });
+            return true;
+        }
+        let _ = (id, rect, capture, cx);
+        false
     }
 
     /// Hands the keyboard back from the page to the window.

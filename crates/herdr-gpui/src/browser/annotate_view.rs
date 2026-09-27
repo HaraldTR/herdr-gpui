@@ -4,7 +4,7 @@
 //! agent until the user presses Send.
 use super::{
     Feedback, Tab, TabId,
-    annotate::{self, Anchor, MAX_NOTES, Note, Report},
+    annotate::{self, Anchor, MAX_NOTES, Note, Rect, Report},
     feedback::Batch,
 };
 use crate::{
@@ -17,7 +17,9 @@ use herdr_client::protocol::{
 };
 use std::{
     collections::HashMap,
-    time::{Duration, Instant},
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant, SystemTime},
 };
 
 /// How long a batch waits for a busy agent before it is pasted anyway, or,
@@ -26,12 +28,24 @@ const HOLD: Duration = Duration::from_secs(120);
 /// Lets the agent's input take the paste before Enter submits it.
 const SUBMIT_DELAY: Duration = Duration::from_millis(150);
 
+/// Screenshots older than this are removed when the next ones are saved.
+const SCREENSHOT_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// What the next note will be about, picked but not yet written, and its
+/// screenshot once WebKit delivers it.
+struct Draft {
+    anchor: Anchor,
+    image: Option<Arc<Image>>,
+    capture: Option<u64>,
+}
+
 #[derive(Default)]
 struct TabNotes {
     /// Whether the picker is running in the page.
     armed: bool,
-    /// What the next note will be about, picked but not yet written.
-    pending: Option<Anchor>,
+    /// Whether a drag draws a region rather than selecting text.
+    regions: bool,
+    pending: Option<Draft>,
     notes: Vec<Note>,
 }
 
@@ -47,6 +61,8 @@ pub(crate) struct Annotations {
     tabs: HashMap<TabId, TabNotes>,
     pub(super) input: Entity<SearchInput>,
     deliveries: Vec<Delivery>,
+    /// Numbers screenshots, to match each to its draft or note.
+    captures: u64,
 }
 
 impl Annotations {
@@ -60,6 +76,7 @@ impl Annotations {
             tabs: HashMap::new(),
             input,
             deliveries: Vec::new(),
+            captures: 0,
         }
     }
 
@@ -104,6 +121,66 @@ fn agent<'a>(
         .find(|agent| agent.pane_id == pane_id)
 }
 
+/// Writes the notes' screenshots where the agent can read them, returning
+/// each note's file. They live in the app's private state folder, and ones
+/// older than a week are removed first. Blocking; run off the UI thread.
+fn save_screenshots(images: &[Option<Arc<Image>>]) -> crate::Result<Vec<Option<PathBuf>>> {
+    let dir = crate::preferences::state_dir()
+        .ok_or(crate::Error::MissingStateRoot)?
+        .join("annotations");
+    save_screenshots_in(&dir, images, SystemTime::now())
+}
+
+fn save_screenshots_in(
+    dir: &std::path::Path,
+    images: &[Option<Arc<Image>>],
+    now: SystemTime,
+) -> crate::Result<Vec<Option<PathBuf>>> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let old = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age > SCREENSHOT_AGE);
+            if old {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let stamp = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|since| since.as_millis())
+        .unwrap_or_default();
+    images
+        .iter()
+        .enumerate()
+        .map(|(index, image)| {
+            let Some(image) = image else {
+                return Ok(None);
+            };
+            let path = dir.join(format!("note-{stamp}-{}.png", index + 1));
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            use std::io::Write as _;
+            options.open(&path)?.write_all(&image.bytes)?;
+            Ok(Some(path))
+        })
+        .collect()
+}
+
 fn enter() -> ClientPaneInputEvent {
     ClientPaneInputEvent::Key {
         code: ClientKeyCode::Enter,
@@ -128,9 +205,15 @@ impl HerdrWindow {
     pub(crate) fn arm_page(&mut self, id: TabId, cx: &mut Context<Self>) {
         #[cfg(any(target_os = "macos", windows))]
         {
-            let notes = &self.tab_notes(id).notes;
-            let script = annotate::arm_script(notes);
+            let tab = self.tab_notes(id);
+            let script = annotate::arm_script(&tab.notes);
+            let regions = tab.regions;
             self.browser.pages.script(id, &script, cx);
+            if regions {
+                self.browser
+                    .pages
+                    .script(id, &annotate::mode_script(true), cx);
+            }
         }
         #[cfg(not(any(target_os = "macos", windows)))]
         let _ = (id, cx);
@@ -165,6 +248,19 @@ impl HerdrWindow {
         cx.notify();
     }
 
+    /// Switches the picker between picking elements and drawing regions.
+    fn toggle_regions(&mut self, id: TabId, cx: &mut Context<Self>) {
+        let tab = self.tab_notes(id);
+        tab.regions = !tab.regions;
+        let regions = tab.regions;
+        #[cfg(any(target_os = "macos", windows))]
+        self.browser
+            .pages
+            .script(id, &annotate::mode_script(regions), cx);
+        let _ = regions;
+        cx.notify();
+    }
+
     /// The picker lost its page to a navigation; put it back.
     pub(crate) fn page_loaded(&mut self, id: TabId, cx: &mut Context<Self>) {
         if self.browser.annotations.armed(id) {
@@ -185,7 +281,9 @@ impl HerdrWindow {
             return;
         }
         match Report::parse(body) {
-            Some(Report::Picked(anchor)) => self.begin_note(id, anchor, window, cx),
+            Some(Report::Picked { anchor, shot }) => {
+                self.begin_note(id, anchor, shot, window, cx);
+            }
             Some(Report::Cancelled) => {
                 if self.tab_notes(id).pending.take().is_none() {
                     self.toggle_annotating(id, window, cx);
@@ -196,21 +294,44 @@ impl HerdrWindow {
         }
     }
 
-    fn begin_note(
+    pub(super) fn begin_note(
         &mut self,
         id: TabId,
         anchor: Anchor,
+        shot: Option<Rect>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.tab_notes(id).notes.len() >= MAX_NOTES {
+            self.reveal_page(id, cx);
             self.show_flash(
                 Flash::warning("Send or remove notes before adding more"),
                 cx,
             );
             return;
         }
-        self.tab_notes(id).pending = Some(anchor);
+        // The picker hid its overlay for the screenshot; WebKit takes it
+        // after the next screen update, then the overlay comes back.
+        let capture = shot.and_then(|rect| {
+            self.browser.annotations.captures += 1;
+            let capture = self.browser.annotations.captures;
+            #[cfg(any(target_os = "macos", windows))]
+            let asked = self.browser.pages.capture(id, rect, capture, cx);
+            #[cfg(not(any(target_os = "macos", windows)))]
+            let asked = {
+                let _ = rect;
+                false
+            };
+            asked.then_some(capture)
+        });
+        if capture.is_none() {
+            self.reveal_page(id, cx);
+        }
+        self.tab_notes(id).pending = Some(Draft {
+            anchor,
+            image: None,
+            capture,
+        });
         // The page holds the keyboard natively; the note is typed here.
         #[cfg(any(target_os = "macos", windows))]
         self.browser.pages.blur(id, cx);
@@ -221,17 +342,79 @@ impl HerdrWindow {
         cx.notify();
     }
 
-    pub(super) fn add_note(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.browser.annotations.input.read(cx).text().to_owned();
-        let Some(anchor) = self.tab_notes(id).pending.clone() else {
+    fn reveal_page(&mut self, id: TabId, cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "macos", windows))]
+        self.browser.pages.script(id, annotate::reveal_script(), cx);
+        #[cfg(not(any(target_os = "macos", windows)))]
+        let _ = (id, cx);
+    }
+
+    /// A screenshot arrived from WebKit: bring the overlay back, turn the
+    /// capture into a PNG off the UI thread, and give it to its draft or note.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn page_captured(
+        &mut self,
+        id: TabId,
+        capture: u64,
+        tiff: Option<Vec<u8>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.reveal_page(id, cx);
+        let Some(tiff) = tiff else {
             return;
         };
-        let Some(note) = Note::new(anchor, &text) else {
+        let png = cx
+            .background_executor()
+            .spawn(async move { super::snapshot::png(&tiff) });
+        cx.spawn(async move |this, cx| {
+            let Some(png) = png.await else {
+                return;
+            };
+            let image = Arc::new(Image::from_bytes(ImageFormat::Png, png));
+            this.update(cx, |this, cx| {
+                this.attach_screenshot(id, capture, image);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn attach_screenshot(&mut self, id: TabId, capture: u64, image: Arc<Image>) {
+        let Some(tab) = self.browser.annotations.tabs.get_mut(&id) else {
+            return;
+        };
+        if let Some(draft) = tab
+            .pending
+            .as_mut()
+            .filter(|draft| draft.capture == Some(capture))
+        {
+            draft.image = Some(image);
+            draft.capture = None;
+        } else if let Some(note) = tab
+            .notes
+            .iter_mut()
+            .find(|note| note.capture == Some(capture))
+        {
+            note.image = Some(image);
+            note.capture = None;
+        }
+    }
+
+    pub(super) fn add_note(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.browser.annotations.input.read(cx).text().to_owned();
+        let Some(draft) = self.tab_notes(id).pending.take() else {
+            return;
+        };
+        let Some(mut note) = Note::new(draft.anchor.clone(), &text) else {
+            self.tab_notes(id).pending = Some(draft);
             self.show_flash(Flash::warning("Write what should change first"), cx);
             return;
         };
+        note.image = draft.image;
+        note.capture = draft.capture;
         let notes = self.tab_notes(id);
-        notes.pending = None;
         notes.notes.push(note);
         self.browser
             .annotations
@@ -257,9 +440,44 @@ impl HerdrWindow {
         cx.notify();
     }
 
-    fn notes_prompt(&mut self, tab: &Tab) -> Option<String> {
-        let notes = &self.tab_notes(tab.id).notes;
-        (!notes.is_empty()).then(|| annotate::prompt(tab, notes, &crate::control::reload_command()))
+    /// The queued notes as a prompt, after their screenshots are saved to
+    /// files the agent can read. Saving runs off the UI thread; `then` gets
+    /// the prompt back on it.
+    fn with_notes_prompt(
+        &mut self,
+        tab: &Tab,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, String, &mut Context<Self>) + 'static,
+    ) {
+        let notes = self.tab_notes(tab.id).notes.clone();
+        if notes.is_empty() {
+            return;
+        }
+        let reload = crate::control::reload_command();
+        if notes.iter().all(|note| note.image.is_none()) {
+            let text = annotate::prompt(tab, &notes, &[], &reload);
+            then(self, text, cx);
+            return;
+        }
+        let images: Vec<Option<Arc<Image>>> = notes.iter().map(|note| note.image.clone()).collect();
+        let saving = cx
+            .background_executor()
+            .spawn(async move { save_screenshots(&images) });
+        let tab = tab.clone();
+        cx.spawn(async move |this, cx| {
+            let paths = saving.await;
+            this.update(cx, |this, cx| {
+                let paths = paths.unwrap_or_else(|error| {
+                    tracing::warn!(%error, "Could not save note screenshots");
+                    this.show_flash(Flash::warning("Screenshots could not be saved"), cx);
+                    Vec::new()
+                });
+                let text = annotate::prompt(&tab, &notes, &paths, &reload);
+                then(this, text, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn clear_notes(&mut self, id: TabId, cx: &mut Context<Self>) {
@@ -269,10 +487,10 @@ impl HerdrWindow {
     }
 
     fn copy_notes(&mut self, tab: &Tab, cx: &mut Context<Self>) {
-        if let Some(text) = self.notes_prompt(tab) {
+        self.with_notes_prompt(tab, cx, |this, text, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
-            self.show_flash(Flash::success("Notes copied"), cx);
-        }
+            this.show_flash(Flash::success("Notes copied"), cx);
+        });
     }
 
     /// Where Send delivers: the pane of the agent that opened the page,
@@ -293,12 +511,18 @@ impl HerdrWindow {
     /// directly when it waits in `browser feedback`, otherwise into its pane
     /// once it is idle, and kept for `browser feedback` when its pane is gone.
     pub(super) fn send_notes(&mut self, tab: &Tab, cx: &mut Context<Self>) {
-        let Some(text) = self.notes_prompt(tab) else {
-            return;
-        };
+        // The queue is cleared at once, so a second Send cannot repeat it
+        // while screenshots are still being saved.
+        let owned = tab.clone();
+        self.with_notes_prompt(tab, cx, move |this, text, cx| {
+            this.deliver_notes(&owned, text, cx);
+        });
+        self.clear_notes(tab.id, cx);
+    }
+
+    fn deliver_notes(&mut self, tab: &Tab, text: String, cx: &mut Context<Self>) {
         let Some(pane_id) = tab.origin.clone() else {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
-            self.clear_notes(tab.id, cx);
             self.show_flash(
                 Flash::success("No agent opened this page, so the notes were copied"),
                 cx,
@@ -344,7 +568,6 @@ impl HerdrWindow {
                 .keep(Batch { pane_id, text });
             Flash::warning("The agent's pane is not here; notes kept for `browser feedback`")
         };
-        self.clear_notes(tab.id, cx);
         self.show_flash(flash, cx);
     }
 
@@ -455,7 +678,14 @@ impl HerdrWindow {
         let theme = self.theme.clone();
         let armed = self.browser.annotations.armed(id);
         let notes = self.tab_notes(id);
-        let pending = notes.pending.clone();
+        let regions = notes.regions;
+        let pending = notes.pending.as_ref().map(|draft| {
+            (
+                draft.anchor.summary(),
+                draft.image.clone(),
+                draft.capture.is_some(),
+            )
+        });
         let list: Vec<(usize, Note)> = notes.notes.iter().cloned().enumerate().collect();
         let origin = tab.origin.is_some();
         let tab_for_send = tab.clone();
@@ -477,7 +707,15 @@ impl HerdrWindow {
                 .text_color(rgb(theme.text_on(background)))
                 .child(label)
         };
-        let composer = pending.map(|anchor| {
+        let thumbnail = |image: Arc<Image>| {
+            img(image)
+                .max_w_full()
+                .max_h(px(96.))
+                .rounded(px(crate::config::corners::CONTROL))
+                .border_1()
+                .border_color(rgb(theme.active))
+        };
+        let composer = pending.map(|(summary, image, capturing)| {
             div()
                 .flex()
                 .flex_col()
@@ -485,12 +723,15 @@ impl HerdrWindow {
                 .p_2()
                 .border_b_1()
                 .border_color(rgb(theme.active))
-                .child(
-                    div()
-                        .text_color(rgb(theme.muted))
-                        .truncate()
-                        .child(anchor.summary()),
-                )
+                .child(div().text_color(rgb(theme.muted)).truncate().child(summary))
+                .children(image.map(thumbnail))
+                .when(capturing, |draft| {
+                    draft.child(
+                        div()
+                            .text_color(rgb(theme.muted))
+                            .child("Taking a screenshot\u{2026}"),
+                    )
+                })
                 .child(
                     div()
                         .id("annotation-input")
@@ -547,7 +788,8 @@ impl HerdrWindow {
                                 .truncate()
                                 .child(note.anchor.summary()),
                         )
-                        .child(div().child(note.comment)),
+                        .child(div().child(note.comment))
+                        .children(note.image.clone().map(thumbnail)),
                 )
                 .child(
                     div()
@@ -593,9 +835,21 @@ impl HerdrWindow {
                     .border_color(rgb(theme.active))
                     .child("Notes")
                     .child(
-                        button("annotation-page", "Note on page", false).on_click(cx.listener(
-                            move |this, _, window, cx| this.begin_note(id, Anchor::Page, window, cx),
-                        )),
+                        div()
+                            .flex()
+                            .gap_1()
+                            .child(
+                                // Drag draws a region while this is on;
+                                // Shift-drag draws one either way.
+                                button("annotation-region", "Region", regions).on_click(
+                                    cx.listener(move |this, _, _, cx| this.toggle_regions(id, cx)),
+                                ),
+                            )
+                            .child(button("annotation-page", "Note on page", false).on_click(
+                                cx.listener(move |this, _, window, cx| {
+                                    this.begin_note(id, Anchor::Page, None, window, cx);
+                                }),
+                            )),
                     ),
             )
             .children(composer)
@@ -611,7 +865,7 @@ impl HerdrWindow {
                             div()
                                 .p_2()
                                 .text_color(rgb(theme.muted))
-                                .child("Click an element or select text in the page, then describe the change."),
+                                .child("Click an element, select text, or Shift-drag a region in the page, then describe the change."),
                         )
                     }),
             )
@@ -634,5 +888,54 @@ impl HerdrWindow {
                 )
             })
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::{SCREENSHOT_AGE, save_screenshots_in};
+    use gpui::{Image, ImageFormat};
+    use std::{
+        sync::Arc,
+        time::{Duration, SystemTime},
+    };
+
+    #[test]
+    fn screenshots_are_private_files_and_old_ones_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("note-1-1.png");
+        std::fs::write(&stale, b"old").unwrap();
+        let week_ago = SystemTime::now() - SCREENSHOT_AGE - Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(week_ago)
+            .unwrap();
+        let image = Arc::new(Image::from_bytes(ImageFormat::Png, b"png bytes".to_vec()));
+        let paths =
+            save_screenshots_in(dir.path(), &[None, Some(image)], SystemTime::now()).unwrap();
+        assert!(paths[0].is_none());
+        let saved = paths[1].as_ref().unwrap();
+        assert_eq!(std::fs::read(saved).unwrap(), b"png bytes");
+        assert!(
+            saved
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .ends_with("-2.png")
+        );
+        assert!(!stale.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |path: &std::path::Path| {
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+            };
+            assert_eq!(mode(saved), 0o600);
+            assert_eq!(mode(dir.path()), 0o700);
+        }
     }
 }

@@ -70,6 +70,9 @@ gpui-wry.workspace = true
 wry.workspace      = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2.workspace                = true
+objc2-core-foundation.workspace = true
+objc2-web-kit.workspace         = true
 cocoa                        = { optional = true, workspace = true }
 core-graphics                = { optional = true, workspace = true }
 foreign-types                = { optional = true, workspace = true }

@@ -419,6 +419,8 @@ impl HerdrWindow {
                     self.page_loaded(id, cx);
                 }
                 Event::Posted(id, body) => self.page_posted(id, &body, window, cx),
+                #[cfg(target_os = "macos")]
+                Event::Captured(id, capture, tiff) => self.page_captured(id, capture, tiff, cx),
                 Event::NewWindow(id, url) => {
                     let parent = store(cx).and_then(|store| store.get(id)).cloned();
                     if let (Some(parent), Ok(url)) = (parent, WebUrl::try_from(url.as_str())) {

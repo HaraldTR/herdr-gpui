@@ -766,14 +766,24 @@ come back after a restart; closing a workspace in Herdr removes its tabs.
 **Annotate** in a browser tab's toolbar lets you pin notes to a page and send
 them to the agent that opened it, so it can change the page.
 
-- Hover to outline an element and click to pick it, or select text. Links do
-  not follow while annotating. **Note on page** writes a note about the whole
-  page. Escape drops the current pick; a second Escape stops annotating.
+- Hover to outline an element and click to pick it, or select text. For
+  anything else, draw a region: turn on **Region** in the notes panel and
+  drag, or Shift-drag at any time. Links do not follow while annotating.
+  **Note on page** writes a note about the whole page. Escape drops the
+  current pick; a second Escape stops annotating.
+- On macOS each pick also takes a screenshot of that part of the page, as it
+  looks on screen and without the annotation overlay, shown in the note. It
+  comes from WebKit's own snapshot, the one place the app calls WebKit
+  directly (`browser/snapshot.rs`). Screenshots are saved when you send, as
+  private files in `$XDG_STATE_HOME/herdr/gpui/annotations/`, removed after a
+  week, and the prompt names each file. Windows notes have no screenshots.
 - Notes are written in the panel beside the page, not in the page, so the
   page never sees them. Queued notes are numbered on the page. Up to 20 wait
   per tab.
 - **Send to agent** turns them into one prompt: the page, then for each note
-  the element's selector path, text, and a short HTML snippet, and your note.
+  the element's selector path, text, and a short HTML snippet (for a region:
+  its position, the container and elements it covers, and their text), its
+  screenshot, and your note.
   Page text is cleaned of control characters and marked as quoted data.
   **Copy** puts the same prompt on the clipboard instead.
 - The prompt goes to the agent one way only. An agent waiting in
