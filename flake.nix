@@ -61,6 +61,8 @@
               ./rust-toolchain.toml
               ./crates
               ./assets
+              # The agent skill is compiled into the executable.
+              ./skills
               ./scripts/release/herdr-gpui.desktop
             ];
           };
