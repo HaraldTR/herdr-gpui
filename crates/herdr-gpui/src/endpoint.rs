@@ -475,13 +475,14 @@ impl HerdrWindow {
         self.reset_selected();
     }
 
-    fn reset_selected(&mut self) {
+    pub(super) fn reset_selected(&mut self) {
         if let Some(transfer) = &self.file_transfer {
             transfer.cancel();
         }
         for image in &self.pending_images {
             image.cancel();
         }
+        self.clear_pending_input();
         self.menu.reset();
         self.selection_epoch += 1;
         let endpoint = &self.endpoints[self.selected_endpoint];
@@ -733,6 +734,9 @@ impl HerdrWindow {
     }
 
     pub(super) fn poll_endpoints(&mut self, cx: &mut Context<Self>) {
+        // Record the focused target the user last saw before a newer snapshot
+        // can replace it; input held across a gap may only go there.
+        self.flush_pending_input(cx);
         if let Some(error) = self.catalog.poll_write() {
             self.local_error = Some(format!("Save host selection: {error}"));
             cx.notify();
@@ -842,6 +846,8 @@ impl HerdrWindow {
             }
             changed = Redraw::Window;
         }
+        // Held input precedes any deferred navigation.
+        self.flush_pending_input(cx);
         if self.navigation_ready() {
             self.activation_deadline = None;
             if let Some(id) = self.pending_toast {

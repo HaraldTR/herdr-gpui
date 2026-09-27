@@ -13,6 +13,7 @@ mod images;
 mod input;
 mod lifecycle;
 mod mouse;
+mod pending_input;
 mod render;
 mod selection;
 mod toasts;
@@ -93,6 +94,7 @@ pub(crate) struct HerdrWindow {
     /// The resize cursor of the pane border under the pointer, if any.
     pub(crate) split_cursor: Option<CursorStyle>,
     pub(crate) pending_images: Vec<images::PendingImage>,
+    pub(crate) pending_input: pending_input::PendingInput,
     pub(crate) file_transfer: Option<transfers::FileTransfer>,
     /// The terminal cells the pointer is choosing. A release copies them and
     /// clears this, so a highlight only ever belongs to a drag in progress.
@@ -361,6 +363,7 @@ impl HerdrWindow {
             split_drag: None,
             split_cursor: None,
             pending_images: Vec::new(),
+            pending_input: Default::default(),
             file_transfer: None,
             selection: None,
             flash: None,
