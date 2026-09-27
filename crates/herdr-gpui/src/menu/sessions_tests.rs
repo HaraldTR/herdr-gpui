@@ -735,9 +735,13 @@ fn a_device_offers_add_session_only_while_it_is_online(cx: &mut TestAppContext) 
     draw(cx);
     click(cx, "sessions-row-2");
     cx.update(|_, cx| {
-        assert!(matches!(
-            view.read(cx).menu.session_edit,
-            Some(super::sessions::Edit::Create { .. })
-        ));
+        // Windows has no SSH route, so even an online device adds nothing there.
+        assert_eq!(
+            matches!(
+                view.read(cx).menu.session_edit,
+                Some(super::sessions::Edit::Create { .. })
+            ),
+            !cfg!(windows)
+        );
     });
 }
