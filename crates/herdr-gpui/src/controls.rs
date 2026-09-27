@@ -37,6 +37,8 @@ pub enum Command {
     Logs,
     About,
     OpenNotificationTarget,
+    NewBrowserTab,
+    InstallBrowserSkill,
 }
 
 pub struct CommandInfo {
@@ -301,6 +303,18 @@ pub const COMMANDS: &[CommandInfo] = &[
         label: "About Herdr",
         shortcuts: &[],
     },
+    CommandInfo {
+        command: Command::NewBrowserTab,
+        name: "new_browser_tab",
+        label: "New Browser Tab",
+        shortcuts: &[],
+    },
+    CommandInfo {
+        command: Command::InstallBrowserSkill,
+        name: "install_browser_skill",
+        label: "Install Browser Skill for Agents",
+        shortcuts: &[],
+    },
 ];
 
 pub fn request(command: Command, snapshot: &ClientShellSnapshot) -> Option<(Method, Value)> {
@@ -416,7 +430,9 @@ pub fn request(command: Command, snapshot: &ClientShellSnapshot) -> Option<(Meth
         | Command::Quit
         | Command::Logs
         | Command::About
-        | Command::OpenNotificationTarget => return None,
+        | Command::OpenNotificationTarget
+        | Command::NewBrowserTab
+        | Command::InstallBrowserSkill => return None,
     })
 }
 
@@ -435,7 +451,7 @@ mod tests {
     #[test]
     fn catalog_has_all_native_commands_and_gpui_shortcuts() {
         use Command::*;
-        let expected: [(Command, &[&str]); 42] = [
+        let expected: [(Command, &[&str]); 44] = [
             (OpenNotificationTarget, &["cmd-alt-n"]),
             (Logs, &[]),
             (NewWindow, &["cmd-alt-shift-n"]),
@@ -478,6 +494,8 @@ mod tests {
             (Reconnect, &[]),
             (Quit, &["cmd-q"]),
             (About, &[]),
+            (NewBrowserTab, &[]),
+            (InstallBrowserSkill, &[]),
         ];
         assert_eq!(COMMANDS.len(), expected.len());
         let shortcuts: std::collections::HashSet<_> =
@@ -540,6 +558,8 @@ mod tests {
             Command::Reconnect,
             Command::Quit,
             Command::About,
+            Command::NewBrowserTab,
+            Command::InstallBrowserSkill,
         ] {
             assert!(request(command, &s).is_none(), "{command:?}");
         }

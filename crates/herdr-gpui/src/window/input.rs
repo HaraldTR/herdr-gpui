@@ -14,7 +14,7 @@ impl HerdrWindow {
     pub(crate) fn open_terminal_link(
         &mut self,
         event: &gpui::ClickEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let pressed = self.pressed_terminal_link.take();
@@ -34,7 +34,14 @@ impl HerdrWindow {
                 .is_some_and(|(destination, _)| destination == &url)
         {
             cx.stop_propagation();
-            cx.open_url(&url);
+            let in_tab = (self.config.open_links_in == crate::config::LinkTarget::BrowserTab)
+                != event.down.modifiers.alt;
+            match crate::browser::WebUrl::try_from(url.as_str()) {
+                Ok(url) if in_tab && crate::browser::EMBEDDED => {
+                    self.open_browser_tab(Some(url), window, cx);
+                }
+                _ => cx.open_url(&url),
+            }
         }
     }
 

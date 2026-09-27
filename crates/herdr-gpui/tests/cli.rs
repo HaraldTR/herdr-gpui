@@ -8,7 +8,21 @@ use std::{
 };
 
 fn cli(args: &[&str]) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_herdr-gpui"))
+    cli_in(args, None)
+}
+
+/// Runs with `state` as the only state directory, and without the variables
+/// a Herdr pane would set, so no running app or daemon is ever reached.
+fn cli_in(args: &[&str], state: Option<&std::path::Path>) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_herdr-gpui"));
+    if let Some(state) = state {
+        command
+            .env("XDG_STATE_HOME", state)
+            .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("HERDR_CLIENT_SOCKET_PATH")
+            .env_remove("HERDR_WORKSPACE_ID");
+    }
+    let mut child = command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -142,4 +156,68 @@ fn native_test_flag_requires_explicit_socket_not_session_discovery() {
     ] {
         usage_error(&args, "--integration-test requires an explicit --socket");
     }
+}
+
+#[test]
+fn browser_commands_answer_without_a_window() {
+    let output = cli(&["browser", "--help"]);
+    assert!(output.status.success(), "{output:?}");
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("browser open URL"), "{help}");
+    assert!(help.contains("3 Herdr GPUI not running"), "{help}");
+
+    let output = cli(&["browser", "skill"]);
+    assert!(output.status.success(), "{output:?}");
+    let skill = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        skill.starts_with("---\nname: herdr-gpui-browser\n"),
+        "{skill}"
+    );
+    // The skill names this very executable, which need not be on PATH.
+    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_herdr-gpui")).unwrap();
+    assert!(
+        skill.contains(&format!("{} browser open", exe.display()))
+            || skill.contains(&format!(
+                "{} browser open",
+                env!("CARGO_BIN_EXE_herdr-gpui")
+            )),
+        "{skill}"
+    );
+
+    usage_error(&["browser", "open"], "browser open requires one URL");
+    usage_error(&["browser", "eval"], "Unknown browser command: eval");
+}
+
+#[test]
+fn browser_open_reports_a_missing_app_and_a_refused_address() {
+    // Short, because the control socket inside must fit a Unix socket path.
+    let parent = if cfg!(unix) {
+        std::path::PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    let state = tempfile::Builder::new()
+        .prefix("hgs")
+        .tempdir_in(parent)
+        .unwrap();
+    let output = cli_in(
+        &["browser", "open", "file:///etc/passwd"],
+        Some(state.path()),
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("http and https"),
+        "{output:?}"
+    );
+    let output = cli_in(&["browser", "open", "localhost:3000"], Some(state.path()));
+    if cfg!(unix) {
+        assert_eq!(output.status.code(), Some(3), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("not running"),
+            "{output:?}"
+        );
+    } else {
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+    }
+    assert!(output.stdout.is_empty(), "{output:?}");
 }

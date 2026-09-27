@@ -2,15 +2,12 @@
 use super::{HIDDEN, InputTarget, popup_origin, wheel_target};
 use herdr_client::protocol::{FrameData, PaneSurfaceFrame};
 
-const MAX_URL_BYTES: usize = 8192;
 const MAX_ROW_BYTES: usize = 32768;
 
 fn web_url(value: &str) -> Option<String> {
-    if value.len() > MAX_URL_BYTES || value.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        return None;
-    }
-    let url = url::Url::parse(value).ok()?;
-    (matches!(url.scheme(), "http" | "https") && url.host_str().is_some()).then(|| url.into())
+    crate::browser::WebUrl::try_from(value)
+        .ok()
+        .map(String::from)
 }
 
 pub(crate) fn link_at(
@@ -221,13 +218,7 @@ mod tests {
         s.frame.hyperlinks[0] = "https://example.com".into();
         s.frame.cells[0].modifier = HIDDEN;
         assert!(link_at(&s, 1., 1., 10., 20.).is_none());
-        assert!(
-            web_url(&format!(
-                "https://example.com/{}",
-                "a".repeat(MAX_URL_BYTES)
-            ))
-            .is_none()
-        );
+        assert!(web_url(&format!("https://example.com/{}", "a".repeat(8192))).is_none());
     }
 
     #[test]

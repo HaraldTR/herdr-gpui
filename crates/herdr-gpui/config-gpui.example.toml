@@ -28,6 +28,10 @@ show_agents = true
 # keep @, [, or letters on Option still type them. true always sends Alt,
 # false always types. Alt always reaches the pane on Linux and Windows.
 option_as_alt = "auto"
+# Where a clicked terminal link opens: "system" (the default browser) or
+# "browser-tab" (a browser tab beside the workspace's terminals, macOS and
+# Windows only). Alt-click (Option-click) opens a link in the other one.
+open_links_in = "system"
 # "normal" (TUI-like), "comfortable" (the previous roomy Normal), or "compact".
 # Compact hides workspace branch lines and PR change
 # counts, and tightens Spaces and Agents spacing without changing font sizes.

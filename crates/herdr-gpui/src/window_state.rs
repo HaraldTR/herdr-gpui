@@ -5,16 +5,10 @@
 //! every display at origin (0, 0), so a position is only meaningful together
 //! with its display. Each window records its display's persistent UUID and is
 //! reopened on that display, falling back to the primary one when it is gone.
+use crate::state_file;
 use gpui::{App, Bounds, Context, DisplayId, Global, Pixels, Window, WindowId, point, px, size};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::VecDeque,
-    fs,
-    io::{self, Read, Write},
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex, mpsc},
-    thread::{self, JoinHandle},
-};
+use std::{collections::VecDeque, path::Path};
 use uuid::Uuid;
 
 const MAX_WINDOWS: usize = 64;
@@ -92,16 +86,9 @@ fn fit(mut geometry: Geometry, display: Option<Bounds<Pixels>>) -> Geometry {
 }
 
 fn read(path: &Path) -> crate::Result<Vec<Geometry>> {
-    let file = match fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
+    let Some(bytes) = state_file::read(path, 64 * 1024)? else {
+        return Ok(Vec::new());
     };
-    let mut bytes = Vec::new();
-    file.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > 64 * 1024 {
-        return Err(crate::Error::InvalidWindowState);
-    }
     let windows: Vec<Geometry> = serde_json::from_slice(&bytes)?;
     if windows.len() > MAX_WINDOWS || windows.iter().any(|geometry| !geometry.valid()) {
         return Err(crate::Error::InvalidWindowState);
@@ -109,64 +96,12 @@ fn read(path: &Path) -> crate::Result<Vec<Geometry>> {
     Ok(windows)
 }
 
+#[cfg(test)]
 fn write(path: &Path, windows: &[Geometry]) -> crate::Result<()> {
-    let parent = path.parent().ok_or(crate::Error::MissingStateRoot)?;
-    fs::create_dir_all(parent)?;
-    let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    serde_json::to_writer(&mut file, windows)?;
-    file.write_all(b"\n")?;
-    // No fsync: on macOS it is F_FULLFSYNC, which can outlast GPUI's 100 ms
-    // quit budget. The rename still replaces the file atomically, and a file
-    // torn by power loss is rejected on load in favor of default placement.
-    file.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    state_file::write(path, windows)
 }
 
-struct Writer {
-    pending: Arc<Mutex<Option<Vec<Geometry>>>>,
-    wake: mpsc::SyncSender<()>,
-    worker: JoinHandle<()>,
-}
-
-impl Writer {
-    fn start(path: PathBuf) -> io::Result<Self> {
-        let pending = Arc::new(Mutex::new(None::<Vec<Geometry>>));
-        let mailbox = pending.clone();
-        let (wake, receiver) = mpsc::sync_channel(1);
-        let worker = thread::Builder::new()
-            .name("window-state".into())
-            .spawn(move || {
-                for () in receiver {
-                    let snapshot = mailbox.lock().ok().and_then(|mut pending| pending.take());
-                    if let Some(snapshot) = snapshot
-                        && let Err(error) = write(&path, &snapshot)
-                    {
-                        tracing::warn!(%error, "Cannot save window state");
-                    }
-                }
-            })?;
-        Ok(Self {
-            pending,
-            wake,
-            worker,
-        })
-    }
-
-    fn save(&self, windows: Vec<Geometry>) {
-        if let Ok(mut pending) = self.pending.lock() {
-            *pending = Some(windows);
-        }
-        // A full wake queue already guarantees that the latest snapshot is read.
-        let _ = self.wake.try_send(());
-    }
-
-    fn finish(self) {
-        drop(self.wake);
-        if self.worker.join().is_err() {
-            tracing::warn!("Window-state worker panicked");
-        }
-    }
-}
+type Writer = state_file::Writer<Vec<Geometry>>;
 
 pub(crate) struct WindowState {
     restored: VecDeque<Geometry>,
@@ -190,7 +125,7 @@ impl WindowState {
                     Vec::new()
                 }
             });
-        let writer = path.and_then(|path| match Writer::start(path) {
+        let writer = path.and_then(|path| match Writer::start("window-state", path) {
             Ok(writer) => Some(writer),
             Err(error) => {
                 tracing::warn!(%error, "Cannot start window-state worker");
@@ -317,6 +252,7 @@ impl WindowState {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+    use std::fs;
 
     fn geometry(x: f32) -> Geometry {
         Geometry {
@@ -333,7 +269,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("windows.json");
         assert!(read(&path).unwrap().is_empty());
-        let writer = Writer::start(path.clone()).unwrap();
+        let writer = Writer::start("window-state", path.clone()).unwrap();
         writer.save(vec![geometry(0.)]);
         let expected = vec![geometry(-1200.), geometry(300.)];
         writer.save(expected.clone());
@@ -348,7 +284,7 @@ mod tests {
         let mut state = WindowState {
             restored: VecDeque::new(),
             live: Vec::new(),
-            writer: Some(Writer::start(path.clone()).unwrap()),
+            writer: Some(Writer::start("window-state", path.clone()).unwrap()),
             quitting: false,
         };
         let ids = [WindowId::from(1), WindowId::from(2), WindowId::from(3)];
@@ -372,7 +308,7 @@ mod tests {
         let mut state = WindowState {
             restored: VecDeque::new(),
             live: Vec::new(),
-            writer: Some(Writer::start(path.clone()).unwrap()),
+            writer: Some(Writer::start("window-state", path.clone()).unwrap()),
             quitting: false,
         };
         let id = WindowId::from(1);

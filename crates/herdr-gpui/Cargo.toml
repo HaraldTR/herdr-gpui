@@ -62,6 +62,12 @@ integration-test = [
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
 
+# wry has no working GPUI child-view backend on Linux yet; browser tabs there
+# open in the system browser instead.
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+gpui-wry.workspace = true
+wry.workspace      = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa                        = { optional = true, workspace = true }
 core-graphics                = { optional = true, workspace = true }

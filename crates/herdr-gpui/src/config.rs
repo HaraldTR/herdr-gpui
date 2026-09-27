@@ -85,6 +85,7 @@ pub struct Config {
     /// Plan usage of the selected host's AI services in the status bar.
     pub usage: crate::usage::UsageConfig,
     pub option_as_alt: OptionAsAlt,
+    pub open_links_in: LinkTarget,
     pub sidebar: FontConfig,
     pub tabs: FontConfig,
     pub terminal: FontConfig,
@@ -95,6 +96,17 @@ pub struct Config {
     pub clipboard_toast: ClipboardToast,
     pub layout: Layout,
     pub keybindings: Keymap,
+}
+
+/// Where a clicked terminal link opens. Alt-click (Option on macOS) opens it
+/// in the other one.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LinkTarget {
+    #[default]
+    System,
+    /// A browser tab in the workspace, where the build can show pages.
+    BrowserTab,
 }
 
 /// Whether macOS Option sends Alt shortcuts to a pane or types the character
@@ -569,6 +581,7 @@ impl Default for Config {
             show_agents: true,
             usage: crate::usage::UsageConfig::default(),
             option_as_alt: OptionAsAlt::default(),
+            open_links_in: LinkTarget::default(),
             features: Features::default(),
             notifications: NotificationConfig::default(),
             clipboard_toast: ClipboardToast::default(),
@@ -592,6 +605,7 @@ struct Settings {
     show_agents: Option<bool>,
     usage: crate::usage::UsageConfig,
     option_as_alt: OptionAsAlt,
+    open_links_in: LinkTarget,
     sidebar: FontSettings,
     tabs: FontSettings,
     terminal: FontSettings,
@@ -947,6 +961,7 @@ impl Config {
         settings.usage.validate()?;
         config.usage = settings.usage;
         config.option_as_alt = settings.option_as_alt;
+        config.open_links_in = settings.open_links_in;
         for (name, font, settings) in [
             ("sidebar", &mut config.sidebar, settings.sidebar),
             ("tabs", &mut config.tabs, settings.tabs),
@@ -2144,6 +2159,21 @@ mod tests {
         assert!(!config.show_agents);
         assert!(Config::parse("confirm_close_tab = 'false'").is_err());
         assert!(Config::parse("show_agents = 0").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn links_open_in_the_system_browser_unless_configured() -> anyhow::Result<()> {
+        assert_eq!(Config::parse("")?.open_links_in, LinkTarget::System);
+        assert_eq!(
+            Config::parse(DEFAULT_CONFIG)?.open_links_in,
+            LinkTarget::System
+        );
+        assert_eq!(
+            Config::parse("open_links_in = \"browser-tab\"")?.open_links_in,
+            LinkTarget::BrowserTab
+        );
+        assert!(Config::parse("open_links_in = \"tab\"").is_err());
         Ok(())
     }
 

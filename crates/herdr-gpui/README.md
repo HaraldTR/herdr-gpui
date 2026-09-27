@@ -726,6 +726,66 @@ Plain URL detection is limited to one row within one pane; links that wrap or
 reach the right edge need explicit terminal hyperlink metadata. Other URI schemes
 and local file paths are not activated.
 
+Set `open_links_in = "browser-tab"` to open links in a [browser tab](#browser-tabs)
+instead. Alt-click (Option-click on macOS) opens a link in the other target.
+
+## Browser Tabs
+
+A browser tab shows a web page in place of the terminal, next to the
+workspace's Herdr tabs. Herdr panes are always terminals, so browser tabs
+belong to this app alone: the daemon, the TUI, and other clients never see
+them. Every window lists the same tabs for a workspace, and each window has its
+own page for each one. Tabs are saved in
+`$XDG_STATE_HOME/herdr/gpui/browser-tabs.json` (default `~/.local/state/`) and
+come back after a restart; closing a workspace in Herdr removes its tabs.
+
+- Open one with **New Browser Tab** in the command palette, from a clicked link
+  (see [Terminal Links](#terminal-links)), or from an agent (below).
+- The toolbar has back, forward, reload, the address field, and a button that
+  opens the page in the system browser. The address field accepts bare hosts:
+  `localhost:3000` becomes `http://localhost:3000/`.
+- Close Tab and Close Pane close the browser tab being shown, without asking.
+  Clicking a Herdr tab, or switching Herdr tabs in the workspace, shows its
+  terminal again.
+- Only `http` and `https` pages open. Pages cannot navigate to other schemes
+  (so `file:` and applications' custom URL schemes stay closed), downloads are
+  refused, and a page's new windows open as new browser tabs. Pages have no
+  script bridge to the app, and the app never runs page-supplied script. On
+  Windows, a frame inside a page that links to an application's URL scheme
+  gets WebView2's own confirmation prompt rather than being refused outright.
+- Pages are native web views (WebKit on macOS, WebView2 on Windows) layered
+  above the window, so the app hides the page while a menu or dialog is open.
+  Toasts that fall over the page are hidden behind it.
+- Linux has no embedded pages yet: browser tab requests open the system browser.
+
+### Letting Agents Open Pages
+
+Agents running in the app's panes can open a page for you:
+
+```sh
+herdr-gpui browser open http://localhost:3000   # macOS: /Applications/Herdr.app/Contents/MacOS/Herdr
+herdr-gpui browser open --no-focus https://example.com/docs
+herdr-gpui browser --help
+```
+
+The tab joins the caller's own workspace, which Herdr names in the pane's
+`HERDR_WORKSPACE_ID`. The command talks to the running app over a socket at
+`$XDG_STATE_HOME/herdr/gpui/control.sock`, readable only by you, and exits with
+3 when the app is not running. Only processes on this machine can reach it:
+agents on saved SSH hosts cannot open browser tabs.
+
+To teach your agents about it, run **Install Browser Skill for Agents** from
+the command palette. It writes a `herdr-gpui-browser` skill, naming this app's
+executable, into `~/.claude/skills/` and `~/.agents/skills/`, for whichever of
+`~/.claude` and `~/.agents` exists. Nothing is installed unless you ask.
+`herdr-gpui browser skill` prints the same text, for example to install it
+elsewhere:
+
+```sh
+mkdir -p ~/.claude/skills/herdr-gpui-browser
+herdr-gpui browser skill > ~/.claude/skills/herdr-gpui-browser/SKILL.md
+```
+
 ## macOS Dock Badge
 
 The Dock icon shows the number of agents reporting `Done` (finished) or `Blocked`

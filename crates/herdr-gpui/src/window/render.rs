@@ -44,6 +44,8 @@ impl Render for HerdrWindow {
             .bg(rgb(self.theme.surface))
             .text_color(rgb(self.theme.foreground))
             .items_center();
+        // A page covering the terminal takes the selection from its tab.
+        let shown = self.shown_browser_tab(cx);
         if let Some(snapshot) = &self.live.snapshot {
             for tab in snapshot
                 .tabs
@@ -56,7 +58,7 @@ impl Render for HerdrWindow {
                 // Selected tabs carry the theme's accent, so the choice reads as
                 // primary rather than as the hover tint used elsewhere; the rest
                 // recede into the strip, as they do in the reference UI.
-                let (background, text) = if tab.focused {
+                let (background, text) = if tab.focused && shown.is_none() {
                     let background = self.theme.primary_wash();
                     (background, self.theme.text_on(background))
                 } else {
@@ -128,12 +130,15 @@ impl Render for HerdrWindow {
                             }),
                         )
                         .on_click(cx.listener(move |this, _, window, cx| {
+                            this.show_terminal(cx);
                             this.navigate(NavigationTarget::Tab(&id), cx);
                             window.focus(&this.focus, cx);
                         })),
                 );
             }
         }
+        let browser_tabs = self.browser_tab_entries(shown.as_ref().map(|tab| tab.id), cx);
+        tabs = tabs.children(browser_tabs);
         // Paints the frame on screen, which during a focus change is the one
         // presented before it: the terminal area never blanks between two
         // projections. What the client knows to be current stays in `live`.
@@ -470,6 +475,11 @@ impl Render for HerdrWindow {
                         ),
                 )
             });
+        let content = match &shown {
+            Some(tab) => self.render_browser(tab, sidebar_gap, cx),
+            None => terminal.into_any_element(),
+        };
+        self.present_browser(shown.as_ref().map(|tab| tab.id), cx);
         let status = (!matches!(self.live.status, ConnectionStatus::Connected)
             || self.local_error.is_some()
             || self.live.error.is_some())
@@ -579,7 +589,7 @@ impl Render for HerdrWindow {
                                             })),
                                     ),
                             )
-                            .child(terminal)
+                            .child(content)
                             .child(
                 div()
                     .id("connection-status")
