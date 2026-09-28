@@ -129,7 +129,6 @@ pub(super) fn agent_labels<'a>(
 
 pub(super) fn status_indicator(status: AgentStatus, font: &FontConfig) -> Div {
     // Upstream dots: working/blocked/done filled, idle hollow, unknown a small dot.
-    let (diameter, filled, color) = status_style(status);
     div()
         .size(px(STATUS_WIDTH))
         .mt(px((line_height(font) - STATUS_WIDTH) / 2.))
@@ -137,14 +136,20 @@ pub(super) fn status_indicator(status: AgentStatus, font: &FontConfig) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .child(
-            div()
-                .size(px(diameter))
-                .rounded_full()
-                .border_1()
-                .border_color(rgb(color))
-                .when(filled, |dot| dot.bg(rgb(color))),
-        )
+        .child(status_dot(status))
+}
+
+/// The status dot alone, sized by its status, for callers that place it
+/// themselves.
+pub(crate) fn status_dot(status: AgentStatus) -> Div {
+    let (diameter, filled, color) = status_style(status);
+    div()
+        .flex_none()
+        .size(px(diameter))
+        .rounded_full()
+        .border_1()
+        .border_color(rgb(color))
+        .when(filled, |dot| dot.bg(rgb(color)))
 }
 
 /// Upstream draws status from its own palette, defaulting to Catppuccin Mocha,

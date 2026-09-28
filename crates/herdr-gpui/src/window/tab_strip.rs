@@ -8,8 +8,34 @@ use crate::{
     browser::{Fold, GroupId, Leaving, Listed, Pick, Shown, Slot},
     controls::Command,
     fonts::StyledFont,
+    sidebar::{STATUS_WIDTH, status_dot},
 };
 use gpui::{prelude::*, *};
+use herdr_client::protocol::AgentStatus;
+
+/// The gap between a Herdr tab's status dot and its title.
+const DOT_GAP: f32 = 6.;
+
+/// What a tab draws before its title.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lead {
+    Nothing,
+    /// A Herdr tab whose agents report a status.
+    Dot,
+    /// A browser tab's globe.
+    Globe,
+}
+
+impl Lead {
+    /// Unknown is what a tab without an agent reports, so it draws nothing
+    /// rather than the sidebar's small grey dot.
+    fn of(status: AgentStatus) -> Self {
+        match status {
+            AgentStatus::Unknown => Self::Nothing,
+            _ => Self::Dot,
+        }
+    }
+}
 
 /// What a divider drags: the index of the group on its left. The row it
 /// resizes reads the pointer.
@@ -33,8 +59,8 @@ impl HerdrWindow {
     }
 
     /// How wide a tab with `label` draws, as its padding, gaps, close
-    /// button, and an icon when it has one add up around the shaped text.
-    fn tab_width(&self, label: &SharedString, icon: bool, window: &Window) -> f32 {
+    /// button, and whatever leads its title add up around the shaped text.
+    fn tab_width(&self, label: &SharedString, lead: Lead, window: &Window) -> f32 {
         let run = TextRun {
             len: label.len(),
             font: self.config.tabs.font(),
@@ -50,8 +76,12 @@ impl HerdrWindow {
                 .width,
         );
         // Padding, the gap before the close button, the button, the rule;
-        // a browser tab's globe and its gap.
-        let chrome = if icon { 10. + 12. + 6. + 6. } else { 12. + 10. };
+        // a status dot or a browser tab's globe, and its gap.
+        let chrome = match lead {
+            Lead::Nothing => 12. + 10.,
+            Lead::Dot => 12. + STATUS_WIDTH + DOT_GAP + 10.,
+            Lead::Globe => 10. + 12. + 6. + 6.,
+        };
         (chrome + text + 18. + 3. + 1.).max(TAB_WIDTH)
     }
 
@@ -82,7 +112,7 @@ impl HerdrWindow {
         // What the strip lists, measured, so the ones that just opened grow
         // in and the ones that just closed shrink out where they stood.
         let now = std::time::Instant::now();
-        let herdr: Vec<(Pick, SharedString)> = self
+        let herdr: Vec<((Pick, SharedString), Lead)> = self
             .live
             .snapshot
             .as_ref()
@@ -93,8 +123,11 @@ impl HerdrWindow {
                     .filter(|t| Some(&t.workspace_id) == snapshot.focused_workspace_id.as_ref())
                     .map(|t| {
                         (
-                            Pick::Herdr(t.tab_id.clone()),
-                            SharedString::from(t.label.clone()),
+                            (
+                                Pick::Herdr(t.tab_id.clone()),
+                                SharedString::from(t.label.clone()),
+                            ),
+                            Lead::of(t.agent_status),
                         )
                     })
                     .collect()
@@ -102,15 +135,14 @@ impl HerdrWindow {
             .unwrap_or_default();
         let listed: Vec<Listed> = herdr
             .into_iter()
-            .map(|entry| (entry, false))
             .chain(
                 self.browser_tab_labels(cx)
                     .into_iter()
-                    .map(|entry| (entry, true)),
+                    .map(|entry| (entry, Lead::Globe)),
             )
             .filter(|((pick, _), _)| self.group_lists(slot.id, pick))
-            .map(|((pick, label), icon)| Listed {
-                width: self.tab_width(&label, icon, window),
+            .map(|((pick, label), lead)| Listed {
+                width: self.tab_width(&label, lead, window),
                 pick,
                 label,
             })
@@ -162,7 +194,19 @@ impl HerdrWindow {
                         .cursor_pointer()
                         .bg(rgb(background))
                         .text_color(rgb(text))
-                        .child(tab.label.clone())
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(DOT_GAP))
+                                .when(Lead::of(tab.agent_status) == Lead::Dot, |title| {
+                                    title.child(status_dot(tab.agent_status).debug_selector({
+                                        let id = id.clone();
+                                        move || slot.selector(&format!("tab-status-{id}"))
+                                    }))
+                                })
+                                .child(tab.label.clone()),
+                        )
                         .child(
                             div()
                                 .id("close-tab")
@@ -555,5 +599,59 @@ impl HerdrWindow {
             }
         }
         row.into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use core::prelude::v1::test;
+    use std::sync::Arc;
+
+    #[gpui::test]
+    fn a_tab_leads_its_title_with_its_status_dot_unless_unknown(cx: &mut TestAppContext) {
+        let label = "a title long enough to outgrow the narrowest tab";
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let mut view = crate::sidebar::layout_tests::fixture_window(window, cx);
+            let mut snapshot: herdr_client::protocol::ClientShellSnapshot = serde_json::from_str(
+                include_str!("../../../herdr-protocol/tests/fixtures/endpoint-snapshot-v1.json"),
+            )
+            .unwrap();
+            snapshot.tabs[0].label = label.into();
+            assert_eq!(snapshot.tabs[0].agent_status, AgentStatus::Working);
+            let mut plain = snapshot.tabs[0].clone();
+            plain.tab_id = "plain".into();
+            plain.focused = false;
+            plain.agent_status = AgentStatus::Unknown;
+            snapshot.tabs.push(plain);
+            view.live.snapshot = Some(Arc::new(snapshot));
+            view
+        });
+        cx.simulate_resize(size(px(1600.), px(600.)));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+
+        // Layout snaps to device pixels, so edges agree within half of one.
+        let near = |a: Pixels, b: Pixels| (a - b).abs() <= px(0.5);
+        let tab = cx.debug_bounds("tab-w1:t1").unwrap();
+        let dot = cx.debug_bounds("tab-status-w1:t1").unwrap();
+        assert_eq!(dot.size, size(px(STATUS_WIDTH), px(STATUS_WIDTH)));
+        assert!(near(dot.left(), tab.left() + px(12.)), "{dot:?} in {tab:?}");
+        assert!(near(dot.center().y, tab.center().y), "{dot:?} in {tab:?}");
+
+        assert!(cx.debug_bounds("tab-status-plain").is_none());
+        let plain = cx.debug_bounds("tab-plain").unwrap();
+        // The dot and its gap widen the tab by what they take, so the
+        // title and close button keep their room.
+        assert!(
+            near(
+                tab.size.width - plain.size.width,
+                px(STATUS_WIDTH + DOT_GAP)
+            ),
+            "{tab:?} beside {plain:?}"
+        );
     }
 }
