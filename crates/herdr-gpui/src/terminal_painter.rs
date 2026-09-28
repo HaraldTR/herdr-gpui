@@ -148,9 +148,22 @@ fn background_spans<'a>(
 ) -> impl Iterator<Item = (usize, usize, u32)> + 'a {
     // A wide glyph's continuation cell shows the glyph's background, as a host
     // terminal does: Herdr's ANSI renderer never draws that cell, so its own
-    // background is not meant to be seen.
+    // background is not meant to be seen. Like that renderer, a halfwidth
+    // katakana with a (semi-)voiced mark counts as two columns.
+    let wide = |symbol: &str| {
+        let mut chars = symbol.chars();
+        symbol.width() > 1
+            || matches!(
+                (chars.next(), chars.next(), chars.next()),
+                (
+                    Some('\u{ff66}'..='\u{ff9d}'),
+                    Some('\u{ff9e}' | '\u{ff9f}'),
+                    None
+                )
+            )
+    };
     let bg = move |x: usize| {
-        let x = if x > 0 && row[x - 1].symbol.width() > 1 {
+        let x = if x > 0 && wide(&row[x - 1].symbol) {
             x - 1
         } else {
             x
@@ -831,6 +844,19 @@ mod tests {
             background_spans(&row, &theme).collect::<Vec<_>>(),
             vec![(0, 2, 0x373737), (2, 3, BACKGROUND), (3, 4, 0)]
         );
+        // Halfwidth katakana with a voiced or semi-voiced mark is two columns
+        // wide in Herdr although its Unicode width is one.
+        for kana in ["\u{ff76}\u{ff9e}", "\u{ff8a}\u{ff9f}"] {
+            let mut row = vec![cell(kana), cell(""), cell("\u{ff76}"), cell("")];
+            row[0].bg = 0x02373737;
+            row[1].bg = 0x02000000;
+            row[3].bg = 0x02000000;
+            assert_eq!(
+                background_spans(&row, &theme).collect::<Vec<_>>(),
+                vec![(0, 2, 0x373737), (2, 3, BACKGROUND), (3, 4, 0)],
+                "{kana}"
+            );
+        }
     }
 
     #[test]
