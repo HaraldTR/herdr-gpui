@@ -7,6 +7,9 @@
 (function (markers) {
   "use strict";
   var previous = window.__herdrAnnotate;
+  // Markers already on screen before this run keep still; only a newly
+  // numbered one pops in.
+  var popped = previous && typeof previous.popped === "number" ? previous.popped : 0;
   if (previous && typeof previous.disarm === "function") {
     try { previous.disarm(); } catch (_) {}
   }
@@ -26,6 +29,9 @@
     ".label{position:fixed;background:#0d99ff;color:#fff;font:11px/16px -apple-system,system-ui,sans-serif;padding:0 6px;border-radius:3px;display:none;white-space:nowrap}" +
     ".mark{position:fixed;border:2px dashed #f59e0b;border-radius:2px}" +
     ".pin{position:fixed;min-width:18px;height:18px;padding:0 4px;box-sizing:border-box;border-radius:9px;background:#f59e0b;color:#111;font:bold 11px/18px -apple-system,system-ui,sans-serif;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.4)}" +
+    "@keyframes herdr-pop{from{transform:scale(.2);opacity:0}to{transform:scale(1);opacity:1}}" +
+    "@keyframes herdr-fade{from{opacity:0}to{opacity:1}}" +
+    "@media (prefers-reduced-motion:no-preference){.pin.new{animation:herdr-pop .26s cubic-bezier(.2,1.5,.4,1)}.mark.new{animation:herdr-fade .22s ease-out}}" +
     "</style><div class=box></div><div class=label></div><div class=marks></div>";
   var box = root.querySelector(".box");
   var label = root.querySelector(".label");
@@ -109,7 +115,10 @@
 
   var drawMarkers = function () {
     marks.textContent = "";
+    var highest = 0;
     markers.forEach(function (marker) {
+      var fresh = marker.number > popped;
+      highest = Math.max(highest, marker.number);
       var rect = null;
       if (marker.rect) {
         rect = {
@@ -125,15 +134,17 @@
         rect = element.getBoundingClientRect();
       }
       var mark = document.createElement("div");
-      mark.className = "mark";
+      mark.className = fresh ? "mark new" : "mark";
       place(mark, rect.left, rect.top, rect.width, rect.height);
       var pin = document.createElement("div");
-      pin.className = "pin";
+      pin.className = fresh ? "pin new" : "pin";
       pin.textContent = String(marker.number);
       place(pin, Math.max(0, rect.left - 9), Math.max(0, rect.top - 9));
       marks.appendChild(mark);
       marks.appendChild(pin);
     });
+    // Sent or cleared notes number again from one, and pop again.
+    popped = highest;
   };
   var frame = 0;
   var redraw = function () {
@@ -340,6 +351,7 @@
   drawMarkers();
 
   window.__herdrAnnotate = {
+    get popped() { return popped; },
     disarm: function () {
       listeners.forEach(function (entry) { window.removeEventListener(entry[0], entry[1], true); });
       window.removeEventListener("scroll", redraw, true);

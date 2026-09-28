@@ -1,6 +1,6 @@
 //! One window's native web views, one per browser tab it has shown. A view
-//! is a platform child view layered above the GPUI surface, so at most one is
-//! visible at a time and the window hides it while an overlay is open.
+//! is a platform child view layered above the GPUI surface: one per side of a
+//! split is visible, and the window hides them while an overlay is open.
 use super::{Location, Tab, TabId, WebUrl, location::PREVIEW_SCHEME, preview::Preview};
 use gpui::{App, AppContext as _, Entity, Window};
 use gpui_wry::WebView;
@@ -27,6 +27,10 @@ pub(crate) enum Event {
     /// none. Only macOS takes them.
     #[cfg(target_os = "macos")]
     Captured(TabId, u64, Option<Vec<u8>>),
+    /// A picture of the whole page, as TIFF bytes, shown in its place while
+    /// a menu covers it. Only macOS takes them.
+    #[cfg(target_os = "macos")]
+    Frozen(TabId, Option<Vec<u8>>),
     /// A message the annotation picker posted. Any script in the page can
     /// post one, so it is parsed as untrusted input.
     Posted(TabId, String),
@@ -37,7 +41,7 @@ const MAX_POST_BYTES: usize = 64 * 1024;
 
 pub(crate) struct Pages {
     pages: HashMap<TabId, Entity<WebView>>,
-    shown: Option<TabId>,
+    shown: Vec<TabId>,
     sender: SyncSender<Event>,
     events: Receiver<Event>,
     /// Reads local pages' files; started with the first page.
@@ -49,7 +53,7 @@ impl Default for Pages {
         let (sender, events) = mpsc::sync_channel(EVENT_CAPACITY);
         Self {
             pages: HashMap::new(),
-            shown: None,
+            shown: Vec::new(),
             sender,
             events,
             preview: None,
@@ -164,24 +168,32 @@ impl Pages {
         Ok(())
     }
 
-    /// Shows `id` and hides every other page; `None` hides them all.
-    pub(crate) fn present(&mut self, id: Option<TabId>, cx: &mut App) {
-        if self.shown == id {
+    /// Shows the pages in `ids` and hides every other one; an empty list
+    /// hides them all.
+    pub(crate) fn present(&mut self, ids: &[TabId], cx: &mut App) {
+        let ids: Vec<TabId> = ids
+            .iter()
+            .copied()
+            .filter(|id| self.pages.contains_key(id))
+            .collect();
+        if self.shown == ids {
             return;
         }
-        if let Some(page) = self.shown.and_then(|shown| self.pages.get(&shown)) {
-            page.update(cx, |page, _| page.hide());
+        for id in self.shown.iter().filter(|id| !ids.contains(id)) {
+            if let Some(page) = self.pages.get(id) {
+                page.update(cx, |page, _| page.hide());
+            }
         }
-        if let Some(page) = id.and_then(|id| self.pages.get(&id)) {
-            page.update(cx, |page, _| page.show());
+        for id in ids.iter().filter(|id| !self.shown.contains(id)) {
+            if let Some(page) = self.pages.get(id) {
+                page.update(cx, |page, _| page.show());
+            }
         }
-        self.shown = id.filter(|id| self.pages.contains_key(id));
+        self.shown = ids;
     }
 
     pub(crate) fn close(&mut self, id: TabId) {
-        if self.shown == Some(id) {
-            self.shown = None;
-        }
+        self.shown.retain(|shown| *shown != id);
         // Dropping the entity hides the view; the platform releases it with
         // the last handle.
         self.pages.remove(&id);
@@ -247,6 +259,28 @@ impl Pages {
             return true;
         }
         let _ = (id, rect, capture, cx);
+        false
+    }
+
+    /// Asks for a picture of the whole page, `size` in CSS pixels, reported
+    /// as `Event::Frozen`. Returns whether one was asked for: only macOS
+    /// takes them.
+    pub(crate) fn freeze(&self, id: TabId, size: gpui::Size<gpui::Pixels>, cx: &App) -> bool {
+        #[cfg(target_os = "macos")]
+        if let Some(page) = self.pages.get(&id) {
+            let sender = self.sender.clone();
+            let rect = super::annotate::Rect {
+                x: 0.,
+                y: 0.,
+                width: f64::from(f32::from(size.width)),
+                height: f64::from(f32::from(size.height)),
+            };
+            super::snapshot::capture(page.read(cx).raw(), rect, move |tiff| {
+                report(&sender, Event::Frozen(id, tiff));
+            });
+            return true;
+        }
+        let _ = (id, size, cx);
         false
     }
 

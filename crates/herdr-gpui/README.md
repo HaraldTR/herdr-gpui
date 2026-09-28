@@ -729,6 +729,54 @@ and local file paths are not activated.
 Set `open_links_in = "browser-tab"` to open links in a [browser tab](#browser-tabs)
 instead. Alt-click (Option-click on macOS) opens a link in the other target.
 
+## Editor Groups
+
+The split button at the right end of the tab strip (or **Split Editor**,
+`Cmd-\`) splits the view into side-by-side groups, as an editor does: keep an
+agent's terminal in one group and its page in another. Split as often as you
+like; each split opens a group to the right of the one it came from, showing
+the same tab. Splitting opens nothing new.
+
+- Every group lists the same tabs. Groups show different Herdr tabs live
+  side by side: each group showing a terminal has its own client connection
+  to the daemon, which keeps a focused tab per client. The group in use holds
+  the window's connection and gets the keyboard; the others only display
+  their tab, report themselves unfocused so notifications, sounds, and the
+  title follow the group in use, and focus their own tab again when an agent
+  or the CLI moves every client. Pressing a group swaps its connection in.
+- A tab is live in one group at a time: the daemon sizes a tab for a single
+  client, and a page is placed once. A terminal tab picked in two groups is
+  live in the one used last, and the other paints the same picture of it, as
+  an editor shows one file twice; a group of another width shows it clipped
+  or padded. Pressing that group brings the live tab there. A page shown in
+  another group is stood in for with **Show Here**.
+- The group in use has the keyboard, and its chosen tab carries the accent.
+  **+** opens a Herdr tab in that group; New Browser Tab and Close Tab act
+  there too. Close Tab in an empty group closes the group.
+- Drag a divider to resize the groups beside it. Groups are the window's own,
+  per workspace. A group's own connection closes with the group, or when the
+  window leaves the workspace or host; returning reconnects it.
+- Each workspace's groups, their tabs and widths, and the group in use are
+  saved in `$XDG_STATE_HOME/herdr/gpui/editor-groups.json` and come back
+  after a restart; the group in use returns to its own tab. Closing a
+  workspace in Herdr forgets its groups, and a damaged file starts every
+  workspace unsplit. With several windows on one workspace, the last change
+  is what is saved.
+- Closing in a group only takes tabs out of that group's strip, as an
+  editor's groups do: they stay open in Herdr, in the browser, and in every
+  other group. Split, a tab's close button does this; **…** offers **Close**,
+  **Close Others**, and **Close All**, which closes the group. A group left
+  with no tabs closes, and a tab closed in every group stays in the group in
+  use. Unsplit, a tab's close button closes it in Herdr, through its
+  confirmation, as before; nothing in **…** ever closes a Herdr tab.
+- **…** also offers **New Browser Tab** and **Split Right**.
+- A split's new group opens from the right, sliding in at its own width
+  while the group it came from gives up the room; a closed group folds away
+  to the right as its neighbour takes the room back.
+- A tab that opens grows into its strip, and one that closes, in Herdr or
+  in a group, shrinks out where it stood. The tabs a strip already has when
+  the window first draws it appear at once.
+
 ## Browser Tabs
 
 A browser tab shows a web page in place of the terminal, next to the
@@ -756,8 +804,11 @@ come back after a restart; closing a workspace in Herdr removes its tabs.
   Windows, a frame inside a page that links to an application's URL scheme
   gets WebView2's own confirmation prompt rather than being refused outright.
 - Pages are native web views (WebKit on macOS, WebView2 on Windows) layered
-  above the window, so the app hides the page while a menu or dialog is open.
-  Toasts that fall over the page are hidden behind it.
+  above the window, so a page steps aside for a menu or popover that would
+  fall over it, and for a dialog, which dims the whole window. A page the menu
+  does not reach keeps showing. On macOS a page that steps aside leaves a
+  picture of itself, taken as the menu opens; on Windows its place is empty
+  until the menu closes. Toasts that fall over a page are hidden behind it.
 - Linux has no embedded pages yet: browser tab requests open the system
   browser, and local files and annotations are unavailable.
 
@@ -779,7 +830,8 @@ them to the agent that opened it, so it can change the page.
   week, and the prompt names each file. Windows notes have no screenshots.
 - Notes are written in the panel beside the page, not in the page, so the
   page never sees them. Queued notes are numbered on the page. Up to 20 wait
-  per tab.
+  per tab. The panel slides open and closed; a new note grows into it, and
+  its number pops onto the page unless the system asks for reduced motion.
 - **Send to agent** turns them into one prompt: the page, then for each note
   the element's selector path, text, and a short HTML snippet (for a region:
   its position, the container and elements it covers, and their text), its

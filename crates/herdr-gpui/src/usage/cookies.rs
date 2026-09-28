@@ -259,11 +259,11 @@ fn chromium_cookies(store: &Path, domains: &[&str], key: &[u8; 16]) -> Option<Ve
 /// `v10` values are AES-128-CBC with a blank IV. Since database version 24
 /// the plaintext starts with a SHA-256 of the host, which is dropped.
 pub(super) fn decrypt(encrypted: &[u8], key: &[u8; 16], hashed_host: bool) -> Option<String> {
-    use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
+    use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::Pkcs7};
     let body = encrypted.strip_prefix(b"v10")?;
     let mut buffer = Zeroizing::new(body.to_vec());
     let plain = cbc::Decryptor::<aes::Aes128>::new(key.into(), &[b' '; 16].into())
-        .decrypt_padded_mut::<Pkcs7>(&mut buffer)
+        .decrypt_padded::<Pkcs7>(&mut buffer)
         .ok()?;
     let plain = if hashed_host && plain.len() >= 32 {
         &plain[32..]

@@ -28,6 +28,8 @@ pub(crate) enum Page {
     AgentSkill,
     Tab,
     RenameTab,
+    /// A group's "…" menu: closing tabs and splitting.
+    Group,
     Pane,
     RenamePane,
     Workspace,

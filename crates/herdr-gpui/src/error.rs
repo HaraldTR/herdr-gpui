@@ -361,6 +361,8 @@ pub enum Error {
     InvalidAnnotation,
     #[error("Invalid saved browser tabs")]
     InvalidBrowserTabs,
+    #[error("Invalid saved editor groups")]
+    InvalidGroupLayouts,
     #[error("Herdr GPUI is not running, or its control socket {} is unreachable: {source}", path.display())]
     ControlUnavailable {
         path: PathBuf,
