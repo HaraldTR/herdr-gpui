@@ -87,6 +87,7 @@ mod embedded {
         assert!(cx.debug_bounds("annotations").is_none());
 
         // Annotating opens the notes panel beside the page.
+        let before = std::time::Instant::now();
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
                 view.toggle_annotating(crate::browser::TabId::test(0), window, cx)
@@ -94,8 +95,12 @@ mod embedded {
         });
         draw(cx);
         assert!(cx.debug_bounds("annotations").is_some());
-        // It slides open rather than appearing whole.
-        view.read_with(cx, |view, _| assert!(view.annotations_moving()));
+        // It slides open rather than appearing whole. Asked about a moment
+        // before it opened, which reads as not yet begun, so a draw slower
+        // than the slide itself cannot finish it first.
+        view.read_with(cx, |view, _| {
+            assert!(view.browser.annotations.moving(before));
+        });
         assert!(cx.debug_bounds("browser-annotate").is_some());
 
         cx.update(|window, cx| {
