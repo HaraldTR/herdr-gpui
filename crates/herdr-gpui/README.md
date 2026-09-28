@@ -745,16 +745,23 @@ the same tab. Splitting opens nothing new.
   title follow the group in use, and focus their own tab again when an agent
   or the CLI moves every client. Pressing a group swaps its connection in.
 - A tab is live in one group at a time: the daemon sizes a tab for a single
-  client, and a page is placed once. Picking a tab another group shows
-  moves it to the group used last; the other stands in for it with **Show
-  Here**.
+  client, and a page is placed once. A terminal tab picked in two groups is
+  live in the one used last, and the other paints the same picture of it, as
+  an editor shows one file twice; a group of another width shows it clipped
+  or padded. Pressing that group brings the live tab there. A page shown in
+  another group is stood in for with **Show Here**.
 - The group in use has the keyboard, and its chosen tab carries the accent.
   **+** opens a Herdr tab in that group; New Browser Tab and Close Tab act
   there too. Close Tab in an empty group closes the group.
 - Drag a divider to resize the groups beside it. Groups are the window's own,
-  per workspace, and are not kept across restarts. A group's own connection
-  closes with the group, or when the window leaves the workspace or host;
-  returning reconnects it.
+  per workspace. A group's own connection closes with the group, or when the
+  window leaves the workspace or host; returning reconnects it.
+- Each workspace's groups, their tabs and widths, and the group in use are
+  saved in `$XDG_STATE_HOME/herdr/gpui/editor-groups.json` and come back
+  after a restart; the group in use returns to its own tab. Closing a
+  workspace in Herdr forgets its groups, and a damaged file starts every
+  workspace unsplit. With several windows on one workspace, the last change
+  is what is saved.
 - **…** on each strip offers **Close**, **Close Others**, and **Close All**
   for the workspace's tabs, Herdr and browser alike, plus **New Browser Tab**,
   **Split Right**, and **Close Group**. Closing Herdr tabs terminates their

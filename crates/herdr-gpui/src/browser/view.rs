@@ -5,7 +5,7 @@
 use super::Annotations;
 use super::{
     Location, Scope, Store, Tab, TabId, WebUrl,
-    groups::{GroupId, GroupIds, Layout, Pick, Slot},
+    groups::{GroupId, GroupIds, Layout, Pick, SavedLayout, Slot},
 };
 use crate::{HerdrWindow, search_input::SearchInput, window::Flash};
 #[cfg(unix)]
@@ -22,7 +22,14 @@ use std::collections::{HashMap, HashSet};
 pub(crate) struct Browser {
     /// Per workspace, its groups. A workspace missing here has one group
     /// following its terminal.
-    pub(super) layouts: HashMap<(Scope, String), Layout>,
+    pub(crate) layouts: HashMap<(Scope, String), Layout>,
+    /// Layouts saved before this window opened, restored the first time it
+    /// shows each workspace.
+    pub(crate) saved: HashMap<(Scope, String), SavedLayout>,
+    /// The workspace whose layout was just restored, whose group in use is
+    /// taken back to its tab once, rather than following wherever the
+    /// daemon's focus was left.
+    pub(crate) restored: Option<(Scope, String)>,
     pub(super) group_ids: GroupIds,
     /// The group drawn before the window has a workspace to split.
     pub(super) fallback_group: GroupId,
@@ -49,12 +56,11 @@ pub(crate) struct Browser {
 
 impl Browser {
     pub(crate) fn new(cx: &mut App) -> Self {
-        // Only the annotation panel needs the app, and only where pages show.
-        #[cfg(not(any(target_os = "macos", windows)))]
-        let _ = cx;
         let mut group_ids = GroupIds::default();
         Self {
             layouts: HashMap::new(),
+            saved: super::Layouts::snapshot(cx),
+            restored: None,
             fallback_group: group_ids.next(),
             group_ids,
             #[cfg(any(target_os = "macos", windows))]
@@ -366,9 +372,14 @@ impl HerdrWindow {
             return;
         };
         let closed: Vec<String> = seen.difference(&current).cloned().collect();
-        if closed.is_empty()
-            || !store(cx).is_some_and(|store| store.has_workspaces(&scope, &closed))
-        {
+        if closed.is_empty() {
+            return;
+        }
+        self.browser
+            .layouts
+            .retain(|(saved, workspace), _| saved != &scope || !closed.contains(workspace));
+        super::Layouts::forget_workspaces(cx, &scope, &closed);
+        if !store(cx).is_some_and(|store| store.has_workspaces(&scope, &closed)) {
             return;
         }
         Store::update(cx, |store| store.forget_workspaces(&scope, &closed));

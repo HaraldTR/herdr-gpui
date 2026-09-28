@@ -267,6 +267,60 @@ mod groups {
     }
 
     #[gpui::test]
+    fn a_saved_layout_comes_back_and_changes_are_recorded(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = window(cx);
+        let saved = r#"{"groups":[{"pick":{"kind":"herdr","id":"t0"},"share":0.3},{"pick":{"kind":"herdr","id":"t1"},"share":0.7}],"active":0}"#;
+        cx.update(|_, cx| {
+            view.update(cx, |view, _| {
+                // As on a first show of the workspace since the restart.
+                let key = view.browser_key().unwrap();
+                view.browser.layouts.remove(&key);
+                view.browser
+                    .saved
+                    .insert(key, serde_json::from_str(saved).unwrap());
+            })
+        });
+        let shown = shown(&view, cx);
+        assert_eq!(shown.len(), 2);
+        // The group in use shows its tab; the other waits for its own
+        // connection, which the fixture never gets.
+        assert_eq!(shown[0], Shown::Terminal);
+        assert_eq!(shown[1], Shown::Elsewhere(herdr("t1")));
+        let (key, share) = view.read_with(cx, |view, _| {
+            let slots = view.group_slots();
+            (view.browser_key().unwrap(), view.group_share(slots[0].id))
+        });
+        assert!((share - 0.3).abs() < 1e-6);
+        // The restored layout is saved as it is, then as it changes.
+        cx.update(|_, cx| view.update(cx, |view, cx| view.save_group_layouts(cx)));
+        let recorded = cx.update(|_, cx| crate::browser::Layouts::snapshot(cx));
+        assert_eq!(
+            serde_json::to_string(recorded.get(&key).unwrap()).unwrap(),
+            saved
+        );
+        run(&view, cx, Command::SplitEditor);
+        cx.update(|_, cx| view.update(cx, |view, cx| view.save_group_layouts(cx)));
+        let recorded = cx.update(|_, cx| crate::browser::Layouts::snapshot(cx));
+        let json = serde_json::to_string(recorded.get(&key).unwrap()).unwrap();
+        assert_eq!(json.matches("\"share\"").count(), 3, "{json}");
+        // Closing back to one group following the terminal forgets it.
+        for group in groups(&view, cx).into_iter().skip(1) {
+            cx.update(|window, cx| view.update(cx, |view, cx| view.close_group(group, window, cx)));
+        }
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                let group = view.group_slots()[0].id;
+                let layout = view.ensure_layout().unwrap();
+                layout.replace(&herdr("t0"), None, None);
+                let _ = group;
+                view.save_group_layouts(cx);
+            })
+        });
+        let recorded = cx.update(|_, cx| crate::browser::Layouts::snapshot(cx));
+        assert!(!recorded.contains_key(&key));
+    }
+
+    #[gpui::test]
     fn empty_groups_and_dividers(cx: &mut gpui::TestAppContext) {
         let (view, cx) = window(cx);
         draw(cx);

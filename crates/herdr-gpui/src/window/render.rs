@@ -7,7 +7,7 @@ use crate::{
     APP_VERSION, CheckForUpdates, Minimize, PlaySound, RunCommand, ShowHerdrNotDetected,
     ShowUpdatePreview,
     actions::ShowToastPreview,
-    browser::{Shown, Slot},
+    browser::{Pick, Shown, Slot},
     config::ClipboardToastPosition,
     fonts::StyledFont,
     state::ConnectionStatus,
@@ -44,6 +44,8 @@ impl Render for HerdrWindow {
         // presented before it: the terminal area never blanks between two
         // projections. What the client knows to be current stays in `live`.
         let surface = self.presentation.frame(&self.live);
+        // A group picking the tab another shows paints this same frame.
+        let window_frame = surface.clone();
         let entity = cx.entity();
         let paint_entity = entity.clone();
         let focus = self.focus.clone();
@@ -423,6 +425,19 @@ impl Render for HerdrWindow {
                 }
                 (Shown::Page(_), Some(tab)) => {
                     self.render_browser(slot, &tab, gap, owns_keyboard, cx)
+                }
+                (Shown::Elsewhere(Pick::Herdr(tab)), _) => {
+                    match self.live_frame_of(tab, window_frame.clone()) {
+                        Some(frame) => self.render_terminal_mirror(
+                            slot,
+                            gap,
+                            Some(frame),
+                            parked_font.clone(),
+                            cell_height,
+                            cx,
+                        ),
+                        None => self.render_stand_in(slot, &shown, gap, owns_keyboard, cx),
+                    }
                 }
                 _ => self.render_stand_in(slot, &shown, gap, owns_keyboard, cx),
             };

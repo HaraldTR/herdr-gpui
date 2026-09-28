@@ -214,6 +214,7 @@ impl HerdrWindow {
         {
             self.browser.terminals.primary = active;
         }
+        self.steer_restored(&key, cx);
         let primary = self.browser.terminals.primary;
         let focused = self.focused_herdr_tab().map(str::to_owned);
         // Every other group holding a Herdr tab needs a connection of its own.
@@ -262,6 +263,44 @@ impl HerdrWindow {
                     });
                 }
             }
+        }
+    }
+
+    /// Takes the window's connection to the Herdr tab the group in use of a
+    /// just-restored layout showed, once, when the daemon's focus was left
+    /// on another. The other groups reach theirs through their own
+    /// connections.
+    fn steer_restored(&mut self, key: &(Scope, String), cx: &mut Context<Self>) {
+        let Some(restored) = &self.browser.restored else {
+            return;
+        };
+        if restored != key {
+            self.browser.restored = None;
+            return;
+        }
+        let pick = self
+            .primary_group()
+            .and_then(|group| self.group_pick(group));
+        let Some(Pick::Herdr(tab)) = pick else {
+            self.browser.restored = None;
+            return;
+        };
+        if self.focused_herdr_tab() == Some(tab.as_str()) {
+            self.browser.restored = None;
+            return;
+        }
+        if !self.navigation_ready() || self.pending_navigation.is_some() {
+            return;
+        }
+        self.browser.restored = None;
+        let open = self.live.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .tabs
+                .iter()
+                .any(|candidate| candidate.tab_id == tab && candidate.workspace_id == key.1)
+        });
+        if open {
+            self.navigate(crate::NavigationTarget::Tab(&tab), cx);
         }
     }
 
@@ -424,14 +463,84 @@ impl HerdrWindow {
         cell_height: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let surface = self.parked_frame(slot.id);
+        self.render_terminal_picture(
+            slot,
+            "parked-terminal",
+            gap,
+            surface,
+            true,
+            font,
+            cell_height,
+            cx,
+        )
+    }
+
+    /// The live frame of `tab` in whichever group holds it: the window's
+    /// own, or a parked connection's.
+    pub(crate) fn live_frame_of(
+        &mut self,
+        tab: &str,
+        window_frame: Option<Arc<PaneSurfaceFrame>>,
+    ) -> Option<Arc<PaneSurfaceFrame>> {
+        if self.focused_herdr_tab() == Some(tab) {
+            return window_frame;
+        }
+        let parked = self
+            .browser
+            .terminals
+            .parked
+            .iter_mut()
+            .find(|parked| parked.focused_tab() == Some(tab))?;
+        parked.presentation.frame(&parked.live)
+    }
+
+    /// A group picking a tab another group shows paints a picture of it,
+    /// as an editor shows one file in two groups. The daemon sizes the tab
+    /// for the group that holds it, so a narrower or wider group shows it
+    /// clipped or padded; pressing the group brings the live tab here.
+    pub(crate) fn render_terminal_mirror(
+        &mut self,
+        slot: Slot,
+        gap: f32,
+        surface: Option<Arc<PaneSurfaceFrame>>,
+        font: Font,
+        cell_height: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.render_terminal_picture(
+            slot,
+            "mirror-terminal",
+            gap,
+            surface,
+            false,
+            font,
+            cell_height,
+            cx,
+        )
+    }
+
+    /// A terminal frame painted without input. `place` sizes the group's
+    /// parked connection to where it is drawn.
+    #[allow(clippy::too_many_arguments)]
+    fn render_terminal_picture(
+        &mut self,
+        slot: Slot,
+        name: &'static str,
+        gap: f32,
+        surface: Option<Arc<PaneSurfaceFrame>>,
+        place: bool,
+        font: Font,
+        cell_height: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let group = slot.id;
-        let surface = self.parked_frame(group);
         let entity = cx.entity();
         let painter = self.painter.clone();
         let cell_width = self.cell_width;
         div()
-            .id(SharedString::from(slot.selector("parked-terminal")))
-            .debug_selector(move || slot.selector("parked-terminal"))
+            .id(SharedString::from(slot.selector(name)))
+            .debug_selector(move || slot.selector(name))
             .flex_1()
             .min_h_0()
             .min_w_0()
@@ -441,38 +550,47 @@ impl HerdrWindow {
             .child(
                 canvas(
                     move |bounds, _, cx| {
-                        entity.update(cx, |this, _| {
-                            this.place_parked_terminal(group, bounds, cell_height);
-                        });
+                        if place {
+                            entity.update(cx, |this, _| {
+                                this.place_parked_terminal(group, bounds, cell_height);
+                            });
+                        }
                     },
                     move |bounds, _, window, cx| {
                         let Some(surface) = &surface else {
                             return;
                         };
-                        painter.borrow_mut().paint_frame(
-                            &surface.frame,
-                            bounds.origin,
-                            cell_width,
-                            &font,
-                            &[],
-                            &surface.panes,
-                            window,
-                            cx,
-                        );
-                        if let Some(popup) = &surface.popup {
-                            let offset =
-                                popup_origin(&surface.frame, &popup.frame, cell_width, cell_height);
+                        // A frame wider than the group stays inside it.
+                        window.with_content_mask(Some(ContentMask { bounds }), |window| {
                             painter.borrow_mut().paint_frame(
-                                &popup.frame,
-                                bounds.origin + offset,
+                                &surface.frame,
+                                bounds.origin,
                                 cell_width,
                                 &font,
                                 &[],
-                                &[],
+                                &surface.panes,
                                 window,
                                 cx,
                             );
-                        }
+                            if let Some(popup) = &surface.popup {
+                                let offset = popup_origin(
+                                    &surface.frame,
+                                    &popup.frame,
+                                    cell_width,
+                                    cell_height,
+                                );
+                                painter.borrow_mut().paint_frame(
+                                    &popup.frame,
+                                    bounds.origin + offset,
+                                    cell_width,
+                                    &font,
+                                    &[],
+                                    &[],
+                                    window,
+                                    cx,
+                                );
+                            }
+                        });
                     },
                 )
                 .size_full(),
@@ -500,7 +618,7 @@ impl HerdrWindow {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::{
@@ -516,7 +634,7 @@ mod tests {
     use std::sync::Arc;
 
     /// A coherent surface for `snapshot`, as the daemon projects one.
-    fn surface(snapshot: &ClientShellSnapshot, pane: &str) -> Arc<PaneSurfaceFrame> {
+    pub(super) fn surface(snapshot: &ClientShellSnapshot, pane: &str) -> Arc<PaneSurfaceFrame> {
         let rect = SurfaceRect {
             x: 0,
             y: 0,
@@ -661,6 +779,13 @@ mod tests {
         assert!(parked.pending_resize.is_none());
     }
 
+    /// The fixture window, connected and showing tab `t0` of `w0`.
+    pub(super) fn fixture_window_on_t0(
+        cx: &mut TestAppContext,
+    ) -> (Entity<HerdrWindow>, &mut VisualTestContext) {
+        window(cx)
+    }
+
     fn window(cx: &mut TestAppContext) -> (Entity<HerdrWindow>, &mut VisualTestContext) {
         cx.add_window_view(|window, cx| {
             let mut view = fixture_window(window, cx);
@@ -803,5 +928,45 @@ mod tests {
                 assert!(view.browser.terminals.parked.is_empty());
             })
         });
+    }
+}
+
+#[cfg(test)]
+mod mirror_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::tests::{fixture_window_on_t0, surface};
+    use crate::{controls::Command, sidebar::layout_tests::full_draw};
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn a_split_shows_the_same_terminal_in_both_groups(cx: &mut TestAppContext) {
+        let (view, cx) = fixture_window_on_t0(cx);
+        cx.update(|_, cx| {
+            view.update(cx, |view, _| {
+                let snapshot = view.live.snapshot.clone().unwrap();
+                view.live.surface = Some(surface(&snapshot, "p0"));
+                view.endpoints[0].live = view.live.clone();
+            })
+        });
+        cx.update(|window, cx| full_draw(window, cx).clear(cx));
+        assert!(cx.debug_bounds("terminal").is_some());
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.command(Command::SplitEditor, window, cx)
+            })
+        });
+        cx.update(|window, cx| full_draw(window, cx).clear(cx));
+        // The new group holds the live terminal; the one it split from
+        // paints the same frame rather than standing empty.
+        let mirror = cx.debug_bounds("mirror-terminal").unwrap();
+        let terminal = cx.debug_bounds("terminal").unwrap();
+        assert!(mirror.right() <= terminal.left());
+        assert!(cx.debug_bounds("stand-in").is_none());
+        // Pressing the mirror brings the live terminal to it.
+        cx.simulate_click(mirror.center(), gpui::Modifiers::none());
+        cx.update(|window, cx| full_draw(window, cx).clear(cx));
+        let terminal = cx.debug_bounds("terminal").unwrap();
+        let mirror = cx.debug_bounds("g1-mirror-terminal").unwrap();
+        assert!(terminal.right() <= mirror.left());
     }
 }

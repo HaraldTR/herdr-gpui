@@ -12,6 +12,7 @@ mod annotate_view;
 mod feedback;
 mod groups;
 mod groups_view;
+mod layouts;
 mod location;
 #[cfg(any(target_os = "macos", windows))]
 mod native;
@@ -30,6 +31,7 @@ pub(crate) use feedback::Feedback;
 #[cfg(test)]
 pub(crate) use groups::GroupIds;
 pub(crate) use groups::{GroupId, Pick, Shown, Slot};
+pub(crate) use layouts::Layouts;
 pub(crate) use location::{LocalFile, Location};
 #[cfg(any(target_os = "macos", windows))]
 pub(crate) use native::Pages;

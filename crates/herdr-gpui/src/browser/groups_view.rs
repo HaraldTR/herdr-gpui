@@ -10,6 +10,7 @@ use super::{
 };
 use crate::{HerdrWindow, NavigationTarget, search_input::SearchInput};
 use gpui::{prelude::*, *};
+use std::collections::hash_map::Entry;
 
 impl HerdrWindow {
     /// The daemon's focused tab, when it belongs to the focused workspace.
@@ -30,12 +31,30 @@ impl HerdrWindow {
         self.browser.layouts.get(&self.browser_key()?)
     }
 
+    /// `key`'s groups, made on first use from the layout saved for it, if
+    /// any, or else as one group following the terminal.
     fn layout_for(&mut self, key: (Scope, String)) -> &mut Layout {
         let browser = &mut self.browser;
-        browser
-            .layouts
-            .entry(key)
-            .or_insert_with(|| Layout::new(browser.group_ids.next()))
+        match browser.layouts.entry(key) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let layout = match browser.saved.remove(entry.key()) {
+                    Some(saved) => {
+                        browser.restored = Some(entry.key().clone());
+                        Layout::restore(&saved, &mut browser.group_ids)
+                    }
+                    None => Layout::new(browser.group_ids.next()),
+                };
+                entry.insert(layout)
+            }
+        }
+    }
+
+    /// Saves each of this window's layouts that changed, for the next start.
+    pub(crate) fn save_group_layouts(&mut self, cx: &mut Context<Self>) {
+        for (key, layout) in &self.browser.layouts {
+            super::Layouts::record(cx, key, layout.saved());
+        }
     }
 
     /// The focused workspace's groups, creating its first one. Render calls
@@ -190,6 +209,8 @@ impl HerdrWindow {
         let Some(key) = self.browser_key() else {
             return;
         };
+        // Restore a saved layout before reading its groups.
+        self.layout_for(key.clone());
         let asked = self
             .browser
             .new_tab_group
@@ -198,7 +219,10 @@ impl HerdrWindow {
         let primary = self.primary_group();
         let on_page =
             primary.is_some_and(|group| matches!(self.group_pick(group), Some(Pick::Page(_))));
-        if arrived && on_page {
+        // A restored layout keeps its tabs; the group in use is taken back
+        // to its own instead.
+        let restoring = self.browser.restored.as_ref() == Some(&key);
+        if arrived && (on_page || restoring) {
             return;
         }
         let layout = self.layout_for(key);

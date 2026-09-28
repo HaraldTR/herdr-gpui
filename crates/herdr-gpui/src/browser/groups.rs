@@ -8,10 +8,14 @@
 //! Of the groups that picked the same tab, the one used last shows it and
 //! the others stand in for it until they are used again.
 use super::TabId;
+use serde::{Deserialize, Serialize};
 
 /// Neither group beside a divider may be dragged narrower than this share
 /// of the row.
 const MIN_SHARE: f32 = 0.08;
+/// A saved layout with more groups than this is not restored.
+const MAX_SAVED_GROUPS: usize = 32;
+const MAX_TAB_ID_BYTES: usize = 256;
 
 /// Names a group within a window. Unique across the window's workspaces, so
 /// state keyed by group, such as an address field, is never shared.
@@ -48,7 +52,8 @@ impl Slot {
 }
 
 /// The tab a group picked.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
 pub(crate) enum Pick {
     Herdr(String),
     Page(TabId),
@@ -88,7 +93,87 @@ pub(crate) struct Layout {
     clock: u64,
 }
 
+/// A layout as saved across restarts: each group's tab and width, left to
+/// right, and the group in use. Group IDs are the window's own and are
+/// handed out anew on restore.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SavedLayout {
+    groups: Vec<SavedGroup>,
+    active: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct SavedGroup {
+    pick: Option<Pick>,
+    share: f32,
+}
+
+impl SavedLayout {
+    /// Whether a saved layout is one the app could have written: bounded,
+    /// with widths that are positive and finite, and names of sane length.
+    pub(crate) fn valid(&self) -> bool {
+        !self.groups.is_empty()
+            && self.groups.len() <= MAX_SAVED_GROUPS
+            && self.active < self.groups.len()
+            && self.groups.iter().all(|group| {
+                group.share.is_finite()
+                    && group.share > 0.
+                    && match &group.pick {
+                        Some(Pick::Herdr(tab)) => !tab.is_empty() && tab.len() <= MAX_TAB_ID_BYTES,
+                        Some(Pick::Page(_)) | None => true,
+                    }
+            })
+    }
+}
+
 impl Layout {
+    /// The layout to save, or `None` for one group following the terminal,
+    /// which is what a workspace shows without one.
+    pub(crate) fn saved(&self) -> Option<SavedLayout> {
+        if self.groups.len() == 1 && self.groups[0].pick.is_none() {
+            return None;
+        }
+        Some(SavedLayout {
+            groups: self
+                .groups
+                .iter()
+                .map(|group| SavedGroup {
+                    pick: group.pick.clone(),
+                    share: group.share,
+                })
+                .collect(),
+            active: self
+                .groups
+                .iter()
+                .position(|group| group.id == self.active)
+                .unwrap_or(0),
+        })
+    }
+
+    /// A layout rebuilt from `saved`, with IDs from `ids`. Widths are
+    /// scaled to fill the row, and the group in use is the latest used, so
+    /// it holds any tab it shares.
+    pub(crate) fn restore(saved: &SavedLayout, ids: &mut GroupIds) -> Self {
+        let total: f32 = saved.groups.iter().map(|group| group.share).sum();
+        let groups: Vec<Group> = saved
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(index, group)| Group {
+                id: ids.next(),
+                pick: group.pick.clone(),
+                used: if index == saved.active { 1 } else { 0 },
+                share: group.share / total,
+            })
+            .collect();
+        let active = groups[saved.active.min(groups.len() - 1)].id;
+        Self {
+            groups,
+            active,
+            clock: 1,
+        }
+    }
+
     /// One group following the terminal, as an unsplit window shows.
     pub(crate) fn new(id: GroupId) -> Self {
         Self {
@@ -335,6 +420,7 @@ impl Layout {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use Shown::*;
 
@@ -502,6 +588,80 @@ mod tests {
         layout.choose(b, page(3));
         assert!(layout.replace(&page(3), None, Some("t1")));
         assert_eq!(layout.pick(b, Some("t5")), Some(herdr("t5")));
+    }
+
+    #[test]
+    fn layouts_round_trip_through_their_saved_form() {
+        let (mut split, mut ids, a) = layout();
+        assert_eq!(split.saved(), None);
+        let (b, c) = (ids.next(), ids.next());
+        split.split(a, b, Some("t1"));
+        split.split(b, c, Some("t1"));
+        split.choose(a, herdr("t2"));
+        split.choose(c, page(4));
+        split.activate(b);
+        let saved = split.saved().unwrap();
+        assert!(saved.valid());
+        let json = serde_json::to_string(&saved).unwrap();
+        assert!(json.contains(r#"{"kind":"herdr","id":"t2"}"#), "{json}");
+        let restored = Layout::restore(&serde_json::from_str(&json).unwrap(), &mut ids);
+        assert_eq!(restored.saved(), Some(saved));
+        assert_eq!(restored.len(), 3);
+        // Fresh IDs, and the group in use is the second one again.
+        let slots: Vec<Slot> = restored.slots().collect();
+        assert!(slots.iter().all(|slot| ![a, b, c].contains(&slot.id)));
+        assert_eq!(restored.active(), slots[1].id);
+        // Each terminal group shows its own tab through its connection.
+        assert_eq!(
+            each(&restored, &["t2", "t1", "t1"]),
+            [Terminal, Terminal, Page(TabId::test(4))]
+        );
+        // A lone group on a page is worth keeping too.
+        let (mut lone, _, a) = layout();
+        lone.choose(a, page(1));
+        assert!(lone.saved().is_some());
+    }
+
+    #[test]
+    fn saved_layouts_the_app_could_not_have_written_are_refused() {
+        let group = |pick: Option<Pick>, share: f32| SavedGroup { pick, share };
+        let valid = SavedLayout {
+            groups: vec![group(None, 0.5), group(Some(herdr("t1")), 0.5)],
+            active: 1,
+        };
+        assert!(valid.valid());
+        for invalid in [
+            SavedLayout {
+                groups: vec![],
+                active: 0,
+            },
+            SavedLayout {
+                active: 2,
+                ..valid.clone()
+            },
+            SavedLayout {
+                groups: vec![group(None, f32::NAN)],
+                active: 0,
+            },
+            SavedLayout {
+                groups: vec![group(None, 0.)],
+                active: 0,
+            },
+            SavedLayout {
+                groups: vec![group(Some(herdr("")), 1.)],
+                active: 0,
+            },
+            SavedLayout {
+                groups: vec![group(Some(herdr(&"x".repeat(300))), 1.)],
+                active: 0,
+            },
+            SavedLayout {
+                groups: vec![group(None, 1.); MAX_SAVED_GROUPS + 1],
+                active: 0,
+            },
+        ] {
+            assert!(!invalid.valid(), "{invalid:?}");
+        }
     }
 
     #[test]
