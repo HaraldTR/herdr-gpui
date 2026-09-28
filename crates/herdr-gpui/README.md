@@ -762,11 +762,14 @@ the same tab. Splitting opens nothing new.
   workspace in Herdr forgets its groups, and a damaged file starts every
   workspace unsplit. With several windows on one workspace, the last change
   is what is saved.
-- **…** on each strip offers **Close**, **Close Others**, and **Close All**
-  for the workspace's tabs, Herdr and browser alike, plus **New Browser Tab**,
-  **Split Right**, and **Close Group**. Closing Herdr tabs terminates their
-  panes and processes, so a bulk close that includes one asks first (unless
-  `confirm_close_tab = false`) and closes them one at a time.
+- Closing in a group only takes tabs out of that group's strip, as an
+  editor's groups do: they stay open in Herdr, in the browser, and in every
+  other group. Split, a tab's close button does this; **…** offers **Close**,
+  **Close Others**, and **Close All**, which closes the group. A group left
+  with no tabs closes, and a tab closed in every group stays in the group in
+  use. Unsplit, a tab's close button closes it in Herdr, through its
+  confirmation, as before; nothing in **…** ever closes a Herdr tab.
+- **…** also offers **New Browser Tab** and **Split Right**.
 
 ## Browser Tabs
 

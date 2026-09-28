@@ -40,9 +40,6 @@ pub(crate) struct Browser {
     /// The group whose "+" asked for a new Herdr tab, which it picks once
     /// the daemon focuses the tab.
     pub(super) new_tab_group: Option<((Scope, String), GroupId)>,
-    /// Herdr tabs a bulk close still has to close, sent one per tick so
-    /// they never crowd the connection's bounded command queue.
-    pub(crate) tab_closes: std::collections::VecDeque<crate::group_menu::TabClose>,
     /// The connection of each group that shows a terminal.
     pub(crate) terminals: crate::group_terminals::GroupTerminals,
     /// Why a tab's page could not be created, shown in its place.
@@ -67,7 +64,6 @@ impl Browser {
             pages: Default::default(),
             addresses: HashMap::new(),
             new_tab_group: None,
-            tab_closes: Default::default(),
             terminals: Default::default(),
             failed: None,
             workspaces: None,
@@ -479,7 +475,11 @@ impl HerdrWindow {
         let (Some((scope, workspace)), Some(store)) = (self.browser_key(), store(cx)) else {
             return Vec::new();
         };
-        let tabs: Vec<Tab> = store.in_workspace(&scope, &workspace).cloned().collect();
+        let tabs: Vec<Tab> = store
+            .in_workspace(&scope, &workspace)
+            .filter(|tab| self.group_lists(slot.id, &Pick::Page(tab.id)))
+            .cloned()
+            .collect();
         tabs.into_iter()
             .map(|tab| {
                 let id = tab.id;
@@ -528,9 +528,14 @@ impl HerdrWindow {
                                     .text_color(rgb(text)),
                             )
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            // Split, the page closes in its group alone.
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
-                                this.close_browser_tab(id, window, cx);
+                                if this.is_split() {
+                                    this.close_in_group(slot.id, vec![Pick::Page(id)], window, cx);
+                                } else {
+                                    this.close_browser_tab(id, window, cx);
+                                }
                             })),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {

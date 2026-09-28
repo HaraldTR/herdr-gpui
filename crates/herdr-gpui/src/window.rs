@@ -252,7 +252,6 @@ impl HerdrWindow {
         self.poll_sessions(cx);
         self.flush_scrollbar(cx);
         self.flush_split(cx);
-        self.flush_tab_closes(cx);
         #[cfg(target_os = "macos")]
         crate::app_badge::sync(window.window_handle().window_id(), &self.endpoints, cx);
         self.cancel_stale_image();

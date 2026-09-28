@@ -46,11 +46,10 @@ impl HerdrWindow {
             .text_color(rgb(self.theme.foreground))
             .items_center();
         if let Some(snapshot) = &self.live.snapshot {
-            for tab in snapshot
-                .tabs
-                .iter()
-                .filter(|t| Some(&t.workspace_id) == snapshot.focused_workspace_id.as_ref())
-            {
+            for tab in snapshot.tabs.iter().filter(|t| {
+                Some(&t.workspace_id) == snapshot.focused_workspace_id.as_ref()
+                    && self.group_lists(slot.id, &Pick::Herdr(t.tab_id.clone()))
+            }) {
                 let id = tab.tab_id.clone();
                 let context_id = id.clone();
                 let close_id = id.clone();
@@ -107,9 +106,18 @@ impl HerdrWindow {
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                     cx.stop_propagation();
                                 })
+                                // Split, a tab closes in its group alone, as
+                                // an editor's does; only the last group's
+                                // close reaches Herdr, through its
+                                // confirmation.
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
-                                    this.open_tab_close(&close_id, window, cx);
+                                    if this.is_split() {
+                                        let pick = Pick::Herdr(close_id.clone());
+                                        this.close_in_group(slot.id, vec![pick], window, cx);
+                                    } else {
+                                        this.open_tab_close(&close_id, window, cx);
+                                    }
                                 })),
                         )
                         .on_mouse_down(

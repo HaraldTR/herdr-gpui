@@ -93,6 +93,76 @@ impl HerdrWindow {
         self.layout()?.pick(group, self.focused_herdr_tab())
     }
 
+    /// Whether `group`'s strip lists `pick`; see [`Layout::lists`].
+    pub(crate) fn group_lists(&self, group: GroupId, pick: &Pick) -> bool {
+        let Some(layout) = self.layout() else {
+            return true;
+        };
+        layout.lists(group, pick, self.primary_group().unwrap_or(group))
+    }
+
+    /// The tabs `group`'s strip lists, in strip order: Herdr tabs first,
+    /// then browser tabs.
+    pub(crate) fn group_tabs(&self, group: GroupId, cx: &App) -> Vec<Pick> {
+        let herdr = self.live.snapshot.as_ref().map(|snapshot| {
+            snapshot
+                .tabs
+                .iter()
+                .filter(|tab| Some(&tab.workspace_id) == snapshot.focused_workspace_id.as_ref())
+                .map(|tab| Pick::Herdr(tab.tab_id.clone()))
+                .collect::<Vec<_>>()
+        });
+        herdr
+            .unwrap_or_default()
+            .into_iter()
+            .chain(self.browser_tab_ids(cx).into_iter().map(Pick::Page))
+            .filter(|pick| self.group_lists(group, pick))
+            .collect()
+    }
+
+    /// Closes `picks` in `group` alone, as an editor closes tabs in one of
+    /// its groups: they stay open in Herdr, in the browser, and in every
+    /// other group. A group closing the tab it shows moves to the tab after
+    /// it in its strip, or before it; a group left with none closes.
+    pub(crate) fn close_in_group(
+        &mut self,
+        group: GroupId,
+        picks: Vec<Pick>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.group_tabs(group, cx);
+        let current = self.group_pick(group);
+        let Some(layout) = self.ensure_layout() else {
+            return;
+        };
+        layout.hide(group, picks.iter().cloned());
+        let after = self.group_tabs(group, cx);
+        if after.is_empty() {
+            self.close_group(group, window, cx);
+            return;
+        }
+        if current
+            .as_ref()
+            .is_some_and(|current| picks.contains(current))
+        {
+            let position = current
+                .and_then(|current| before.iter().position(|pick| *pick == current))
+                .unwrap_or(0);
+            let next = before[position..]
+                .iter()
+                .chain(before[..position].iter().rev())
+                .find(|pick| after.contains(pick))
+                .cloned();
+            match next {
+                Some(Pick::Herdr(tab)) => self.choose_herdr_tab(group, &tab, window, cx),
+                Some(Pick::Page(id)) => self.show_browser_tab_in(Some(group), id, window, cx),
+                None => {}
+            }
+        }
+        cx.notify();
+    }
+
     /// What `group` draws. A page another window closed reads as nothing
     /// until the next tick forgets it.
     pub(crate) fn group_shown(&self, group: GroupId, cx: &App) -> Shown {
@@ -260,6 +330,14 @@ impl HerdrWindow {
         for pick in &closed {
             layout.replace(pick, None, focused.as_deref());
         }
+        // Closed-in-group marks for tabs the daemon closed go with them.
+        layout.forget_hidden(|pick| match pick {
+            Pick::Herdr(tab) => snapshot
+                .tabs
+                .iter()
+                .any(|candidate| &candidate.tab_id == tab && candidate.workspace_id == key.1),
+            Pick::Page(id) => store(cx).is_some_and(|store| store.get(*id).is_some()),
+        });
         if !closed.is_empty() {
             cx.notify();
         }

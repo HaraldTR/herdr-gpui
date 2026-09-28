@@ -30,8 +30,6 @@ pub(crate) enum Page {
     RenameTab,
     /// A group's "…" menu: closing tabs and splitting.
     Group,
-    /// Confirms a bulk close that reaches Herdr tabs.
-    ConfirmCloseTabs,
     Pane,
     RenamePane,
     Workspace,

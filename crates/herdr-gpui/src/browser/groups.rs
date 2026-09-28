@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 const MIN_SHARE: f32 = 0.08;
 /// A saved layout with more groups than this is not restored.
 const MAX_SAVED_GROUPS: usize = 32;
+/// Nor one whose group removed more tabs from its strip than this.
+const MAX_SAVED_HIDDEN: usize = 512;
 const MAX_TAB_ID_BYTES: usize = 256;
 
 /// Names a group within a window. Unique across the window's workspaces, so
@@ -83,6 +85,9 @@ struct Group {
     used: u64,
     /// The group's share of the row's width.
     share: f32,
+    /// Tabs closed in this group: gone from its strip, still open in Herdr
+    /// and in every other group.
+    hidden: Vec<Pick>,
 }
 
 /// One workspace's groups, left to right.
@@ -106,6 +111,15 @@ pub(crate) struct SavedLayout {
 struct SavedGroup {
     pick: Option<Pick>,
     share: f32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    hidden: Vec<Pick>,
+}
+
+fn valid_pick(pick: &Pick) -> bool {
+    match pick {
+        Pick::Herdr(tab) => !tab.is_empty() && tab.len() <= MAX_TAB_ID_BYTES,
+        Pick::Page(_) => true,
+    }
 }
 
 impl SavedLayout {
@@ -118,10 +132,9 @@ impl SavedLayout {
             && self.groups.iter().all(|group| {
                 group.share.is_finite()
                     && group.share > 0.
-                    && match &group.pick {
-                        Some(Pick::Herdr(tab)) => !tab.is_empty() && tab.len() <= MAX_TAB_ID_BYTES,
-                        Some(Pick::Page(_)) | None => true,
-                    }
+                    && group.pick.as_ref().is_none_or(valid_pick)
+                    && group.hidden.len() <= MAX_SAVED_HIDDEN
+                    && group.hidden.iter().all(valid_pick)
             })
     }
 }
@@ -130,7 +143,10 @@ impl Layout {
     /// The layout to save, or `None` for one group following the terminal,
     /// which is what a workspace shows without one.
     pub(crate) fn saved(&self) -> Option<SavedLayout> {
-        if self.groups.len() == 1 && self.groups[0].pick.is_none() {
+        if self.groups.len() == 1
+            && self.groups[0].pick.is_none()
+            && self.groups[0].hidden.is_empty()
+        {
             return None;
         }
         Some(SavedLayout {
@@ -140,6 +156,7 @@ impl Layout {
                 .map(|group| SavedGroup {
                     pick: group.pick.clone(),
                     share: group.share,
+                    hidden: group.hidden.clone(),
                 })
                 .collect(),
             active: self
@@ -164,6 +181,7 @@ impl Layout {
                 pick: group.pick.clone(),
                 used: if index == saved.active { 1 } else { 0 },
                 share: group.share / total,
+                hidden: group.hidden.clone(),
             })
             .collect();
         let active = groups[saved.active.min(groups.len() - 1)].id;
@@ -182,6 +200,7 @@ impl Layout {
                 pick: None,
                 used: 0,
                 share: 1.,
+                hidden: Vec::new(),
             }],
             active: id,
             clock: 0,
@@ -304,11 +323,43 @@ impl Layout {
         true
     }
 
-    /// Picks `pick` in `id` and uses the group.
+    /// Picks `pick` in `id` and uses the group. A tab picked here is back
+    /// in the group's strip.
     pub(crate) fn choose(&mut self, id: GroupId, pick: Pick) {
         if let Some(group) = self.group_mut(id) {
+            group.hidden.retain(|hidden| *hidden != pick);
             group.pick = Some(pick);
             self.activate(id);
+        }
+    }
+
+    /// Whether `id`'s strip lists `pick`. A tab closed in every group is
+    /// still listed in `fallback`, the group in use, so no open tab is ever
+    /// out of reach.
+    pub(crate) fn lists(&self, id: GroupId, pick: &Pick, fallback: GroupId) -> bool {
+        let hidden_in = |group: &Group| group.hidden.contains(pick);
+        let Some(group) = self.group(id) else {
+            return false;
+        };
+        !hidden_in(group) || (id == fallback && self.groups.iter().all(hidden_in))
+    }
+
+    /// Closes `picks` in `id`: gone from its strip, open everywhere else.
+    pub(crate) fn hide(&mut self, id: GroupId, picks: impl IntoIterator<Item = Pick>) {
+        let Some(group) = self.group_mut(id) else {
+            return;
+        };
+        for pick in picks {
+            if !group.hidden.contains(&pick) {
+                group.hidden.push(pick);
+            }
+        }
+    }
+
+    /// Drops closed-in-group marks for tabs that are gone for good.
+    pub(crate) fn forget_hidden(&mut self, mut open: impl FnMut(&Pick) -> bool) {
+        for group in &mut self.groups {
+            group.hidden.retain(&mut open);
         }
     }
 
@@ -326,11 +377,14 @@ impl Layout {
         }
         let source = &mut self.groups[index];
         source.share /= 2.;
+        // The new group lists what its source lists, as an editor's split
+        // opens with the same tabs.
         let group = Group {
             id: new,
             pick: source.pick.clone(),
             used: 0,
             share: source.share,
+            hidden: source.hidden.clone(),
         };
         self.groups.insert(index + 1, group);
         self.activate(new);
@@ -624,7 +678,11 @@ mod tests {
 
     #[test]
     fn saved_layouts_the_app_could_not_have_written_are_refused() {
-        let group = |pick: Option<Pick>, share: f32| SavedGroup { pick, share };
+        let group = |pick: Option<Pick>, share: f32| SavedGroup {
+            pick,
+            share,
+            hidden: Vec::new(),
+        };
         let valid = SavedLayout {
             groups: vec![group(None, 0.5), group(Some(herdr("t1")), 0.5)],
             active: 1,
@@ -662,6 +720,33 @@ mod tests {
         ] {
             assert!(!invalid.valid(), "{invalid:?}");
         }
+    }
+
+    #[test]
+    fn closing_a_tab_in_a_group_leaves_it_open_everywhere_else() {
+        let (mut layout, mut ids, a) = layout();
+        let (b, c) = (ids.next(), ids.next());
+        layout.split(a, b, Some("t1"));
+        layout.hide(b, [herdr("t2"), page(1)]);
+        assert!(layout.lists(a, &herdr("t2"), b));
+        assert!(!layout.lists(b, &herdr("t2"), b));
+        // A split lists what its source lists.
+        layout.split(b, c, Some("t1"));
+        assert!(!layout.lists(c, &page(1), c));
+        // Closed in every group, a tab stays in the group in use.
+        layout.hide(a, [page(1)]);
+        assert!(layout.lists(c, &page(1), c));
+        assert!(!layout.lists(a, &page(1), c));
+        // Picking it again brings it back to that group.
+        layout.choose(a, page(1));
+        assert!(layout.lists(a, &page(1), c));
+        // Saved and restored with the layout; gone tabs are forgotten.
+        let saved = layout.saved().unwrap();
+        assert!(saved.valid());
+        let restored = Layout::restore(&saved, &mut ids);
+        assert_eq!(restored.saved(), Some(saved));
+        layout.forget_hidden(|pick| *pick != herdr("t2"));
+        assert!(layout.lists(b, &herdr("t2"), b));
     }
 
     #[test]
