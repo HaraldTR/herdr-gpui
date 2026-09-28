@@ -5,6 +5,8 @@ mod credentials;
 mod device;
 mod http;
 mod log;
+#[cfg(target_os = "linux")]
+mod secret_service;
 mod store;
 mod token;
 

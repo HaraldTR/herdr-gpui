@@ -69,6 +69,10 @@ rustix.workspace = true
 gpui-wry.workspace = true
 wry.workspace      = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+futures-lite.workspace = true
+oo7.workspace          = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
 block2.workspace                = true
 objc2-core-foundation.workspace = true

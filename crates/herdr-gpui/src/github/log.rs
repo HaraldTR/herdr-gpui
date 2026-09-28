@@ -162,6 +162,12 @@ pub(super) fn kind(error: &Error) -> &'static str {
         Error::KeychainRead(_) => "keychain_read",
         #[cfg(target_os = "macos")]
         Error::KeychainWrite(_) => "keychain_write",
+        #[cfg(target_os = "linux")]
+        Error::SecretServiceRead(_) => "secret_service_read",
+        #[cfg(target_os = "linux")]
+        Error::SecretServiceWrite(_) => "secret_service_write",
+        #[cfg(target_os = "linux")]
+        Error::SecretServiceUnavailable => "secret_service_unavailable",
         Error::CredentialDirectory => "credential_directory",
         Error::CredentialPermissions => "credential_permissions",
         Error::CredentialIo(_) => "credential_io",
