@@ -228,7 +228,7 @@ impl HerdrWindow {
                 let slot = drag
                     .and_then(|drag| drag.target.as_ref())
                     .map_or(plan.dragged(), |target| target.slot);
-                reorder::preview(&heights, plan.dragged(), slot)
+                crate::reorder::preview(&heights, plan.dragged(), slot)
             });
             // A child closes the group when no child follows it.
             let closes: Vec<bool> = (0..entries.len())

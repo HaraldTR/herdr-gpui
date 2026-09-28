@@ -619,7 +619,7 @@ impl HerdrWindow {
         slot: Slot,
         shown: Option<TabId>,
         cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
+    ) -> Vec<(TabId, Stateful<Div>)> {
         let (Some((scope, workspace)), Some(store)) = (self.browser_key(), store(cx)) else {
             return Vec::new();
         };
@@ -632,7 +632,7 @@ impl HerdrWindow {
             .map(|tab| {
                 let id = tab.id;
                 let (background, text) = self.tab_colors(shown == Some(id), slot.id);
-                div()
+                let tab = div()
                     .id(SharedString::from(format!("browser-tab-{id}")))
                     .debug_selector(move || slot.selector(&format!("browser-tab-{id}")))
                     .pl(px(10.))
@@ -689,8 +689,8 @@ impl HerdrWindow {
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.show_browser_tab_in(Some(slot.id), id, window, cx);
-                    }))
-                    .into_any_element()
+                    }));
+                (id, tab)
             })
             .collect()
     }
