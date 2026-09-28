@@ -290,6 +290,9 @@ mod tests {
                 "../../herdr-protocol/tests/fixtures/endpoint-snapshot-v1.json"
             ))
             .unwrap();
+            // No status dots, so both tabs fit the narrow strip and the new
+            // tab button still follows the last one rather than scrolling.
+            snapshot.tabs[0].agent_status = herdr_client::protocol::AgentStatus::Unknown;
             let mut tab = snapshot.tabs[0].clone();
             tab.tab_id = "inactive".into();
             tab.focused = false;

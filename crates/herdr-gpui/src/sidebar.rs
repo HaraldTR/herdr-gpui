@@ -23,9 +23,9 @@ pub(crate) mod layout_tests;
 pub(crate) mod native_tests;
 
 pub(crate) use {
-    agents::agent_name,
+    agents::{agent_name, status_dot},
     hover::{HoverMenu, HoverRest},
-    metrics::{ARROW_RESERVE, HOST_ARROW_WIDTH, HOST_GAP, ICON_RESERVE, LABEL_GAP},
+    metrics::{ARROW_RESERVE, HOST_ARROW_WIDTH, HOST_GAP, ICON_RESERVE, LABEL_GAP, STATUS_WIDTH},
     reorder::WorkspaceDrag,
     row::{compact, github_mark, label_text},
     view::SidebarView,
