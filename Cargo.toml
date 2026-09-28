@@ -62,7 +62,7 @@ secrecy              = { features = ["serde"], version = "=0.10.3" }
 security-framework   = "=3.7.0"
 serde                = { features = ["derive"], version = "1" }
 serde_json           = "1"
-sha1                 = "0.10.6"
+sha1                 = "0.11.0"
 sha2                 = "0.10.9"
 tar                  = "0.4"
 tempfile             = "3"
