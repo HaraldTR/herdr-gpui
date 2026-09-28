@@ -5,7 +5,7 @@
 use super::HerdrWindow;
 use crate::{
     TAB_HEIGHT, TAB_WIDTH,
-    browser::{Fold, GroupId, Leaving, Listed, Pick, Shown, Slot},
+    browser::{Fold, GroupId, Leaving, Listed, Pick, Shown, Slot, ThumbDrag},
     controls::Command,
     fonts::StyledFont,
     sidebar::{STATUS_WIDTH, status_dot},
@@ -15,6 +15,13 @@ use herdr_client::protocol::AgentStatus;
 
 /// The gap between a Herdr tab's status dot and its title.
 const DOT_GAP: f32 = 6.;
+
+/// How tall the thumb along a scrolling strip's foot draws.
+const THUMB_HEIGHT: f32 = 4.;
+
+/// How opaque the thumb draws over the strip's muted color, and while held.
+const THUMB_ALPHA: u32 = 0x80;
+const THUMB_HELD_ALPHA: u32 = 0xc0;
 
 /// What a tab draws before its title.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,7 +154,11 @@ impl HerdrWindow {
                 label,
             })
             .collect();
+        // Leaving tabs slot in among these below; `None` marks where.
+        let mut places: Vec<Option<Pick>> =
+            listed.iter().map(|tab| Some(tab.pick.clone())).collect();
         self.observe_strip(slot.id, listed, now);
+        let scroll = self.strip_scroll(slot.id);
         let mut entries: Vec<AnyElement> = Vec::new();
         let mut tabs = div()
             .id(SharedString::from(slot.selector("tabs")))
@@ -157,6 +168,7 @@ impl HerdrWindow {
             .text_font(&self.config.tabs)
             .text_size(px(self.config.tabs.size))
             .overflow_x_scroll()
+            .track_scroll(&scroll)
             .bg(rgb(self.theme.surface))
             .text_color(rgb(self.theme.foreground))
             .items_center();
@@ -275,8 +287,61 @@ impl HerdrWindow {
         for leaving in leaving {
             let index = leaving.index.min(entries.len());
             entries.insert(index, self.leaving_tab(slot, &leaving, now));
+            places.insert(index.min(places.len()), None);
         }
         tabs = tabs.children(entries);
+        if let Some((index, pick)) = pick.as_ref().and_then(|pick| {
+            let index = places
+                .iter()
+                .position(|place| place.as_ref() == Some(pick))?;
+            Some((index, pick))
+        }) && self.reveal_tab(slot.id, pick, index)
+        {
+            window.request_animation_frame();
+        }
+        let hover_group = SharedString::from(slot.selector("tab-scroller"));
+        let thumb_color = |alpha| rgba((self.theme.muted << 8) | alpha);
+        // The thumb sits over the tabs rather than inside them, so it stays
+        // put as they scroll beneath it; the pointer finds it along the
+        // strip's foot, as in an editor.
+        let scroller = div()
+            .id(SharedString::from(slot.selector("tab-scroller")))
+            .group(hover_group.clone())
+            .relative()
+            .flex()
+            .flex_shrink_1()
+            .min_w_0()
+            .on_drag_move(
+                cx.listener(move |this, event: &DragMoveEvent<ThumbDrag>, _, cx| {
+                    let ThumbDrag(group) = *event.drag(cx);
+                    if group == slot.id && this.drag_strip_thumb(group, event.event.position.x) {
+                        cx.notify();
+                    }
+                }),
+            )
+            .child(tabs.flex_shrink_1().min_w_0())
+            .children(self.strip_thumb(slot.id).map(|thumb| {
+                div()
+                    .id(SharedString::from(slot.selector("tab-scroll-thumb")))
+                    .debug_selector(move || slot.selector("tab-scroll-thumb"))
+                    .absolute()
+                    .bottom_0()
+                    .left(px(thumb.left))
+                    .w(px(thumb.width))
+                    .h(px(THUMB_HEIGHT))
+                    // The wheel still scrolls the strip over the thumb.
+                    .block_mouse_except_scroll()
+                    .group_hover(hover_group, |s| s.bg(thumb_color(THUMB_ALPHA)))
+                    .hover(|s| s.bg(thumb_color(THUMB_ALPHA)))
+                    .active(|s| s.bg(thumb_color(THUMB_HELD_ALPHA)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, _, _| {
+                            this.grab_strip_thumb(slot.id, event.position.x);
+                        }),
+                    )
+                    .on_drag(ThumbDrag(slot.id), |_, _, _, cx| cx.new(|_| EmptyView))
+            }));
         div()
             .flex()
             .flex_none()
@@ -285,7 +350,7 @@ impl HerdrWindow {
             // Tabs size to their content and shrink when the row is full, so
             // the button sits after the last tab instead of at the far right
             // of the window.
-            .child(tabs.flex_shrink_1().min_w_0())
+            .child(scroller)
             .child(
                 div()
                     .id(SharedString::from(slot.selector("new-tab")))
@@ -653,5 +718,180 @@ mod tests {
             ),
             "{tab:?} beside {plain:?}"
         );
+    }
+
+    /// A window whose focused workspace has far more tabs than fit in
+    /// 800 pixels, the last of them focused when `last_focused`.
+    fn crowded(
+        cx: &mut TestAppContext,
+        last_focused: bool,
+    ) -> (Entity<HerdrWindow>, &mut VisualTestContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = crate::sidebar::layout_tests::fixture_window(window, cx);
+            let mut snapshot: herdr_client::protocol::ClientShellSnapshot = serde_json::from_str(
+                include_str!("../../../herdr-protocol/tests/fixtures/endpoint-snapshot-v1.json"),
+            )
+            .unwrap();
+            let first = snapshot.tabs[0].clone();
+            for index in 0..30 {
+                let mut tab = first.clone();
+                tab.tab_id = format!("x{index}");
+                tab.label = format!("tab number {index}");
+                tab.focused = false;
+                snapshot.tabs.push(tab);
+            }
+            if last_focused {
+                snapshot.tabs[0].focused = false;
+                snapshot.tabs[30].focused = true;
+                snapshot.focused_tab_id = Some("x29".into());
+            }
+            view.live.snapshot = Some(Arc::new(snapshot));
+            view
+        });
+        cx.simulate_resize(size(px(800.), px(600.)));
+        for _ in 0..2 {
+            cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+        }
+        (view, cx)
+    }
+
+    /// Where the strip's tabs can be seen: from the first group's left
+    /// edge to its "+" button.
+    fn viewport(cx: &mut VisualTestContext) -> (Pixels, Pixels) {
+        let new_tab = cx.debug_bounds("new-tab").unwrap();
+        let strip = view_scroll(cx).bounds();
+        assert!(
+            (strip.right() - new_tab.left()).abs() <= px(0.5),
+            "{strip:?} {new_tab:?}"
+        );
+        (strip.left(), strip.right())
+    }
+
+    fn view_scroll(cx: &mut VisualTestContext) -> ScrollHandle {
+        cx.update(|window, cx| {
+            let view = window.root::<HerdrWindow>().flatten().unwrap();
+            view.update(cx, |view, _| {
+                let group = view.group_slots()[0].id;
+                view.strip_scroll(group)
+            })
+        })
+    }
+
+    #[gpui::test]
+    fn the_wheel_scrolls_a_crowded_strip_sideways(cx: &mut TestAppContext) {
+        let (_, cx) = crowded(cx, false);
+        let (_, right) = viewport(cx);
+        let last = cx.debug_bounds("tab-x29").unwrap();
+        assert!(last.left() > right, "{last:?} starts out of view");
+        let first = cx.debug_bounds("tab-w1:t1").unwrap();
+        for _ in 0..40 {
+            cx.simulate_event(ScrollWheelEvent {
+                position: first.center(),
+                delta: ScrollDelta::Pixels(point(px(0.), px(-200.))),
+                ..Default::default()
+            });
+        }
+        cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+        let last = cx.debug_bounds("tab-x29").unwrap();
+        assert!(
+            (last.right() - right).abs() <= px(0.5),
+            "{last:?} ends at {right:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn the_chosen_tab_is_scrolled_into_view(cx: &mut TestAppContext) {
+        let (_, cx) = crowded(cx, true);
+        let (left, right) = viewport(cx);
+        let last = cx.debug_bounds("tab-x29").unwrap();
+        assert!(
+            last.left() >= left && (last.right() - right).abs() <= px(0.5),
+            "{last:?}"
+        );
+
+        // Scrolled away by hand, the strip stays put while the choice holds.
+        let first = cx.debug_bounds("tab-x28").unwrap();
+        cx.simulate_event(ScrollWheelEvent {
+            position: first.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(300.))),
+            ..Default::default()
+        });
+        cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+        assert!(cx.debug_bounds("tab-x29").unwrap().left() > right);
+    }
+
+    #[gpui::test]
+    fn choosing_a_far_tab_later_scrolls_it_into_view(cx: &mut TestAppContext) {
+        let (view, cx) = crowded(cx, false);
+        let (left, right) = viewport(cx);
+        assert!(cx.debug_bounds("tab-x29").unwrap().left() > right);
+        view.update(cx, |view, cx| {
+            let snapshot = Arc::make_mut(view.live.snapshot.as_mut().unwrap());
+            snapshot.tabs[0].focused = false;
+            snapshot.tabs[30].focused = true;
+            snapshot.focused_tab_id = Some("x29".into());
+            cx.notify();
+        });
+        for _ in 0..2 {
+            cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+        }
+        let last = cx.debug_bounds("tab-x29").unwrap();
+        assert!(
+            last.left() >= left && (last.right() - right).abs() <= px(0.5),
+            "{last:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn dragging_the_thumb_scrolls_the_strip(cx: &mut TestAppContext) {
+        let (_, cx) = crowded(cx, false);
+        let (left, right) = viewport(cx);
+        let thumb = cx.debug_bounds("tab-scroll-thumb").unwrap();
+        assert!(
+            (thumb.left() - left).abs() <= px(0.5),
+            "{thumb:?} starts at the left"
+        );
+        assert!(thumb.size.width < right - left);
+        let start = thumb.center();
+        let end = point(right + px(200.), start.y);
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            start + point(px(10.), px(0.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+        let last = cx.debug_bounds("tab-x29").unwrap();
+        assert!(
+            (last.right() - right).abs() <= px(0.5),
+            "{last:?} ends at {right:?}"
+        );
+        let thumb = cx.debug_bounds("tab-scroll-thumb").unwrap();
+        assert!(
+            (thumb.right() - right).abs() <= px(0.5),
+            "{thumb:?} ends at the right"
+        );
+    }
+
+    #[gpui::test]
+    fn a_strip_whose_tabs_fit_has_no_thumb(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let mut view = crate::sidebar::layout_tests::fixture_window(window, cx);
+            view.live.snapshot = Some(Arc::new(
+                serde_json::from_str(include_str!(
+                    "../../../herdr-protocol/tests/fixtures/endpoint-snapshot-v1.json"
+                ))
+                .unwrap(),
+            ));
+            view
+        });
+        cx.simulate_resize(size(px(800.), px(600.)));
+        for _ in 0..2 {
+            cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+        }
+        assert!(cx.debug_bounds("tab-w1:t1").is_some());
+        assert!(cx.debug_bounds("tab-scroll-thumb").is_none());
     }
 }
