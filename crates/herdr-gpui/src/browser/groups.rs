@@ -54,7 +54,7 @@ impl Slot {
 }
 
 /// The tab a group picked.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
 pub(crate) enum Pick {
     Herdr(String),
@@ -389,6 +389,17 @@ impl Layout {
         self.groups.insert(index + 1, group);
         self.activate(new);
         true
+    }
+
+    /// Where closing `id` would leave it: its place, its share, and the
+    /// group its room goes to. `None` for the last group, which never closes.
+    pub(crate) fn fold_target(&self, id: GroupId) -> Option<(usize, f32, GroupId)> {
+        if self.groups.len() < 2 {
+            return None;
+        }
+        let index = self.groups.iter().position(|group| group.id == id)?;
+        let into = if index == 0 { 1 } else { index - 1 };
+        Some((index, self.groups[index].share, self.groups[into].id))
     }
 
     /// Closes `id`, giving its width to the group on its left, or its right

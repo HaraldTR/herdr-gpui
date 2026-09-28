@@ -73,6 +73,7 @@ impl Render for HerdrWindow {
         };
         // Only the first group meets the sidebar, so only it takes the gap.
         self.ensure_layout();
+        self.forget_gone_strips();
         let slots = self.group_slots();
         let shown: Vec<Shown> = slots
             .iter()
@@ -441,9 +442,13 @@ impl Render for HerdrWindow {
                 }
                 _ => self.render_stand_in(slot, &shown, gap, owns_keyboard, cx),
             };
-            groups.push(self.render_group(slot, body, cx));
+            groups.push(self.render_group(slot, body, window, cx));
         }
         let content = self.render_groups(groups, cx);
+        // Not `||`: asking forgets group motion that has finished.
+        if self.groups_moving() | self.tabs_growing() | self.annotations_moving() {
+            window.request_animation_frame();
+        }
         self.present_browser(cx);
         let status = (!matches!(self.live.status, ConnectionStatus::Connected)
             || self.local_error.is_some()

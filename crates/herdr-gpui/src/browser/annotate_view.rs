@@ -7,8 +7,15 @@ use super::{
     annotate::{self, Anchor, MAX_NOTES, Note, Rect, Report},
     feedback::Batch,
 };
+/// The notes panel's width beside the page.
+pub(super) const ANNOTATIONS_WIDTH: f32 = 300.;
+
 use crate::{
-    HerdrWindow, connection::ConnectionBridge, search_input::SearchInput, terminal::InputTarget,
+    HerdrWindow,
+    connection::ConnectionBridge,
+    motion::{self, ENTER, Toggle},
+    search_input::SearchInput,
+    terminal::InputTarget,
     window::Flash,
 };
 use gpui::{prelude::*, *};
@@ -59,6 +66,11 @@ struct Delivery {
 
 pub(crate) struct Annotations {
     tabs: HashMap<TabId, TabNotes>,
+    /// Each tab's notes panel, sliding open and closed beside its page.
+    panels: HashMap<TabId, Toggle>,
+    /// When each note a tab's panel draws was added, while it grows into the
+    /// list; `None` for a note that is whole.
+    drawn: HashMap<TabId, Vec<Option<Instant>>>,
     pub(super) input: Entity<SearchInput>,
     deliveries: Vec<Delivery>,
     /// Numbers screenshots, to match each to its draft or note.
@@ -74,6 +86,8 @@ impl Annotations {
         });
         Self {
             tabs: HashMap::new(),
+            panels: HashMap::new(),
+            drawn: HashMap::new(),
             input,
             deliveries: Vec::new(),
             captures: 0,
@@ -107,6 +121,56 @@ impl Annotations {
 
     pub(crate) fn forget(&mut self, id: TabId) {
         self.tabs.remove(&id);
+        self.panels.remove(&id);
+        self.drawn.remove(&id);
+    }
+
+    #[cfg(test)]
+    fn tab_notes_mut(&mut self, id: TabId) -> &mut TabNotes {
+        self.tabs.entry(id).or_default()
+    }
+
+    /// How much of `id`'s notes panel shows at `now`, as it slides open or
+    /// closed. A panel already open when first drawn is simply there.
+    pub(crate) fn panel_shown(&mut self, id: TabId, now: Instant) -> f32 {
+        let open = self.open(id);
+        match self.panels.get_mut(&id) {
+            Some(panel) => panel.set(open, now, false),
+            None => {
+                let mut panel = Toggle::default();
+                panel.set(open, now, true);
+                self.panels.insert(id, panel);
+            }
+        }
+        self.panels.get(&id).map_or(0., |panel| panel.shown(now))
+    }
+
+    /// Records how many notes `id`'s panel draws at `now`; notes added
+    /// since the last draw start growing in. Notes there when the panel first
+    /// drew are whole.
+    fn observe_notes(&mut self, id: TabId, count: usize, now: Instant) {
+        let added = self.drawn.entry(id).or_insert_with(|| vec![None; count]);
+        added.truncate(count);
+        added.resize(count, Some(now));
+    }
+
+    /// How far note `index` of `id` has grown in at `now`, or `None` once
+    /// it is whole.
+    fn note_growth(&self, id: TabId, index: usize, now: Instant) -> Option<f32> {
+        let since = (*self.drawn.get(&id)?.get(index)?)?;
+        motion::progress(since, now, ENTER)
+    }
+
+    /// Whether a panel or a note is still moving, so the window draws
+    /// another frame.
+    pub(crate) fn moving(&self, now: Instant) -> bool {
+        self.panels.values().any(|panel| panel.moving(now))
+            || self
+                .drawn
+                .values()
+                .flatten()
+                .flatten()
+                .any(|since| motion::progress(*since, now, ENTER).is_some())
     }
 }
 
@@ -687,6 +751,8 @@ impl HerdrWindow {
             )
         });
         let list: Vec<(usize, Note)> = notes.notes.iter().cloned().enumerate().collect();
+        let now = Instant::now();
+        self.browser.annotations.observe_notes(id, list.len(), now);
         let origin = tab.origin.is_some();
         let tab_for_send = tab.clone();
         let tab_for_copy = tab.clone();
@@ -756,9 +822,16 @@ impl HerdrWindow {
                     ),
                 ))
         });
+        let growth: Vec<Option<f32>> = (0..list.len())
+            .map(|index| self.browser.annotations.note_growth(id, index, now))
+            .collect();
         let rows = list.into_iter().map(|(index, note)| {
             div()
                 .id(("annotation-note", index))
+                // A new note opens into the list and fades in.
+                .when_some(growth[index], |row, k| {
+                    row.max_h(px(320. * k)).overflow_hidden().opacity(k)
+                })
                 .flex()
                 .gap_2()
                 .p_2()
@@ -818,7 +891,7 @@ impl HerdrWindow {
             .id("annotations")
             .debug_selector(|| "annotations".into())
             .flex_none()
-            .w(px(300.))
+            .w(px(ANNOTATIONS_WIDTH))
             .h_full()
             .flex()
             .flex_col()
@@ -894,12 +967,45 @@ impl HerdrWindow {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::{SCREENSHOT_AGE, save_screenshots_in};
+    use super::{Annotations, ENTER, Instant, SCREENSHOT_AGE, TabId, save_screenshots_in};
     use gpui::{Image, ImageFormat};
     use std::{
         sync::Arc,
         time::{Duration, SystemTime},
     };
+
+    #[gpui::test]
+    fn new_notes_grow_in_and_the_panel_slides(cx: &mut gpui::TestAppContext) {
+        let id = TabId::test(7);
+        cx.update(|cx| {
+            let mut annotations = Annotations::new(cx);
+            let start = Instant::now();
+            // Notes a panel has when it first draws are whole.
+            annotations.observe_notes(id, 2, start);
+            assert_eq!(annotations.note_growth(id, 1, start), None);
+            assert!(!annotations.moving(start));
+            // One added since grows in, then is whole.
+            annotations.observe_notes(id, 3, start);
+            assert_eq!(annotations.note_growth(id, 2, start), Some(0.));
+            assert_eq!(annotations.note_growth(id, 1, start), None);
+            assert!(annotations.moving(start));
+            assert_eq!(annotations.note_growth(id, 2, start + ENTER), None);
+            // Sent notes leave; the next one grows in again.
+            annotations.observe_notes(id, 0, start + ENTER);
+            annotations.observe_notes(id, 1, start + ENTER);
+            assert!(annotations.note_growth(id, 0, start + ENTER).is_some());
+
+            // A closed panel first drawn closed shows nothing; opening slides.
+            let page = TabId::test(8);
+            assert_eq!(annotations.panel_shown(page, start), 0.);
+            annotations.tab_notes_mut(page).armed = true;
+            assert_eq!(annotations.panel_shown(page, start), 0.);
+            assert_eq!(annotations.panel_shown(page, start + ENTER), 1.);
+            annotations.forget(page);
+            annotations.forget(id);
+            assert!(!annotations.moving(start + ENTER));
+        });
+    }
 
     #[test]
     fn screenshots_are_private_files_and_old_ones_go() {

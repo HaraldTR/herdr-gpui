@@ -42,6 +42,10 @@ pub(crate) struct Browser {
     pub(super) new_tab_group: Option<((Scope, String), GroupId)>,
     /// The connection of each group that shows a terminal.
     pub(crate) terminals: crate::group_terminals::GroupTerminals,
+    /// Tabs growing into the strip as they open.
+    pub(super) appear: super::tab_appear::TabAppear,
+    /// Groups opening from a split and folding away as they close.
+    pub(super) group_motion: super::group_motion::GroupMotion,
     /// Why a tab's page could not be created, shown in its place.
     pub(super) failed: Option<(TabId, SharedString)>,
     /// The workspaces of the last snapshot and the boot they came from: one
@@ -65,6 +69,8 @@ impl Browser {
             addresses: HashMap::new(),
             new_tab_group: None,
             terminals: Default::default(),
+            appear: Default::default(),
+            group_motion: Default::default(),
             failed: None,
             workspaces: None,
             #[cfg(any(target_os = "macos", windows))]
@@ -82,7 +88,7 @@ pub(crate) fn scope(endpoint: &crate::endpoint::Endpoint) -> Scope {
 }
 
 /// Page titles run long; a tab shows the start of one, like a web browser.
-fn tab_label(title: &str) -> SharedString {
+pub(super) fn tab_label(title: &str) -> SharedString {
     const MAX_CHARS: usize = 28;
     match title.char_indices().nth(MAX_CHARS) {
         Some((end, _)) => format!("{}\u{2026}", title[..end].trim_end()).into(),
@@ -449,6 +455,15 @@ impl HerdrWindow {
         self.show_browser_tab_in(Some(group), id, window, cx);
     }
 
+    /// Whether a notes panel or a note is still moving, so the window draws
+    /// another frame. Only builds that show pages have either.
+    pub(crate) fn annotations_moving(&self) -> bool {
+        #[cfg(any(target_os = "macos", windows))]
+        return self.browser.annotations.moving(std::time::Instant::now());
+        #[cfg(not(any(target_os = "macos", windows)))]
+        false
+    }
+
     /// Shows or hides the native pages to match what the window draws. The
     /// pages sit above everything GPUI paints, so any overlay hides them.
     pub(crate) fn present_browser(&mut self, cx: &mut Context<Self>) {
@@ -491,6 +506,7 @@ impl HerdrWindow {
                     .pr(px(3.))
                     .py(px(2.))
                     .min_w(px(crate::TAB_WIDTH))
+                    .map(|tab| self.grow_tab(tab, slot.id, &Pick::Page(id)))
                     .border_r_1()
                     .border_color(rgb(self.theme.active))
                     .flex_none()
@@ -598,11 +614,21 @@ impl HerdrWindow {
         #[cfg(any(target_os = "macos", windows))]
         let (annotate_button, panel) = {
             let annotating = self.browser.annotations.armed(id);
-            let panel = self
+            // The panel slides open and closed beside the page: its content
+            // keeps its width and the edge moves.
+            let shown = self
                 .browser
                 .annotations
-                .open(id)
-                .then(|| self.render_annotations(tab, cx));
+                .panel_shown(id, std::time::Instant::now());
+            let panel = (shown > 0.).then(|| {
+                div()
+                    .flex_none()
+                    .h_full()
+                    .w(px(super::annotate_view::ANNOTATIONS_WIDTH * shown))
+                    .overflow_hidden()
+                    .child(self.render_annotations(tab, cx))
+                    .into_any_element()
+            });
             let button = {
                 // Annotating needs the page itself, so a blank tab or a
                 // build without pages has nothing to annotate.

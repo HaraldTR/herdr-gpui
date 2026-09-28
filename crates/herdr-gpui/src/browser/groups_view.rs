@@ -3,6 +3,7 @@
 //! group draws live in [`super::groups`]; this applies them to the focused
 //! workspace and carries out what they imply, such as focusing the Herdr tab
 //! a group asks for.
+use super::tab_appear::{Leaving, Listed};
 use super::{
     Location, Scope, Tab, TabId,
     groups::{GroupId, Layout, Pick, Shown, Slot},
@@ -10,7 +11,7 @@ use super::{
 };
 use crate::{HerdrWindow, NavigationTarget, search_input::SearchInput};
 use gpui::{prelude::*, *};
-use std::collections::hash_map::Entry;
+use std::{collections::hash_map::Entry, time::Instant};
 
 impl HerdrWindow {
     /// The daemon's focused tab, when it belongs to the focused workspace.
@@ -84,13 +85,95 @@ impl HerdrWindow {
         self.layout().map(Layout::active)
     }
 
+    /// The share of the row `group` takes as drawn now: its settled share,
+    /// bent while a group beside it opens or folds.
     pub(crate) fn group_share(&self, group: GroupId) -> f32 {
-        self.layout().map_or(1., |layout| layout.share(group))
+        let Some(layout) = self.layout() else {
+            return 1.;
+        };
+        self.browser.group_motion.share(
+            group,
+            layout.share(group),
+            |other| layout.share(other),
+            Instant::now(),
+        )
+    }
+
+    /// How far `group` has opened from its split, or `None` once open.
+    pub(crate) fn group_opened(&self, group: GroupId) -> Option<f32> {
+        self.browser.group_motion.opened(group, Instant::now())
+    }
+
+    /// The closed groups still folding away.
+    pub(crate) fn folding_groups(&self) -> Vec<super::Folding> {
+        self.browser.group_motion.folding(Instant::now())
+    }
+
+    /// Whether a group is still opening or folding, so the window draws
+    /// another frame.
+    pub(crate) fn groups_moving(&mut self) -> bool {
+        self.browser.group_motion.animating(Instant::now())
     }
 
     /// The tab `group` picked, the focused one when it follows the terminal.
     pub(crate) fn group_pick(&self, group: GroupId) -> Option<Pick> {
         self.layout()?.pick(group, self.focused_herdr_tab())
+    }
+
+    /// Records what `group`'s strip draws; see
+    /// [`super::tab_appear::TabAppear::observe`].
+    pub(crate) fn observe_strip(&mut self, group: GroupId, tabs: Vec<Listed>, now: Instant) {
+        self.browser.appear.observe(group, tabs, now);
+    }
+
+    /// The tabs shrinking out of `group`'s strip.
+    pub(crate) fn leaving_tabs(&self, group: GroupId) -> Vec<Leaving> {
+        self.browser.appear.leaving(group).to_vec()
+    }
+
+    /// Forgets the strips of groups that closed, so their tabs never shrink
+    /// out of a strip no longer drawn.
+    pub(crate) fn forget_gone_strips(&mut self) {
+        let layouts = &self.browser.layouts;
+        self.browser.appear.retain(|group| {
+            layouts
+                .values()
+                .any(|layout| layout.slots().any(|slot| slot.id == group))
+        });
+    }
+
+    /// The focused workspace's browser tabs and the labels their strips
+    /// show, in strip order.
+    pub(crate) fn browser_tab_labels(&self, cx: &App) -> Vec<(Pick, SharedString)> {
+        let (Some((scope, workspace)), Some(store)) = (self.browser_key(), store(cx)) else {
+            return Vec::new();
+        };
+        store
+            .in_workspace(&scope, &workspace)
+            .map(|tab| (Pick::Page(tab.id), super::view::tab_label(&tab.title)))
+            .collect()
+    }
+
+    /// Whether a tab is still growing or shrinking, so the window draws
+    /// another frame.
+    pub(crate) fn tabs_growing(&self) -> bool {
+        self.browser.appear.animating()
+    }
+
+    /// Narrows and fades `tab` while it grows into the strip; a whole tab
+    /// is left as it is.
+    pub(crate) fn grow_tab<E: Styled>(&self, tab: E, group: GroupId, pick: &Pick) -> E {
+        /// Wider than any label a strip shows, so the last frame of growth
+        /// does not visibly clamp a long one.
+        const GROWN: f32 = 480.;
+        match self.browser.appear.growth(group, pick, Instant::now()) {
+            Some(k) => tab
+                .min_w(px(crate::TAB_WIDTH * k))
+                .max_w(px(GROWN * k))
+                .overflow_hidden()
+                .opacity(k),
+            None => tab,
+        }
     }
 
     /// Whether `group`'s strip lists `pick`; see [`Layout::lists`].
@@ -445,6 +528,7 @@ impl HerdrWindow {
         if !layout.split(group, new, focused.as_deref()) {
             return;
         }
+        self.browser.group_motion.open(new, group, Instant::now());
         // The new group shows the tab the window's connection shows, so it
         // takes that connection, and the group it split from connects anew
         // only once it picks a tab of its own.
@@ -470,10 +554,16 @@ impl HerdrWindow {
         let Some(layout) = self.ensure_layout() else {
             return;
         };
+        let target = layout.fold_target(group);
         if !layout.close(group) {
             return;
         }
         let active = layout.active();
+        if let Some((index, share, into)) = target {
+            self.browser
+                .group_motion
+                .fold(group, index, share, into, Instant::now());
+        }
         self.browser.addresses.remove(&group);
         self.forget_group_terminal(group);
         self.bring_group_tab(active, window, cx);

@@ -10,6 +10,7 @@ mod annotate;
 #[cfg(any(target_os = "macos", windows))]
 mod annotate_view;
 mod feedback;
+mod group_motion;
 mod groups;
 mod groups_view;
 mod layouts;
@@ -21,6 +22,7 @@ mod preview;
 #[cfg(target_os = "macos")]
 mod snapshot;
 mod store;
+mod tab_appear;
 mod view;
 #[cfg(test)]
 mod view_tests;
@@ -28,6 +30,7 @@ mod view_tests;
 #[cfg(any(target_os = "macos", windows))]
 pub(crate) use annotate_view::Annotations;
 pub(crate) use feedback::Feedback;
+pub(crate) use group_motion::Folding;
 #[cfg(test)]
 pub(crate) use groups::GroupIds;
 pub(crate) use groups::{GroupId, Pick, Shown, Slot};
@@ -36,6 +39,7 @@ pub(crate) use location::{LocalFile, Location};
 #[cfg(any(target_os = "macos", windows))]
 pub(crate) use native::Pages;
 pub(crate) use store::{Scope, Store, Tab, TabId};
+pub(crate) use tab_appear::{Leaving, Listed};
 pub(crate) use view::Browser;
 #[cfg(test)]
 pub(crate) use view::scope;

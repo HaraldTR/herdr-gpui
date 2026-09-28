@@ -770,6 +770,12 @@ the same tab. Splitting opens nothing new.
   use. Unsplit, a tab's close button closes it in Herdr, through its
   confirmation, as before; nothing in **…** ever closes a Herdr tab.
 - **…** also offers **New Browser Tab** and **Split Right**.
+- A split's new group opens from the right, sliding in at its own width
+  while the group it came from gives up the room; a closed group folds away
+  to the right as its neighbour takes the room back.
+- A tab that opens grows into its strip, and one that closes, in Herdr or
+  in a group, shrinks out where it stood. The tabs a strip already has when
+  the window first draws it appear at once.
 
 ## Browser Tabs
 
@@ -821,7 +827,8 @@ them to the agent that opened it, so it can change the page.
   week, and the prompt names each file. Windows notes have no screenshots.
 - Notes are written in the panel beside the page, not in the page, so the
   page never sees them. Queued notes are numbered on the page. Up to 20 wait
-  per tab.
+  per tab. The panel slides open and closed; a new note grows into it, and
+  its number pops onto the page unless the system asks for reduced motion.
 - **Send to agent** turns them into one prompt: the page, then for each note
   the element's selector path, text, and a short HTML snippet (for a region:
   its position, the container and elements it covers, and their text), its

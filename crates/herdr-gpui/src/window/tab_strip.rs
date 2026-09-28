@@ -5,7 +5,7 @@
 use super::HerdrWindow;
 use crate::{
     TAB_HEIGHT, TAB_WIDTH,
-    browser::{GroupId, Pick, Shown, Slot},
+    browser::{Folding, GroupId, Leaving, Listed, Pick, Shown, Slot},
     controls::Command,
     fonts::StyledFont,
 };
@@ -32,8 +32,91 @@ impl HerdrWindow {
         }
     }
 
-    fn render_tab_strip(&mut self, slot: Slot, cx: &mut Context<Self>) -> Div {
+    /// How wide a tab with `label` draws, as its padding, gaps, close
+    /// button, and an icon when it has one add up around the shaped text.
+    fn tab_width(&self, label: &SharedString, icon: bool, window: &Window) -> f32 {
+        let run = TextRun {
+            len: label.len(),
+            font: self.config.tabs.font(),
+            color: black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let text = f32::from(
+            window
+                .text_system()
+                .shape_line(label.clone(), px(self.config.tabs.size), &[run], None)
+                .width,
+        );
+        // Padding, the gap before the close button, the button, the rule;
+        // a browser tab's globe and its gap.
+        let chrome = if icon { 10. + 12. + 6. + 6. } else { 12. + 10. };
+        (chrome + text + 18. + 3. + 1.).max(TAB_WIDTH)
+    }
+
+    /// A closed tab where it stood, narrowing and fading out.
+    fn leaving_tab(&self, slot: Slot, leaving: &Leaving, now: std::time::Instant) -> AnyElement {
+        let left = leaving.left(now);
+        div()
+            .debug_selector(move || slot.selector("leaving-tab"))
+            .flex_none()
+            .h_full()
+            .w(px(leaving.width * left))
+            .overflow_hidden()
+            .opacity(left)
+            .flex()
+            .items_center()
+            .pl(px(12.))
+            .whitespace_nowrap()
+            .border_r_1()
+            .border_color(rgb(self.theme.active))
+            .bg(rgb(self.theme.surface))
+            .text_color(rgb(self.theme.muted))
+            .child(leaving.label.clone())
+            .into_any_element()
+    }
+
+    fn render_tab_strip(&mut self, slot: Slot, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let pick = self.group_pick(slot.id);
+        // What the strip lists, measured, so the ones that just opened grow
+        // in and the ones that just closed shrink out where they stood.
+        let now = std::time::Instant::now();
+        let herdr: Vec<(Pick, SharedString)> = self
+            .live
+            .snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .tabs
+                    .iter()
+                    .filter(|t| Some(&t.workspace_id) == snapshot.focused_workspace_id.as_ref())
+                    .map(|t| {
+                        (
+                            Pick::Herdr(t.tab_id.clone()),
+                            SharedString::from(t.label.clone()),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let listed: Vec<Listed> = herdr
+            .into_iter()
+            .map(|entry| (entry, false))
+            .chain(
+                self.browser_tab_labels(cx)
+                    .into_iter()
+                    .map(|entry| (entry, true)),
+            )
+            .filter(|((pick, _), _)| self.group_lists(slot.id, pick))
+            .map(|((pick, label), icon)| Listed {
+                width: self.tab_width(&label, icon, window),
+                pick,
+                label,
+            })
+            .collect();
+        self.observe_strip(slot.id, listed, now);
+        let mut entries: Vec<AnyElement> = Vec::new();
         let mut tabs = div()
             .id(SharedString::from(slot.selector("tabs")))
             .flex()
@@ -55,7 +138,7 @@ impl HerdrWindow {
                 let close_id = id.clone();
                 let selected = matches!(&pick, Some(Pick::Herdr(picked)) if *picked == id);
                 let (background, text) = self.tab_colors(selected, slot.id);
-                tabs = tabs.child(
+                entries.push(
                     div()
                         .id(SharedString::from(format!("tab-{id}")))
                         .debug_selector({
@@ -69,6 +152,7 @@ impl HerdrWindow {
                         .py(px(2.))
                         // Even cells divided by a single rule, as in the reference UI.
                         .min_w(px(TAB_WIDTH))
+                        .map(|tab| self.grow_tab(tab, slot.id, &Pick::Herdr(id.clone())))
                         .border_r_1()
                         .border_color(rgb(self.theme.active))
                         .flex_none()
@@ -131,7 +215,8 @@ impl HerdrWindow {
                         )
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.choose_herdr_tab(slot.id, &id, window, cx);
-                        })),
+                        }))
+                        .into_any_element(),
                 );
             }
         }
@@ -139,7 +224,15 @@ impl HerdrWindow {
             Some(Pick::Page(id)) => Some(id),
             _ => None,
         };
-        tabs = tabs.children(self.browser_tab_entries(slot, shown, cx));
+        entries.extend(self.browser_tab_entries(slot, shown, cx));
+        // Closed tabs go back where they stood, in the order they stood.
+        let mut leaving = self.leaving_tabs(slot.id);
+        leaving.sort_by_key(|leaving| leaving.index);
+        for leaving in leaving {
+            let index = leaving.index.min(entries.len());
+            entries.insert(index, self.leaving_tab(slot, &leaving, now));
+        }
+        tabs = tabs.children(entries);
         div()
             .flex()
             .flex_none()
@@ -338,21 +431,27 @@ impl HerdrWindow {
         &mut self,
         slot: Slot,
         body: AnyElement,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let strip = self.render_tab_strip(slot, cx);
-        let share = self.is_split().then(|| self.group_share(slot.id));
-        div()
+        let strip = self.render_tab_strip(slot, window, cx);
+        let share = (self.is_split() || !self.folding_groups().is_empty())
+            .then(|| self.group_share(slot.id));
+        let opened = self.group_opened(slot.id);
+        let column = div()
             .id(SharedString::from(slot.selector("group")))
             .debug_selector(move || slot.selector("group"))
             .flex()
             .flex_col()
             .min_w_0()
             .min_h_0()
-            .map(|column| match share {
-                // Dividers take their width from every group alike.
-                Some(share) => column.flex_shrink(1.).w(relative(share)),
-                None => column.flex_1(),
+            .h_full()
+            // Opening, the group is laid out at the width it opens to and
+            // uncovered from the right, so it slides in rather than squeezing,
+            // and its terminal keeps one size while it does.
+            .map(|column| match opened {
+                Some(k) => column.flex_none().w(relative(1. / k.max(0.02))),
+                None => column.w_full(),
             })
             .capture_any_mouse_down(cx.listener(move |this, _, window, cx| {
                 if this.menu.page.is_none() {
@@ -360,7 +459,42 @@ impl HerdrWindow {
                 }
             }))
             .child(strip)
-            .child(body)
+            .child(body);
+        div()
+            .flex()
+            .justify_end()
+            .overflow_hidden()
+            .min_w_0()
+            .min_h_0()
+            .map(|frame| match share {
+                // Dividers take their width from every group alike.
+                Some(share) => frame.flex_shrink(1.).w(relative(share)),
+                None => frame.flex_1(),
+            })
+            .child(column)
+            .into_any_element()
+    }
+
+    /// A closed group folding away to the right where it stood: its strip's
+    /// band and an empty body.
+    fn folding_group(&self, folding: &Folding, now: std::time::Instant) -> AnyElement {
+        div()
+            .debug_selector(|| "folding-group".into())
+            .flex_shrink(1.)
+            .w(relative(folding.share(now)))
+            .h_full()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .border_l_1()
+            .border_color(rgb(self.theme.active))
+            .bg(rgb(self.theme.background))
+            .child(
+                div()
+                    .flex_none()
+                    .h(px((self.config.tabs.size * 1.6 + 4.).max(TAB_HEIGHT)))
+                    .bg(rgb(self.theme.surface)),
+            )
             .into_any_element()
     }
 
@@ -371,7 +505,20 @@ impl HerdrWindow {
         groups: Vec<AnyElement>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let count = groups.len();
+        let now = std::time::Instant::now();
+        // Real groups keep their layout index for the dividers between them;
+        // folding ones slot in where they stood.
+        let mut children: Vec<(Option<usize>, AnyElement)> = groups
+            .into_iter()
+            .enumerate()
+            .map(|(index, group)| (Some(index), group))
+            .collect();
+        let mut folding = self.folding_groups();
+        folding.sort_by_key(|folding| folding.index);
+        for folding in folding {
+            let at = folding.index.min(children.len());
+            children.insert(at, (None, self.folding_group(&folding, now)));
+        }
         let mut row = div()
             .id("groups")
             .flex()
@@ -387,9 +534,12 @@ impl HerdrWindow {
                     }
                 }),
             );
-        for (index, group) in groups.into_iter().enumerate() {
+        let mut children = children.into_iter().peekable();
+        while let Some((index, group)) = children.next() {
             row = row.child(group);
-            if index + 1 < count {
+            // A divider sits between two real groups; a folding one draws its
+            // own edge.
+            if let (Some(index), Some((Some(_), _))) = (index, children.peek()) {
                 row = row.child(
                     div()
                         .id(("group-divider", index))

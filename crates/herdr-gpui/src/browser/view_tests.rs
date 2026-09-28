@@ -94,6 +94,8 @@ mod embedded {
         });
         draw(cx);
         assert!(cx.debug_bounds("annotations").is_some());
+        // It slides open rather than appearing whole.
+        view.read_with(cx, |view, _| assert!(view.annotations_moving()));
         assert!(cx.debug_bounds("browser-annotate").is_some());
 
         cx.update(|window, cx| {
@@ -321,6 +323,61 @@ mod groups {
     }
 
     #[gpui::test]
+    fn a_split_opens_from_the_right_and_a_close_folds_away(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = window(cx);
+        cx.update(|_, cx| view.update(cx, |view, _| view.browser.group_motion.enable()));
+        draw(cx);
+        let whole = cx.debug_bounds("group").unwrap();
+        run(&view, cx, Command::SplitEditor);
+        let early = crate::motion::ENTER / 8;
+        cx.update(|_, cx| view.update(cx, |view, _| view.browser.group_motion.freeze(early)));
+        draw(cx);
+        // Early on, the source still has most of the row, and the new group,
+        // laid out at its settled width, is only partly uncovered from the
+        // right: its content runs past the source's edge to the left.
+        let source = cx.debug_bounds("group").unwrap();
+        let opening = cx.debug_bounds("g1-group").unwrap();
+        assert!(source.size.width > whole.size.width * 0.55, "{source:?}");
+        assert!(opening.size.width > whole.size.width * 0.45, "{opening:?}");
+        assert!(opening.left() < source.right(), "{opening:?} {source:?}");
+        assert!(
+            (opening.right() - whole.right()).abs() < gpui::px(2.),
+            "{opening:?} {whole:?}"
+        );
+        view.read_with(cx, |view, _| {
+            let group = view.group_slots()[1].id;
+            let opened = view.group_opened(group).unwrap_or(1.);
+            assert!(opened > 0. && opened < 1., "{opened}");
+        });
+
+        // Settled, then closed: the group folds away where it stood.
+        cx.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.browser.group_motion = Default::default();
+                view.browser.group_motion.enable();
+            })
+        });
+        let [_, right] = groups(&view, cx)[..] else {
+            panic!("two groups")
+        };
+        cx.update(|window, cx| view.update(cx, |view, cx| view.close_group(right, window, cx)));
+        cx.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.browser.group_motion.freeze(std::time::Duration::ZERO)
+            })
+        });
+        draw(cx);
+        let folding = cx.debug_bounds("folding-group").unwrap();
+        let left = cx.debug_bounds("group").unwrap();
+        assert!(
+            folding.left() >= left.right() - gpui::px(1.),
+            "{folding:?} {left:?}"
+        );
+        assert!(folding.size.width > whole.size.width / 3., "{folding:?}");
+        view.read_with(cx, |view, _| assert_eq!(view.folding_groups().len(), 1));
+    }
+
+    #[gpui::test]
     fn empty_groups_and_dividers(cx: &mut gpui::TestAppContext) {
         let (view, cx) = window(cx);
         draw(cx);
@@ -355,6 +412,49 @@ mod groups {
         assert_eq!(shown(&view, cx), [Shown::Terminal]);
         assert!(cx.debug_bounds("group-divider-0").is_none());
     }
+}
+
+/// Tabs a workspace already has appear at once; one that opens later grows
+/// into the strip.
+#[gpui::test]
+fn a_tab_that_opens_grows_into_the_strip(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = window(cx);
+    draw(cx);
+    let tab = cx.debug_bounds("tab-t0").unwrap();
+    assert!(tab.size.width >= gpui::px(crate::TAB_WIDTH));
+    view.read_with(cx, |view, _| assert!(!view.tabs_growing()));
+    cx.update(|_, cx| {
+        let scope = scope(&view.read(cx).endpoints[0]);
+        Store::update(cx, |store| store.open(scope, "w0", None, None));
+    });
+    draw(cx);
+    view.read_with(cx, |view, _| assert!(view.tabs_growing()));
+    // Held where it started: narrow and clear.
+    cx.update(|_, cx| view.update(cx, |view, _| view.browser.appear.hold()));
+    draw(cx);
+    let growing = cx.debug_bounds("browser-tab-0").unwrap();
+    assert!(
+        growing.size.width < gpui::px(crate::TAB_WIDTH / 2.),
+        "{growing:?}"
+    );
+
+    // Closed, it shrinks out where it stood, from its full width.
+    cx.update(|_, cx| view.update(cx, |view, _| view.browser.appear = Default::default()));
+    draw(cx);
+    let whole = cx.debug_bounds("browser-tab-0").unwrap();
+    cx.update(|_, cx| Store::update(cx, |store| store.close(crate::browser::TabId::test(0))));
+    draw(cx);
+    assert!(cx.debug_bounds("browser-tab-0").is_none());
+    cx.update(|_, cx| view.update(cx, |view, _| view.browser.appear.hold()));
+    draw(cx);
+    let leaving = cx.debug_bounds("leaving-tab").unwrap();
+    assert_eq!(leaving.left(), whole.left());
+    // Its measured width, within a pixel or two of the tab it replaces.
+    assert!(
+        (leaving.size.width - whole.size.width).abs() < gpui::px(4.),
+        "{leaving:?} {whole:?}"
+    );
+    view.read_with(cx, |view, _| assert!(view.tabs_growing()));
 }
 
 /// Opens a request's tab without switching to it, so no native page is made.

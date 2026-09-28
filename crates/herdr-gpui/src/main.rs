@@ -35,6 +35,7 @@ mod keymap;
 mod log_window;
 mod menu;
 mod menus;
+mod motion;
 mod navigation;
 mod notifications;
 mod palette;
