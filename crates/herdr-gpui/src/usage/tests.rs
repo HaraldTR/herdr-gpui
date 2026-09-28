@@ -476,7 +476,7 @@ fn settings_come_from_this_machines_config() {
 
 #[test]
 fn chrome_values_decrypt_with_the_derived_key() {
-    use aes::cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
+    use aes::cipher::{BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
     let mut key = [0u8; 16];
     pbkdf2::pbkdf2_hmac::<sha1::Sha1>(b"peanuts", b"saltysalt", 1, &mut key);
     let seal = |plain: &[u8]| {
@@ -484,7 +484,7 @@ fn chrome_values_decrypt_with_the_derived_key() {
         let mut buffer = plain.to_vec();
         buffer.resize(plain.len() + 16, 0);
         let length = cbc::Encryptor::<aes::Aes128>::new(&key.into(), &[b' '; 16].into())
-            .encrypt_padded_mut::<Pkcs7>(&mut buffer, plain.len())
+            .encrypt_padded::<Pkcs7>(&mut buffer, plain.len())
             .unwrap()
             .len();
         sealed.extend_from_slice(&buffer[..length]);

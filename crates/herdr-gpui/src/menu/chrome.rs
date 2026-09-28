@@ -7,6 +7,10 @@ use crate::{HerdrWindow, actions, fonts::StyledFont};
 use gpui::{prelude::*, *};
 use herdr_client::Method;
 
+/// How far past its panel a popover counts as covering, for the native pages
+/// that step aside for it.
+const COVER_MARGIN: f32 = 8.;
+
 impl HerdrWindow {
     pub(crate) fn show_install_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.open_menu(window, cx) {
@@ -290,6 +294,7 @@ impl HerdrWindow {
             Page::Workspace
                 | Page::Tab
                 | Page::RenameTab
+                | Page::Group
                 | Page::Pane
                 | Page::RenamePane
                 | Page::Host
@@ -376,6 +381,7 @@ impl HerdrWindow {
                     page,
                     Page::Tab
                         | Page::RenameTab
+                        | Page::Group
                         | Page::Pane
                         | Page::RenamePane
                         | Page::Host
@@ -386,6 +392,8 @@ impl HerdrWindow {
                         .w((viewport.width - px(24.)).max(px(0.)).min(px(
                             if matches!(page, Page::Tab | Page::Pane | Page::Host) {
                                 180.
+                            } else if page == Page::Group {
+                                240.
                             } else {
                                 360.
                             },
@@ -622,6 +630,8 @@ impl HerdrWindow {
             panel = panel.child(self.render_host_menu(cx));
         } else if matches!(page, Page::Tab | Page::RenameTab) {
             panel = panel.child(self.render_tab_menu(cx));
+        } else if page == Page::Group {
+            panel = panel.child(self.render_group_menu(cx));
         } else if matches!(page, Page::Pane | Page::RenamePane) {
             panel = panel.child(self.render_pane_menu(cx));
         } else if page == Page::Keybinds {
@@ -720,20 +730,38 @@ impl HerdrWindow {
                     })),
             );
         }
+        // Pages sit above everything GPUI draws, so the menu says what it
+        // covers: a dimmed dialog covers the window, a popover its panel.
+        let dims = !footer_anchored && !matches!(page, Page::Usage(_)) && !pointer_anchored;
+        let cover = self.menu.cover.clone();
+        if dims {
+            cover.set(super::state::Cover::All);
+        }
+        let panel = panel.when(!dims, |panel| {
+            panel.child(
+                canvas(
+                    // Laid out inside the panel's border; the margin takes in
+                    // the border and the start of its shadow.
+                    move |bounds, _, _| {
+                        cover.set(super::state::Cover::Panel(bounds.dilate(px(COVER_MARGIN))))
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+        });
         div()
             .id("menu-overlay")
             .absolute()
             .inset_0()
-            .when(
-                !footer_anchored && !matches!(page, Page::Usage(_)) && !pointer_anchored,
-                |overlay| {
-                    overlay
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(rgba((theme.background << 8) | 0xb0))
-                },
-            )
+            .when(dims, |overlay| {
+                overlay
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(rgba((theme.background << 8) | 0xb0))
+            })
             .occlude()
             .track_focus(&self.menu.focus)
             .on_action(
@@ -842,6 +870,10 @@ impl HerdrWindow {
                 }
                 if matches!(this.menu.page, Some(Page::Tab | Page::RenameTab)) {
                     this.tab_menu_key(event, window, cx);
+                    return;
+                }
+                if this.menu.page == Some(Page::Group) {
+                    this.group_menu_key(event, window, cx);
                     return;
                 }
                 if matches!(this.menu.page, Some(Page::Pane | Page::RenamePane)) {
@@ -1034,6 +1066,9 @@ impl HerdrWindow {
                     } else {
                         self.menu.anchor
                     })
+                    // The "…" button sits at a strip's right end, so its menu
+                    // hangs leftward from it, as an editor's does.
+                    .when(page == Page::Group, |menu| menu.anchor(Anchor::TopRight))
                     .snap_to_window_with_margin(Edges::all(px(12.)))
                     .child(panel)
                     .into_any_element()

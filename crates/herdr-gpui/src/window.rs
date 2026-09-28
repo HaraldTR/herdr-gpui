@@ -16,6 +16,7 @@ mod mouse;
 mod pending_input;
 mod render;
 mod selection;
+mod tab_strip;
 mod toasts;
 mod transfers;
 #[cfg(test)]
@@ -178,6 +179,7 @@ impl HerdrWindow {
                     .endpoints
                     .iter()
                     .any(|endpoint| endpoint.connection.has_update())
+                    || view.group_terminals_updated()
                 {
                     view.tick(window, cx);
                 }
@@ -227,15 +229,24 @@ impl HerdrWindow {
         };
         let old_tab = focused_tab(&self.live);
         self.poll_endpoints(cx);
-        // Switching Herdr tabs within a workspace, from a shortcut or an
-        // agent, brings its terminal back from behind a page.
-        if let (Some((old_workspace, old_tab)), Some((workspace, tab))) =
+        // Switching Herdr tabs, from a shortcut, an agent, or the sidebar,
+        // moves the group holding the window's connection to the new tab, or
+        // brings the terminal back from behind a page. Arriving in another
+        // workspace does the same for that workspace's group, so its tab is
+        // the one just navigated to.
+        if let (Some((old_workspace, old_tab)), Some((workspace, Some(tab)))) =
             (old_tab, focused_tab(&self.live))
-            && old_workspace == workspace
-            && old_tab != tab
+            && (old_workspace != workspace || old_tab.as_ref() != Some(&tab))
         {
-            self.show_terminal(cx);
+            self.terminal_focus_moved(&tab, old_workspace != workspace, cx);
         }
+        // After the focus check: a swap replaces `live` with another
+        // connection's, which is not a move of this one's focus.
+        if self.poll_group_terminals() {
+            self.redraw_terminal(cx);
+        }
+        self.reconcile_group_terminals(cx);
+        self.save_group_layouts(cx);
         self.poll_browser(window, cx);
         self.offer_browser_skill(window, cx);
         self.poll_sessions(cx);

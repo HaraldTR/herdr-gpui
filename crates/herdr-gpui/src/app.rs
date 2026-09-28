@@ -193,6 +193,12 @@ pub(crate) fn run() -> std::process::ExitCode {
     } else {
         crate::browser::Store::default()
     };
+    // Nor with saved editor groups, which they would overwrite.
+    let group_layouts = if mode == LaunchMode::Normal {
+        crate::browser::Layouts::load()
+    } else {
+        crate::browser::Layouts::default()
+    };
     gpui_platform::application()
         .with_assets(icons::Icons)
         .run(move |cx| {
@@ -201,6 +207,7 @@ pub(crate) fn run() -> std::process::ExitCode {
                 state.install(cx);
             }
             browser_tabs.install(cx);
+            group_layouts.install(cx);
             agent_skill.install_global(cx);
             // Only the user's own app answers agents; native test modes stay private.
             if mode == LaunchMode::Normal {

@@ -85,6 +85,20 @@ pub(crate) fn png(tiff: &[u8]) -> Option<Vec<u8>> {
     Some(bytes.into_inner())
 }
 
+/// A capture decoded into a frame GPUI paints as is, with no loading of its
+/// own: a picture handed to `img` as encoded bytes is decoded on its first
+/// frame, and a page stepping aside for it would leave that frame empty.
+/// Decoding is work for a background thread.
+pub(crate) fn frame(tiff: &[u8]) -> Option<gpui::RenderImage> {
+    let image = image::load_from_memory_with_format(tiff, image::ImageFormat::Tiff).ok()?;
+    let mut pixels = image.into_rgba8();
+    // GPUI keeps pictures as BGRA.
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    Some(gpui::RenderImage::new(vec![image::Frame::new(pixels)]))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -107,5 +121,15 @@ mod tests {
         let large = image::load_from_memory(&png(&tiff(4000, 1000)).unwrap()).unwrap();
         assert_eq!((large.width(), large.height()), (MAX_SIDE, MAX_SIDE / 4));
         assert!(png(b"not a tiff").is_none());
+    }
+
+    #[test]
+    fn captures_become_paintable_bgra_frames() {
+        let frame = frame(&tiff(3, 2)).unwrap();
+        let size = frame.size(0);
+        assert_eq!((size.width.0, size.height.0), (3, 2));
+        // The red and blue channels trade places.
+        assert_eq!(&frame.as_bytes(0).unwrap()[..4], &[30, 20, 10, 255]);
+        assert!(super::frame(b"not a tiff").is_none());
     }
 }

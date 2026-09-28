@@ -9,8 +9,36 @@ use crate::dialog_input::DialogInput;
 use gpui::{App, Entity, FocusHandle, Pixels, Point, ScrollHandle, Subscription};
 use herdr_client::protocol::ClientShellSnapshot;
 
+/// What an open menu covers, as its last frame laid it out: the window's
+/// native pages above GPUI would hide it, so the ones it covers step aside.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) enum Cover {
+    /// Not laid out yet.
+    #[default]
+    Unknown,
+    /// A dialog dims the whole window.
+    All,
+    /// A popover or menu covers only its own panel.
+    Panel(gpui::Bounds<Pixels>),
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
+impl Cover {
+    /// Whether a page drawn at `page` would hide this menu. Before the menu
+    /// is laid out nothing is, so pages keep showing for that one frame.
+    pub(crate) fn covers(self, page: Option<gpui::Bounds<Pixels>>) -> bool {
+        match self {
+            Self::Unknown => false,
+            Self::All => true,
+            Self::Panel(panel) => page.is_some_and(|page| page.intersects(&panel)),
+        }
+    }
+}
+
 pub(crate) struct MenuState {
     pub page: Option<Page>,
+    /// Written by the menu's layout, read when presenting pages.
+    pub(crate) cover: std::rc::Rc<std::cell::Cell<Cover>>,
     pub(super) device_setup: Option<super::devices::Setup>,
     pub(super) session_edit: Option<super::sessions::Edit>,
     pub(super) devices_scroll: ScrollHandle,
@@ -45,6 +73,7 @@ pub(crate) struct MenuState {
     pub(crate) palette: Option<crate::palette::Palette>,
     pub(crate) close: Option<crate::close_modal::CloseConfirmation>,
     pub(crate) tab: Option<crate::tab_menu::TabMenu>,
+    pub(crate) group: Option<crate::group_menu::GroupMenu>,
     pub(crate) host: Option<super::devices::HostMenu>,
     pub(crate) pane: Option<crate::pane_menu::PaneMenu>,
     /// The new worktree dialog's tabs and the GitHub listing behind them.
@@ -182,6 +211,7 @@ impl MenuState {
     pub fn new(cx: &App) -> Self {
         Self {
             page: None,
+            cover: Default::default(),
             device_setup: None,
             session_edit: None,
             devices_scroll: ScrollHandle::new(),
@@ -221,6 +251,7 @@ impl MenuState {
             github_scroll: ScrollHandle::new(),
             pr_connection: None,
             tab: None,
+            group: None,
             host: None,
             pane: None,
             worktree: None,
@@ -228,6 +259,7 @@ impl MenuState {
     }
 
     pub fn reset(&mut self) {
+        self.cover.set(Cover::Unknown);
         self.device_setup = None;
         self.session_edit = None;
         self.devices_scroll.set_offset(Point::default());
@@ -235,6 +267,7 @@ impl MenuState {
         self.usage_scroll.set_offset(Point::default());
         self.opening_right_click = false;
         self.tab = None;
+        self.group = None;
         self.host = None;
         self.pane = None;
         self.github_selected = None;
@@ -259,5 +292,25 @@ impl MenuState {
         self.worktree = None;
         self.pr.clear();
         self.pr_connection = None;
+    }
+}
+
+#[cfg(test)]
+mod cover_tests {
+    use super::Cover;
+    use gpui::{Bounds, point, px, size};
+
+    #[test]
+    fn only_pages_under_a_menu_step_aside() {
+        let at = |x: f32, width: f32| Bounds::new(point(px(x), px(0.)), size(px(width), px(400.)));
+        // A sessions popover on the left, a page on the right.
+        let popover = Cover::Panel(at(40., 300.));
+        assert!(!popover.covers(Some(at(900., 700.))));
+        assert!(popover.covers(Some(at(200., 700.))));
+        // A dimmed dialog covers every page; an unlaid menu none yet.
+        assert!(Cover::All.covers(Some(at(900., 700.))));
+        assert!(!Cover::Unknown.covers(Some(at(0., 1900.))));
+        // A page not drawn yet is under nothing.
+        assert!(!popover.covers(None));
     }
 }

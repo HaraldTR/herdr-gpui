@@ -212,16 +212,31 @@ impl HerdrWindow {
                 return;
             }
             // A page has no panes, so either close closes its tab, as in
-            // a web browser; nothing runs in it that needs confirming.
+            // a web browser; nothing runs in it that needs confirming. A group
+            // standing in for a tab closes that tab, and an empty group of a
+            // split closes, as an editor group does.
             Command::ClosePane | Command::CloseTab => {
-                match self.shown_browser_tab(cx) {
-                    Some(tab) => self.close_browser_tab(tab.id, cx),
-                    None => self.open_close_confirmation(command, window, cx),
+                let Some(group) = self.active_group() else {
+                    self.open_close_confirmation(command, window, cx);
+                    return;
+                };
+                match self.group_shown(group, cx) {
+                    crate::browser::Shown::Terminal => {
+                        self.open_close_confirmation(command, window, cx)
+                    }
+                    crate::browser::Shown::Page(_) | crate::browser::Shown::Elsewhere(_) => {
+                        self.close_group_tab(group, window, cx)
+                    }
+                    crate::browser::Shown::Empty => self.close_group(group, window, cx),
                 }
                 return;
             }
             Command::NewBrowserTab => {
                 self.open_browser_tab(None, window, cx);
+                return;
+            }
+            Command::SplitEditor => {
+                self.split_active_group(window, cx);
                 return;
             }
             Command::InstallBrowserSkill => {
