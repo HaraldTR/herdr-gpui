@@ -804,8 +804,11 @@ come back after a restart; closing a workspace in Herdr removes its tabs.
   Windows, a frame inside a page that links to an application's URL scheme
   gets WebView2's own confirmation prompt rather than being refused outright.
 - Pages are native web views (WebKit on macOS, WebView2 on Windows) layered
-  above the window, so the app hides the page while a menu or dialog is open.
-  Toasts that fall over the page are hidden behind it.
+  above the window, so a page steps aside for a menu or popover that would
+  fall over it, and for a dialog, which dims the whole window. A page the menu
+  does not reach keeps showing. On macOS a page that steps aside leaves a
+  picture of itself, taken as the menu opens; on Windows its place is empty
+  until the menu closes. Toasts that fall over a page are hidden behind it.
 - Linux has no embedded pages yet: browser tab requests open the system
   browser, and local files and annotations are unavailable.
 

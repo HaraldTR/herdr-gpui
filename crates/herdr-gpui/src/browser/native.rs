@@ -27,6 +27,10 @@ pub(crate) enum Event {
     /// none. Only macOS takes them.
     #[cfg(target_os = "macos")]
     Captured(TabId, u64, Option<Vec<u8>>),
+    /// A picture of the whole page, as TIFF bytes, shown in its place while
+    /// a menu covers it. Only macOS takes them.
+    #[cfg(target_os = "macos")]
+    Frozen(TabId, Option<Vec<u8>>),
     /// A message the annotation picker posted. Any script in the page can
     /// post one, so it is parsed as untrusted input.
     Posted(TabId, String),
@@ -255,6 +259,28 @@ impl Pages {
             return true;
         }
         let _ = (id, rect, capture, cx);
+        false
+    }
+
+    /// Asks for a picture of the whole page, `size` in CSS pixels, reported
+    /// as `Event::Frozen`. Returns whether one was asked for: only macOS
+    /// takes them.
+    pub(crate) fn freeze(&self, id: TabId, size: gpui::Size<gpui::Pixels>, cx: &App) -> bool {
+        #[cfg(target_os = "macos")]
+        if let Some(page) = self.pages.get(&id) {
+            let sender = self.sender.clone();
+            let rect = super::annotate::Rect {
+                x: 0.,
+                y: 0.,
+                width: f64::from(f32::from(size.width)),
+                height: f64::from(f32::from(size.height)),
+            };
+            super::snapshot::capture(page.read(cx).raw(), rect, move |tiff| {
+                report(&sender, Event::Frozen(id, tiff));
+            });
+            return true;
+        }
+        let _ = (id, size, cx);
         false
     }
 

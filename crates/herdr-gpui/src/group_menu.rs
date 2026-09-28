@@ -279,6 +279,38 @@ mod tests {
     }
 
     #[gpui::test]
+    fn menus_say_what_they_cover(cx: &mut TestAppContext) {
+        use crate::menu::Cover;
+        let (view, cx) = window(cx);
+        draw(cx);
+        // A popover covers its own panel.
+        let button = cx.debug_bounds("tab-actions").unwrap();
+        cx.simulate_click(button.center(), Modifiers::none());
+        draw(cx);
+        let panel = cx.debug_bounds("menu-panel").unwrap();
+        let Cover::Panel(covered) = view.read_with(cx, |view, _| view.menu.cover.get()) else {
+            panic!("a popover covers its panel")
+        };
+        // The panel, and a margin around it for its border and shadow.
+        assert!(covered.contains(&panel.origin) && covered.contains(&panel.bottom_right()));
+        assert!(covered.size.width < panel.size.width + px(24.));
+        // A dimmed dialog covers the window.
+        cx.simulate_keystrokes("escape");
+        assert_eq!(
+            view.read_with(cx, |view, _| view.menu.cover.get()),
+            Cover::Unknown
+        );
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| view.command(Command::Palette, window, cx))
+        });
+        draw(cx);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.menu.cover.get()),
+            Cover::All
+        );
+    }
+
+    #[gpui::test]
     fn a_lone_group_offers_no_close(cx: &mut TestAppContext) {
         let (view, cx) = window(cx);
         let [group] = groups(&view, cx)[..] else {

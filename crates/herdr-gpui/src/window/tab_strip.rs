@@ -5,7 +5,7 @@
 use super::HerdrWindow;
 use crate::{
     TAB_HEIGHT, TAB_WIDTH,
-    browser::{Folding, GroupId, Leaving, Listed, Pick, Shown, Slot},
+    browser::{Fold, GroupId, Leaving, Listed, Pick, Shown, Slot},
     controls::Command,
     fonts::StyledFont,
 };
@@ -477,11 +477,11 @@ impl HerdrWindow {
 
     /// A closed group folding away to the right where it stood: its strip's
     /// band and an empty body.
-    fn folding_group(&self, folding: &Folding, now: std::time::Instant) -> AnyElement {
+    fn folding_group(&self, fold: &Fold) -> AnyElement {
         div()
             .debug_selector(|| "folding-group".into())
             .flex_shrink(1.)
-            .w(relative(folding.share(now)))
+            .w(relative(fold.share))
             .h_full()
             .overflow_hidden()
             .flex()
@@ -505,7 +505,6 @@ impl HerdrWindow {
         groups: Vec<AnyElement>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let now = std::time::Instant::now();
         // Real groups keep their layout index for the dividers between them;
         // folding ones slot in where they stood.
         let mut children: Vec<(Option<usize>, AnyElement)> = groups
@@ -517,7 +516,7 @@ impl HerdrWindow {
         folding.sort_by_key(|folding| folding.index);
         for folding in folding {
             let at = folding.index.min(children.len());
-            children.insert(at, (None, self.folding_group(&folding, now)));
+            children.insert(at, (None, self.folding_group(&folding)));
         }
         let mut row = div()
             .id("groups")

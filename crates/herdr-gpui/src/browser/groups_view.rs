@@ -105,7 +105,7 @@ impl HerdrWindow {
     }
 
     /// The closed groups still folding away.
-    pub(crate) fn folding_groups(&self) -> Vec<super::Folding> {
+    pub(crate) fn folding_groups(&self) -> Vec<super::Fold> {
         self.browser.group_motion.folding(Instant::now())
     }
 

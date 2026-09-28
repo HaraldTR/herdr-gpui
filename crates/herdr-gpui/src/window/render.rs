@@ -449,7 +449,10 @@ impl Render for HerdrWindow {
         if self.groups_moving() | self.tabs_growing() | self.annotations_moving() {
             window.request_animation_frame();
         }
-        self.present_browser(cx);
+        // A menu just opened, or a covered page's picture is on its way.
+        if self.present_browser(cx) {
+            window.request_animation_frame();
+        }
         let status = (!matches!(self.live.status, ConnectionStatus::Connected)
             || self.local_error.is_some()
             || self.live.error.is_some())

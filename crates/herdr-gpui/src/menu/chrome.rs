@@ -7,6 +7,10 @@ use crate::{HerdrWindow, actions, fonts::StyledFont};
 use gpui::{prelude::*, *};
 use herdr_client::Method;
 
+/// How far past its panel a popover counts as covering, for the native pages
+/// that step aside for it.
+const COVER_MARGIN: f32 = 8.;
+
 impl HerdrWindow {
     pub(crate) fn show_install_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.open_menu(window, cx) {
@@ -726,20 +730,38 @@ impl HerdrWindow {
                     })),
             );
         }
+        // Pages sit above everything GPUI draws, so the menu says what it
+        // covers: a dimmed dialog covers the window, a popover its panel.
+        let dims = !footer_anchored && !matches!(page, Page::Usage(_)) && !pointer_anchored;
+        let cover = self.menu.cover.clone();
+        if dims {
+            cover.set(super::state::Cover::All);
+        }
+        let panel = panel.when(!dims, |panel| {
+            panel.child(
+                canvas(
+                    // Laid out inside the panel's border; the margin takes in
+                    // the border and the start of its shadow.
+                    move |bounds, _, _| {
+                        cover.set(super::state::Cover::Panel(bounds.dilate(px(COVER_MARGIN))))
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+        });
         div()
             .id("menu-overlay")
             .absolute()
             .inset_0()
-            .when(
-                !footer_anchored && !matches!(page, Page::Usage(_)) && !pointer_anchored,
-                |overlay| {
-                    overlay
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(rgba((theme.background << 8) | 0xb0))
-                },
-            )
+            .when(dims, |overlay| {
+                overlay
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(rgba((theme.background << 8) | 0xb0))
+            })
             .occlude()
             .track_focus(&self.menu.focus)
             .on_action(

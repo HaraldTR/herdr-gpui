@@ -7,6 +7,14 @@ use super::GroupId;
 use crate::motion::{self, ENTER, LEAVE};
 use std::time::Instant;
 
+/// A closed group as drawn now: where it stood and the share of the row it
+/// still takes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Fold {
+    pub(crate) index: usize,
+    pub(crate) share: f32,
+}
+
 /// A split's new group, opening.
 #[derive(Clone, Copy, Debug)]
 struct Opening {
@@ -18,9 +26,9 @@ struct Opening {
 
 /// A closed group, folding away where it stood.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Folding {
+struct Folding {
     /// Its place in the row when it closed.
-    pub(crate) index: usize,
+    index: usize,
     share: f32,
     /// The neighbour its room went to.
     into: GroupId,
@@ -29,7 +37,7 @@ pub(crate) struct Folding {
 
 impl Folding {
     /// The share of the row it still takes at `now`.
-    pub(crate) fn share(&self, now: Instant) -> f32 {
+    fn share(&self, now: Instant) -> f32 {
         self.share * motion::progress(self.since, now, LEAVE).map_or(0., |k| 1. - k)
     }
 }
@@ -141,13 +149,17 @@ impl GroupMotion {
         drawn.max(0.)
     }
 
-    /// The closed groups still folding away at `now`.
-    pub(crate) fn folding(&self, now: Instant) -> Vec<Folding> {
+    /// The closed groups still folding away at `now`, with the share of the
+    /// row each still takes.
+    pub(crate) fn folding(&self, now: Instant) -> Vec<Fold> {
         let now = self.at(now);
         self.folding
             .iter()
-            .filter(|folding| folding.share(now) > 0.)
-            .copied()
+            .map(|folding| Fold {
+                index: folding.index,
+                share: folding.share(now),
+            })
+            .filter(|fold| fold.share > 0.)
             .collect()
     }
 
@@ -218,7 +230,7 @@ mod tests {
 
         // Closing b gives a its room back gradually.
         motion.fold(b, 1, 0.5, a, start);
-        assert_eq!(motion.folding(start)[0].share(start), 0.5);
+        assert_eq!(motion.folding(start)[0].share, 0.5);
         assert_eq!(motion.share(a, 1., |_| 1., start), 0.5);
         assert_eq!(motion.share(a, 1., |_| 1., start + LEAVE), 1.);
         assert!(motion.folding(start + LEAVE).is_empty());
@@ -229,7 +241,7 @@ mod tests {
         let c = ids.next();
         motion.open(c, a, later);
         motion.fold(c, 1, 0.5, a, later + ENTER / 2);
-        let from = motion.folding(later + ENTER / 2)[0].share(later + ENTER / 2);
+        let from = motion.folding(later + ENTER / 2)[0].share;
         assert!(from > 0. && from < 0.5, "{from}");
         assert_eq!(motion.opened(c, later + ENTER / 2), None);
     }
