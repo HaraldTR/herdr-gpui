@@ -28,8 +28,10 @@ pub(crate) enum Page {
     AgentSkill,
     Tab,
     RenameTab,
-    /// A tab strip's "…" menu: browser tabs in bulk and the split.
+    /// A group's "…" menu: closing tabs and splitting.
     Group,
+    /// Confirms a bulk close that reaches Herdr tabs.
+    ConfirmCloseTabs,
     Pane,
     RenamePane,
     Workspace,

@@ -1,11 +1,11 @@
 //! The window side of browser tabs: their entries in the tab strip, the page
-//! and its toolbar in place of the terminal or beside it in a split, and
-//! requests to open one.
+//! and its toolbar in a group where the terminal would be, and requests to
+//! open one.
 #[cfg(any(target_os = "macos", windows))]
 use super::Annotations;
 use super::{
     Location, Scope, Store, Tab, TabId, WebUrl,
-    groups::{Content, Groups, Side, Split},
+    groups::{GroupId, GroupIds, Layout, Pick, Slot},
 };
 use crate::{HerdrWindow, search_input::SearchInput, window::Flash};
 #[cfg(unix)]
@@ -16,21 +16,28 @@ use crate::{
 use gpui::{prelude::*, *};
 use std::collections::{HashMap, HashSet};
 
-/// One window's browser state. Which tab each side shows is the window's own
-/// choice, like its focused workspace; the tabs themselves are the app's.
+/// One window's browser state. How each workspace's view is split, and what
+/// each group shows, is the window's own choice, like its focused workspace;
+/// the tabs themselves are the app's.
 pub(crate) struct Browser {
-    /// Per workspace, what each side shows. A workspace missing here shows
-    /// its terminal on the left and nothing on the right.
-    groups: HashMap<(Scope, String), Groups>,
-    /// Set while the window shows two sides.
-    split: Option<Split>,
+    /// Per workspace, its groups. A workspace missing here has one group
+    /// following its terminal.
+    pub(super) layouts: HashMap<(Scope, String), Layout>,
+    pub(super) group_ids: GroupIds,
+    /// The group drawn before the window has a workspace to split.
+    pub(super) fallback_group: GroupId,
     #[cfg(any(target_os = "macos", windows))]
     pub(super) pages: super::Pages,
-    /// Each side's address field, and the tab whose address it last showed.
-    address: [Entity<SearchInput>; 2],
-    address_tab: [Option<TabId>; 2],
+    /// Each group's address field, and the tab whose address it last showed.
+    pub(super) addresses: HashMap<GroupId, (Entity<SearchInput>, Option<TabId>)>,
+    /// The group whose "+" asked for a new Herdr tab, which it picks once
+    /// the daemon focuses the tab.
+    pub(super) new_tab_group: Option<((Scope, String), GroupId)>,
+    /// Herdr tabs a bulk close still has to close, sent one per tick so
+    /// they never crowd the connection's bounded command queue.
+    pub(crate) tab_closes: std::collections::VecDeque<crate::group_menu::TabClose>,
     /// Why a tab's page could not be created, shown in its place.
-    failed: Option<(TabId, SharedString)>,
+    pub(super) failed: Option<(TabId, SharedString)>,
     /// The workspaces of the last snapshot and the boot they came from: one
     /// missing from the next snapshot of the same boot was closed.
     workspaces: Option<(Scope, String, HashSet<String>)>,
@@ -40,20 +47,19 @@ pub(crate) struct Browser {
 
 impl Browser {
     pub(crate) fn new(cx: &mut App) -> Self {
-        let address = |cx: &mut App| {
-            cx.new(|cx| {
-                let mut input = SearchInput::new(cx);
-                input.set_placeholder("Enter an address", cx);
-                input
-            })
-        };
+        // Only the annotation panel needs the app, and only where pages show.
+        #[cfg(not(any(target_os = "macos", windows)))]
+        let _ = cx;
+        let mut group_ids = GroupIds::default();
         Self {
-            groups: HashMap::new(),
-            split: None,
+            layouts: HashMap::new(),
+            fallback_group: group_ids.next(),
+            group_ids,
             #[cfg(any(target_os = "macos", windows))]
             pages: Default::default(),
-            address: [address(cx), address(cx)],
-            address_tab: [None, None],
+            addresses: HashMap::new(),
+            new_tab_group: None,
+            tab_closes: Default::default(),
             failed: None,
             workspaces: None,
             #[cfg(any(target_os = "macos", windows))]
@@ -79,45 +85,14 @@ fn tab_label(title: &str) -> SharedString {
     }
 }
 
-fn store(cx: &App) -> Option<&Store> {
+pub(super) fn store(cx: &App) -> Option<&Store> {
     cx.try_global::<Store>()
 }
 
 impl HerdrWindow {
-    fn browser_key(&self) -> Option<(Scope, String)> {
+    pub(super) fn browser_key(&self) -> Option<(Scope, String)> {
         let workspace = self.live.snapshot.as_ref()?.focused_workspace_id.clone()?;
         Some((scope(&self.endpoints[self.selected_endpoint]), workspace))
-    }
-
-    /// The window's split, if it shows two sides.
-    pub(crate) fn split(&self) -> Option<Split> {
-        self.browser.split
-    }
-
-    /// The side that has the keyboard: the only one when unsplit.
-    pub(crate) fn active_side(&self) -> Side {
-        self.browser.split.map_or(Side::Left, |split| split.active)
-    }
-
-    /// The sides the window draws, left first.
-    pub(crate) fn visible_sides(&self) -> &'static [Side] {
-        if self.browser.split.is_some() {
-            &Side::BOTH
-        } else {
-            &[Side::Left]
-        }
-    }
-
-    /// The focused workspace's sides, with pages the app no longer has read
-    /// as closed until the next tick forgets them.
-    pub(crate) fn browser_groups(&self, cx: &App) -> Groups {
-        let mut groups = self
-            .browser_key()
-            .and_then(|key| self.browser.groups.get(&key).copied())
-            .unwrap_or_default();
-        let store = store(cx);
-        groups.retain(|id| store.is_some_and(|store| store.get(id).is_some()));
-        groups
     }
 
     /// The focused workspace's browser tabs, in the order they opened.
@@ -131,195 +106,22 @@ impl HerdrWindow {
             .collect()
     }
 
-    /// What `side` shows in the focused workspace.
-    pub(crate) fn side_content(&self, side: Side, cx: &App) -> Content {
-        self.browser_groups(cx).content(side)
-    }
-
-    fn tab_on(&self, side: Side, cx: &App) -> Option<Tab> {
-        match self.side_content(side, cx) {
-            Content::Page(id) => store(cx)?.get(id).cloned(),
-            Content::Terminal | Content::Empty => None,
-        }
-    }
-
-    /// Makes `side` the one with the keyboard. The terminal takes it back
-    /// when it is what that side shows.
-    pub(crate) fn activate_side(
-        &mut self,
-        side: Side,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(split) = &mut self.browser.split else {
-            return;
-        };
-        if split.active == side {
-            return;
-        }
-        split.active = side;
-        if self.side_content(side, cx) == Content::Terminal {
-            window.focus(&self.focus, cx);
-        }
-        cx.notify();
-    }
-
-    /// Uncovers the focused workspace's terminal on the side it sits on.
-    pub(crate) fn show_terminal(&mut self, cx: &mut Context<Self>) {
-        if let Some(key) = self.browser_key()
-            && let Some(groups) = self.browser.groups.get_mut(&key)
-        {
-            let before = *groups;
-            groups.uncover_terminal();
-            if *groups != before {
-                cx.notify();
+    pub(super) fn forget_browser_tabs(&mut self, mut gone: impl FnMut(TabId) -> bool) {
+        let key = self.browser_key();
+        let focused = self.focused_herdr_tab().map(str::to_owned);
+        for (workspace, layout) in &mut self.browser.layouts {
+            // Only the focused workspace's terminal is known here.
+            let focused = focused
+                .as_deref()
+                .filter(|_| key.as_ref() == Some(workspace));
+            let closed: Vec<Pick> = layout
+                .picks()
+                .filter(|pick| matches!(pick, Pick::Page(id) if gone(*id)))
+                .cloned()
+                .collect();
+            for pick in closed {
+                layout.replace(&pick, None, focused);
             }
-        }
-    }
-
-    /// Shows the focused workspace's terminal on `side`, trading places
-    /// with whatever the other side showed if the terminal was there.
-    pub(crate) fn show_terminal_on(&mut self, side: Side, cx: &mut Context<Self>) {
-        let Some(key) = self.browser_key() else {
-            return;
-        };
-        self.browser
-            .groups
-            .entry(key)
-            .or_default()
-            .show(side, Content::Terminal);
-        if let Some(split) = &mut self.browser.split {
-            split.active = side;
-        }
-        cx.notify();
-    }
-
-    /// Shows a tab on the active side.
-    pub(crate) fn show_browser_tab(
-        &mut self,
-        id: TabId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.show_browser_tab_on(self.active_side(), id, window, cx);
-    }
-
-    pub(crate) fn show_browser_tab_on(
-        &mut self,
-        side: Side,
-        id: TabId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(tab) = store(cx).and_then(|store| store.get(id)).cloned() else {
-            return;
-        };
-        let side = if self.browser.split.is_some() {
-            side
-        } else {
-            Side::Left
-        };
-        self.browser
-            .groups
-            .entry((tab.scope.clone(), tab.workspace_id.clone()))
-            .or_default()
-            .show(side, Content::Page(id));
-        if let Some(split) = &mut self.browser.split {
-            split.active = side;
-        }
-        #[cfg(any(target_os = "macos", windows))]
-        if let Err(error) = self.browser.pages.ensure(&tab, window, cx) {
-            tracing::warn!(%error, "Cannot create a browser page");
-            self.browser.failed = Some((id, error.to_string().into()));
-        }
-        self.sync_address(side, Some(&tab), true, window, cx);
-        // A swap may have moved another page onto the other side.
-        if self.browser.split.is_some() {
-            let other = self.tab_on(side.other(), cx);
-            self.sync_address(side.other(), other.as_ref(), false, window, cx);
-        }
-        if tab.location.is_none() {
-            let focus = self.browser.address[side.index()].read(cx).focus.clone();
-            window.focus(&focus, cx);
-        }
-        cx.notify();
-    }
-
-    /// Closes a tab. A side of a split that showed it moves to a neighbouring
-    /// tab the other side does not show, as an editor group does.
-    pub(crate) fn close_browser_tab(
-        &mut self,
-        id: TabId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(tab) = store(cx).and_then(|store| store.get(id)).cloned() else {
-            return;
-        };
-        let key = (tab.scope.clone(), tab.workspace_id.clone());
-        let order: Vec<TabId> = store(cx)
-            .map(|store| {
-                store
-                    .in_workspace(&key.0, &key.1)
-                    .map(|tab| tab.id)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let before = self.browser.groups.get(&key).copied().unwrap_or_default();
-        Store::update(cx, |store| store.close(id));
-        self.forget_browser_tabs(|tab| tab == id);
-        if let Some(split) = self.browser.split {
-            let after = self.browser.groups.get(&key).copied().unwrap_or_default();
-            let position = order.iter().position(|tab| *tab == id).unwrap_or(0);
-            for side in Side::BOTH {
-                if before.content(side) != Content::Page(id)
-                    || after.content(side) != Content::Empty
-                {
-                    continue;
-                }
-                let next = order[position + 1..]
-                    .iter()
-                    .chain(order[..position].iter().rev())
-                    .copied()
-                    .find(|tab| *tab != id && after.side_of(Content::Page(*tab)).is_none());
-                if let Some(next) = next {
-                    self.show_browser_tab_on(side, next, window, cx);
-                }
-            }
-            // Filling a side is not choosing it.
-            if let Some(current) = &mut self.browser.split {
-                current.active = split.active;
-            }
-        }
-        cx.notify();
-    }
-
-    /// Closes the focused workspace's browser tabs that `close` picks.
-    pub(crate) fn close_browser_tabs(
-        &mut self,
-        mut close: impl FnMut(TabId) -> bool,
-        cx: &mut Context<Self>,
-    ) {
-        let closing: Vec<TabId> = self
-            .browser_tab_ids(cx)
-            .into_iter()
-            .filter(|id| close(*id))
-            .collect();
-        if closing.is_empty() {
-            return;
-        }
-        Store::update(cx, |store| {
-            for id in &closing {
-                store.close(*id);
-            }
-        });
-        self.forget_browser_tabs(|id| closing.contains(&id));
-        cx.notify();
-    }
-
-    fn forget_browser_tabs(&mut self, mut gone: impl FnMut(TabId) -> bool) {
-        for groups in self.browser.groups.values_mut() {
-            groups.retain(|id| !gone(id));
         }
         #[cfg(any(target_os = "macos", windows))]
         self.browser.pages.retain(|id| !gone(id));
@@ -367,86 +169,6 @@ impl HerdrWindow {
             Some(id) => self.show_browser_tab(id, window, cx),
             None => self.show_flash(Flash::warning("Too many browser tabs are open"), cx),
         }
-    }
-
-    /// Opens a tab on `side`.
-    pub(crate) fn open_browser_tab_on(
-        &mut self,
-        side: Side,
-        url: Option<WebUrl>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(split) = &mut self.browser.split {
-            split.active = side;
-        }
-        self.open_browser_tab(url, window, cx);
-    }
-
-    /// Moves the split's divider; see [`Split::drag`].
-    pub(crate) fn drag_split(&mut self, offset: f32, width: f32) -> bool {
-        self.browser
-            .split
-            .as_mut()
-            .is_some_and(|split| split.drag(offset, width))
-    }
-
-    /// Splits the window in two, or closes the right side of a split.
-    pub(crate) fn toggle_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.browser.split.is_some() {
-            self.close_split(Side::Left, window, cx);
-        } else {
-            self.split_editor(window, cx);
-        }
-    }
-
-    /// Splits the window: the page the window showed moves right with the
-    /// terminal back on the left, or, over the terminal, the right side shows
-    /// the workspace's latest browser tab, or a new one when it has none.
-    fn split_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !super::EMBEDDED {
-            self.show_flash(
-                Flash::warning("Split needs browser tabs, which need macOS or Windows"),
-                cx,
-            );
-            return;
-        }
-        let Some((scope, workspace)) = self.browser_key() else {
-            self.show_flash(Flash::warning("Open a workspace first"), cx);
-            return;
-        };
-        let shown = self.side_content(Side::Left, cx);
-        self.browser.split = Some(Split::default());
-        let latest = store(cx).and_then(|store| {
-            store
-                .in_workspace(&scope, &workspace)
-                .last()
-                .map(|tab| tab.id)
-        });
-        match (shown, latest) {
-            (Content::Page(id), _) | (_, Some(id)) => {
-                self.show_browser_tab_on(Side::Right, id, window, cx);
-            }
-            (_, None) => self.open_browser_tab(None, window, cx),
-        }
-        cx.notify();
-    }
-
-    /// Folds the split into one side showing what `kept` showed. Its tabs
-    /// stay in the strip, as the other side's do.
-    pub(crate) fn close_split(&mut self, kept: Side, window: &mut Window, cx: &mut Context<Self>) {
-        if self.browser.split.take().is_none() {
-            return;
-        }
-        for groups in self.browser.groups.values_mut() {
-            groups.unsplit(kept);
-        }
-        self.browser.address_tab[Side::Right.index()] = None;
-        self.sync_addresses(true, window, cx);
-        if self.side_content(Side::Left, cx) == Content::Terminal {
-            window.focus(&self.focus, cx);
-        }
-        cx.notify();
     }
 
     /// The endpoint and workspace a control request names, if this window
@@ -564,40 +286,6 @@ impl HerdrWindow {
         let _ = (tabs, cx);
     }
 
-    /// Shows each visible side's tab address in its field, unless someone
-    /// is typing there.
-    fn sync_addresses(&mut self, force: bool, window: &Window, cx: &mut Context<Self>) {
-        for side in self.visible_sides() {
-            let tab = self.tab_on(*side, cx);
-            self.sync_address(*side, tab.as_ref(), force, window, cx);
-        }
-    }
-
-    fn sync_address(
-        &mut self,
-        side: Side,
-        tab: Option<&Tab>,
-        force: bool,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        let index = side.index();
-        let id = tab.map(|tab| tab.id);
-        let text = tab
-            .and_then(|tab| tab.location.as_ref())
-            .map(Location::display)
-            .unwrap_or_default();
-        let input = self.browser.address[index].read(cx);
-        if !force
-            && (input.focus.is_focused(window)
-                || (self.browser.address_tab[index] == id && input.text() == text.as_str()))
-        {
-            return;
-        }
-        self.browser.address_tab[index] = id;
-        self.browser.address[index].update(cx, |input, cx| input.set_text_selected(&text, cx));
-    }
-
     /// Applies page reports, drops tabs other windows closed, and forgets the
     /// tabs of workspaces the daemon closed. Runs on every window tick.
     pub(crate) fn poll_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -606,9 +294,13 @@ impl HerdrWindow {
         if let Some(store) = store(cx) {
             let gone: HashSet<TabId> = self
                 .browser
-                .groups
+                .layouts
                 .values()
-                .flat_map(Groups::pages)
+                .flat_map(Layout::picks)
+                .filter_map(|pick| match pick {
+                    Pick::Page(id) => Some(*id),
+                    Pick::Herdr(_) => None,
+                })
                 .filter(|id| store.get(*id).is_none())
                 .collect();
             #[cfg(any(target_os = "macos", windows))]
@@ -627,6 +319,7 @@ impl HerdrWindow {
             }
         }
         self.forget_closed_workspaces(cx);
+        self.forget_closed_herdr_tabs(cx);
         #[cfg(any(target_os = "macos", windows))]
         self.poll_deliveries(cx);
         self.sync_addresses(false, window, cx);
@@ -706,12 +399,7 @@ impl HerdrWindow {
                     let parent = store(cx).and_then(|store| store.get(id)).cloned();
                     if let (Some(parent), Ok(url)) = (parent, WebUrl::try_from(url.as_str())) {
                         // The new tab opens where its opener shows.
-                        let side = self
-                            .browser
-                            .groups
-                            .get(&(parent.scope.clone(), parent.workspace_id.clone()))
-                            .and_then(|groups| groups.side_of(Content::Page(id)))
-                            .unwrap_or(self.active_side());
+                        let group = self.group_showing(&Pick::Page(id), cx);
                         let opened = Store::update(cx, |store| {
                             store.open(
                                 parent.scope,
@@ -721,7 +409,7 @@ impl HerdrWindow {
                             )
                         });
                         if let Some(opened) = opened {
-                            self.show_browser_tab_on(side, opened, window, cx);
+                            self.show_browser_tab_in(group, opened, window, cx);
                         }
                     }
                 }
@@ -731,15 +419,12 @@ impl HerdrWindow {
 
     fn submit_address(
         &mut self,
-        side: Side,
+        group: GroupId,
         id: TabId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let text = self.browser.address[side.index()]
-            .read(cx)
-            .text()
-            .to_owned();
+        let text = self.group_address(group, cx).read(cx).text().to_owned();
         let Ok(url) = WebUrl::from_typed(&text) else {
             self.show_flash(Flash::warning("Not an http or https address"), cx);
             return;
@@ -751,7 +436,7 @@ impl HerdrWindow {
             self.browser.pages.load(id, &location, cx);
             self.browser.pages.focus(id, cx);
         }
-        self.show_browser_tab_on(side, id, window, cx);
+        self.show_browser_tab_in(Some(group), id, window, cx);
     }
 
     /// Shows or hides the native pages to match what the window draws. The
@@ -762,13 +447,7 @@ impl HerdrWindow {
             let shown: Vec<TabId> = if self.menu.page.is_some() {
                 Vec::new()
             } else {
-                self.visible_sides()
-                    .iter()
-                    .filter_map(|side| match self.side_content(*side, cx) {
-                        Content::Page(id) => Some(id),
-                        Content::Terminal | Content::Empty => None,
-                    })
-                    .collect()
+                self.live_pages(cx)
             };
             self.browser.pages.present(&shown, cx);
         }
@@ -776,10 +455,10 @@ impl HerdrWindow {
         let _ = cx;
     }
 
-    /// The workspace's browser tabs, after its Herdr tabs in `side`'s strip.
+    /// The workspace's browser tabs, after its Herdr tabs in a group's strip.
     pub(crate) fn browser_tab_entries(
         &self,
-        side: Side,
+        slot: Slot,
         shown: Option<TabId>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
@@ -790,10 +469,10 @@ impl HerdrWindow {
         tabs.into_iter()
             .map(|tab| {
                 let id = tab.id;
-                let (background, text) = self.tab_colors(shown == Some(id), side);
+                let (background, text) = self.tab_colors(shown == Some(id), slot.id);
                 div()
                     .id(SharedString::from(format!("browser-tab-{id}")))
-                    .debug_selector(move || side.selector(&format!("browser-tab-{id}")))
+                    .debug_selector(move || slot.selector(&format!("browser-tab-{id}")))
                     .pl(px(10.))
                     .pr(px(3.))
                     .py(px(2.))
@@ -819,7 +498,7 @@ impl HerdrWindow {
                         div()
                             .id("close-browser-tab")
                             .debug_selector(move || {
-                                side.selector(&format!("close-browser-tab-{id}"))
+                                slot.selector(&format!("close-browser-tab-{id}"))
                             })
                             .size(px(18.))
                             .flex_none()
@@ -841,7 +520,7 @@ impl HerdrWindow {
                             })),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.show_browser_tab_on(side, id, window, cx);
+                        this.show_browser_tab_in(Some(slot.id), id, window, cx);
                     }))
                     .into_any_element()
             })
@@ -850,7 +529,7 @@ impl HerdrWindow {
 
     fn toolbar_button(
         &self,
-        side: Side,
+        slot: Slot,
         id: &'static str,
         icon: &'static str,
         enabled: bool,
@@ -864,7 +543,7 @@ impl HerdrWindow {
         };
         div()
             .id(id)
-            .debug_selector(move || side.selector(id))
+            .debug_selector(move || slot.selector(id))
             .size(px(24.))
             .flex_none()
             .flex()
@@ -880,12 +559,12 @@ impl HerdrWindow {
             .child(svg().path(icon).size(px(14.)).text_color(rgb(color)))
     }
 
-    /// The page with its toolbar, drawn on `side` where the terminal would
+    /// The page with its toolbar, drawn in a group where the terminal would
     /// be. `keyboard` marks the one element holding the window's focus
     /// handle when no terminal is drawn to hold it.
     pub(crate) fn render_browser(
         &mut self,
-        side: Side,
+        slot: Slot,
         tab: &Tab,
         gap: f32,
         keyboard: bool,
@@ -918,7 +597,7 @@ impl HerdrWindow {
                 };
                 div()
                     .id("browser-annotate")
-                    .debug_selector(move || side.selector("browser-annotate"))
+                    .debug_selector(move || slot.selector("browser-annotate"))
                     .flex_none()
                     .flex()
                     .items_center()
@@ -980,7 +659,7 @@ impl HerdrWindow {
             .border_b_1()
             .border_color(rgb(self.theme.active))
             .child(self.toolbar_button(
-                side,
+                slot,
                 "browser-back",
                 "icons/arrow-left.svg",
                 loaded,
@@ -993,7 +672,7 @@ impl HerdrWindow {
                 },
             ))
             .child(self.toolbar_button(
-                side,
+                slot,
                 "browser-forward",
                 "icons/arrow-right.svg",
                 loaded,
@@ -1006,7 +685,7 @@ impl HerdrWindow {
                 },
             ))
             .child(self.toolbar_button(
-                side,
+                slot,
                 "browser-reload",
                 "icons/refresh.svg",
                 loaded,
@@ -1021,28 +700,28 @@ impl HerdrWindow {
             .child(
                 div()
                     .id("browser-address")
-                    .debug_selector(move || side.selector("browser-address"))
+                    .debug_selector(move || slot.selector("browser-address"))
                     .flex_1()
                     .min_w_0()
                     .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                         match event.keystroke.key.as_str() {
-                            "enter" => this.submit_address(side, id, window, cx),
+                            "enter" => this.submit_address(slot.id, id, window, cx),
                             "escape" => {
                                 let tab = store(cx).and_then(|store| store.get(id)).cloned();
-                                this.sync_address(side, tab.as_ref(), true, window, cx);
+                                this.sync_address(slot.id, tab.as_ref(), true, window, cx);
                                 window.focus(&this.focus, cx);
                             }
                             _ => return,
                         }
                         cx.stop_propagation();
                     }))
-                    .child(self.browser.address[side.index()].clone()),
+                    .child(self.group_address(slot.id, cx)),
             )
-            // A split shows the window's flash once, on the side in use.
+            // A split shows the window's flash once, in the group in use.
             .children(
                 self.flash
                     .as_ref()
-                    .filter(|_| side == self.active_side())
+                    .filter(|_| Some(slot.id) == self.active_group())
                     .map(|(flash, _)| {
                         div()
                             .flex_none()
@@ -1054,7 +733,7 @@ impl HerdrWindow {
             )
             .children(annotate_button)
             .child(self.toolbar_button(
-                side,
+                slot,
                 "browser-external",
                 "icons/external.svg",
                 external.is_some(),
@@ -1077,14 +756,14 @@ impl HerdrWindow {
                 .text_color(rgb(self.theme.muted))
                 .child(
                     div()
-                        .debug_selector(move || side.selector("browser-placeholder"))
+                        .debug_selector(move || slot.selector("browser-placeholder"))
                         .child(placeholder),
                 )
                 .into_any_element(),
         };
         div()
-            .id(SharedString::from(side.selector("browser")))
-            .debug_selector(move || side.selector("browser"))
+            .id(SharedString::from(slot.selector("browser")))
+            .debug_selector(move || slot.selector("browser"))
             .flex()
             .flex_col()
             .flex_1()

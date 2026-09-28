@@ -107,18 +107,30 @@ mod embedded {
     }
 }
 
-/// Splitting needs pages, so these run where a build shows them. Blank tabs
-/// need no native page, so none is created.
-#[cfg(any(target_os = "macos", windows))]
-mod split {
+/// Editor groups. Blank browser tabs need no native page, so none is
+/// created, and a split alone needs no page at all.
+mod groups {
     use super::*;
     use crate::{
-        browser::{Content, Side, TabId},
+        browser::{GroupId, Pick, Shown},
         controls::Command,
     };
 
-    fn content(view: &Entity<HerdrWindow>, cx: &mut VisualTestContext) -> [Content; 2] {
-        cx.update(|_, cx| Side::BOTH.map(|side| view.read(cx).side_content(side, cx)))
+    fn groups(view: &Entity<HerdrWindow>, cx: &mut VisualTestContext) -> Vec<GroupId> {
+        draw(cx);
+        view.read_with(cx, |view, _| {
+            view.group_slots().into_iter().map(|slot| slot.id).collect()
+        })
+    }
+
+    fn shown(view: &Entity<HerdrWindow>, cx: &mut VisualTestContext) -> Vec<Shown> {
+        let groups = groups(view, cx);
+        cx.update(|_, cx| {
+            groups
+                .iter()
+                .map(|group| view.read(cx).group_shown(*group, cx))
+                .collect()
+        })
     }
 
     fn run(view: &Entity<HerdrWindow>, cx: &mut VisualTestContext, command: Command) {
@@ -126,147 +138,141 @@ mod split {
         draw(cx);
     }
 
-    #[gpui::test]
-    fn splitting_puts_a_page_beside_the_terminal(cx: &mut gpui::TestAppContext) {
-        let (view, cx) = window(cx);
-        draw(cx);
-        assert!(cx.debug_bounds("right-side").is_none());
-        let split = cx.debug_bounds("split-editor").unwrap();
-        cx.simulate_click(split.center(), gpui::Modifiers::none());
-        draw(cx);
-        // With no browser tab yet, the right side opens a blank one.
-        let page = TabId::test(0);
-        assert_eq!(content(&view, cx), [Content::Terminal, Content::Page(page)]);
-        assert!(cx.debug_bounds("terminal").is_some());
-        assert!(cx.debug_bounds("right-browser").is_some());
-        assert!(cx.debug_bounds("split-divider").is_some());
-        // Both strips list the same tabs; only the right one splits.
-        for selector in [
-            "tab-t0",
-            "browser-tab-0",
-            "right-tab-t0",
-            "right-browser-tab-0",
-        ] {
-            assert!(cx.debug_bounds(selector).is_some(), "{selector}");
-        }
-        assert!(cx.debug_bounds("split-editor").is_none());
-        assert!(cx.debug_bounds("right-split-editor").is_some());
-        assert!(cx.debug_bounds("tab-actions").is_some());
-        assert!(cx.debug_bounds("right-tab-actions").is_some());
-        let left = cx.debug_bounds("side").unwrap();
-        let right = cx.debug_bounds("right-side").unwrap();
-        assert!(left.right() <= right.left());
+    /// Debug selectors are looked up as `'static`; tests name a few.
+    fn selector(name: String) -> &'static str {
+        Box::leak(name.into_boxed_str())
+    }
 
-        // Choosing on the right what the left shows swaps the two.
-        let terminal_tab = cx.debug_bounds("right-tab-t0").unwrap();
-        cx.simulate_click(terminal_tab.center(), gpui::Modifiers::none());
+    fn click(cx: &mut VisualTestContext, selector: &'static str) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector}"));
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
         draw(cx);
-        assert_eq!(content(&view, cx), [Content::Page(page), Content::Terminal]);
-        assert!(cx.debug_bounds("browser").is_some());
-        let terminal = cx.debug_bounds("terminal").unwrap();
-        assert!(terminal.left() >= right.left());
-        let browser_tab = cx.debug_bounds("right-browser-tab-0").unwrap();
-        cx.simulate_click(browser_tab.center(), gpui::Modifiers::none());
-        draw(cx);
-        assert_eq!(content(&view, cx), [Content::Terminal, Content::Page(page)]);
+    }
 
-        // Closing the split closes its right side; the page stays a tab.
-        run(&view, cx, Command::ToggleSplitEditor);
-        assert!(view.read_with(cx, |view, _| view.split().is_none()));
-        assert_eq!(content(&view, cx), [Content::Terminal, Content::Empty]);
-        assert!(cx.debug_bounds("right-side").is_none());
-        assert!(cx.debug_bounds("terminal").is_some());
-        assert!(cx.debug_bounds("browser-tab-0").is_some());
-
-        // Splitting from a page moves it right and brings the terminal back.
-        let browser_tab = cx.debug_bounds("browser-tab-0").unwrap();
-        cx.simulate_click(browser_tab.center(), gpui::Modifiers::none());
-        draw(cx);
-        assert_eq!(content(&view, cx), [Content::Page(page), Content::Empty]);
-        run(&view, cx, Command::ToggleSplitEditor);
-        assert_eq!(content(&view, cx), [Content::Terminal, Content::Page(page)]);
-        // A split whose left side has nothing folds into the right one.
-        cx.update(|_, cx| view.update(cx, |view, cx| view.show_terminal_on(Side::Right, cx)));
-        cx.update(|window, cx| {
-            view.update(cx, |view, cx| view.activate_side(Side::Left, window, cx))
-        });
-        assert_eq!(content(&view, cx), [Content::Page(page), Content::Terminal]);
-        cx.update(|window, cx| {
-            view.update(cx, |view, cx| view.close_browser_tab(page, window, cx))
-        });
-        assert_eq!(content(&view, cx), [Content::Empty, Content::Terminal]);
-        run(&view, cx, Command::CloseTab);
-        assert!(view.read_with(cx, |view, _| view.split().is_none()));
-        assert_eq!(content(&view, cx), [Content::Terminal, Content::Empty]);
+    fn herdr(tab: &str) -> Pick {
+        Pick::Herdr(tab.into())
     }
 
     #[gpui::test]
-    fn closing_a_page_moves_its_side_to_a_neighbour(cx: &mut gpui::TestAppContext) {
+    fn splitting_only_splits(cx: &mut gpui::TestAppContext) {
         let (view, cx) = window(cx);
         draw(cx);
-        run(&view, cx, Command::ToggleSplitEditor);
-        run(&view, cx, Command::NewBrowserTab);
-        run(&view, cx, Command::NewBrowserTab);
-        let [first, second, third] = [0, 1, 2].map(TabId::test);
+        assert_eq!(shown(&view, cx), [Shown::Terminal]);
+        click(cx, "split-editor");
+        // The new group takes the tab; nothing new opens.
         assert_eq!(
-            content(&view, cx),
-            [Content::Terminal, Content::Page(third)]
+            shown(&view, cx),
+            [Shown::Elsewhere(herdr("t0")), Shown::Terminal]
         );
-        // The page on the left moves right when the right side asks for it.
+        assert!(
+            cx.update(|_, cx| view.read(cx).browser_tab_ids(cx))
+                .is_empty()
+        );
+        assert!(cx.debug_bounds("stand-in").is_some());
+        assert!(cx.debug_bounds("g1-tab-t0").is_some());
+        // Split as often as wanted, from any group.
+        click(cx, "g1-split-editor");
+        run(&view, cx, Command::SplitEditor);
+        assert_eq!(groups(&view, cx).len(), 4);
+        for divider in 0..3 {
+            let selector = selector(format!("group-divider-{divider}"));
+            assert!(cx.debug_bounds(selector).is_some(), "{selector}");
+        }
+        // Showing it here brings the terminal back to the first group.
+        click(cx, "show-here");
+        let terminal = cx.debug_bounds("terminal").unwrap();
+        let first = cx.debug_bounds("group").unwrap();
+        assert!(terminal.left() < first.right());
+        assert_eq!(shown(&view, cx)[0], Shown::Terminal);
+    }
+
+    /// Needs a build that shows pages: elsewhere a new tab opens nothing.
+    #[cfg(any(target_os = "macos", windows))]
+    #[gpui::test]
+    fn a_page_and_the_terminal_sit_side_by_side(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = window(cx);
+        draw(cx);
+        run(&view, cx, Command::SplitEditor);
+        let [left, right] = groups(&view, cx)[..] else {
+            panic!("two groups")
+        };
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.show_browser_tab_on(Side::Left, second, window, cx)
+                view.open_browser_tab_in(right, window, cx);
+                view.activate_group(left, window, cx);
+            })
+        });
+        let page = crate::browser::TabId::test(0);
+        assert_eq!(shown(&view, cx), [Shown::Terminal, Shown::Page(page)]);
+        assert!(cx.debug_bounds("terminal").is_some());
+        assert!(cx.debug_bounds("g1-browser").is_some());
+        // Every group lists every tab.
+        for selector in ["tab-t0", "browser-tab-0", "g1-tab-t0", "g1-browser-tab-0"] {
+            assert!(cx.debug_bounds(selector).is_some(), "{selector}");
+        }
+        // Picking the page on the left as well moves it there.
+        click(cx, "browser-tab-0");
+        assert_eq!(
+            shown(&view, cx),
+            [Shown::Page(page), Shown::Elsewhere(Pick::Page(page))]
+        );
+        // Closing the page leaves both groups following the terminal again.
+        run(&view, cx, Command::CloseTab);
+        assert!(
+            cx.update(|_, cx| view.read(cx).browser_tab_ids(cx))
+                .is_empty()
+        );
+        assert_eq!(
+            shown(&view, cx),
+            [Shown::Terminal, Shown::Elsewhere(herdr("t0"))]
+        );
+    }
+
+    #[gpui::test]
+    fn picking_another_herdr_tab_focuses_it_in_the_daemon(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = window(cx);
+        draw(cx);
+        run(&view, cx, Command::SplitEditor);
+        let other = view.read_with(cx, |view, _| {
+            let snapshot = view.live.snapshot.as_ref().unwrap();
+            snapshot
+                .tabs
+                .iter()
+                .find(|tab| tab.workspace_id == "w0" && tab.tab_id != "t0")
+                .map(|tab| tab.tab_id.clone())
+        });
+        let Some(other) = other else {
+            return;
+        };
+        click(cx, selector(format!("g1-tab-{other}")));
+        // Until the daemon focuses it, the group stands in for it.
+        assert_eq!(
+            shown(&view, cx)[1],
+            Shown::Elsewhere(Pick::Herdr(other.clone()))
+        );
+        // Once it does, the group shows it and the other keeps its tab.
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                let snapshot = Arc::make_mut(view.live.snapshot.as_mut().unwrap());
+                snapshot.focused_tab_id = Some(other.clone());
+                view.terminal_focus_moved(Some("t0"), &other, cx);
             })
         });
         assert_eq!(
-            content(&view, cx),
-            [Content::Page(second), Content::Page(third)]
+            shown(&view, cx),
+            [Shown::Elsewhere(herdr("t0")), Shown::Terminal]
         );
-        view.read_with(cx, |view, _| assert_eq!(view.active_side(), Side::Left));
-        // The keyboard follows a press on a side.
-        let right = cx.debug_bounds("right-browser").unwrap();
-        cx.simulate_mouse_down(
-            right.center(),
-            gpui::MouseButton::Left,
-            gpui::Modifiers::none(),
-        );
-        cx.simulate_mouse_up(
-            right.center(),
-            gpui::MouseButton::Left,
-            gpui::Modifiers::none(),
-        );
-        view.read_with(cx, |view, _| assert_eq!(view.active_side(), Side::Right));
-
-        // The right side's page closes to the one before it the left does
-        // not show.
-        run(&view, cx, Command::CloseTab);
-        assert_eq!(
-            content(&view, cx),
-            [Content::Page(second), Content::Page(first)]
-        );
-        run(&view, cx, Command::CloseTab);
-        assert_eq!(content(&view, cx), [Content::Page(second), Content::Empty]);
-        assert!(cx.debug_bounds("right-empty-side").is_some());
-        // The left side's covered terminal comes back when its page closes.
-        cx.update(|window, cx| {
-            view.update(cx, |view, cx| view.close_browser_tab(second, window, cx))
-        });
-        draw(cx);
-        assert_eq!(content(&view, cx), [Content::Terminal, Content::Empty]);
-        // Close Tab on an empty side closes the split.
-        run(&view, cx, Command::CloseTab);
-        assert!(view.read_with(cx, |view, _| view.split().is_none()));
-        view.read_with(cx, |view, _| assert!(view.menu.page.is_none()));
-        assert!(cx.debug_bounds("terminal").is_some());
     }
 
     #[gpui::test]
-    fn the_divider_drags_within_bounds(cx: &mut gpui::TestAppContext) {
+    fn empty_groups_and_dividers(cx: &mut gpui::TestAppContext) {
         let (view, cx) = window(cx);
         draw(cx);
-        run(&view, cx, Command::ToggleSplitEditor);
-        let divider = cx.debug_bounds("split-divider").unwrap();
-        let before = cx.debug_bounds("side").unwrap();
+        run(&view, cx, Command::SplitEditor);
+        let divider = cx.debug_bounds("group-divider-0").unwrap();
+        let before = cx.debug_bounds("group").unwrap();
         let target = divider.center() - gpui::point(gpui::px(100.), gpui::px(0.));
         cx.simulate_mouse_down(
             divider.center(),
@@ -285,12 +291,15 @@ mod split {
         );
         cx.simulate_mouse_up(target, gpui::MouseButton::Left, gpui::Modifiers::none());
         draw(cx);
-        let after = cx.debug_bounds("side").unwrap();
+        let after = cx.debug_bounds("group").unwrap();
         assert!(after.size.width < before.size.width - gpui::px(50.));
-        view.read_with(cx, |view, _| {
-            let ratio = view.split().unwrap().ratio();
-            assert!(ratio > 0.1 && ratio < 0.5, "{ratio}");
-        });
+        // Closing a group hands its tab strip back to one group.
+        let [_, right] = groups(&view, cx)[..] else {
+            panic!("two groups")
+        };
+        cx.update(|window, cx| view.update(cx, |view, cx| view.close_group(right, window, cx)));
+        assert_eq!(shown(&view, cx), [Shown::Terminal]);
+        assert!(cx.debug_bounds("group-divider-0").is_none());
     }
 }
 

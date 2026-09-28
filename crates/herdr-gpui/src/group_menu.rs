@@ -1,83 +1,116 @@
-//! The menu behind a tab strip's "…" button: opening a browser tab on that
-//! side, closing browser tabs in bulk, and splitting the window. Closing only
-//! ever reaches browser tabs; a Herdr tab runs processes, so it closes one at
-//! a time through its own confirmation.
+//! The menu behind a group's "…" button: closing tabs, opening a browser
+//! tab in the group, and splitting or closing the group. Closes reach every
+//! tab of the workspace, Herdr tabs included; those run processes, so a bulk
+//! close that includes one asks first, as closing a single Herdr tab does.
 use crate::{
-    HerdrWindow,
-    browser::{Content, Side, TabId},
+    Error, HerdrWindow,
+    browser::{GroupId, Pick, TabId},
     menu::Page,
 };
 use gpui::{prelude::*, *};
+use herdr_client::Method;
+use serde_json::json;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
-    NewBrowserTab,
+    Close,
     CloseOthers,
     CloseAll,
+    NewBrowserTab,
     Split,
-    CloseSplit,
+    CloseGroup,
 }
 
 impl Action {
     fn label(self) -> &'static str {
         match self {
+            Self::Close => "Close",
+            Self::CloseOthers => "Close Others",
+            Self::CloseAll => "Close All",
             Self::NewBrowserTab => "New Browser Tab",
-            Self::CloseOthers => "Close Other Browser Tabs",
-            Self::CloseAll => "Close All Browser Tabs",
             Self::Split => "Split Right",
-            Self::CloseSplit => "Close Split",
+            Self::CloseGroup => "Close Group",
         }
     }
 
     /// Whether a rule separates this row from the one above it.
     fn starts_section(self) -> bool {
-        matches!(self, Self::CloseOthers | Self::Split | Self::CloseSplit)
+        matches!(self, Self::NewBrowserTab | Self::Split)
     }
 }
 
 pub(crate) struct GroupMenu {
-    side: Side,
+    group: GroupId,
     selected: Option<usize>,
 }
 
+/// A Herdr tab a bulk close still has to close, with the daemon boot and
+/// workspace it was chosen under, so it never reaches a replaced daemon.
+pub(crate) struct TabClose {
+    boot: String,
+    workspace: String,
+    tab: String,
+}
+
+/// A bulk close waiting for its confirmation.
+pub(crate) struct BulkClose {
+    boot: String,
+    workspace: String,
+    tabs: Vec<String>,
+    pages: Vec<TabId>,
+    confirm_selected: bool,
+}
+
 impl HerdrWindow {
-    /// The focused workspace's browser tabs, and those a side shows.
-    fn group_tabs(&self, cx: &App) -> (Vec<TabId>, Vec<TabId>) {
-        let groups = self.browser_groups(cx);
-        let shown = self
-            .visible_sides()
-            .iter()
-            .filter_map(|side| match groups.content(*side) {
-                Content::Page(id) => Some(id),
-                Content::Terminal | Content::Empty => None,
+    /// The focused workspace's Herdr tabs and browser tabs, in strip order.
+    fn workspace_tabs(&self, cx: &App) -> (Vec<String>, Vec<TabId>) {
+        let herdr = self
+            .live
+            .snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .tabs
+                    .iter()
+                    .filter(|tab| Some(&tab.workspace_id) == snapshot.focused_workspace_id.as_ref())
+                    .map(|tab| tab.tab_id.clone())
+                    .collect()
             })
-            .collect();
-        let all = self.browser_tab_ids(cx);
-        (all, shown)
+            .unwrap_or_default();
+        (herdr, self.browser_tab_ids(cx))
     }
 
-    /// The rows worth offering: a bulk close appears only when it would
-    /// close something.
-    fn group_actions(&self, cx: &App) -> Vec<Action> {
-        let (all, shown) = self.group_tabs(cx);
-        let mut actions = vec![Action::NewBrowserTab];
-        if all.iter().any(|id| !shown.contains(id)) {
+    /// The rows worth offering for `group`: a close appears only when it
+    /// would close something.
+    fn group_actions(&self, group: GroupId, cx: &App) -> Vec<Action> {
+        let pick = self.group_pick(group);
+        let (herdr, pages) = self.workspace_tabs(cx);
+        let others = herdr
+            .iter()
+            .any(|tab| pick.as_ref() != Some(&Pick::Herdr(tab.clone())))
+            || pages
+                .iter()
+                .any(|id| pick.as_ref() != Some(&Pick::Page(*id)));
+        let mut actions = Vec::new();
+        if pick.is_some() {
+            actions.push(Action::Close);
+        }
+        if others && pick.is_some() {
             actions.push(Action::CloseOthers);
         }
-        if !all.is_empty() {
+        if !herdr.is_empty() || !pages.is_empty() {
             actions.push(Action::CloseAll);
         }
-        actions.push(if self.split().is_some() {
-            Action::CloseSplit
-        } else {
-            Action::Split
-        });
+        actions.extend([Action::NewBrowserTab, Action::Split]);
+        if self.is_split() {
+            actions.push(Action::CloseGroup);
+        }
         actions
     }
 
     pub(crate) fn open_group_menu(
         &mut self,
-        side: Side,
+        group: GroupId,
         anchor: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -88,25 +121,142 @@ impl HerdrWindow {
         self.menu.anchor = anchor;
         self.menu.page = Some(Page::Group);
         self.menu.group = Some(GroupMenu {
-            side,
+            group,
             selected: None,
         });
     }
 
     fn activate_group_menu(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(side) = self.menu.group.as_ref().map(|menu| menu.side) else {
+        let Some(group) = self.menu.group.as_ref().map(|menu| menu.group) else {
             return;
         };
         self.dismiss_menu(window, cx);
-        self.activate_side(side, window, cx);
+        self.activate_group(group, window, cx);
         match action {
-            Action::NewBrowserTab => self.open_browser_tab_on(side, None, window, cx),
+            Action::Close => self.close_group_tab(group, window, cx),
             Action::CloseOthers => {
-                let (_, shown) = self.group_tabs(cx);
-                self.close_browser_tabs(|id| !shown.contains(&id), cx);
+                let keep = self.group_pick(group);
+                self.close_tabs(keep, window, cx);
             }
-            Action::CloseAll => self.close_browser_tabs(|_| true, cx),
-            Action::Split | Action::CloseSplit => self.toggle_split(window, cx),
+            Action::CloseAll => self.close_tabs(None, window, cx),
+            Action::NewBrowserTab => self.open_browser_tab_in(group, window, cx),
+            Action::Split => self.split_group(group, window, cx),
+            Action::CloseGroup => self.close_group(group, window, cx),
+        }
+    }
+
+    /// Closes the tab `group` picked: a page at once, a Herdr tab through
+    /// its confirmation.
+    pub(crate) fn close_group_tab(
+        &mut self,
+        group: GroupId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.group_pick(group) {
+            Some(Pick::Herdr(tab)) => self.open_tab_close(&tab, window, cx),
+            Some(Pick::Page(id)) => self.close_browser_tab(id, window, cx),
+            None => {}
+        }
+    }
+
+    /// Closes every tab of the focused workspace but `keep`, asking first
+    /// when that includes a Herdr tab.
+    fn close_tabs(&mut self, keep: Option<Pick>, window: &mut Window, cx: &mut Context<Self>) {
+        let (herdr, pages) = self.workspace_tabs(cx);
+        let tabs: Vec<String> = herdr
+            .into_iter()
+            .filter(|tab| keep.as_ref() != Some(&Pick::Herdr(tab.clone())))
+            .collect();
+        let pages: Vec<TabId> = pages
+            .into_iter()
+            .filter(|id| keep.as_ref() != Some(&Pick::Page(*id)))
+            .collect();
+        let Some(snapshot) = self.live.snapshot.as_ref() else {
+            return;
+        };
+        let (Some(workspace), false) = (
+            snapshot.focused_workspace_id.clone(),
+            tabs.is_empty() && pages.is_empty(),
+        ) else {
+            return;
+        };
+        let bulk = BulkClose {
+            boot: snapshot.boot_id.clone(),
+            workspace,
+            tabs,
+            pages,
+            confirm_selected: false,
+        };
+        if bulk.tabs.is_empty() || !self.config.confirm_close_tab {
+            self.run_bulk_close(bulk, window, cx);
+            return;
+        }
+        if !self.open_menu(window, cx) {
+            return;
+        }
+        self.menu.page = Some(Page::ConfirmCloseTabs);
+        self.menu.bulk_close = Some(bulk);
+    }
+
+    fn run_bulk_close(&mut self, bulk: BulkClose, window: &mut Window, cx: &mut Context<Self>) {
+        for id in bulk.pages {
+            self.close_browser_tab(id, window, cx);
+        }
+        self.browser
+            .tab_closes
+            .extend(bulk.tabs.into_iter().map(|tab| TabClose {
+                boot: bulk.boot.clone(),
+                workspace: bulk.workspace.clone(),
+                tab,
+            }));
+        self.flush_tab_closes(cx);
+        cx.notify();
+    }
+
+    fn confirm_bulk_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(bulk) = self.menu.bulk_close.take() else {
+            return;
+        };
+        self.dismiss_menu(window, cx);
+        self.run_bulk_close(bulk, window, cx);
+    }
+
+    /// Sends the next queued Herdr tab close once the connection takes
+    /// input again, so each close lands before the next is sent. Tabs that
+    /// are already gone are skipped, and a replaced daemon drops them all.
+    pub(crate) fn flush_tab_closes(&mut self, cx: &mut Context<Self>) {
+        if self.browser.tab_closes.is_empty() || !self.input_ready() {
+            return;
+        }
+        let Some(snapshot) = self.live.snapshot.clone() else {
+            self.browser.tab_closes.clear();
+            return;
+        };
+        while let Some(close) = self.browser.tab_closes.pop_front() {
+            if close.boot != snapshot.boot_id {
+                self.browser.tab_closes.clear();
+                return;
+            }
+            let open = snapshot
+                .tabs
+                .iter()
+                .any(|tab| tab.tab_id == close.tab && tab.workspace_id == close.workspace);
+            if !open {
+                continue;
+            }
+            let params = json!({"tab_id": close.tab});
+            if !self.request_focus_change(Method::TabClose.as_str(), None, |handle, boot| {
+                handle.request(boot, Method::TabClose, params)
+            }) {
+                // The error is the window's to show; the rest would fail too.
+                self.browser.tab_closes.clear();
+                if self.local_error.is_none() {
+                    self.local_error = Some(Error::NotConnected.to_string());
+                }
+            }
+            cx.notify();
+            return;
         }
     }
 
@@ -116,7 +266,10 @@ impl HerdrWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let actions = self.group_actions(cx);
+        let Some(group) = self.menu.group.as_ref().map(|menu| menu.group) else {
+            return;
+        };
+        let actions = self.group_actions(group, cx);
         let Some(menu) = &mut self.menu.group else {
             return;
         };
@@ -150,7 +303,7 @@ impl HerdrWindow {
         };
         let theme = &self.theme;
         let mut body = div().flex().flex_col();
-        for (index, action) in self.group_actions(cx).into_iter().enumerate() {
+        for (index, action) in self.group_actions(menu.group, cx).into_iter().enumerate() {
             body = body.child(
                 div()
                     .id(("group-menu-action", index))
@@ -181,6 +334,109 @@ impl HerdrWindow {
         }
         body
     }
+
+    pub(crate) fn bulk_close_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        window.prevent_default();
+        match event.keystroke.key.as_str() {
+            "escape" => self.dismiss_menu(window, cx),
+            "tab" | "left" | "right" => {
+                if let Some(bulk) = &mut self.menu.bulk_close {
+                    bulk.confirm_selected = !bulk.confirm_selected;
+                }
+                cx.notify();
+            }
+            "enter" => {
+                if self
+                    .menu
+                    .bulk_close
+                    .as_ref()
+                    .is_some_and(|bulk| bulk.confirm_selected)
+                {
+                    self.confirm_bulk_close(window, cx);
+                } else {
+                    self.dismiss_menu(window, cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn render_bulk_close(&self, cx: &mut Context<Self>) -> Div {
+        let Some(bulk) = &self.menu.bulk_close else {
+            return div();
+        };
+        let theme = &self.theme;
+        let count = bulk.tabs.len() + bulk.pages.len();
+        let plural = |count: usize, one: &'static str, many: &'static str| {
+            if count == 1 { one } else { many }
+        };
+        let detail = format!(
+            "This terminates every pane and running process in {} Herdr {}{}. This cannot be undone.",
+            bulk.tabs.len(),
+            plural(bulk.tabs.len(), "tab", "tabs"),
+            match bulk.pages.len() {
+                0 => String::new(),
+                pages => format!(
+                    " and closes {pages} browser {}",
+                    plural(pages, "tab", "tabs")
+                ),
+            },
+        );
+        let button = |id: &'static str, label: SharedString, lit: bool| {
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .px(px(12.))
+                .py(px(6.))
+                .rounded(px(crate::config::corners::CONTROL))
+                .border_1()
+                .border_color(rgb(if lit { theme.foreground } else { theme.active }))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(theme.active)))
+                .child(label)
+        };
+        div()
+            .p(px(12.))
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(
+                div()
+                    .text_size(px(self.config.ui.size * 1.35))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(format!("Close {count} {}?", plural(count, "tab", "tabs"))),
+            )
+            .child(div().text_color(rgb(theme.muted)).child(detail))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(8.))
+                    .child(
+                        button("bulk-close-cancel", "Cancel".into(), !bulk.confirm_selected)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.dismiss_menu(window, cx)),
+                            ),
+                    )
+                    .child(
+                        button(
+                            "bulk-close-confirm",
+                            format!("Close {}", plural(count, "Tab", "Tabs")).into(),
+                            bulk.confirm_selected,
+                        )
+                        .bg(rgb(theme.active))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.confirm_bulk_close(window, cx)),
+                        ),
+                    ),
+            )
+    }
 }
 
 #[cfg(test)]
@@ -206,8 +462,12 @@ mod tests {
         })
     }
 
+    fn draw(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| full_draw(window, cx).clear(cx));
+    }
+
     /// Opens blank tabs, which need no native page, without showing them.
-    fn open_tabs(view: &Entity<HerdrWindow>, cx: &mut VisualTestContext, count: usize) {
+    fn open_pages(view: &Entity<HerdrWindow>, cx: &mut VisualTestContext, count: usize) {
         cx.update(|_, cx| {
             let scope = crate::browser::scope(&view.read(cx).endpoints[0]);
             Store::update(cx, |store| {
@@ -218,74 +478,144 @@ mod tests {
         });
     }
 
-    fn actions(view: &Entity<HerdrWindow>, cx: &mut VisualTestContext) -> Vec<Action> {
-        cx.update(|_, cx| view.read(cx).group_actions(cx))
+    fn group(view: &Entity<HerdrWindow>, cx: &mut VisualTestContext) -> GroupId {
+        draw(cx);
+        view.read_with(cx, |view, _| view.active_group().unwrap())
     }
 
-    fn tab_ids(view: &Entity<HerdrWindow>, cx: &mut VisualTestContext) -> Vec<TabId> {
-        cx.update(|_, cx| view.read(cx).group_tabs(cx).0)
+    fn actions(view: &Entity<HerdrWindow>, cx: &mut VisualTestContext) -> Vec<Action> {
+        let group = group(view, cx);
+        cx.update(|_, cx| view.read(cx).group_actions(group, cx))
+    }
+
+    fn run(view: &Entity<HerdrWindow>, cx: &mut VisualTestContext, action: Action) {
+        let group = group(view, cx);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.open_group_menu(group, Point::default(), window, cx);
+                view.activate_group_menu(action, window, cx);
+            })
+        });
+    }
+
+    fn herdr_tabs(view: &Entity<HerdrWindow>, cx: &mut VisualTestContext) -> usize {
+        view.read_with(cx, |view, _| {
+            let snapshot = view.live.snapshot.as_ref().unwrap();
+            snapshot
+                .tabs
+                .iter()
+                .filter(|tab| tab.workspace_id == "w0")
+                .count()
+        })
     }
 
     #[gpui::test]
-    fn bulk_closes_only_reach_browser_tabs(cx: &mut TestAppContext) {
+    fn bulk_closes_reach_herdr_tabs_after_asking(cx: &mut TestAppContext) {
         let (view, cx) = window(cx);
-        assert_eq!(actions(&view, cx), [Action::NewBrowserTab, Action::Split]);
-        open_tabs(&view, cx, 3);
-        let ids = tab_ids(&view, cx);
-        assert_eq!(ids.len(), 3);
-        assert_eq!(
-            actions(&view, cx),
-            [
-                Action::NewBrowserTab,
-                Action::CloseOthers,
-                Action::CloseAll,
-                Action::Split
-            ]
-        );
-        cx.update(|window, cx| {
-            view.update(cx, |view, cx| view.show_browser_tab(ids[1], window, cx))
+        let herdr = herdr_tabs(&view, cx);
+        assert!(herdr > 0);
+        let all = actions(&view, cx);
+        assert!(all.contains(&Action::Close) && all.contains(&Action::CloseAll));
+        assert!(!all.contains(&Action::CloseGroup));
+        open_pages(&view, cx, 2);
+        let pages = cx.update(|_, cx| view.read(cx).browser_tab_ids(cx));
+
+        // Close Others keeps the group's tab and asks about the Herdr ones.
+        run(&view, cx, Action::CloseOthers);
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.menu.page, Some(Page::ConfirmCloseTabs));
+            let bulk = view.menu.bulk_close.as_ref().unwrap();
+            assert_eq!(bulk.tabs.len(), herdr - 1);
+            assert!(!bulk.tabs.contains(&"t0".to_owned()));
+            assert_eq!(bulk.pages, pages);
         });
-        // Close Others keeps the tab on show.
+        draw(cx);
+        assert!(cx.debug_bounds("bulk-close-confirm").is_some());
+        // Cancelling closes nothing.
+        cx.simulate_keystrokes("escape");
+        assert_eq!(cx.update(|_, cx| view.read(cx).browser_tab_ids(cx)), pages);
+
+        run(&view, cx, Action::CloseAll);
+        cx.simulate_keystrokes("tab enter");
+        view.read_with(cx, |view, _| {
+            assert!(view.menu.page.is_none());
+            // The fixture takes no input, so every Herdr close still waits.
+            let queued: Vec<&str> = view
+                .browser
+                .tab_closes
+                .iter()
+                .map(|close| close.tab.as_str())
+                .collect();
+            assert_eq!(queued.len(), herdr);
+            assert!(queued.contains(&"t0"));
+        });
+        assert!(
+            cx.update(|_, cx| view.read(cx).browser_tab_ids(cx))
+                .is_empty()
+        );
+    }
+
+    #[gpui::test]
+    fn a_group_closes_its_own_page_without_asking(cx: &mut TestAppContext) {
+        let (view, cx) = window(cx);
+        open_pages(&view, cx, 2);
+        let pages = cx.update(|_, cx| view.read(cx).browser_tab_ids(cx));
+        let group = group(&view, cx);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.open_group_menu(Side::Left, Point::default(), window, cx);
-                view.activate_group_menu(Action::CloseOthers, window, cx);
+                view.show_browser_tab_in(Some(group), pages[0], window, cx)
             })
         });
-        assert_eq!(tab_ids(&view, cx), [ids[1]]);
-        assert!(view.read_with(cx, |view, _| view.menu.page.is_none()));
+        run(&view, cx, Action::Close);
         assert_eq!(
-            actions(&view, cx),
-            [Action::NewBrowserTab, Action::CloseAll, Action::Split]
+            cx.update(|_, cx| view.read(cx).browser_tab_ids(cx)),
+            [pages[1]]
         );
-        cx.update(|window, cx| {
+        view.read_with(cx, |view, _| {
+            assert!(view.menu.page.is_none());
+            // The group moves on to the next page.
+            assert_eq!(view.group_pick(group), Some(Pick::Page(pages[1])));
+        });
+    }
+
+    #[gpui::test]
+    fn queued_closes_wait_for_the_connection(cx: &mut TestAppContext) {
+        let (view, cx) = window(cx);
+        cx.update(|_, cx| {
             view.update(cx, |view, cx| {
-                view.open_group_menu(Side::Left, Point::default(), window, cx);
-                view.activate_group_menu(Action::CloseAll, window, cx);
+                let boot = view.live.snapshot.as_ref().unwrap().boot_id.clone();
+                view.browser.tab_closes.push_back(TabClose {
+                    boot,
+                    workspace: "w0".into(),
+                    tab: "t0".into(),
+                });
+                // The fixture never takes input, so nothing is sent.
+                view.flush_tab_closes(cx);
+                assert_eq!(view.browser.tab_closes.len(), 1);
             })
         });
-        assert!(tab_ids(&view, cx).is_empty());
-        cx.update(|window, cx| full_draw(window, cx).clear(cx));
-        assert!(cx.debug_bounds("terminal").is_some());
-        // The Herdr tabs are untouched.
-        assert!(cx.debug_bounds("tab-t0").is_some());
     }
 
     #[gpui::test]
     fn the_menu_opens_from_the_strip_and_steps_with_the_keyboard(cx: &mut TestAppContext) {
         let (view, cx) = window(cx);
-        cx.update(|window, cx| full_draw(window, cx).clear(cx));
+        draw(cx);
         let button = cx.debug_bounds("tab-actions").unwrap();
         cx.simulate_click(button.center(), Modifiers::none());
-        cx.update(|window, cx| full_draw(window, cx).clear(cx));
+        draw(cx);
         assert!(view.read_with(cx, |view, _| view.menu.page == Some(Page::Group)));
-        assert!(cx.debug_bounds("group-menu-NewBrowserTab").is_some());
-        assert!(cx.debug_bounds("group-menu-Split").is_some());
-        assert!(cx.debug_bounds("group-menu-CloseAll").is_none());
-        cx.simulate_keystrokes("up");
+        for row in [
+            "group-menu-Close",
+            "group-menu-CloseAll",
+            "group-menu-NewBrowserTab",
+            "group-menu-Split",
+        ] {
+            assert!(cx.debug_bounds(row).is_some(), "{row}");
+        }
+        cx.simulate_keystrokes("down");
         assert_eq!(
             view.read_with(cx, |view, _| view.menu.group.as_ref().unwrap().selected),
-            Some(1)
+            Some(0)
         );
         cx.simulate_keystrokes("escape");
         assert!(view.read_with(cx, |view, _| view.menu.page.is_none()));

@@ -39,7 +39,7 @@ pub enum Command {
     OpenNotificationTarget,
     NewBrowserTab,
     InstallBrowserSkill,
-    ToggleSplitEditor,
+    SplitEditor,
 }
 
 pub struct CommandInfo {
@@ -317,9 +317,9 @@ pub const COMMANDS: &[CommandInfo] = &[
         shortcuts: &[],
     },
     CommandInfo {
-        command: Command::ToggleSplitEditor,
-        name: "toggle_split_editor",
-        label: "Toggle Split Editor",
+        command: Command::SplitEditor,
+        name: "split_editor",
+        label: "Split Editor",
         shortcuts: &["cmd-\\"],
     },
 ];
@@ -440,7 +440,7 @@ pub fn request(command: Command, snapshot: &ClientShellSnapshot) -> Option<(Meth
         | Command::OpenNotificationTarget
         | Command::NewBrowserTab
         | Command::InstallBrowserSkill
-        | Command::ToggleSplitEditor => return None,
+        | Command::SplitEditor => return None,
     })
 }
 
@@ -504,7 +504,7 @@ mod tests {
             (About, &[]),
             (NewBrowserTab, &[]),
             (InstallBrowserSkill, &[]),
-            (ToggleSplitEditor, &["cmd-\\"]),
+            (SplitEditor, &["cmd-\\"]),
         ];
         assert_eq!(COMMANDS.len(), expected.len());
         let shortcuts: std::collections::HashSet<_> =
@@ -569,7 +569,7 @@ mod tests {
             Command::About,
             Command::NewBrowserTab,
             Command::InstallBrowserSkill,
-            Command::ToggleSplitEditor,
+            Command::SplitEditor,
         ] {
             assert!(request(command, &s).is_none(), "{command:?}");
         }

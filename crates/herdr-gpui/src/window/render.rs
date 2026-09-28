@@ -7,7 +7,7 @@ use crate::{
     APP_VERSION, CheckForUpdates, Minimize, PlaySound, RunCommand, ShowHerdrNotDetected,
     ShowUpdatePreview,
     actions::ShowToastPreview,
-    browser::{Content, Side},
+    browser::{Shown, Slot},
     config::ClipboardToastPosition,
     fonts::StyledFont,
     state::ConnectionStatus,
@@ -67,15 +67,20 @@ impl Render for HerdrWindow {
         } else {
             0.
         };
-        // Only the left side meets the sidebar, so only it takes the gap.
-        let side_gap = |side: Side| if side == Side::Left { sidebar_gap } else { 0. };
-        let groups = self.browser_groups(cx);
-        let sides = self.visible_sides();
-        let terminal_side = sides
+        // Only the first group meets the sidebar, so only it takes the gap.
+        self.ensure_layout();
+        let slots = self.group_slots();
+        let shown: Vec<Shown> = slots
             .iter()
-            .copied()
-            .find(|side| groups.content(*side) == Content::Terminal);
-        let terminal_gap = terminal_side.map_or(sidebar_gap, side_gap);
+            .map(|slot| self.group_shown(slot.id, cx))
+            .collect();
+        let slot_gap = |slot: Slot| if slot.index == 0 { sidebar_gap } else { 0. };
+        let terminal_slot = slots
+            .iter()
+            .zip(&shown)
+            .find(|(_, shown)| **shown == Shown::Terminal)
+            .map(|(slot, _)| *slot);
+        let terminal_gap = terminal_slot.map_or(sidebar_gap, slot_gap);
         let terminal = div()
             .id("terminal")
             .debug_selector(|| "terminal".into())
@@ -384,34 +389,36 @@ impl Render for HerdrWindow {
                 )
             });
         // A focus handle belongs to one element: the terminal when drawn,
-        // otherwise the first side.
-        let keyboard = terminal_side.is_none().then(|| sides[0]);
+        // otherwise the group in use.
+        let keyboard = terminal_slot
+            .is_none()
+            .then(|| self.active_group())
+            .flatten();
         let mut terminal = Some(terminal);
-        let mut columns = Vec::with_capacity(sides.len());
-        for side in sides.iter().copied() {
-            let content = groups.content(side);
-            let tab = match content {
-                Content::Page(id) => cx
+        let mut groups = Vec::with_capacity(slots.len());
+        for (slot, shown) in slots.into_iter().zip(shown) {
+            let gap = slot_gap(slot);
+            let owns_keyboard = keyboard == Some(slot.id);
+            let tab = match &shown {
+                Shown::Page(id) => cx
                     .try_global::<crate::browser::Store>()
-                    .and_then(|store| store.get(id))
+                    .and_then(|store| store.get(*id))
                     .cloned(),
-                Content::Terminal | Content::Empty => None,
+                _ => None,
             };
-            let body = match (content, tab) {
-                (Content::Terminal, _) => terminal
+            let body = match (&shown, tab) {
+                (Shown::Terminal, _) => terminal
                     .take()
                     .map(IntoElement::into_any_element)
                     .unwrap_or_else(|| div().into_any_element()),
-                (Content::Page(_), Some(tab)) => {
-                    self.render_browser(side, &tab, side_gap(side), keyboard == Some(side), cx)
+                (Shown::Page(_), Some(tab)) => {
+                    self.render_browser(slot, &tab, gap, owns_keyboard, cx)
                 }
-                (Content::Page(_) | Content::Empty, _) => {
-                    self.render_empty_side(side, side_gap(side), keyboard == Some(side), cx)
-                }
+                _ => self.render_stand_in(slot, &shown, gap, owns_keyboard, cx),
             };
-            columns.push(self.render_side(side, content, body, cx));
+            groups.push(self.render_group(slot, body, cx));
         }
-        let content = self.render_sides(columns, cx);
+        let content = self.render_groups(groups, cx);
         self.present_browser(cx);
         let status = (!matches!(self.live.status, ConnectionStatus::Connected)
             || self.local_error.is_some()

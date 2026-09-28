@@ -1,5 +1,5 @@
-//! Browser tabs: web pages shown in place of the terminal, or beside it in a
-//! split window, next to a workspace's Herdr tabs. Herdr panes are always
+//! Browser tabs: web pages shown in place of the terminal, or beside it in
+//! another editor group, next to a workspace's Herdr tabs. Herdr panes are always
 //! terminals, so these tabs belong to this client alone; the daemon and its
 //! other clients never see them. Pages are native web views drawn above the window, which is why the
 //! window hides them whenever one of its own overlays is open.
@@ -11,6 +11,7 @@ mod annotate;
 mod annotate_view;
 mod feedback;
 mod groups;
+mod groups_view;
 mod location;
 #[cfg(any(target_os = "macos", windows))]
 mod native;
@@ -26,7 +27,7 @@ mod view_tests;
 #[cfg(any(target_os = "macos", windows))]
 pub(crate) use annotate_view::Annotations;
 pub(crate) use feedback::Feedback;
-pub(crate) use groups::{Content, Side};
+pub(crate) use groups::{GroupId, Pick, Shown, Slot};
 pub(crate) use location::{LocalFile, Location};
 #[cfg(any(target_os = "macos", windows))]
 pub(crate) use native::Pages;

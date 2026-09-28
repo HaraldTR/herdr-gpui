@@ -628,6 +628,8 @@ impl HerdrWindow {
             panel = panel.child(self.render_tab_menu(cx));
         } else if page == Page::Group {
             panel = panel.child(self.render_group_menu(cx));
+        } else if page == Page::ConfirmCloseTabs {
+            panel = panel.child(self.render_bulk_close(cx));
         } else if matches!(page, Page::Pane | Page::RenamePane) {
             panel = panel.child(self.render_pane_menu(cx));
         } else if page == Page::Keybinds {
@@ -852,6 +854,10 @@ impl HerdrWindow {
                 }
                 if this.menu.page == Some(Page::Group) {
                     this.group_menu_key(event, window, cx);
+                    return;
+                }
+                if this.menu.page == Some(Page::ConfirmCloseTabs) {
+                    this.bulk_close_key(event, window, cx);
                     return;
                 }
                 if matches!(this.menu.page, Some(Page::Pane | Page::RenamePane)) {

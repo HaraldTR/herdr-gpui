@@ -212,17 +212,22 @@ impl HerdrWindow {
                 return;
             }
             // A page has no panes, so either close closes its tab, as in
-            // a web browser; nothing runs in it that needs confirming. An
-            // empty side of a split closes the split, as an editor group does.
+            // a web browser; nothing runs in it that needs confirming. A group
+            // standing in for a tab closes that tab, and an empty group of a
+            // split closes, as an editor group does.
             Command::ClosePane | Command::CloseTab => {
-                match self.side_content(self.active_side(), cx) {
-                    crate::browser::Content::Page(id) => self.close_browser_tab(id, window, cx),
-                    crate::browser::Content::Empty => {
-                        self.close_split(self.active_side().other(), window, cx)
-                    }
-                    crate::browser::Content::Terminal => {
+                let Some(group) = self.active_group() else {
+                    self.open_close_confirmation(command, window, cx);
+                    return;
+                };
+                match self.group_shown(group, cx) {
+                    crate::browser::Shown::Terminal => {
                         self.open_close_confirmation(command, window, cx)
                     }
+                    crate::browser::Shown::Page(_) | crate::browser::Shown::Elsewhere(_) => {
+                        self.close_group_tab(group, window, cx)
+                    }
+                    crate::browser::Shown::Empty => self.close_group(group, window, cx),
                 }
                 return;
             }
@@ -230,8 +235,8 @@ impl HerdrWindow {
                 self.open_browser_tab(None, window, cx);
                 return;
             }
-            Command::ToggleSplitEditor => {
-                self.toggle_split(window, cx);
+            Command::SplitEditor => {
+                self.split_active_group(window, cx);
                 return;
             }
             Command::InstallBrowserSkill => {

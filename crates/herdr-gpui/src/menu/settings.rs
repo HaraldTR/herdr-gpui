@@ -238,7 +238,7 @@ impl HerdrWindow {
                 | Command::ClosePane
                 | Command::CloseTab
                 | Command::NewBrowserTab
-                | Command::ToggleSplitEditor => 0,
+                | Command::SplitEditor => 0,
                 Command::NextTab
                 | Command::PreviousTab
                 | Command::FocusLeft
