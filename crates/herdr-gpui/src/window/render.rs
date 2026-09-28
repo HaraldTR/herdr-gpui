@@ -22,6 +22,8 @@ impl Render for HerdrWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.restore_menu_focus(window, cx);
         let font = self.config.terminal.font();
+        // Parked groups paint with the same face as the window's terminal.
+        let parked_font = font.clone();
         let cell_height = self.config.terminal.line_height();
         self.painter.borrow_mut().set_appearance(
             self.config.terminal.size,
@@ -75,10 +77,15 @@ impl Render for HerdrWindow {
             .map(|slot| self.group_shown(slot.id, cx))
             .collect();
         let slot_gap = |slot: Slot| if slot.index == 0 { sidebar_gap } else { 0. };
+        // The window's own terminal, with its input, goes to the group holding
+        // its connection; other terminal groups paint parked connections.
+        let primary = self.primary_group();
         let terminal_slot = slots
             .iter()
             .zip(&shown)
-            .find(|(_, shown)| **shown == Shown::Terminal)
+            .find(|(slot, shown)| {
+                **shown == Shown::Terminal && primary.is_none_or(|group| group == slot.id)
+            })
             .map(|(slot, _)| *slot);
         let terminal_gap = terminal_slot.map_or(sidebar_gap, slot_gap);
         let terminal = div()
@@ -407,10 +414,13 @@ impl Render for HerdrWindow {
                 _ => None,
             };
             let body = match (&shown, tab) {
-                (Shown::Terminal, _) => terminal
+                (Shown::Terminal, _) if terminal_slot == Some(slot) => terminal
                     .take()
                     .map(IntoElement::into_any_element)
                     .unwrap_or_else(|| div().into_any_element()),
+                (Shown::Terminal, _) if self.shows_parked_terminal(slot.id, cx) => {
+                    self.render_parked_terminal(slot, gap, parked_font.clone(), cell_height, cx)
+                }
                 (Shown::Page(_), Some(tab)) => {
                     self.render_browser(slot, &tab, gap, owns_keyboard, cx)
                 }

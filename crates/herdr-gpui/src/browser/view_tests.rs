@@ -257,7 +257,7 @@ mod groups {
             view.update(cx, |view, cx| {
                 let snapshot = Arc::make_mut(view.live.snapshot.as_mut().unwrap());
                 snapshot.focused_tab_id = Some(other.clone());
-                view.terminal_focus_moved(Some("t0"), &other, cx);
+                view.terminal_focus_moved(&other, false, cx);
             })
         });
         assert_eq!(

@@ -243,10 +243,10 @@ impl HerdrWindow {
                             .find(|candidate| &candidate.tab_id == tab)
                     })
                     .map_or_else(|| tab.clone(), |tab| tab.label.clone());
-                let note = if self.focused_herdr_tab() == Some(tab.as_str()) {
-                    "Shown in another group."
+                let note = if self.group_connecting(slot.id) {
+                    "Opening\u{2026}"
                 } else {
-                    "Not the focused Herdr tab."
+                    "Shown in another group."
                 };
                 (label.into(), note)
             }
@@ -257,7 +257,9 @@ impl HerdrWindow {
                     .map_or_else(String::new, |tab| tab.title.clone());
                 (title.into(), "Shown in another group.")
             }
-            Shown::Terminal | Shown::Page(_) | Shown::Empty => ("".into(), "Nothing to show."),
+            // A terminal group whose connection has not shown its tab yet.
+            Shown::Terminal => ("".into(), "Opening\u{2026}"),
+            Shown::Page(_) | Shown::Empty => ("".into(), "Nothing to show."),
         };
         let elsewhere = matches!(shown, Shown::Elsewhere(_));
         div()

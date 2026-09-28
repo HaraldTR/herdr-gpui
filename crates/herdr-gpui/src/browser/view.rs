@@ -36,6 +36,8 @@ pub(crate) struct Browser {
     /// Herdr tabs a bulk close still has to close, sent one per tick so
     /// they never crowd the connection's bounded command queue.
     pub(crate) tab_closes: std::collections::VecDeque<crate::group_menu::TabClose>,
+    /// The connection of each group that shows a terminal.
+    pub(crate) terminals: crate::group_terminals::GroupTerminals,
     /// Why a tab's page could not be created, shown in its place.
     pub(super) failed: Option<(TabId, SharedString)>,
     /// The workspaces of the last snapshot and the boot they came from: one
@@ -60,6 +62,7 @@ impl Browser {
             addresses: HashMap::new(),
             new_tab_group: None,
             tab_closes: Default::default(),
+            terminals: Default::default(),
             failed: None,
             workspaces: None,
             #[cfg(any(target_os = "macos", windows))]
@@ -90,7 +93,7 @@ pub(super) fn store(cx: &App) -> Option<&Store> {
 }
 
 impl HerdrWindow {
-    pub(super) fn browser_key(&self) -> Option<(Scope, String)> {
+    pub(crate) fn browser_key(&self) -> Option<(Scope, String)> {
         let workspace = self.live.snapshot.as_ref()?.focused_workspace_id.clone()?;
         Some((scope(&self.endpoints[self.selected_endpoint]), workspace))
     }

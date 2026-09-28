@@ -146,6 +146,20 @@ impl Endpoint {
     pub fn surface_requested(&self) -> bool {
         self.initial_surface
     }
+
+    /// Trades this endpoint's connection, and its projection, for another
+    /// client of the same daemon that said hello with an active surface, as
+    /// an editor group's own connection does. The caller keeps the one this
+    /// endpoint had.
+    pub(crate) fn trade_connection(
+        &mut self,
+        connection: &mut ConnectionBridge,
+        live: &mut LiveState,
+    ) {
+        std::mem::swap(&mut self.connection, connection);
+        std::mem::swap(&mut self.live, live);
+        self.initial_surface = true;
+    }
     pub fn new(id: String, label: String, target: ConnectTarget, enabled: bool) -> Self {
         Self {
             id,

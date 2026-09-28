@@ -443,6 +443,20 @@ pub(crate) mod tests {
 
     impl Peer {
         pub(crate) fn new() -> Self {
+            Self::advertising(&[])
+        }
+
+        /// A peer whose welcome also advertises `methods`, so requests the
+        /// fixture's welcome lacks reach the wire instead of being refused.
+        pub(crate) fn advertising(methods: &[&str]) -> Self {
+            let mut welcome: serde_json::Value = serde_json::from_str(include_str!(
+                "../../../herdr-protocol/tests/fixtures/endpoint-welcome-v1.json"
+            ))
+            .unwrap();
+            if let Some(advertised) = welcome["methods"].as_array_mut() {
+                advertised.extend(methods.iter().map(|method| serde_json::json!(method)));
+            }
+            let welcome = welcome.to_string();
             let (stream, mut server) = Stream::pair().unwrap();
             server
                 .set_read_timeout(Some(Duration::from_secs(3)))
@@ -462,10 +476,7 @@ pub(crate) mod tests {
                 ClientMessage::EndpointControl { .. }
             ));
             for (kind, data) in [
-                (
-                    ENDPOINT_WELCOME_KIND,
-                    include_str!("../../../herdr-protocol/tests/fixtures/endpoint-welcome-v1.json"),
-                ),
+                (ENDPOINT_WELCOME_KIND, welcome.as_str()),
                 (
                     ENDPOINT_SNAPSHOT_KIND,
                     include_str!(

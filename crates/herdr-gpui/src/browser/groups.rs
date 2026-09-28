@@ -1,12 +1,12 @@
 //! Editor groups: a workspace's view split into side-by-side groups, each
 //! listing the same tabs and showing one of them, as an editor's groups do.
 //!
-//! Any tab may be picked in several groups at once, but the daemon projects a
-//! single terminal surface and a native page can be placed only once, so a
-//! tab is live in just one of them: the group used most recently. The others
-//! stand in for it until they are used again. The terminal is live only in a
-//! group that picked the daemon's focused tab; using a group that picked
-//! another Herdr tab is what focuses that tab.
+//! Each group that shows a terminal has a client connection of its own, and
+//! the daemon keeps a focused tab per client, so groups show different Herdr
+//! tabs side by side. A tab is still live in just one group at a time: the
+//! daemon sizes a tab for one client, and a native page is placed only once.
+//! Of the groups that picked the same tab, the one used last shows it and
+//! the others stand in for it until they are used again.
 use super::TabId;
 
 /// Neither group beside a divider may be dragged narrower than this share
@@ -140,9 +140,10 @@ impl Layout {
             .or_else(|| focused.map(|tab| Pick::Herdr(tab.to_owned())))
     }
 
-    /// What `id` draws while the daemon focuses `focused`.
-    pub(crate) fn shown(&self, id: GroupId, focused: Option<&str>) -> Shown {
-        let Some(pick) = self.pick(id, focused) else {
+    /// What `id` draws, where `focused` names the tab each group's own
+    /// connection focuses.
+    pub(crate) fn shown(&self, id: GroupId, focused: impl Fn(GroupId) -> Option<String>) -> Shown {
+        let Some(pick) = self.pick(id, focused(id).as_deref()) else {
             // Following a terminal the daemon has not focused: the terminal
             // area still shows, as it does before a workspace connects.
             let follower = self
@@ -158,8 +159,8 @@ impl Layout {
             };
         };
         let live = match &pick {
-            Pick::Herdr(tab) if Some(tab.as_str()) != focused => false,
-            _ => self.holder(&pick, focused) == Some(id),
+            Pick::Herdr(tab) if focused(id).as_deref() != Some(tab.as_str()) => false,
+            _ => self.holder(&pick, &focused) == Some(id),
         };
         match (live, pick) {
             (true, Pick::Herdr(_)) => Shown::Terminal,
@@ -169,12 +170,37 @@ impl Layout {
     }
 
     /// The group a tab is live in: the latest used of those that picked it.
-    fn holder(&self, pick: &Pick, focused: Option<&str>) -> Option<GroupId> {
+    fn holder(&self, pick: &Pick, focused: &impl Fn(GroupId) -> Option<String>) -> Option<GroupId> {
         self.groups
             .iter()
-            .filter(|group| self.pick(group.id, focused).as_ref() == Some(pick))
+            .filter(|group| {
+                self.pick(group.id, focused(group.id).as_deref()).as_ref() == Some(pick)
+            })
             .max_by_key(|group| group.used)
             .map(|group| group.id)
+    }
+
+    /// The Herdr tab each group picked, for the groups that hold it: the
+    /// ones that need a terminal connection. A group following the terminal
+    /// is left out; it shows whatever the window's own connection focuses.
+    pub(crate) fn terminal_holders(&self) -> Vec<(GroupId, String)> {
+        let mut holders: Vec<(GroupId, String, u64)> = Vec::new();
+        for group in &self.groups {
+            let Some(Pick::Herdr(tab)) = &group.pick else {
+                continue;
+            };
+            match holders.iter_mut().find(|(_, held, _)| held == tab) {
+                Some(holder) if holder.2 < group.used => {
+                    *holder = (group.id, tab.clone(), group.used)
+                }
+                Some(_) => {}
+                None => holders.push((group.id, tab.clone(), group.used)),
+            }
+        }
+        holders
+            .into_iter()
+            .map(|(group, tab, _)| (group, tab))
+            .collect()
     }
 
     /// Makes `id` the group in use. Returns whether anything changed.
@@ -266,37 +292,14 @@ impl Layout {
         true
     }
 
-    /// Follows the daemon moving its focus from `old` to `new`, from a
-    /// shortcut, an agent, or a closed tab. The latest used group that showed
-    /// `old` now shows `new`; with none, the group in use does. Nothing moves
-    /// when a group already asked for `new`, since using that group is what
-    /// focused it.
-    pub(crate) fn focus_moved(&mut self, old: Option<&str>, new: &str) {
-        let asked = Pick::Herdr(new.to_owned());
-        if self
-            .groups
-            .iter()
-            .any(|group| group.pick.as_ref() == Some(&asked))
+    /// Follows the daemon moving the focus of `group`'s connection to `new`,
+    /// from a shortcut, an agent, or a closed tab. A group following the
+    /// terminal already shows it.
+    pub(crate) fn focus_moved(&mut self, group: GroupId, new: &str) {
+        if let Some(group) = self.group_mut(group)
+            && group.pick.is_some()
         {
-            return;
-        }
-        let old = old.map(|tab| Pick::Herdr(tab.to_owned()));
-        // A group following the terminal already shows `new`; one that
-        // picked `old` follows along with it.
-        if self.groups.iter().any(|group| group.pick.is_none()) {
-            if let Some(old) = &old {
-                self.replace(old, None, Some(new));
-            }
-            return;
-        }
-        let follower = self
-            .groups
-            .iter()
-            .filter(|group| old.is_some() && group.pick == old)
-            .max_by_key(|group| group.used)
-            .map_or(self.active, |group| group.id);
-        if let Some(group) = self.group_mut(follower) {
-            group.pick = Some(asked);
+            group.pick = Some(Pick::Herdr(new.to_owned()));
         }
     }
 
@@ -343,10 +346,24 @@ mod tests {
         Pick::Herdr(id.into())
     }
 
+    /// Every group's connection focusing the same tab, as before a split
+    /// connects the others.
     fn shown(layout: &Layout, focused: &str) -> Vec<Shown> {
-        layout
-            .slots()
-            .map(|slot| layout.shown(slot.id, Some(focused)))
+        each(layout, &[focused; 8])
+    }
+
+    /// Group `i`'s connection focusing `focused[i]`.
+    fn each(layout: &Layout, focused: &[&str]) -> Vec<Shown> {
+        let slots: Vec<Slot> = layout.slots().collect();
+        let focus = |group: GroupId| {
+            slots
+                .iter()
+                .position(|slot| slot.id == group)
+                .map(|index| focused[index].to_owned())
+        };
+        slots
+            .iter()
+            .map(|slot| layout.shown(slot.id, focus))
             .collect()
     }
 
@@ -360,58 +377,61 @@ mod tests {
     fn an_unsplit_layout_follows_the_terminal_until_a_page_is_picked() {
         let (mut layout, _, a) = layout();
         assert_eq!(shown(&layout, "t1"), [Terminal]);
-        assert_eq!(layout.shown(a, None), Terminal);
+        assert_eq!(layout.shown(a, |_| None), Terminal);
         layout.choose(a, page(1));
         assert_eq!(shown(&layout, "t1"), [Page(TabId::test(1))]);
         layout.choose(a, herdr("t1"));
         assert_eq!(shown(&layout, "t1"), [Terminal]);
-        // Picking a Herdr tab the daemon does not focus waits for it.
+        // Picking a Herdr tab its connection does not focus waits for it.
         layout.choose(a, herdr("t2"));
         assert_eq!(shown(&layout, "t1"), [Elsewhere(herdr("t2"))]);
         assert_eq!(shown(&layout, "t2"), [Terminal]);
     }
 
     #[test]
-    fn splitting_moves_the_tab_to_the_new_group_and_leaves_a_stand_in() {
+    fn groups_show_different_herdr_tabs_through_their_own_connections() {
         let (mut layout, mut ids, a) = layout();
         let (b, c) = (ids.next(), ids.next());
+        assert!(layout.split(a, b, Some("t1")));
+        assert!(layout.split(b, c, Some("t1")));
+        layout.choose(b, herdr("t2"));
+        layout.choose(c, page(7));
+        assert_eq!(
+            each(&layout, &["t1", "t2", "t1"]),
+            [Terminal, Terminal, Page(TabId::test(7))]
+        );
+        // A connection still on its way to the tab stands in for it.
+        assert_eq!(
+            each(&layout, &["t1", "t1", "t1"]),
+            [Terminal, Elsewhere(herdr("t2")), Page(TabId::test(7))]
+        );
+        // Only groups holding a Herdr tab need a connection.
+        assert_eq!(
+            layout.terminal_holders(),
+            [(a, "t1".to_owned()), (b, "t2".to_owned())]
+        );
+    }
+
+    #[test]
+    fn one_tab_is_live_in_the_latest_group_to_use_it() {
+        let (mut layout, mut ids, a) = layout();
+        let b = ids.next();
         assert!(layout.split(a, b, Some("t1")));
         assert_eq!(layout.len(), 2);
         assert_eq!(layout.active(), b);
         assert_eq!(shown(&layout, "t1"), [Elsewhere(herdr("t1")), Terminal]);
+        assert_eq!(layout.terminal_holders(), [(b, "t1".to_owned())]);
         assert_eq!(layout.share(a), 0.5);
-        // Using the first group takes the terminal back.
         assert!(layout.activate(a));
+        assert!(!layout.activate(a));
         assert_eq!(shown(&layout, "t1"), [Terminal, Elsewhere(herdr("t1"))]);
-        // Splits go as far as asked.
-        layout.choose(b, page(7));
-        assert!(layout.split(b, c, Some("t1")));
-        assert_eq!(
-            shown(&layout, "t1"),
-            [Terminal, Elsewhere(page(7)), Page(TabId::test(7))]
-        );
-        assert_eq!(layout.share(b), 0.25);
-        assert_eq!(layout.share(c), 0.25);
-        assert!(!layout.split(ids.next(), ids.next(), Some("t1")));
-    }
-
-    #[test]
-    fn a_page_is_live_in_the_latest_group_to_use_it() {
-        let (mut layout, mut ids, a) = layout();
-        let b = ids.next();
-        layout.split(a, b, Some("t1"));
         layout.choose(b, page(1));
         layout.choose(a, page(1));
         assert_eq!(
             shown(&layout, "t1"),
             [Page(TabId::test(1)), Elsewhere(page(1))]
         );
-        assert!(layout.activate(b));
-        assert!(!layout.activate(b));
-        assert_eq!(
-            shown(&layout, "t1"),
-            [Elsewhere(page(1)), Page(TabId::test(1))]
-        );
+        assert!(!layout.split(ids.next(), ids.next(), Some("t1")));
     }
 
     #[test]
@@ -420,6 +440,7 @@ mod tests {
         let (b, c) = (ids.next(), ids.next());
         layout.split(a, b, Some("t1"));
         layout.split(b, c, Some("t1"));
+        assert_eq!(layout.share(b), 0.25);
         assert!(layout.close(c));
         assert_eq!(layout.active(), b);
         assert_eq!(layout.share(b), 0.5);
@@ -448,33 +469,20 @@ mod tests {
     }
 
     #[test]
-    fn daemon_focus_moves_the_group_that_showed_the_old_tab() {
+    fn a_connections_focus_moves_only_its_own_group() {
         let (mut layout, mut ids, a) = layout();
         let b = ids.next();
+        // Alone, a group follows the terminal.
+        layout.focus_moved(a, "t9");
+        assert_eq!(layout.pick(a, Some("t2")), Some(herdr("t2")));
         layout.split(a, b, Some("t1"));
-        layout.choose(a, herdr("t1"));
-        layout.choose(b, page(1));
-        layout.focus_moved(Some("t1"), "t2");
-        assert_eq!(shown(&layout, "t2"), [Terminal, Page(TabId::test(1))]);
-        // A group that asked for the tab keeps the others where they were.
-        layout.choose(b, herdr("t3"));
-        layout.focus_moved(Some("t2"), "t3");
-        assert_eq!(shown(&layout, "t3"), [Elsewhere(herdr("t2")), Terminal]);
-        // With no group on the terminal, the group in use takes it.
-        layout.choose(a, page(2));
-        layout.choose(b, page(3));
-        layout.focus_moved(Some("t3"), "t4");
-        assert_eq!(shown(&layout, "t4"), [Page(TabId::test(2)), Terminal]);
-    }
-
-    #[test]
-    fn a_split_pins_the_terminal_tab_each_group_showed() {
-        let (mut layout, mut ids, a) = layout();
-        let b = ids.next();
-        layout.split(a, b, Some("t1"));
+        layout.choose(b, herdr("t2"));
+        layout.focus_moved(a, "t3");
+        assert_eq!(layout.pick(a, None), Some(herdr("t3")));
+        assert_eq!(layout.pick(b, None), Some(herdr("t2")));
         layout.choose(a, page(1));
-        layout.focus_moved(Some("t1"), "t2");
-        assert_eq!(shown(&layout, "t2"), [Page(TabId::test(1)), Terminal]);
+        layout.focus_moved(a, "t4");
+        assert_eq!(layout.pick(a, None), Some(herdr("t4")));
     }
 
     #[test]
@@ -489,6 +497,11 @@ mod tests {
         assert!(layout.replace(&page(2), None, Some("t1")));
         assert!(!layout.replace(&page(2), None, Some("t1")));
         assert_eq!(shown(&layout, "t1"), [Elsewhere(herdr("t1")), Terminal]);
+        // Alone, a group whose tab closed follows the terminal again.
+        layout.close(a);
+        layout.choose(b, page(3));
+        assert!(layout.replace(&page(3), None, Some("t1")));
+        assert_eq!(layout.pick(b, Some("t5")), Some(herdr("t5")));
     }
 
     #[test]

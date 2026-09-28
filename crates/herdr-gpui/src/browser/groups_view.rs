@@ -80,7 +80,7 @@ impl HerdrWindow {
         let Some(layout) = self.layout() else {
             return Shown::Terminal;
         };
-        let shown = layout.shown(group, self.focused_herdr_tab());
+        let shown = layout.shown(group, |group| self.group_focused_tab(group));
         match &shown {
             Shown::Page(id) | Shown::Elsewhere(Pick::Page(id))
                 if store(cx).is_none_or(|store| store.get(*id).is_none()) =>
@@ -116,9 +116,15 @@ impl HerdrWindow {
             .collect()
     }
 
-    /// Focuses the Herdr tab `group` picked if the daemon focuses another,
-    /// and hands the keyboard to the terminal when the group shows it.
+    /// Settles which group holds the window's connection, then, when that
+    /// is `group`, focuses the Herdr tab it picked if the connection shows
+    /// another, and hands it the keyboard. A group with a parked connection
+    /// steers that one to its tab instead.
     fn bring_group_tab(&mut self, group: GroupId, window: &mut Window, cx: &mut Context<Self>) {
+        self.reconcile_group_terminals(cx);
+        if self.primary_group() != Some(group) {
+            return;
+        }
         let focused = self.focused_herdr_tab().map(str::to_owned);
         if let Some(Pick::Herdr(tab)) = self.group_pick(group)
             && focused.as_deref() != Some(tab.as_str())
@@ -169,12 +175,16 @@ impl HerdrWindow {
         self.browser.new_tab_group = self.browser_key().map(|key| (key, group));
     }
 
-    /// Follows the daemon moving its focus within the workspace, from a
-    /// shortcut, an agent, a closed tab, or a group's "+".
+    /// Follows the window's connection moving its focus, from a shortcut, an
+    /// agent, a closed tab, or a group's "+". The group holding the
+    /// connection shows the new tab, unless a "+" asked for it in another
+    /// group, which then takes the connection; the group that had it gets a
+    /// parked one for its own tab. Arriving in another workspace moves its
+    /// group only off a Herdr tab: one showing a page keeps it.
     pub(crate) fn terminal_focus_moved(
         &mut self,
-        old: Option<&str>,
         new: &str,
+        arrived: bool,
         cx: &mut Context<Self>,
     ) {
         let Some(key) = self.browser_key() else {
@@ -185,11 +195,22 @@ impl HerdrWindow {
             .new_tab_group
             .take_if(|(asked, _)| *asked == key)
             .map(|(_, group)| group);
-        let layout = self.layout_for(key);
-        match asked {
-            Some(group) => layout.choose(group, Pick::Herdr(new.to_owned())),
-            None => layout.focus_moved(old, new),
+        let primary = self.primary_group();
+        let on_page =
+            primary.is_some_and(|group| matches!(self.group_pick(group), Some(Pick::Page(_))));
+        if arrived && on_page {
+            return;
         }
+        let layout = self.layout_for(key);
+        match (asked, primary) {
+            (Some(group), _) => {
+                layout.choose(group, Pick::Herdr(new.to_owned()));
+                self.set_primary_group(group);
+            }
+            (None, Some(primary)) => layout.focus_moved(primary, new),
+            (None, None) => {}
+        }
+        self.reconcile_group_terminals(cx);
         cx.notify();
     }
 
@@ -322,6 +343,9 @@ impl HerdrWindow {
         if !layout.split(group, new, focused.as_deref()) {
             return;
         }
+        // The new group shows the tab the window's connection shows, so it
+        // takes that connection, and the group it split from connects anew
+        // only once it picks a tab of its own.
         self.bring_group_tab(new, window, cx);
         self.sync_addresses(true, window, cx);
         cx.notify();
@@ -349,6 +373,7 @@ impl HerdrWindow {
         }
         let active = layout.active();
         self.browser.addresses.remove(&group);
+        self.forget_group_terminal(group);
         self.bring_group_tab(active, window, cx);
         self.sync_addresses(true, window, cx);
         cx.notify();

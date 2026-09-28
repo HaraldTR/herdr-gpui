@@ -737,16 +737,24 @@ agent's terminal in one group and its page in another. Split as often as you
 like; each split opens a group to the right of the one it came from, showing
 the same tab. Splitting opens nothing new.
 
-- Every group lists the same tabs, and any tab can be picked in several
-  groups. Herdr projects a single terminal and each page is placed once, so a
-  tab is live only in the group used last; the others stand in for it with
-  **Show Here**. Pressing in a group makes it the one in use, which brings its
-  tab back. Picking a Herdr tab the daemon does not focus focuses it.
+- Every group lists the same tabs. Groups show different Herdr tabs live
+  side by side: each group showing a terminal has its own client connection
+  to the daemon, which keeps a focused tab per client. The group in use holds
+  the window's connection and gets the keyboard; the others only display
+  their tab, report themselves unfocused so notifications, sounds, and the
+  title follow the group in use, and focus their own tab again when an agent
+  or the CLI moves every client. Pressing a group swaps its connection in.
+- A tab is live in one group at a time: the daemon sizes a tab for a single
+  client, and a page is placed once. Picking a tab another group shows
+  moves it to the group used last; the other stands in for it with **Show
+  Here**.
 - The group in use has the keyboard, and its chosen tab carries the accent.
   **+** opens a Herdr tab in that group; New Browser Tab and Close Tab act
   there too. Close Tab in an empty group closes the group.
 - Drag a divider to resize the groups beside it. Groups are the window's own,
-  per workspace, and are not kept across restarts.
+  per workspace, and are not kept across restarts. A group's own connection
+  closes with the group, or when the window leaves the workspace or host;
+  returning reconnects it.
 - **…** on each strip offers **Close**, **Close Others**, and **Close All**
   for the workspace's tabs, Herdr and browser alike, plus **New Browser Tab**,
   **Split Right**, and **Close Group**. Closing Herdr tabs terminates their
