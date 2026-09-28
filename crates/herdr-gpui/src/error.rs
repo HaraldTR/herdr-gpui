@@ -225,6 +225,19 @@ pub enum Error {
     #[cfg(target_os = "macos")]
     #[error("GitHub Keychain update failed. Unlock your login Keychain and try again.")]
     KeychainWrite(#[source] security_framework::base::Error),
+    #[cfg(target_os = "linux")]
+    #[error(
+        "Cannot read GitHub sign-in from the desktop keyring. Unlock your keyring or set GH_TOKEN."
+    )]
+    SecretServiceRead(#[source] Box<oo7::Error>),
+    #[cfg(target_os = "linux")]
+    #[error("GitHub keyring update failed. Unlock your desktop keyring and try again.")]
+    SecretServiceWrite(#[source] Box<oo7::Error>),
+    #[cfg(target_os = "linux")]
+    #[error(
+        "No desktop keyring (Secret Service) is running. Start GNOME Keyring, KWallet, or KeePassXC, or set [github] allow_plaintext_credentials = true, or use GH_TOKEN / GITHUB_TOKEN."
+    )]
+    SecretServiceUnavailable,
     #[error("Missing credential directory.")]
     CredentialDirectory,
     #[error(

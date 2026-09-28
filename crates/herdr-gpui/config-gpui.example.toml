@@ -138,6 +138,8 @@ size = 12
 # Explicit opt-in when an OS credential store is not available, which on macOS
 # means every unsigned development build; signed release builds use the Keychain
 # and ignore this field. macOS development builds always use the file store.
+# Linux uses the desktop keyring (Secret Service) unless this is true, for
+# desktops without GNOME Keyring, KWallet, or KeePassXC.
 # WARNING: saves an UNENCRYPTED token in the separate 0600 github-credentials file.
 # Other software running as you and backups can read it. Default is false.
 # allow_plaintext_credentials = false

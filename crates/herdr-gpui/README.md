@@ -1069,7 +1069,7 @@ Windows setup) nothing is saved and the window says so.
   repositories another account owns. Select the device, open the GitHub panel,
   and choose **Use another account** to run the same device sign-in for that
   device only. It is stored with the main account's mechanism (the app's Keychain
-  service under a per-device account name, or its own private
+  or Secret Service entry under a per-device account name, or its own private
   `github-credentials-<device-id>` file) and renewed the same way. Pull requests on
   that device then use it; a device without one uses the main account. Signing
   out in that panel removes only the device's credential. `GH_TOKEN` /
@@ -1101,12 +1101,18 @@ Windows setup) nothing is saved and the window says so.
   Signed macOS release builds keep tokens in this app's Keychain entry; unsigned
   development and worktree builds use the private file store instead, so a new
   code identity per rebuild cannot trigger a Keychain prompt on every launch.
-  `GH_TOKEN` / `GITHUB_TOKEN` override either. Access tokens and retained device/user codes use redacted, zeroizing
+  Linux builds keep tokens in the desktop keyring through the freedesktop Secret
+  Service (GNOME Keyring, KWallet, KeePassXC), under service
+  `dev.herdr.gpui.github`; the desktop may ask to unlock it. With no Secret
+  Service running, restore finds nothing saved and saving a sign-in says so.
+  `GH_TOKEN` / `GITHUB_TOKEN` override any of them. Access tokens and retained device/user codes use redacted, zeroizing
   `secrecy` types; HTTP headers are sensitive and application-owned raw OAuth
   buffers are wiped. The user code is intentionally exposed for rendering.
   Library/OS/rendering copies are not guaranteed to be erased. Linux supports an
   explicit `allow_plaintext_credentials = true` opt-in with a prominent warning,
-  separate private credential file and atomic no-follow Unix writes; macOS
+  separate private credential file and atomic no-follow Unix writes, which
+  replaces the Secret Service for desktops without one; a token saved in one store
+  is not moved to the other, so changing the opt-in means signing in again; macOS
   development builds use that same store, enabled by default and warned about in
   the profile panel. Signed macOS release builds still use Keychain. Windows has
   neither store: the opt-in does not select the file there, saving a token
@@ -1121,7 +1127,7 @@ Windows setup) nothing is saved and the window says so.
    sessions are checked in the background every five minutes and renewed within
    ten minutes of expiry, without restarting the app. Older saved pairs without
    expiry metadata renew when GitHub rejects the access token. The rotated pair
-   is saved before loading the profile again. Temporary network and Keychain
+   is saved before loading the profile again. Temporary network and keyring
    failures keep an active session visible and retry on the next check. They do
    not delete credentials; environment tokens are never renewed or replaced by
    saved credentials. Successful sign-in closes the GitHub panel and returns

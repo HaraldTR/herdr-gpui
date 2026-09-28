@@ -7,7 +7,7 @@ use super::{
     http::{LIMIT, authorization, graphql, pr_cooldown, response},
     log::{header, kind, public_sso, token_kind},
     store,
-    store::{KEYCHAIN, credential_bytes, resolve_token},
+    store::{KEYRING, credential_bytes, resolve_token},
     token::Credential,
 };
 use crate::{Error, Result};
@@ -73,27 +73,43 @@ fn copy_feedback_is_scoped_to_live_flow_and_expires() {
 }
 
 #[test]
-fn only_a_signed_release_build_uses_the_keychain() {
-    // A signed release build keeps the Keychain whatever the config says.
-    assert_eq!(Store::choose(false, true, false), Store::Keychain);
-    assert_eq!(Store::choose(true, true, false), Store::Keychain);
-    // An unsigned development build gets a new code identity on every rebuild,
-    // so it uses the private file instead of re-prompting for Keychain access.
+fn keyring_is_used_by_signed_macos_releases_and_linux() {
+    assert_eq!(Store::choose(false, true, false), Store::Keyring);
+    // The plaintext opt-in wins over a keyring where it is honoured at all, so
+    // a Linux desktop without a Secret Service still has a way to save.
+    assert_eq!(Store::choose(true, true, false), Store::File);
+    // An unsigned macOS development build gets a new code identity on every
+    // rebuild, so it uses the private file instead of re-prompting for Keychain.
     assert_eq!(Store::choose(false, false, true), Store::File);
     assert_eq!(Store::choose(true, false, true), Store::File);
     // Everywhere else unencrypted storage stays an explicit opt-in.
     assert_eq!(Store::choose(false, false, false), Store::Environment);
     assert_eq!(Store::choose(true, false, false), Store::File);
+    assert_eq!(
+        KEYRING,
+        cfg!(target_os = "linux") || (cfg!(target_os = "macos") && crate::RELEASE_BUILD)
+    );
     let mut config = crate::config::Config::default();
     #[cfg(target_os = "macos")]
-    if !crate::RELEASE_BUILD {
-        assert_eq!(Store::select(&config), Store::File);
-    }
-    config.github.allow_plaintext_credentials = true;
     assert_eq!(
         Store::select(&config),
-        Store::choose(store::FILE, KEYCHAIN, false)
+        if crate::RELEASE_BUILD {
+            Store::Keyring
+        } else {
+            Store::File
+        }
     );
+    #[cfg(target_os = "linux")]
+    assert_eq!(Store::select(&config), Store::Keyring);
+    config.github.allow_plaintext_credentials = true;
+    // macOS picks its store from the build alone and ignores the opt-in.
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+        Store::select(&config),
+        Store::choose(false, KEYRING, store::FILE_DEFAULT)
+    );
+    #[cfg(target_os = "linux")]
+    assert_eq!(Store::select(&config), Store::File);
     // Platforms without POSIX ownership and mode bits cannot keep the file
     // private, so opting in must not select it there.
     assert_eq!(store::FILE, cfg!(unix));
@@ -123,10 +139,10 @@ fn only_a_signed_release_build_uses_the_keychain() {
 fn credential_notes_state_where_tokens_are_kept() {
     assert!(Store::Environment.note(false).is_none());
     assert!(Store::Environment.note(true).is_none());
-    assert!(matches!(Store::Keychain.note(false), Some(Note::Info(_))));
+    assert!(matches!(Store::Keyring.note(false), Some(Note::Info(_))));
     assert!(
-        Store::Keychain.note(true).is_none(),
-        "a connected account already proved Keychain access"
+        Store::Keyring.note(true).is_none(),
+        "a connected account already proved keyring access"
     );
     for connected in [false, true] {
         let Some(Note::Warning(text)) = Store::File.note(connected) else {
@@ -281,7 +297,7 @@ fn enabling_plaintext_reloads_saved_token_but_explicit_signout_stays_suppressed(
         .unwrap();
     deliver(&mut auth, reply);
     auth.poll_with(|_| panic!("already removed"), |_, _| panic!("signed out"));
-    for store in [Store::Environment, Store::File, Store::Keychain] {
+    for store in [Store::Environment, Store::File, Store::Keyring] {
         assert!(!auth.initialize_with(store));
         assert_eq!(auth.store(), store);
         assert!(auth.signed_out);
