@@ -302,6 +302,11 @@ already waiting in a connection inbox from the disabled period are discarded too
 Failed reloads preserve current settings. QA
 previews remain available regardless of delivery settings.
 
+The sidebar button at the left of the titlebar hides or shows the sidebar.
+It stays available when the sidebar is hidden; the existing View menu command and shortcut still work.
+In **Settings > Appearance**, click **Show usage** to turn the bottom quota display on or off.
+The choice is saved to `config-gpui.local.toml` and follows the existing `[usage] show` setting.
+
 Choose the sidebar layout from **View > Layout**, which lists every layout,
 checks the one in use, switches at once, and saves the choice to
 `config-gpui.local.toml`. The same setting can be written by hand as a
@@ -335,6 +340,7 @@ GUI shows the same status word beside each agent, in the activity dot's color,
 in every layout. An agent with its own `rows_by_agent` entry follows that entry
 instead, as the terminal client does. Rows without the token keep the dot
 alone, so an unconfigured pair of clients renders alike.
+Status dots and words use darker versions of their status colors on light backgrounds so they remain visible.
 
 Three more layouts draw rows with a design of their own, each with fixed
 spacing:
@@ -379,11 +385,11 @@ mode = "compact"
 sidebar_gap = 8
 ```
 
-`sidebar_gap` (finite 0..64 logical pixels,
-default `8`) is blank space between the sidebar and the terminal beside it, so
-the first column does not sit against the divider; `0` restores the flush edge.
+`sidebar_gap` (finite 0..64 logical pixels, default `0`) is optional blank space between the sidebar and the terminal beside it.
+The default keeps the first column flush with the divider; an explicit value such as `8` adds a gutter.
 The terminal keeps the remaining width, so the daemon is resized to the columns
 it actually has, and the gap is ignored while the sidebar is hidden.
+Any space smaller than one character cell at the right or bottom edge takes the adjacent terminal cells' background colors, without stretching text or changing input coordinates.
 
 The `[clipboard_toast]` table controls the `copied to clipboard` flash shown
 after a terminal selection is copied. Like the keymap (see the daemon `[keys]`

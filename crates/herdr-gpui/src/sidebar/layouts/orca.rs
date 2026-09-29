@@ -205,7 +205,7 @@ impl RowLayout for Orca {
                 line.label(
                     div()
                         .debug_selector(|| format!("status-{key}"))
-                        .text_color(rgb(status_style(agent.status).2)),
+                        .text_color(rgb(status_style(agent.status, theme).2)),
                     text,
                     glyph_at(font, font.size),
                     0.5,

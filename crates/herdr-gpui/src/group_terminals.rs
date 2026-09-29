@@ -565,6 +565,7 @@ impl HerdrWindow {
                             painter.borrow_mut().paint_frame(
                                 &surface.frame,
                                 bounds.origin,
+                                Some(bounds.size),
                                 cell_width,
                                 &font,
                                 &[],
@@ -582,6 +583,7 @@ impl HerdrWindow {
                                 painter.borrow_mut().paint_frame(
                                     &popup.frame,
                                     bounds.origin + offset,
+                                    None,
                                     cell_width,
                                     &font,
                                     &[],

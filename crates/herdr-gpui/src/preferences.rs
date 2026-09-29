@@ -159,11 +159,48 @@ impl HerdrWindow {
                 "Show agents",
                 self.config.show_agents.to_string(),
             ))
-            .child(row(
-                "preferences-show-usage",
-                "Show usage",
-                self.config.usage.show.to_string(),
-            ))
+            .child(
+                row(
+                    "preferences-show-usage",
+                    "Show usage",
+                    if self.config.usage.show { "On" } else { "Off" }.into(),
+                )
+                .id("preferences-show-usage")
+                .items_center()
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(theme.active)))
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .w(px(30.))
+                        .h(px(18.))
+                        .p(px(2.))
+                        .rounded_full()
+                        .bg(rgb(if self.config.usage.show {
+                            theme.foreground
+                        } else {
+                            theme.muted
+                        }))
+                        .when(self.config.usage.show, |track| track.justify_end())
+                        .child(div().size(px(14.)).rounded_full().bg(rgb(theme.background))),
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    let show = !this.config.usage.show;
+                    let text_system = cx.text_system().clone();
+                    this.load_gui_config_with(
+                        move || {
+                            Config::save_usage_visibility(show)?;
+                            let mut config = Config::load()?;
+                            config.resolve_font_fallbacks(|| text_system.all_font_names());
+                            let theme = config.theme()?;
+                            Ok((config, theme))
+                        },
+                        cx,
+                    );
+                })),
+            )
             .child(row(
                 "preferences-confirm-close-tab",
                 "Confirm tab close",

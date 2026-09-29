@@ -479,10 +479,8 @@ impl GitHubConfig {
     }
 }
 
-/// The first terminal column otherwise starts against the sidebar's divider,
-/// which crowds the prompt. Two-thirds of a default cell reads as a gutter
-/// without costing a column at any usable window width.
-const DEFAULT_SIDEBAR_GAP: f32 = 8.;
+/// Keep the terminal flush with the divider unless spacing is requested.
+const DEFAULT_SIDEBAR_GAP: f32 = 0.;
 
 /// A gap wider than this stops reading as spacing and starts eating columns the
 /// terminal needs, so the config file is held to a band a window can afford.
@@ -1208,6 +1206,35 @@ impl Config {
     pub(crate) fn save_font_sizes(sizes: &[(FontFace, f32)]) -> Result<()> {
         let (_lock, local) = Self::prepare_files(&Self::path()?)?;
         Self::save_font_sizes_path(sizes, &local)
+    }
+
+    /// Persist usage visibility without replacing provider settings.
+    pub(crate) fn save_usage_visibility(show: bool) -> Result<()> {
+        let (_lock, local) = Self::prepare_files(&Self::path()?)?;
+        Self::save_usage_visibility_path(show, &local)
+    }
+
+    fn save_usage_visibility_path(show: bool, path: &Path) -> Result<()> {
+        let result = (|| -> Result<()> {
+            let text = match fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == ErrorKind::NotFound => LOCAL_CONFIG.into(),
+                Err(error) => return Err(error.into()),
+            };
+            let mut document = text.parse::<toml_edit::DocumentMut>()?;
+            let usage = document
+                .entry("usage")
+                .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+                .as_table_like_mut()
+                .ok_or(Error::InvalidUsageTable)?;
+            let mut value = toml_edit::Value::from(show);
+            if let Some(previous) = usage.get("show").and_then(toml_edit::Item::as_value) {
+                *value.decor_mut() = previous.decor().clone();
+            }
+            usage.insert("show", toml_edit::Item::Value(value));
+            write_config(path, &document.to_string())
+        })();
+        result.map_err(|error| error.at_path(path))
     }
 
     /// `None` removes the local override, inheriting the platform's managed default.
@@ -2182,6 +2209,39 @@ mod tests {
     }
 
     #[test]
+    fn usage_visibility_preserves_settings_and_rejects_invalid_tables() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config.toml");
+        let original = "theme = 'Nord' # keep\n[usage]\nshow = true # visibility\nhide_providers = ['claude']\n";
+        fs::write(&path, original)?;
+        Config::save_usage_visibility_path(false, &path)?;
+        assert_eq!(
+            fs::read_to_string(&path)?,
+            original.replace("show = true", "show = false")
+        );
+        assert!(!Config::parse(&fs::read_to_string(&path)?)?.usage.show);
+        Config::save_usage_visibility_path(true, &path)?;
+        assert_eq!(fs::read_to_string(&path)?, original);
+        for original in [
+            "theme = 'Nord'\n",
+            "usage = { show = true, browser_cookies = false }\n",
+        ] {
+            fs::write(&path, original)?;
+            Config::save_usage_visibility_path(false, &path)?;
+            assert!(!Config::parse(&fs::read_to_string(&path)?)?.usage.show);
+        }
+        fs::write(&path, "usage = false\n")?;
+        let error = Config::save_usage_visibility_path(false, &path)
+            .err()
+            .context("invalid usage table must be rejected")?;
+        assert!(matches!(&error, Error::Path { path: failed, source }
+            if failed == &path && matches!(**source, Error::InvalidUsageTable)));
+        assert!(std::error::Error::source(&error).is_some());
+        assert_eq!(fs::read_to_string(&path)?, "usage = false\n");
+        Ok(())
+    }
+
+    #[test]
     fn saves_only_theme_and_preserves_latest_settings_and_comments() -> anyhow::Result<()> {
         let temp = TempDirectory::new()?;
         let path = temp.0.join("config.toml");
@@ -2494,17 +2554,17 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_gap_defaults_to_a_gutter_and_accepts_its_band() -> anyhow::Result<()> {
+    fn sidebar_gap_defaults_to_flush_and_accepts_its_band() -> anyhow::Result<()> {
         for config in [
             Config::default(),
             Config::parse("")?,
             Config::parse(DEFAULT_CONFIG)?,
         ] {
             assert_eq!(config.layout, Layout::default());
-            assert_eq!(config.layout.sidebar_gap, 8.);
+            assert_eq!(config.layout.sidebar_gap, 0.);
         }
         // An empty table keeps the default; only a written value replaces it.
-        assert_eq!(Config::parse("[layout]")?.layout.sidebar_gap, 8.);
+        assert_eq!(Config::parse("[layout]")?.layout.sidebar_gap, 0.);
         for (text, gap) in [
             ("[layout]\nsidebar_gap = 0", 0.),
             ("[layout]\nsidebar_gap = 12", 12.),

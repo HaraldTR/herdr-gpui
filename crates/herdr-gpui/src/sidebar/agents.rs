@@ -3,7 +3,10 @@
 //! at terminal output.
 
 use super::{STATUS_DOT_UNKNOWN, STATUS_WIDTH, first_text, label_text, line_height};
-use crate::{HerdrWindow, config::FontConfig};
+use crate::{
+    HerdrWindow,
+    config::{FontConfig, Theme},
+};
 use gpui::{prelude::*, *};
 use herdr_client::protocol::{AgentStatus, ClientShellAgent, ClientShellSnapshot};
 
@@ -127,7 +130,7 @@ pub(super) fn agent_labels<'a>(
 
 // Match the expanded upstream shell order, including orphaned linked worktrees.
 
-pub(super) fn status_indicator(status: AgentStatus, font: &FontConfig) -> Div {
+pub(super) fn status_indicator(status: AgentStatus, font: &FontConfig, theme: &Theme) -> Div {
     // Upstream dots: working/blocked/done filled, idle hollow, unknown a small dot.
     div()
         .size(px(STATUS_WIDTH))
@@ -136,13 +139,13 @@ pub(super) fn status_indicator(status: AgentStatus, font: &FontConfig) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .child(status_dot(status))
+        .child(status_dot(status, theme))
 }
 
 /// The status dot alone, sized by its status, for callers that place it
 /// themselves.
-pub(crate) fn status_dot(status: AgentStatus) -> Div {
-    let (diameter, filled, color) = status_style(status);
+pub(crate) fn status_dot(status: AgentStatus, theme: &Theme) -> Div {
+    let (diameter, filled, color) = status_style(status, theme);
     div()
         .flex_none()
         .size(px(diameter))
@@ -165,11 +168,20 @@ pub(super) fn status_text(status: AgentStatus) -> &'static str {
     }
 }
 
-/// Upstream draws status from its own palette, defaulting to Catppuccin Mocha,
-/// and never from the terminal's ANSI colors. Matching those literals keeps a
-/// dot the same color in both clients whatever terminal theme is loaded, where
-/// ANSI slots would drift: Xcode Dark paints its cyan purple.
-pub(super) fn status_style(status: AgentStatus) -> (f32, bool, u32) {
+/// Keep status hues independent of ANSI slots, but use darker colors on light
+/// chrome so small dots and status words remain visible.
+pub(super) fn status_style(status: AgentStatus, theme: &Theme) -> (f32, bool, u32) {
+    let channel = |shift: u32| ((theme.surface >> shift) & 255) as f32 / 255.;
+    let light = 0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0) > 0.5;
+    if light {
+        return match status {
+            AgentStatus::Working => (STATUS_WIDTH, true, 0x875b00),
+            AgentStatus::Blocked => (STATUS_WIDTH, true, 0xb52249),
+            AgentStatus::Done => (STATUS_WIDTH, true, 0x08796b),
+            AgentStatus::Idle => (STATUS_WIDTH, false, 0x34752a),
+            AgentStatus::Unknown => (STATUS_DOT_UNKNOWN, true, 0x626880),
+        };
+    }
     match status {
         AgentStatus::Working => (STATUS_WIDTH, true, 0xf9e2af),
         AgentStatus::Blocked => (STATUS_WIDTH, true, 0xf38ba8),

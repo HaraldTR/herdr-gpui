@@ -236,9 +236,8 @@ fn rows_weight_and_dim_their_text_like_upstream() {
 }
 
 #[test]
-fn status_colors_match_upstream_and_ignore_the_theme() {
-    // The literals are upstream's default palette (Catppuccin Mocha), which
-    // its status dots use whatever terminal colors are loaded.
+fn status_colors_keep_upstream_hues_on_dark_themes() {
+    // ANSI slots must not change the meaning of a status color.
     for (status, color) in [
         (AgentStatus::Working, 0xf9e2af),
         (AgentStatus::Blocked, 0xf38ba8),
@@ -246,23 +245,42 @@ fn status_colors_match_upstream_and_ignore_the_theme() {
         (AgentStatus::Idle, 0xa6e3a1),
         (AgentStatus::Unknown, 0x6c7086),
     ] {
-        assert_eq!(status_style(status).2, color);
-    }
-    for name in Theme::BUILTIN_NAMES {
-        let theme = Theme::builtin(name).unwrap();
-        for status in [
-            AgentStatus::Working,
-            AgentStatus::Blocked,
-            AgentStatus::Done,
-            AgentStatus::Idle,
-            AgentStatus::Unknown,
-        ] {
-            let color = status_style(status).2;
-            assert!(
-                !theme.palette.contains(&color) || theme.palette[..16].contains(&color),
-                "{name}: dots must not be read out of the theme"
-            );
+        for name in ["Default", "Nord", "Dracula", "Catppuccin Mocha"] {
+            let mut theme = Theme::builtin(name).unwrap();
+            assert_eq!(status_style(status, &theme).2, color, "{name}");
+            theme.palette.fill(0x123456);
+            assert_eq!(status_style(status, &theme).2, color, "{name}");
         }
+    }
+}
+
+#[test]
+fn light_theme_status_colors_contrast_with_chrome() {
+    let luminance = |color: u32| {
+        let channel = |shift: u32| {
+            let value = ((color >> shift) & 255) as f64 / 255.;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+    };
+    let theme = Theme::builtin("Catppuccin Latte").unwrap();
+    for status in [
+        AgentStatus::Working,
+        AgentStatus::Blocked,
+        AgentStatus::Done,
+        AgentStatus::Idle,
+        AgentStatus::Unknown,
+    ] {
+        let color = status_style(status, &theme).2;
+        for background in [theme.surface, theme.active, theme.background, 0xffffff] {
+            let ratio = (luminance(background) + 0.05) / (luminance(color) + 0.05);
+            assert!(ratio >= 3., "{status:?} on {background:06x}: {ratio}");
+        }
+        assert_ne!(color, status_style(status, &Theme::default()).2);
     }
 }
 
@@ -285,7 +303,7 @@ fn status_shapes_match_upstream_dots_and_wire_casing() {
         let agent: ClientShellAgent = serde_json::from_value(value).unwrap();
         assert_eq!(agent.agent_status, status);
         assert_eq!(serde_json::to_value(status).unwrap(), wire);
-        let (diameter, filled, color) = status_style(status);
+        let (diameter, filled, color) = status_style(status, &Theme::default());
         assert_eq!(
             color,
             match status {
