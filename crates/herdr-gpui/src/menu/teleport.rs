@@ -4,7 +4,9 @@
 use super::Page;
 use crate::{
     HerdrWindow,
-    teleport::{HostRepositories, Place, Repository, Source, Teleport, host_for},
+    teleport::{
+        Follow, HostRepositories, Mark, Place, Repository, Retired, Source, Teleport, host_for,
+    },
 };
 use gpui::{Context, Window};
 use herdr_client::protocol::ClientShellSnapshot;
@@ -51,6 +53,53 @@ impl HerdrWindow {
             && host_for(&self.endpoints[self.selected_endpoint].connection.target).is_ok()
     }
 
+    /// The teleported mark on the menu's workspace, if its work moved away.
+    pub(super) fn teleport_mark(&self) -> Option<&Mark> {
+        let target = self.menu.target.as_ref()?;
+        self.teleport_marks.find(
+            &self.endpoints[self.selected_endpoint].id,
+            &target.worktree.as_ref()?.key,
+            target.branch.as_deref()?,
+        )
+    }
+
+    pub(super) fn go_to_teleported(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mark) = self.teleport_mark().cloned() else {
+            return;
+        };
+        let destination = &mark.destination;
+        // A restarted daemon renumbers workspaces; find it by repository and
+        // branch when that host's snapshot is at hand.
+        let workspace = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == destination.endpoint)
+            .and_then(|endpoint| endpoint.live.snapshot.as_ref())
+            .and_then(|snapshot| {
+                snapshot.workspaces.iter().find(|w| {
+                    w.branch.as_deref() == Some(mark.branch.as_str())
+                        && w.worktree
+                            .as_ref()
+                            .is_some_and(|t| t.key == destination.repo_key)
+                })
+            })
+            .map_or_else(
+                || destination.workspace_id.clone(),
+                |w| w.workspace_id.clone(),
+            );
+        self.dismiss_menu(window, cx);
+        self.teleport_follow = Some(Follow::new(destination.endpoint.clone(), workspace));
+        cx.notify();
+    }
+
+    pub(super) fn clear_teleport_mark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(mark) = self.teleport_mark().cloned() {
+            self.teleport_marks
+                .remove(&mark.endpoint, &mark.repo_key, &mark.branch);
+        }
+        self.dismiss_menu(window, cx);
+    }
+
     pub(super) fn open_teleport(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = &self.menu.target else {
             return;
@@ -87,6 +136,7 @@ impl HerdrWindow {
                 .map(|workspace| workspace.label.clone()),
             repo_key: worktree.key.clone(),
             repo_label: worktree.label.clone(),
+            branch: target.branch.clone(),
             tab_labels,
         };
         // Every enabled host, connected or not: Teleport reaches each over its
@@ -103,12 +153,31 @@ impl HerdrWindow {
             if host == source.place.host || hosts.iter().any(|known| known.place.host == host) {
                 continue;
             }
-            let repositories = endpoint
+            let snapshot = endpoint
                 .live
                 .snapshot
                 .as_ref()
-                .filter(|_| endpoint.live.status.is_connected())
-                .map(|snapshot| repositories(snapshot));
+                .filter(|_| endpoint.live.status.is_connected());
+            let repositories = snapshot.map(|snapshot| repositories(snapshot));
+            // Checkouts this client teleported away from, still open there.
+            let retired = snapshot
+                .map(|snapshot| {
+                    self.teleport_marks
+                        .on(&endpoint.id)
+                        .filter_map(|mark| {
+                            let workspace = snapshot.workspaces.iter().find(|w| {
+                                w.branch.as_deref() == Some(mark.branch.as_str())
+                                    && w.worktree.as_ref().is_some_and(|t| t.key == mark.repo_key)
+                            })?;
+                            Some(Retired {
+                                repo_key: mark.repo_key.clone(),
+                                branch: mark.branch.clone(),
+                                workspace_id: workspace.workspace_id.clone(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             hosts.push(HostRepositories {
                 place: Place {
                     endpoint_id: endpoint.id.clone(),
@@ -116,6 +185,7 @@ impl HerdrWindow {
                     host,
                 },
                 repositories,
+                retired,
             });
         }
         let label = target.label.clone();
@@ -224,6 +294,7 @@ mod tests {
                     custom_label: None,
                     repo_key: REPO_KEY.into(),
                     repo_label: "agent-launcher".into(),
+                    branch: None,
                     tab_labels: HashMap::new(),
                 };
                 let candidate = Candidate {
@@ -265,6 +336,88 @@ mod tests {
             view.update(cx, |view, cx| view.poll_teleport(window, cx));
             assert!(view.read(cx).teleport.is_none(), "closing cancels a review");
             assert_eq!(view.read(cx).menu.page, None);
+        });
+    }
+
+    fn actions(view: &HerdrWindow) -> Vec<super::super::WorkspaceMenuAction> {
+        view.workspace_items()
+            .into_iter()
+            .map(|(action, _)| action)
+            .collect()
+    }
+
+    #[gpui::test]
+    fn a_teleported_worktree_offers_its_copy_and_can_be_cleared(cx: &mut gpui::TestAppContext) {
+        use super::super::WorkspaceMenuAction;
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.live.status = crate::state::ConnectionStatus::Connected;
+                view.live.supports_surface = true;
+                view.endpoints[0].connection.target = herdr_client::ConnectTarget::Local;
+                let snapshot = std::sync::Arc::make_mut(view.live.snapshot.as_mut().unwrap());
+                snapshot.workspaces = crate::sidebar::layout_tests::snapshot(7).workspaces;
+                view.endpoints[0].live = view.live.clone();
+                view.endpoints.push(crate::endpoint::Endpoint::new(
+                    "ssh:box".into(),
+                    "Box".into(),
+                    herdr_client::ConnectTarget::Ssh {
+                        target: "me@box".into(),
+                        session: "default".into(),
+                    },
+                    true,
+                ));
+                // w4 is the linked worktree on `worktree/sidebar-child`.
+                view.teleport_marks.add(Mark {
+                    endpoint: crate::endpoint::LOCAL.into(),
+                    repo_key: REPO_KEY.into(),
+                    branch: "worktree/sidebar-child".into(),
+                    destination: crate::teleport::MarkDestination {
+                        endpoint: "ssh:box".into(),
+                        label: "Box".into(),
+                        repo_key: "/home/me/agent-launcher/.git".into(),
+                        workspace_id: "w9".into(),
+                    },
+                });
+
+                view.open_workspace_menu("w4", Default::default(), window, cx);
+                let offered = actions(view);
+                assert!(offered.contains(&WorkspaceMenuAction::GoToTeleported));
+                assert!(offered.contains(&WorkspaceMenuAction::ClearTeleported));
+                assert!(!offered.contains(&WorkspaceMenuAction::Teleport));
+
+                view.activate_workspace_menu(WorkspaceMenuAction::GoToTeleported, window, cx);
+                assert_eq!(view.menu.page, None);
+                assert!(view.teleport_follow.is_some());
+                view.poll_teleport(window, cx);
+                assert_eq!(view.endpoints[view.selected_endpoint].id, "ssh:box");
+
+                // Back on the local host, clearing the mark offers Teleport again.
+                view.teleport_follow = None;
+                assert!(view.navigate_endpoint(
+                    crate::endpoint::LOCAL,
+                    crate::NavigationTarget::Workspace("w4"),
+                    cx,
+                ));
+                view.live.status = crate::state::ConnectionStatus::Connected;
+                let snapshot =
+                    std::sync::Arc::make_mut(view.live.snapshot.get_or_insert_with(|| {
+                        std::sync::Arc::new(crate::sidebar::layout_tests::snapshot(7))
+                    }));
+                snapshot.workspaces = crate::sidebar::layout_tests::snapshot(7).workspaces;
+                view.open_workspace_menu("w4", Default::default(), window, cx);
+                view.activate_workspace_menu(WorkspaceMenuAction::ClearTeleported, window, cx);
+                assert!(
+                    view.teleport_marks
+                        .find(crate::endpoint::LOCAL, REPO_KEY, "worktree/sidebar-child")
+                        .is_none()
+                );
+                view.open_workspace_menu("w4", Default::default(), window, cx);
+                assert!(
+                    actions(view).contains(&WorkspaceMenuAction::Teleport)
+                        == cfg!(any(target_os = "linux", target_os = "macos"))
+                );
+            })
         });
     }
 }

@@ -12,6 +12,7 @@ mod host;
 mod job;
 mod launch;
 mod layout;
+mod marks;
 mod provision;
 mod remote;
 mod sessions;
@@ -21,11 +22,13 @@ mod ui;
 #[cfg(test)]
 pub(crate) use {
     job::{Candidate, Destination},
+    marks::Destination as MarkDestination,
     remote::MatchReason,
 };
 pub(crate) use {
-    job::{HostRepositories, Place, Repository, Source},
-    ui::Teleport,
+    job::{HostRepositories, Place, Repository, Retired, Source},
+    marks::{Mark, Marks},
+    ui::{Follow, Teleport},
 };
 
 /// The host Teleport scripts for an endpoint, if it can script it at all.

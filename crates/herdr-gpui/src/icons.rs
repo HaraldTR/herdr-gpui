@@ -62,6 +62,27 @@ pub(super) fn uncommitted(theme: &crate::config::Theme, size: f32) -> gpui::Div 
         )
 }
 
+/// A checkout whose work was teleported to another host.
+pub(super) fn teleported(theme: &crate::config::Theme, size: f32) -> gpui::Div {
+    use gpui::{div, prelude::*, px, rgb, rgba, svg};
+    div()
+        .size(px(size))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(crate::config::corners::SMALL))
+        .bg(rgba((theme.palette[4] << 8) | 0x30))
+        .border_1()
+        .border_color(rgba((theme.palette[4] << 8) | 0x90))
+        .child(
+            svg()
+                .path("icons/teleport.svg")
+                .size(px(size - 4.))
+                .text_color(rgb(theme.palette[4])),
+        )
+}
+
 impl AssetSource for Icons {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
         let bytes: &'static [u8] = match path {

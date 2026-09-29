@@ -11,15 +11,19 @@ use super::{
         self, Action, Candidate, Destination, Discovery, HostRepositories, Outcome, Review, Source,
     },
     launch::{Work, command_line},
+    marks::{Destination as MarkDestination, Mark},
     provision::Arrival,
     remote::MatchReason,
 };
 use crate::{HerdrWindow, NavigationTarget, menu::Page, window::Flash};
 use gpui::{prelude::*, *};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-    mpsc,
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    time::{Duration, Instant},
 };
 
 enum Event {
@@ -36,6 +40,29 @@ enum Stage {
     Ready(Candidate, Box<Review>),
     Moving(Candidate, Option<Step>),
     Failed(String),
+}
+
+/// How long the window keeps steering to a teleported workspace.
+const FOLLOW_FOR: Duration = Duration::from_secs(20);
+const FOLLOW_RETRY: Duration = Duration::from_millis(750);
+
+/// The workspace a finished teleport should end up focused on.
+pub(crate) struct Follow {
+    endpoint_id: String,
+    workspace_id: String,
+    until: Instant,
+    next: Option<Instant>,
+}
+
+impl Follow {
+    pub(crate) fn new(endpoint_id: String, workspace_id: String) -> Self {
+        Self {
+            endpoint_id,
+            workspace_id,
+            until: Instant::now() + FOLLOW_FOR,
+            next: None,
+        }
+    }
 }
 
 pub(crate) struct Teleport {
@@ -224,6 +251,10 @@ fn destination_text(candidate: &Candidate) -> (String, String) {
         Destination::Open { repository, reason } => {
             (repository.label.clone(), reason_text(*reason).to_owned())
         }
+        Destination::Reclaim { repository, .. } => (
+            repository.label.clone(),
+            "Brings the work back to the checkout it left".to_owned(),
+        ),
         Destination::Arrive(Arrival::Existing { path, .. }) => {
             (path.clone(), "Opens the checkout already there".to_owned())
         }
@@ -266,6 +297,10 @@ fn describe(work: &Work, action: &Action) -> String {
 
 impl HerdrWindow {
     pub(crate) fn poll_teleport(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.teleport_marks.poll() {
+            cx.notify();
+        }
+        self.follow_teleport(cx);
         let open = self.menu.page == Some(Page::Teleport);
         let Some(teleport) = &mut self.teleport else {
             return;
@@ -276,41 +311,92 @@ impl HerdrWindow {
             return;
         }
         let (changed, finished) = teleport.poll();
-        if let Some(result) = finished {
-            let destination = teleport.destination_label().unwrap_or_default().to_owned();
-            match result {
-                Ok(outcome) => {
-                    self.teleport = None;
-                    if open {
-                        self.dismiss_menu(window, cx);
-                    }
-                    for warning in &outcome.warnings {
-                        tracing::warn!(%warning, "teleport");
-                    }
-                    let flash = match outcome.warnings.first() {
-                        None => Flash::success(format!("Teleported to {destination}")),
-                        Some(first) => Flash::warning(format!(
-                            "Teleported to {destination} with {} warning(s): {first}",
-                            outcome.warnings.len()
-                        )),
-                    };
-                    self.show_flash(flash, cx);
-                    self.navigate_endpoint(
-                        &outcome.endpoint_id,
-                        NavigationTarget::Workspace(&outcome.workspace_id),
-                        cx,
-                    );
-                }
-                Err(error) if !open => {
-                    self.teleport = None;
-                    self.show_flash(Flash::warning(format!("Teleport failed: {error}")), cx);
-                }
-                Err(_) => cx.notify(),
+        let Some(result) = finished else {
+            if changed {
+                cx.notify();
             }
             return;
+        };
+        let destination = teleport.destination_label().unwrap_or_default().to_owned();
+        let source = teleport.source.clone();
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(error) if !open => {
+                self.teleport = None;
+                self.show_flash(Flash::warning(format!("Teleport failed: {error}")), cx);
+                return;
+            }
+            Err(_) => return cx.notify(),
+        };
+        self.teleport = None;
+        if open {
+            self.dismiss_menu(window, cx);
         }
-        if changed {
-            cx.notify();
+        for warning in &outcome.warnings {
+            tracing::warn!(%warning, "teleport");
+        }
+        // The checkout left behind is marked; the one the work came back to,
+        // if any, no longer is.
+        self.teleport_marks
+            .remove(&outcome.endpoint_id, &outcome.repo_key, &outcome.branch);
+        self.teleport_marks.add(Mark {
+            endpoint: source.place.endpoint_id.clone(),
+            repo_key: source.repo_key.clone(),
+            branch: outcome.branch.clone(),
+            destination: MarkDestination {
+                endpoint: outcome.endpoint_id.clone(),
+                label: destination.clone(),
+                repo_key: outcome.repo_key.clone(),
+                workspace_id: outcome.workspace_id.clone(),
+            },
+        });
+        let flash = match outcome.warnings.first() {
+            None => Flash::success(format!("Teleported to {destination}")),
+            Some(first) => Flash::warning(format!(
+                "Teleported to {destination} with {} warning(s): {first}",
+                outcome.warnings.len()
+            )),
+        };
+        self.show_flash(flash, cx);
+        self.teleport_follow = Some(Follow::new(outcome.endpoint_id, outcome.workspace_id));
+        self.follow_teleport(cx);
+    }
+
+    /// Keep steering to the teleported workspace until it is focused: the
+    /// host may still be connecting, its snapshot may not list the workspace
+    /// yet, or a menu may be open. Gives up after a short while, so it never
+    /// fights the user for long.
+    fn follow_teleport(&mut self, cx: &mut Context<Self>) {
+        let Some(follow) = &mut self.teleport_follow else {
+            return;
+        };
+        let now = Instant::now();
+        if now >= follow.until {
+            self.teleport_follow = None;
+            return;
+        }
+        if self.menu.page.is_some() || follow.next.is_some_and(|next| now < next) {
+            return;
+        }
+        follow.next = Some(now + FOLLOW_RETRY);
+        let (endpoint, workspace) = (follow.endpoint_id.clone(), follow.workspace_id.clone());
+        if self.endpoints[self.selected_endpoint].id != endpoint {
+            self.navigate_endpoint(&endpoint, NavigationTarget::Workspace(&workspace), cx);
+            return;
+        }
+        let Some(snapshot) = &self.live.snapshot else {
+            return;
+        };
+        if snapshot.focused_workspace_id.as_deref() == Some(workspace.as_str()) {
+            self.teleport_follow = None;
+            return;
+        }
+        let listed = snapshot
+            .workspaces
+            .iter()
+            .any(|w| w.workspace_id == workspace);
+        if listed && self.pending_navigation.is_none() {
+            self.navigate(NavigationTarget::Workspace(&workspace), cx);
         }
     }
 

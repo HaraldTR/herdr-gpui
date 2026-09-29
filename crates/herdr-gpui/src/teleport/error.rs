@@ -14,7 +14,7 @@ pub(crate) enum Step {
     CreateWorktree,
     Restore,
     Tabs,
-    CloseSource,
+    Retire,
     Sessions,
     Launch,
 }
@@ -33,7 +33,7 @@ impl Step {
             Self::CreateWorktree => "creating the destination worktree",
             Self::Restore => "restoring uncommitted changes",
             Self::Tabs => "recreating tabs",
-            Self::CloseSource => "closing the source workspace",
+            Self::Retire => "stopping programs in the source workspace",
             Self::Sessions => "moving agent sessions",
             Self::Launch => "starting programs",
         }

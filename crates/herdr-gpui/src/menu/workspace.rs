@@ -294,7 +294,13 @@ impl HerdrWindow {
                 "Delete worktree checkout",
             ));
         }
-        if self.can_teleport() {
+        if self.teleport_mark().is_some() {
+            items.push((WorkspaceMenuAction::GoToTeleported, "Go to teleported copy"));
+            items.push((
+                WorkspaceMenuAction::ClearTeleported,
+                "Clear teleported mark",
+            ));
+        } else if self.can_teleport() {
             items.push((WorkspaceMenuAction::Teleport, "Teleport..."));
         }
         // Only a workspace that heads a group of checkouts can fold anything.
@@ -433,6 +439,8 @@ impl HerdrWindow {
             }
             WorkspaceMenuAction::PullRequest => self.open_workspace_pr(cx),
             WorkspaceMenuAction::Teleport => self.open_teleport(window, cx),
+            WorkspaceMenuAction::GoToTeleported => self.go_to_teleported(window, cx),
+            WorkspaceMenuAction::ClearTeleported => self.clear_teleport_mark(window, cx),
         }
     }
 

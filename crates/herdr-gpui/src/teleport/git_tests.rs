@@ -152,10 +152,8 @@ fn a_teleported_checkout_matches_its_source_exactly() {
     use std::io::Seek;
     bundle.rewind().unwrap();
     let uploaded = upload(&host, bundle, &cancelled).unwrap();
-    fetch(
-        &host, &dest_key, &uploaded, "feature", reference, &cancelled,
-    )
-    .unwrap();
+    fetch(&host, &dest_key, &uploaded, reference, &cancelled).unwrap();
+    advance_branch(&host, &dest_key, "feature", reference, &cancelled).unwrap();
     discard_upload(&host, &uploaded, &cancelled).unwrap();
     assert!(!Path::new(&uploaded).exists());
     assert!(!Path::new(&uploaded).parent().unwrap().exists());
@@ -292,13 +290,87 @@ fn a_branch_whose_commits_the_destination_has_still_moves() {
     use std::io::Seek;
     bundle.rewind().unwrap();
     let uploaded = upload(&host, bundle, &cancelled).unwrap();
-    fetch(
-        &host, &dest_key, &uploaded, "feature", reference, &cancelled,
-    )
-    .unwrap();
+    fetch(&host, &dest_key, &uploaded, reference, &cancelled).unwrap();
+    advance_branch(&host, &dest_key, "feature", reference, &cancelled).unwrap();
     discard_upload(&host, &uploaded, &cancelled).unwrap();
     assert_eq!(
         git(&fx.destination, &["rev-parse", "feature"]),
         git(&fx.checkout, &["rev-parse", "HEAD"])
     );
+}
+
+/// Capture `from`'s work, carry it into `to_key`, and return the reference.
+fn carry(host: &Host, from: &Path, to_key: &str, branch: &str, name: &str) -> String {
+    let cancelled = AtomicBool::new(false);
+    let dest = destination_branch(host, to_key, branch, &cancelled).unwrap();
+    let reference = format!("refs/herdr-teleport/{name}");
+    let mut bundle = tempfile::tempfile().unwrap();
+    capture(
+        host,
+        from.to_str().unwrap(),
+        &reference,
+        &dest.tips,
+        &mut bundle,
+        &cancelled,
+    )
+    .unwrap();
+    use std::io::Seek;
+    bundle.rewind().unwrap();
+    let uploaded = upload(host, bundle, &cancelled).unwrap();
+    fetch(host, to_key, &uploaded, &reference, &cancelled).unwrap();
+    discard_upload(host, &uploaded, &cancelled).unwrap();
+    reference
+}
+
+#[test]
+fn teleporting_back_reclaims_the_old_checkout_and_keeps_a_backup() {
+    let fx = fixture();
+    let host = Host::new(&ConnectTarget::Local).unwrap();
+    let cancelled = AtomicBool::new(false);
+    let dest_key = key(&fx.destination);
+    let forward = carry(&host, &fx.checkout, &dest_key, "feature", "forward");
+    advance_branch(&host, &dest_key, "feature", &forward, &cancelled).unwrap();
+    let moved = fx.destination.parent().unwrap().join("moved");
+    git(
+        &fx.destination,
+        &["worktree", "add", "-q", moved.to_str().unwrap(), "feature"],
+    );
+    restore(&host, moved.to_str().unwrap(), &forward, &cancelled).unwrap();
+
+    // Work continues on the destination; the old checkout picks up a stray file.
+    git(&moved, &["add", "-A"]);
+    git(&moved, &["commit", "-q", "-m", "more work"]);
+    write(&moved.join("edit.txt"), b"back home\n");
+    write(&fx.checkout.join("stray.txt"), b"left behind\n");
+
+    let back = carry(&host, &moved, &key(&fx.source), "feature", "back");
+    let backup = "refs/herdr-teleport/backup/test";
+    reclaim(
+        &host,
+        fx.checkout.to_str().unwrap(),
+        &back,
+        backup,
+        &cancelled,
+    )
+    .unwrap();
+
+    assert_eq!(
+        git(&fx.checkout, &["rev-parse", "HEAD"]),
+        git(&moved, &["rev-parse", "HEAD"])
+    );
+    assert_eq!(
+        git(&fx.checkout, &["rev-parse", "feature"]),
+        git(&moved, &["rev-parse", "HEAD"])
+    );
+    assert_eq!(
+        git(&fx.checkout, &["status", "--porcelain=v1"]),
+        git(&moved, &["status", "--porcelain=v1"])
+    );
+    assert!(!fx.checkout.join("stray.txt").exists());
+    // Nothing the old checkout held is lost: the backup has the stray file.
+    assert_eq!(
+        git(&fx.source, &["show", &format!("{backup}:stray.txt")]),
+        "left behind\n"
+    );
+    assert!(git(&fx.source, &["for-each-ref", "refs/herdr-teleport/back"]).is_empty());
 }

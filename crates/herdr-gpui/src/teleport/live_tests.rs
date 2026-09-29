@@ -5,7 +5,7 @@
 use super::{
     error::Step,
     host::Host,
-    job::{self, Destination, HostRepositories, Place, Repository, Source},
+    job::{self, Destination, HostRepositories, Place, Repository, Retired, Source},
     remote::MatchReason,
     snapshot::{HostSnapshot, ProcessInfoResult, SnapshotResult},
 };
@@ -286,6 +286,7 @@ fn teleport_between_two_daemons() {
         custom_label: None,
         repo_key: key(&repo_a),
         repo_label: "app".into(),
+        branch: Some("feat".into()),
         tab_labels: HashMap::from([(
             tab["tab"]["tab_id"].as_str().unwrap().to_owned(),
             "server".to_owned(),
@@ -301,6 +302,7 @@ fn teleport_between_two_daemons() {
                 label: "app".into(),
                 workspace_id: main_b.clone(),
             }]),
+            retired: Vec::new(),
         }],
         &cancelled,
     )
@@ -335,8 +337,12 @@ fn teleport_between_two_daemons() {
     assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
     assert!(steps.contains(&Step::Launch));
 
-    // Source: workspace closed, checkout kept.
-    assert!(a.snapshot().workspace(&source_ws).is_none());
+    // Source: the workspace stays with one idle "teleported" tab; the
+    // programs it ran are gone and the checkout is untouched.
+    let tabs = a.snapshot().tabs_of(&source_ws).len();
+    assert_eq!(tabs, 1);
+    let kept = a.herdr(&["tab", "list", "--workspace", &source_ws]);
+    assert_eq!(kept["tabs"][0]["label"], "teleported");
     assert!(checkout.join("sub/new.txt").exists());
 
     // Destination: same commit, same uncommitted state, same tabs and layout.
@@ -376,6 +382,56 @@ fn teleport_between_two_daemons() {
     });
     let tab_list = b.herdr(&["tab", "list", "--workspace", &outcome.workspace_id]);
     assert_eq!(tab_list["tabs"][1]["label"], "server");
+
+    // Teleport back: the checkout the work left is reused, not duplicated.
+    fs::write(moved_checkout.join("more.txt"), "from b\n").unwrap();
+    let back = Source {
+        place: place(&b, "b"),
+        workspace_id: outcome.workspace_id.clone(),
+        custom_label: None,
+        repo_key: key(&repo_b),
+        repo_label: "app".into(),
+        branch: Some("feat".into()),
+        tab_labels: HashMap::new(),
+    };
+    let discovery = job::discover(
+        &back,
+        vec![HostRepositories {
+            place: place(&a, "a"),
+            repositories: Some(vec![Repository {
+                key: key(&repo_a),
+                label: "app".into(),
+                workspace_id: main_a.clone(),
+            }]),
+            retired: vec![Retired {
+                repo_key: key(&repo_a),
+                branch: "feat".into(),
+                workspace_id: source_ws.clone(),
+            }],
+        }],
+        &cancelled,
+    )
+    .unwrap();
+    let home = &discovery.candidates[0];
+    assert!(matches!(home.destination, Destination::Reclaim { .. }));
+    let review = job::review(&back, home, &cancelled).unwrap();
+    let returned = job::run(&back, home, &review, |_| {}, &cancelled).unwrap();
+    assert!(returned.warnings.is_empty(), "{:?}", returned.warnings);
+    assert_eq!(returned.workspace_id, source_ws);
+    assert_eq!(
+        fs::read_to_string(checkout.join("more.txt")).unwrap(),
+        "from b\n"
+    );
+    assert_eq!(
+        git(&checkout, &["rev-parse", "HEAD"]),
+        git(&moved_checkout, &["rev-parse", "HEAD"])
+    );
+    // Its tabs are rebuilt and the "teleported" tab is gone.
+    let snapshot = a.snapshot();
+    assert_eq!(snapshot.tabs_of(&source_ws).len(), 2);
+    let tabs = a.herdr(&["tab", "list", "--workspace", &source_ws]);
+    assert_ne!(tabs["tabs"][0]["label"], "teleported");
+    assert!(!git(&repo_a, &["for-each-ref", "refs/herdr-teleport/backup"]).is_empty());
 }
 
 #[test]
@@ -443,6 +499,7 @@ fn teleport_copies_the_repository_where_it_is_missing() {
         custom_label: None,
         repo_key: repo.join(".git").to_string_lossy().into_owned(),
         repo_label: "app".into(),
+        branch: Some("feat".into()),
         tab_labels: HashMap::new(),
     };
     let cancelled = AtomicBool::new(false);
@@ -456,6 +513,7 @@ fn teleport_copies_the_repository_where_it_is_missing() {
                 host: b.host.clone(),
             },
             repositories: None,
+            retired: Vec::new(),
         }],
         &cancelled,
     )
@@ -495,5 +553,5 @@ fn teleport_copies_the_repository_where_it_is_missing() {
         fs::read_to_string(moved_checkout.join("notes.txt")).unwrap(),
         "untracked\n"
     );
-    assert!(a.snapshot().workspace(&source_ws).is_none());
+    assert_eq!(a.snapshot().tabs_of(&source_ws).len(), 1);
 }

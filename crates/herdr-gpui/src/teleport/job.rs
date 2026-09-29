@@ -15,7 +15,7 @@ use super::{
     sessions::{Route, move_session},
     snapshot::{
         HostSnapshot, PaneInfoResult, ProcessInfo, ProcessInfoResult, SnapshotResult, TabCreated,
-        WorkspaceCreated, WorktreeCreated,
+        TabList, WorkspaceCreated, WorktreeCreated,
     },
 };
 use herdr_client::shell_quote;
@@ -41,6 +41,8 @@ pub(crate) struct Source {
     pub(crate) custom_label: Option<String>,
     pub(crate) repo_key: String,
     pub(crate) repo_label: String,
+    /// The branch the GUI snapshot shows, for finding a checkout it left.
+    pub(crate) branch: Option<String>,
     /// Tab labels the user chose, by source tab id.
     pub(crate) tab_labels: HashMap<String, String>,
 }
@@ -60,6 +62,16 @@ pub(crate) struct HostRepositories {
     /// The host's open repositories from its GUI snapshot, or `None` when it
     /// is not connected and they must be read through its CLI.
     pub(crate) repositories: Option<Vec<Repository>>,
+    /// Checkouts on this host this client marked as teleported away.
+    pub(crate) retired: Vec<Retired>,
+}
+
+/// A checkout whose work was teleported away, still open as a workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Retired {
+    pub(crate) repo_key: String,
+    pub(crate) branch: String,
+    pub(crate) workspace_id: String,
 }
 
 /// Where the worktree lands on a host.
@@ -72,6 +84,11 @@ pub(crate) enum Destination {
     },
     /// It is not open: open an existing checkout or clone one first.
     Arrive(Arrival),
+    /// The work left this checkout earlier and is coming back to it.
+    Reclaim {
+        repository: Repository,
+        workspace_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -85,9 +102,10 @@ pub(crate) struct Candidate {
 impl Candidate {
     fn rank(&self) -> (u8, Option<MatchReason>) {
         match &self.destination {
-            Destination::Open { reason, .. } => (0, Some(*reason)),
-            Destination::Arrive(Arrival::Existing { .. }) => (1, None),
-            Destination::Arrive(Arrival::Clone { .. }) => (2, None),
+            Destination::Reclaim { .. } => (0, None),
+            Destination::Open { reason, .. } => (1, Some(*reason)),
+            Destination::Arrive(Arrival::Existing { .. }) => (2, None),
+            Destination::Arrive(Arrival::Clone { .. }) => (3, None),
         }
     }
 }
@@ -146,7 +164,13 @@ pub(crate) fn discover(
     )?;
     let mut discovery = Discovery::default();
     for host in hosts {
-        match discover_host(&host, &identity, &origin, cancelled) {
+        match discover_host(
+            &host,
+            &identity,
+            &origin,
+            source.branch.as_deref(),
+            cancelled,
+        ) {
             Ok(candidates) => discovery.candidates.extend(candidates),
             Err(Error::Cancelled) => return Err(Error::Cancelled),
             Err(error) => discovery
@@ -166,6 +190,7 @@ fn discover_host(
     host: &HostRepositories,
     identity: &RepoIdentity,
     source: &provision::SourceRepository,
+    branch: Option<&str>,
     cancelled: &AtomicBool,
 ) -> Result<Vec<Candidate>> {
     let repositories = match &host.repositories {
@@ -196,6 +221,26 @@ fn discover_host(
             Some(candidate(Destination::Open { repository, reason }))
         })
         .collect();
+    // Going back to a checkout the work left: that checkout is the place.
+    let back = branch.and_then(|branch| {
+        host.retired.iter().find_map(|retired| {
+            let repository = open
+                .iter()
+                .find_map(|candidate| match &candidate.destination {
+                    Destination::Open { repository, .. } if repository.key == retired.repo_key => {
+                        Some(repository.clone())
+                    }
+                    _ => None,
+                })?;
+            (retired.branch == branch).then(|| Destination::Reclaim {
+                repository,
+                workspace_id: retired.workspace_id.clone(),
+            })
+        })
+    });
+    if let Some(back) = back {
+        return Ok(vec![candidate(back)]);
+    }
     if !open.is_empty() {
         return Ok(open);
     }
@@ -342,6 +387,8 @@ pub(crate) fn review(
         Destination::Open { repository, .. } => Some(repository.key.as_str()),
         Destination::Arrive(Arrival::Existing { key, .. }) => Some(key.as_str()),
         Destination::Arrive(Arrival::Clone { .. }) => None,
+        // The checkout there is this branch's, and is backed up before reuse.
+        Destination::Reclaim { .. } => None,
     };
     if let Some(key) = key {
         let dest = git::destination_branch(&destination.place.host, key, &branch, cancelled)?;
@@ -390,7 +437,7 @@ pub(crate) fn review(
         tabs,
         reason: match &destination.destination {
             Destination::Open { reason, .. } => Some(*reason),
-            Destination::Arrive(_) => None,
+            Destination::Arrive(_) | Destination::Reclaim { .. } => None,
         },
     })
 }
@@ -445,6 +492,9 @@ fn plan_tab(
 pub(crate) struct Outcome {
     pub(crate) endpoint_id: String,
     pub(crate) workspace_id: String,
+    /// The destination repository, for remembering where the work went.
+    pub(crate) repo_key: String,
+    pub(crate) branch: String,
     /// Things that did not carry over, for the user to see.
     pub(crate) warnings: Vec<String>,
 }
@@ -511,7 +561,11 @@ pub(crate) fn run(
 
     report(Step::Capture);
     let dest = git::destination_branch(to, key, &review.branch, cancelled)?;
-    git::check_destination(from, &review.checkout, &review.branch, &dest, cancelled)?;
+    // Coming back, the branch is checked out in the very checkout being
+    // reclaimed, which is backed up rather than refused.
+    if !matches!(destination.destination, Destination::Reclaim { .. }) {
+        git::check_destination(from, &review.checkout, &review.branch, &dest, cancelled)?;
+    }
     let reference = reference_name();
     let mut bundle = tempfile::tempfile().map_err(Error::LocalFile)?;
     git::capture(
@@ -527,20 +581,24 @@ pub(crate) fn run(
     report(Step::Transfer);
     let uploaded = git::upload(to, bundle, cancelled)?;
     report(Step::Fetch);
-    let fetched = git::fetch(to, key, &uploaded, &review.branch, &reference, cancelled);
+    let fetched = git::fetch(to, key, &uploaded, &reference, cancelled);
     let _ = git::discard_upload(to, &uploaded, cancelled);
     fetched?;
 
-    let placed = place_worktree(
-        source,
-        destination,
-        &repository,
-        review,
-        &reference,
-        &mut report,
-        cancelled,
-    );
-    let (created, panes) = match placed {
+    let placed = (|| {
+        let landing = land(
+            source,
+            destination,
+            &repository,
+            review,
+            &reference,
+            &mut report,
+            cancelled,
+        )?;
+        let panes = rebuild_tabs(to, &landing, review, &mut report, cancelled)?;
+        Ok((landing, panes))
+    })();
+    let (landing, panes) = match placed {
         Ok(placed) => placed,
         Err(error) => {
             git::drop_reference(to, key, &reference, &AtomicBool::new(false));
@@ -548,13 +606,10 @@ pub(crate) fn run(
         }
     };
 
-    // The source's programs stop here, so every session file is complete.
-    report(Step::CloseSource);
-    from.herdr_ok(
-        Step::CloseSource,
-        &["workspace", "close", &source.workspace_id],
-        cancelled,
-    )?;
+    // The source's programs stop here, so every session file is complete. The
+    // workspace itself stays, for this client to mark as teleported.
+    report(Step::Retire);
+    retire(from, &source.workspace_id, &review.checkout, cancelled)?;
 
     report(Step::Sessions);
     let mut launches = Vec::new();
@@ -569,7 +624,7 @@ pub(crate) fn run(
                     source: from,
                     destination: to,
                     from: &review.checkout,
-                    to: &created.worktree.path,
+                    to: &landing.checkout,
                     cwd: &target.cwd,
                 };
                 Some(match move_session(*agent, session, &route, cancelled) {
@@ -582,11 +637,11 @@ pub(crate) fn run(
                 })
             }
             Action::Handoff { note, to: agent } => {
-                let note = format!("{}/{note}", created.worktree.path);
+                let note = format!("{}/{note}", landing.checkout);
                 Some(agent.start_argv(Some(&handoff_resume_prompt(&note))))
             }
             Action::Start(argv) | Action::Run(argv) => {
-                Some(remap_argv(argv, &review.checkout, &created.worktree.path))
+                Some(remap_argv(argv, &review.checkout, &landing.checkout))
             }
         };
         if let Action::Missing(program) = &plan.action {
@@ -615,7 +670,9 @@ pub(crate) fn run(
 
     Ok(Outcome {
         endpoint_id: destination.place.endpoint_id.clone(),
-        workspace_id: created.workspace.workspace_id.clone(),
+        workspace_id: landing.workspace_id,
+        repo_key: repository.key.clone(),
+        branch: review.branch.clone(),
         warnings,
     })
 }
@@ -630,7 +687,9 @@ fn arrive(
 ) -> Result<Repository> {
     let to = &destination.place.host;
     let (path, key) = match &destination.destination {
-        Destination::Open { repository, .. } => return Ok(repository.clone()),
+        Destination::Open { repository, .. } | Destination::Reclaim { repository, .. } => {
+            return Ok(repository.clone());
+        }
         Destination::Arrive(Arrival::Existing { path, key }) => (path, key.clone()),
         Destination::Arrive(Arrival::Clone { path }) => {
             report(Step::Clone);
@@ -667,9 +726,19 @@ struct Target {
     created_in: String,
 }
 
-/// Create the worktree, restore changes, and rebuild the tabs. Returns the
-/// created worktree and one target per pane in `review.panes()` order.
-fn place_worktree(
+/// Where the work lands: a workspace, its checkout, the empty tab the first
+/// source tab is rebuilt in, and tabs to close once the rebuild is done.
+struct Landing {
+    workspace_id: String,
+    checkout: String,
+    first_tab: String,
+    first_pane: String,
+    stale_tabs: Vec<String>,
+}
+
+/// Put the branch and changes in place: a new worktree, or, coming back, the
+/// checkout the work once left (backed up first).
+fn land(
     source: &Source,
     destination: &Candidate,
     repository: &Repository,
@@ -677,8 +746,47 @@ fn place_worktree(
     reference: &str,
     report: &mut impl FnMut(Step),
     cancelled: &AtomicBool,
-) -> Result<(WorktreeCreated, Vec<Target>)> {
+) -> Result<Landing> {
     let to = &destination.place.host;
+    if let Destination::Reclaim { workspace_id, .. } = &destination.destination {
+        report(Step::Restore);
+        let snapshot: SnapshotResult = to.herdr(Step::Restore, &["api", "snapshot"], cancelled)?;
+        let snapshot = snapshot.snapshot;
+        let checkout = snapshot
+            .workspace(workspace_id)
+            .and_then(|workspace| workspace.worktree.as_ref())
+            .map(|worktree| worktree.checkout_path.clone())
+            .ok_or(Error::WorkspaceGone)?;
+        let stale_tabs = snapshot
+            .tabs_of(workspace_id)
+            .iter()
+            .map(|tab| tab.tab_id.clone())
+            .collect();
+        let backup = reference.replacen("refs/herdr-teleport/", "refs/herdr-teleport/backup/", 1);
+        git::reclaim(to, &checkout, reference, &backup, cancelled)?;
+        report(Step::Tabs);
+        let made: TabCreated = to.herdr(
+            Step::Tabs,
+            &[
+                "tab",
+                "create",
+                "--workspace",
+                workspace_id,
+                "--cwd",
+                &checkout,
+                "--no-focus",
+            ],
+            cancelled,
+        )?;
+        return Ok(Landing {
+            workspace_id: workspace_id.clone(),
+            checkout,
+            first_tab: made.tab.tab_id,
+            first_pane: made.root_pane.pane_id,
+            stale_tabs,
+        });
+    }
+    git::advance_branch(to, &repository.key, &review.branch, reference, cancelled)?;
     report(Step::CreateWorktree);
     let mut args = vec![
         "worktree",
@@ -693,15 +801,60 @@ fn place_worktree(
         args.extend(["--label", label]);
     }
     let created: WorktreeCreated = to.herdr(Step::CreateWorktree, &args, cancelled)?;
-    let checkout = created.worktree.path.clone();
-
     report(Step::Restore);
-    git::restore(to, &checkout, reference, cancelled)?;
+    git::restore(to, &created.worktree.path, reference, cancelled)?;
+    Ok(Landing {
+        workspace_id: created.workspace.workspace_id,
+        checkout: created.worktree.path,
+        first_tab: created.tab.tab_id,
+        first_pane: created.root_pane.pane_id,
+        stale_tabs: Vec::new(),
+    })
+}
 
+/// Stop everything running in the source workspace but keep the workspace:
+/// one fresh shell tab replaces its tabs.
+fn retire(host: &Host, workspace_id: &str, checkout: &str, cancelled: &AtomicBool) -> Result<()> {
+    let tabs: TabList = host.herdr(
+        Step::Retire,
+        &["tab", "list", "--workspace", workspace_id],
+        cancelled,
+    )?;
+    host.herdr_ok(
+        Step::Retire,
+        &[
+            "tab",
+            "create",
+            "--workspace",
+            workspace_id,
+            "--cwd",
+            checkout,
+            "--label",
+            "teleported",
+            "--no-focus",
+        ],
+        cancelled,
+    )?;
+    for tab in tabs.tabs {
+        host.herdr_ok(Step::Retire, &["tab", "close", &tab.tab_id], cancelled)?;
+    }
+    Ok(())
+}
+
+/// Rebuild the source tabs in `landing`, then close the tabs it replaces.
+/// Returns one target per pane in `review.panes()` order.
+fn rebuild_tabs(
+    to: &Host,
+    landing: &Landing,
+    review: &Review,
+    report: &mut impl FnMut(Step),
+    cancelled: &AtomicBool,
+) -> Result<Vec<Target>> {
     report(Step::Tabs);
+    let checkout = &landing.checkout;
     let cwd_of = |plan: Option<&PanePlan>| {
         plan.and_then(|plan| plan.cwd.as_deref())
-            .and_then(|cwd| remap(cwd, &review.checkout, &checkout))
+            .and_then(|cwd| remap(cwd, &review.checkout, checkout))
             .unwrap_or_else(|| checkout.clone())
     };
     let mut targets: HashMap<String, Target> = HashMap::new();
@@ -710,8 +863,8 @@ fn place_worktree(
         let first_cwd = cwd_of(build.slots.first().and_then(|id| tab.pane(id)));
         let (tab_id, root, root_cwd) = if index == 0 {
             (
-                created.tab.tab_id.clone(),
-                created.root_pane.pane_id.clone(),
+                landing.first_tab.clone(),
+                landing.first_pane.clone(),
                 checkout.clone(),
             )
         } else {
@@ -721,7 +874,7 @@ fn place_worktree(
                     "tab",
                     "create",
                     "--workspace",
-                    &created.workspace.workspace_id,
+                    &landing.workspace_id,
                     "--cwd",
                     &first_cwd,
                     "--no-focus",
@@ -767,7 +920,10 @@ fn place_worktree(
             );
         }
     }
-    let ordered = review
+    for tab in &landing.stale_tabs {
+        to.herdr_ok(Step::Tabs, &["tab", "close", tab], cancelled)?;
+    }
+    review
         .panes()
         .map(|plan| {
             targets
@@ -778,8 +934,7 @@ fn place_worktree(
                     source: serde::de::Error::custom("a pane was not recreated"),
                 })
         })
-        .collect::<Result<Vec<_>>>()?;
-    Ok((created, ordered))
+        .collect()
 }
 
 #[cfg(test)]

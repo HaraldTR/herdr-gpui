@@ -249,6 +249,10 @@ pub(super) fn status(status: AgentStatus, removing: bool, theme: &Theme, font: &
 }
 
 /// Uncommitted work, marked as the titlebar marks it.
+pub(super) fn teleported(key: &str, size: f32, theme: &Theme) -> Div {
+    crate::icons::teleported(theme, size).debug_selector(|| format!("teleported-{key}"))
+}
+
 pub(super) fn dirty(key: &str, size: f32, theme: &Theme) -> Div {
     crate::icons::uncommitted(theme, size).debug_selector(|| format!("dirty-{key}"))
 }

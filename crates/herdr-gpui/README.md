@@ -641,7 +641,8 @@ saved SSH host; custom socket endpoints are not scripted.
    untracked files, and what each pane becomes. The destination's branch must be
    absent or an ancestor of this one, and must not be checked out there.
 3. **Teleport.** Closing the dialog does not stop a move in progress; its result
-   arrives as a flash, and success switches to the new workspace.
+   arrives as a flash, and success switches to the new workspace on the
+   destination, waiting for that host to connect and list it if need be.
 
 Commits travel as a Git bundle holding only what the destination lacks. The
 uncommitted work travels as two temporary commits, built through a temporary
@@ -675,8 +676,15 @@ changes, even where `.herdr` is ignored. The same agent, or else the first
 installed of Claude Code, Codex, opencode and pi, then starts with that note.
 Anything nothing can continue is listed as skipped.
 
-The source workspace closes only after the destination worktree, changes and
-tabs exist. Its checkout stays on disk and can be reopened with Open worktree....
+Once the destination worktree, changes and tabs exist, the source workspace's
+programs stop: its tabs are replaced by one idle `teleported` shell tab, and the
+workspace and checkout stay. Herdr has no moved or disabled state, so this
+client remembers the move (`teleported.json` in its state directory) and marks
+the row with a teleport icon. Its menu offers Go to teleported copy and Clear
+teleported mark instead of Teleport. Teleporting the work back picks that
+checkout as the destination: its current state, committed or not, is saved to
+`refs/herdr-teleport/backup/...` first, then it takes the returning branch and
+changes, its tabs are rebuilt, and the mark is cleared.
 Everything runs as noninteractive scripts calling Git and the `herdr` CLI on
 each host. Remote hosts use the terminal's SSH trust and authentication policy,
 and the UI thread never blocks. The GUI connection's API does not expose layouts,

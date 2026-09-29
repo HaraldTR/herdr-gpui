@@ -60,6 +60,10 @@ pub(crate) enum WorkspaceMenuAction {
     Expand,
     PullRequest,
     Teleport,
+    /// Focus the copy the work was teleported to.
+    GoToTeleported,
+    /// Forget that this checkout's work was teleported away.
+    ClearTeleported,
 }
 
 impl WorkspaceMenuAction {
@@ -74,7 +78,8 @@ impl WorkspaceMenuAction {
             Self::Dialog(WorkspaceAction::DeleteWorktree) => "icons/trash.svg",
             Self::Collapse => "icons/chevron-up.svg",
             Self::Expand => "icons/chevron-down.svg",
-            Self::Teleport => "icons/teleport.svg",
+            Self::Teleport | Self::GoToTeleported => "icons/teleport.svg",
+            Self::ClearTeleported => "icons/x.svg",
             Self::PullRequest => return None,
         })
     }

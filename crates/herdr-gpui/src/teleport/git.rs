@@ -294,22 +294,45 @@ pub(crate) fn discard_upload(host: &Host, path: &str, cancelled: &AtomicBool) ->
     host.query(Step::Transfer, &body, &[], cancelled).map(drop)
 }
 
-/// Fetch the uploaded bundle into the destination repository and point the
-/// branch at the source's HEAD, the work reference's grandparent. Only the
-/// reference is fetched: its two commits are new, so it is always in the
-/// bundle, whereas a branch whose commits the destination already has would
-/// be left out of it. An existing branch may only fast-forward.
+/// Fetch the uploaded bundle's work reference into the destination
+/// repository. Only the reference is fetched: its two commits are new, so it
+/// is always in the bundle, whereas a branch whose commits the destination
+/// already has would be left out of it.
 pub(crate) fn fetch(
     host: &Host,
     key: &str,
     bundle: &str,
+    reference: &str,
+    cancelled: &AtomicBool,
+) -> Result<()> {
+    let body = format!(
+        "git --git-dir {key} fetch --no-tags --no-write-fetch-head -q {bundle} {spec}\n",
+        key = shell_quote(key),
+        bundle = shell_quote(bundle),
+        spec = shell_quote(&format!("{reference}:{reference}")),
+    );
+    host.run(
+        Step::Fetch,
+        &body,
+        io::empty(),
+        io::sink(),
+        TRANSFER,
+        cancelled,
+    )
+    .map(drop)
+}
+
+/// Point `branch` at the source's HEAD, the work reference's grandparent. An
+/// existing branch may only fast-forward.
+pub(crate) fn advance_branch(
+    host: &Host,
+    key: &str,
     branch: &str,
     reference: &str,
     cancelled: &AtomicBool,
 ) -> Result<()> {
     let body = format!(
         r#"g() {{ git --git-dir {key} "$@"; }}
-g fetch --no-tags --no-write-fetch-head -q {bundle} {reference_spec}
 head=$(g rev-parse --verify {head})
 if old=$(g rev-parse -q --verify {branch_commit}); then
     g merge-base --is-ancestor "$old" "$head" || {{ echo "branch has diverged" >&2; exit 1; }}
@@ -319,15 +342,50 @@ else
 fi
 "#,
         key = shell_quote(key),
-        bundle = shell_quote(bundle),
-        reference_spec = shell_quote(&format!("{reference}:{reference}")),
         head = shell_quote(&format!("{reference}~2^{{commit}}")),
         branch_commit = shell_quote(&format!("refs/heads/{branch}^{{commit}}")),
         branch_ref = shell_quote(&format!("refs/heads/{branch}")),
     );
-    let sink = io::sink();
-    host.run(Step::Fetch, &body, io::empty(), sink, TRANSFER, cancelled)
-        .map(drop)
+    host.query(Step::Fetch, &body, &[], cancelled).map(drop)
+}
+
+/// Take back a checkout this work was once teleported away from: save its
+/// current state (committed or not, untracked included) as `backup`, then
+/// reset it to the incoming HEAD and restore the incoming changes exactly.
+/// Ignored files, such as build output, stay.
+pub(crate) fn reclaim(
+    host: &Host,
+    checkout: &str,
+    reference: &str,
+    backup: &str,
+    cancelled: &AtomicBool,
+) -> Result<()> {
+    let body = format!(
+        r#"cd -- {checkout}
+t=$(mktemp -d "${{TMPDIR:-/tmp}}/herdr-teleport.XXXXXXXXXX")
+trap 'rm -rf "$t"' EXIT
+cp "$(git rev-parse --git-path index)" "$t/index"
+GIT_INDEX_FILE="$t/index" git add -A
+tree=$(GIT_INDEX_FILE="$t/index" git write-tree)
+GIT_AUTHOR_NAME=Herdr GIT_AUTHOR_EMAIL=teleport@herdr.invalid
+GIT_COMMITTER_NAME=Herdr GIT_COMMITTER_EMAIL=teleport@herdr.invalid
+export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+saved=$(git commit-tree --no-gpg-sign "$tree" -p HEAD -m 'herdr teleport: checkout before the work came back')
+git update-ref {backup} "$saved"
+git reset -q --hard {head}
+git clean -fdq
+git read-tree -m -u HEAD {reference}
+git read-tree {staged}
+git update-ref -d {reference}
+git update-index -q --refresh >/dev/null 2>&1 || :
+"#,
+        checkout = shell_quote(checkout),
+        backup = shell_quote(backup),
+        head = shell_quote(&format!("{reference}~2")),
+        reference = shell_quote(reference),
+        staged = shell_quote(&format!("{reference}^")),
+    );
+    host.query(Step::Restore, &body, &[], cancelled).map(drop)
 }
 
 /// Restore the uncommitted work in the new destination checkout, then drop

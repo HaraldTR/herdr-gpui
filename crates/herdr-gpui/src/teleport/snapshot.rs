@@ -217,6 +217,12 @@ pub(crate) struct WorkspaceCreated {
     pub(crate) workspace: CreatedWorkspace,
 }
 
+/// `tab_list`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct TabList {
+    pub(crate) tabs: Vec<CreatedTab>,
+}
+
 /// `tab_created`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct TabCreated {
