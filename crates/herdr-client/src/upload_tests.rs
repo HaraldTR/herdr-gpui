@@ -261,8 +261,7 @@ fn full_upload_collision_rolls_back_prior_success_without_deleting_collision() {
     let bin = temp.0.join("bin");
     fs::create_dir(&bin).unwrap();
     let fake_mktemp = bin.join("mktemp");
-    fs::write(&fake_mktemp, b"#!/bin/sh\ndir=\"$TMPDIR/herdr-upload.123456ABCDEF\"\nmkdir \"$dir\" || exit 1\nprintf 'keep collision' > \"$dir/collision.iso\"\nprintf '%s\\n' \"$dir\"\n").unwrap();
-    fs::set_permissions(&fake_mktemp, fs::Permissions::from_mode(0o700)).unwrap();
+    crate::test_executable::write(&fake_mktemp, b"#!/bin/sh\ndir=\"$TMPDIR/herdr-upload.123456ABCDEF\"\nmkdir \"$dir\" || exit 1\nprintf 'keep collision' > \"$dir/collision.iso\"\nprintf '%s\\n' \"$dir\"\n", 0o700).unwrap();
     let mut calls = 0;
     let mut sent = 0;
     let error = upload(
