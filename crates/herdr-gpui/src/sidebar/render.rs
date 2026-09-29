@@ -4,7 +4,7 @@
 
 use super::{
     DEVICE_FOOTER_HEIGHT, HOST_ARROW_WIDTH, HOST_GAP, STATUS_WIDTH, SidebarDrag, agent_name,
-    agents::agent_place,
+    agents::{agent_place, status_text},
     agents_sort,
     cell::{AgentRow, Cell, Fold, RowContext, RowData, RowState, WorkspaceRow, layout_for},
     label_text,
@@ -469,6 +469,11 @@ impl HerdrWindow {
                             icon: crate::icons::AgentIcon::from_identity(agent.agent.as_deref()),
                             status: agent.agent_status,
                             place: agent_place(agent, snapshot),
+                            status_text: self
+                                .config
+                                .agent_status_text
+                                .shown_for(agent.agent.as_deref())
+                                .then(|| status_text(agent.agent_status)),
                         }),
                         &row_cx,
                     )

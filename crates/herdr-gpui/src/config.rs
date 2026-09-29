@@ -82,6 +82,9 @@ pub struct Config {
     pub theme: String,
     pub confirm_close_tab: bool,
     pub show_agents: bool,
+    /// Show each agent's status word beside it, following the daemon's
+    /// `[ui.sidebar.agents]` rows when they name the `state_text` token.
+    pub agent_status_text: AgentStatusText,
     /// Plan usage of the selected host's AI services in the status bar.
     pub usage: crate::usage::UsageConfig,
     pub option_as_alt: OptionAsAlt,
@@ -579,6 +582,7 @@ impl Default for Config {
             github: GitHubConfig::default(),
             confirm_close_tab: true,
             show_agents: true,
+            agent_status_text: AgentStatusText::default(),
             usage: crate::usage::UsageConfig::default(),
             option_as_alt: OptionAsAlt::default(),
             open_links_in: LinkTarget::default(),
@@ -707,6 +711,45 @@ pub(crate) fn daemon_config_path(get: impl Fn(&str) -> Option<std::ffi::OsString
 struct Daemon {
     clipboard_toast: ClipboardToast,
     keys: DaemonKeys,
+    /// Which agents' daemon rows name the `state_text` token.
+    agent_status_text: AgentStatusText,
+}
+
+/// Which agents the daemon's `[ui.sidebar.agents]` rows give a status word.
+/// The daemon uses an agent's `rows_by_agent` entry instead of `rows`, never
+/// both, so each agent is decided by the list it will actually draw.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgentStatusText {
+    /// Whether `rows` names the token: agents without their own entry.
+    rows: bool,
+    /// Per canonical agent id, whether its `rows_by_agent` entry names it.
+    by_agent: std::collections::BTreeMap<String, bool>,
+}
+
+impl AgentStatusText {
+    /// Whether an agent, by the canonical id the daemon reports for it, shows
+    /// its status word.
+    pub fn shown_for(&self, agent: Option<&str>) -> bool {
+        agent
+            .and_then(|agent| self.by_agent.get(agent))
+            .copied()
+            .unwrap_or(self.rows)
+    }
+
+    /// The setting for `rows` plus the given `rows_by_agent` overrides.
+    #[cfg(test)]
+    pub(crate) fn from_rows<'a>(
+        rows: bool,
+        by_agent: impl IntoIterator<Item = (&'a str, bool)>,
+    ) -> Self {
+        Self {
+            rows,
+            by_agent: by_agent
+                .into_iter()
+                .map(|(agent, shown)| (agent.to_owned(), shown))
+                .collect(),
+        }
+    }
 }
 
 /// A config file the GUI does not own can hold anything, including settings
@@ -725,6 +768,7 @@ fn daemon_settings(path: &Path) -> Daemon {
     Daemon {
         clipboard_toast: daemon_clipboard_toast(&table),
         keys: DaemonKeys::from_table(table.get("keys").and_then(toml::Value::as_table)),
+        agent_status_text: daemon_agent_status_text(&table),
     }
 }
 
@@ -747,6 +791,52 @@ fn daemon_clipboard_toast(table: &toml::Table) -> ClipboardToast {
         resolved.position = position;
     }
     resolved
+}
+
+/// Which agents the daemon's `[ui.sidebar.agents]` rows give the `state_text`
+/// token. That is the TUI's status word beside each agent, so the GUI shows the
+/// same text instead of only the dot. Rows without it, or a differently shaped
+/// table, leave it off, matching the daemon's default rows.
+fn daemon_agent_status_text(table: &toml::Table) -> AgentStatusText {
+    let Some(agents) = table
+        .get("ui")
+        .and_then(|ui| ui.get("sidebar")?.get("agents")?.as_table())
+    else {
+        return AgentStatusText::default();
+    };
+    AgentStatusText {
+        rows: agents.get("rows").is_some_and(rows_have_state_text),
+        by_agent: agents
+            .get("rows_by_agent")
+            .and_then(toml::Value::as_table)
+            .map(|by_agent| {
+                by_agent
+                    .iter()
+                    .filter(|(_, rows)| rows.is_array())
+                    .map(|(agent, rows)| (agent.clone(), rows_have_state_text(rows)))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// One sidebar row list: arrays of tokens, each a plain name or an inline table
+/// with a `token` key. Unknown shapes are ignored rather than treated as a match.
+fn rows_have_state_text(rows: &toml::Value) -> bool {
+    rows.as_array().is_some_and(|rows| {
+        rows.iter().any(|row| {
+            row.as_array().is_some_and(|tokens| {
+                tokens.iter().any(|token| {
+                    token.as_str() == Some("state_text")
+                        || token
+                            .as_table()
+                            .and_then(|token| token.get("token"))
+                            .and_then(toml::Value::as_str)
+                            == Some("state_text")
+                })
+            })
+        })
+    })
 }
 
 fn theme_directories() -> Result<Vec<PathBuf>> {
@@ -951,6 +1041,7 @@ impl Config {
         config.features = settings.features;
         config.notifications = settings.notifications;
         config.clipboard_toast = settings.clipboard_toast.resolve(base.clipboard_toast);
+        config.agent_status_text = base.agent_status_text.clone();
         if !settings.layout.sidebar_gap.is_finite()
             || !(0.0..=MAX_SIDEBAR_GAP).contains(&settings.layout.sidebar_gap)
         {
@@ -1611,6 +1702,77 @@ mod tests {
                 position: TopLeft
             }
         );
+        Ok(())
+    }
+
+    /// The daemon's `state_text` token turns the GUI's status word on for the
+    /// agents whose rows name it: an agent's `rows_by_agent` entry replaces
+    /// `rows` for that agent only. Rows without it, or a file the GUI cannot
+    /// use, leave it off.
+    #[test]
+    fn daemon_sidebar_state_text_turns_agent_status_words_on() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let daemon = temp.0.join("config.toml");
+        // Expected for Claude, Codex, and an agent the daemon did not identify.
+        for (text, expected) in [
+            ("", [false; 3]),
+            ("[ui]\nstatus_indicators = \"dots\"\n", [false; 3]),
+            (
+                "[ui.sidebar.agents]\nrows = [[\"state_icon\", \"workspace\", \"tab\"], [\"agent\"]]\n",
+                [false; 3],
+            ),
+            (
+                "[ui.sidebar.agents]\nrows = [[\"state_icon\", \"agent\", \"state_text\"], [\"agent\"]]\n",
+                [true; 3],
+            ),
+            (
+                "[ui.sidebar.agents]\nrows = [[{ token = \"state_text\", dim = true }]]\n",
+                [true; 3],
+            ),
+            (
+                "[ui.sidebar.agents.rows_by_agent]\nclaude = [[\"state_icon\", \"state_text\"]]\n",
+                [true, false, false],
+            ),
+            (
+                "[ui.sidebar.agents.rows_by_agent]\nclaude = [[\"agent\"]]\n",
+                [false; 3],
+            ),
+            (
+                "[ui.sidebar.agents]\nrows = [[\"state_text\"]]\n\
+                 [ui.sidebar.agents.rows_by_agent]\nclaude = [[\"agent\"]]\n",
+                [false, true, true],
+            ),
+            ("not toml", [false; 3]),
+        ] {
+            fs::write(&daemon, text)?;
+            let settings = daemon_settings(&daemon).agent_status_text;
+            assert_eq!(
+                [
+                    settings.shown_for(Some("claude")),
+                    settings.shown_for(Some("codex")),
+                    settings.shown_for(None),
+                ],
+                expected,
+                "{text}"
+            );
+        }
+        let off = AgentStatusText::default();
+        assert_eq!(
+            daemon_settings(&temp.0).agent_status_text,
+            off,
+            "a directory is not a config"
+        );
+        assert_eq!(
+            daemon_settings(&temp.0.join("absent.toml")).agent_status_text,
+            off
+        );
+
+        // Oversized files are skipped rather than parsed on every config load.
+        let mut oversized = "[ui.sidebar.agents]\nrows = [[\"state_text\"]]\n".to_owned();
+        oversized.push_str(&"# pad\n".repeat(MAX_DAEMON_CONFIG_BYTES as usize / 6));
+        assert!(oversized.len() as u64 > MAX_DAEMON_CONFIG_BYTES);
+        fs::write(&daemon, &oversized)?;
+        assert_eq!(daemon_settings(&daemon).agent_status_text, off);
         Ok(())
     }
 

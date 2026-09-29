@@ -330,6 +330,12 @@ Normal and Compact show PR numbers without change counts. Status indicators and
 agent-name lines remain visible in every density, and flat ones keep tree guides;
 font sizes and terminal spacing are unchanged. Saved edits apply automatically.
 
+When the daemon's `[ui.sidebar.agents]` rows name the `state_text` token, the
+GUI shows the same status word beside each agent, in the activity dot's color,
+in every layout. An agent with its own `rows_by_agent` entry follows that entry
+instead, as the terminal client does. Rows without the token keep the dot
+alone, so an unconfigured pair of clients renders alike.
+
 Three more layouts draw rows with a design of their own, each with fixed
 spacing:
 
