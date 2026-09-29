@@ -93,6 +93,7 @@ impl RowLayout for Orca {
         let branch = branch.filter(|branch| *branch != label);
         let pr = badge.as_ref().and_then(|badge| badge.pr.as_ref());
         let dirty = badge.as_ref().is_some_and(|badge| badge.dirty);
+        let teleported = badge.as_ref().is_some_and(|badge| badge.teleported);
         let dirty_size = (line * 0.7).round().min(14.);
         let meta = branch.is_some() || cx.host.is_some() || badge.is_some();
         // The repository's own checkout is the group's primary card.
@@ -136,6 +137,9 @@ impl RowLayout for Orca {
                     line.fill(div().debug_selector(|| format!("detail-{label}")), branch)
                 }
                 None => line.spacer(),
+            })
+            .when(teleported, |line| {
+                line.fixed(dirty_size, parts::teleported(label, dirty_size, theme))
             })
             .when(dirty, |line| {
                 line.fixed(dirty_size, parts::dirty(label, dirty_size, theme))

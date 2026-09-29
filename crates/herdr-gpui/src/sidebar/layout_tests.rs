@@ -677,6 +677,18 @@ fn check_layouts(modes: &[crate::config::LayoutMode], cx: &mut gpui::TestAppCont
         pr.deletions = 567;
         view.menu.pr_cache.seed(input.clone(), pr, now);
         view.git.seed_probe(input, true, now);
+        // Its work was teleported away, so the row carries that mark too.
+        view.teleport_marks.add(crate::teleport::Mark {
+            endpoint: crate::endpoint::LOCAL.into(),
+            repo_key: REPO_KEY.into(),
+            branch: "worktree/sidebar-child".into(),
+            destination: crate::teleport::MarkDestination {
+                endpoint: "ssh:box".into(),
+                label: "box".into(),
+                repo_key: "/home/me/agent-launcher/.git".into(),
+                workspace_id: "w9".into(),
+            },
+        });
         view
     });
     cx.simulate_resize(size(px(800.), px(900.)));
@@ -744,6 +756,11 @@ fn check_layouts(modes: &[crate::config::LayoutMode], cx: &mut gpui::TestAppCont
                         "{context}: badge {badge:?} {row:?}"
                     );
                     assert!(cx.debug_bounds("dirty-sidebar-child").is_some());
+                    let teleported = cx
+                        .debug_bounds("teleported-sidebar-child")
+                        .unwrap_or_else(|| panic!("{context}: no teleported mark"));
+                    assert!(teleported.right() <= row.right(), "{context}");
+                    assert!(cx.debug_bounds("teleported-herdr").is_none(), "{context}");
                 }
                 // Only the focused workspace draws a selection mark in the
                 // layouts whose highlight exists only while selected.
@@ -1090,6 +1107,9 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         updater: crate::updater::Updater::default(),
         update_preview: None,
         removal: None,
+        teleport: None,
+        teleport_marks: crate::teleport::Marks::detached(),
+        teleport_follow: None,
         selection: None,
         flash: None,
         configured_terminal_size: crate::config::Config::default().terminal.size,

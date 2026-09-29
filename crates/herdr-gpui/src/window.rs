@@ -116,6 +116,12 @@ pub(crate) struct HerdrWindow {
     pub(crate) menu: menu::MenuState,
     /// A `worktree.remove` queued after its dialog closed.
     pub(crate) removal: Option<menu::Removal>,
+    /// A teleport being set up or under way; a move outlives its dialog.
+    pub(crate) teleport: Option<crate::teleport::Teleport>,
+    /// Checkouts this client teleported away from, marked in the sidebar.
+    pub(crate) teleport_marks: crate::teleport::Marks,
+    /// The workspace a finished teleport keeps steering to until focused.
+    pub(crate) teleport_follow: Option<crate::teleport::Follow>,
     pub(crate) git: git::Git,
     pub(crate) usage: crate::usage::Usage,
     pub(crate) install_warning_shown: bool,
@@ -264,6 +270,7 @@ impl HerdrWindow {
         self.cancel_stale_image();
         self.poll_file_transfer(cx);
         self.update_workspace_dialog(window, cx);
+        self.poll_teleport(window, cx);
         self.poll_device_setup(window, cx);
         self.poll_worktree_source(cx);
         self.poll_hover_menu(std::time::Instant::now(), window, cx);
@@ -413,6 +420,9 @@ impl HerdrWindow {
             local_error: error,
             menu: menu::MenuState::new(cx),
             removal: None,
+            teleport: None,
+            teleport_marks: crate::teleport::Marks::start(),
+            teleport_follow: None,
             git: git::Git::default(),
             usage: Default::default(),
             install_warning_shown: false,

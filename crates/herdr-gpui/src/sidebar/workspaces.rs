@@ -61,7 +61,7 @@ pub(super) fn visible_workspace_entries(
         .collect()
 }
 
-/// Cached pull request and dirty mark for a worktree row, if the prefetch and
+/// Cached pull request, dirty and teleported marks for a worktree row, if the prefetch and
 /// the Git probe already have them. Rendering only reads: a missing entry
 /// simply shows nothing, never a stale or guessed state.
 /// `cache` is `None` for a row on a device other than the selected one: the
@@ -71,15 +71,18 @@ pub(super) fn workspace_badge(
     workspace: &ClientShellWorkspace,
     cache: Option<&crate::pull_request::Cache>,
     git: &crate::git::Git,
+    marks: (&crate::teleport::Marks, &str),
     theme: &Theme,
 ) -> Option<RowBadge> {
     let key = workspace.worktree.as_ref()?.key.as_str();
     let branch = workspace.branch.as_deref()?;
+    let (marks, endpoint) = marks;
     RowBadge::new(
         cache
             .and_then(|cache| cache.peek(key, branch))
             .map(|pr| PrBadge::new(pr, theme)),
         git.dirty(key, branch).unwrap_or(false),
+        marks.find(endpoint, key, branch).is_some(),
     )
 }
 

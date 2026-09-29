@@ -626,6 +626,91 @@ bridge files, they are not owned or deleted by Herdr on disconnect. Network loss
 can prevent cleanup, and kernel-blocked local filesystem operations cannot be
 forcibly interrupted. A copy stalls out after 30 seconds without progress.
 
+## Teleport
+
+Right-click a linked worktree and choose Teleport... to move it to another
+connected host: its branch and commits, staged, unstaged and untracked changes,
+tabs and splits, the programs running in them, and agent sessions. It is offered
+on Linux and macOS clients when the worktree's host is the local session or a
+saved SSH host; custom socket endpoints are not scripted.
+
+1. **Choose a host.** Every other enabled host is listed at once, connected or
+   not; nothing is probed until one is chosen. The review then finds where the
+   worktree goes there: the checkout it once left (see below), else the
+   repository if it is open, matched by normalized Git remote (`origin` first,
+   then any remote) or, only when this repository has no remotes, by name.
+   Otherwise Teleport sets it up: a checkout of the same repository at the same
+   place under the home directory (`~/code/app`) is opened as a space; failing
+   that, the repository is cloned there from `origin` without prompting, or,
+   when that host cannot reach `origin`, copied from this machine with its
+   branches and tags and `origin` restored. A different repository already at
+   that place is left alone and the copy goes to `<place>-teleport`.
+2. **Review.** The dialog lists the branch, unpushed commits, changed and
+   untracked files, and what each pane becomes. The destination's branch must be
+   absent or an ancestor of this one, and must not be checked out there.
+3. **Teleport.** Closing the dialog does not stop a move in progress; its result
+   arrives as a flash, and success switches to the new workspace on the
+   destination, waiting for that host to connect and list it if need be.
+
+Commits travel as a Git bundle holding only what the destination lacks. The
+uncommitted work travels as two temporary commits, built through a temporary
+index so the source checkout, index and branch are not modified. The branch is
+set to the source's commit, fast-forwarding a branch already there but never
+overwriting one that diverged. The destination's `herdr worktree create` checks
+it out under the same name, then the staged index and working tree are restored exactly, binary files
+included. Ignored files such as `.env` and build output stay behind, and so do
+submodule contents.
+
+When `origin` is on GitHub and the destination cannot reach it by itself (no
+SSH key there, or an unknown host key), the review says so and the move lends
+it this machine's `gh auth token`. The token travels over the script's stdin
+and is stored in the repository's Git directory, `.git/herdr/github-token` (mode
+600), so no working tree or commit ever holds it. A repository-local credential
+helper answers `https://github.com` from that file, `git@github.com:` URLs are
+rewritten to HTTPS for that repository, and `.envrc` gains an `export GH_TOKEN`
+that reads the file, for `gh` under direnv; it is excluded locally, and a
+repository that tracks its own `.envrc` is left untouched. Replace the file to
+rotate the token. If `gh` is not signed in here, the review warns that pull
+and push will not work there.
+
+Tabs, split directions and ratios, and custom tab and workspace labels are
+rebuilt. Each pane starts in the same directory relative to the checkout.
+Running commands start again with their arguments, with paths under the
+checkout moved to the new checkout. Environment variables, shell history,
+background jobs and unsaved editor buffers do not carry over.
+
+Agent sessions move in each agent's own format, so the full history resumes:
+
+| Agent | Moved as | Resumed with |
+| --- | --- | --- |
+| Claude Code | transcript into the new cwd's `~/.claude/projects` directory | `claude --resume <id>` |
+| Codex | rollout under `~/.codex/sessions` | `codex resume <id>` |
+| opencode | `opencode export`, then `opencode import` | `opencode --session <id>` |
+| pi, omp | session file into the new cwd's session directory | `pi --session <file>` |
+
+The checkout path is rewritten inside each moved session. Model and permission
+flags from the original command line are kept. Initial prompts are dropped. An
+agent the destination lacks, or one with no reported session, is asked first to
+write a handoff note to `.herdr/teleport/handoff-N.md`. The note travels with the
+changes, even where `.herdr` is ignored. The same agent, or else the first
+installed of Claude Code, Codex, opencode and pi, then starts with that note.
+Anything nothing can continue is listed as skipped.
+
+Once the destination worktree, changes and tabs exist, the source workspace's
+programs stop: its tabs are replaced by one idle `teleported` shell tab, and the
+workspace and checkout stay. Herdr has no moved or disabled state, so this
+client remembers the move (`teleported.json` in its state directory) and marks
+the row with a teleport icon. Its menu offers Go to teleported copy and Clear
+teleported mark instead of Teleport. The copy on the destination offers
+Teleport back, which opens Teleport already aimed at the host the work came
+from. Teleporting the work back picks that checkout as the destination: its current state, committed or not, is saved to
+`refs/herdr-teleport/backup/...` first, then it takes the returning branch and
+changes, its tabs are rebuilt, and the mark is cleared.
+Everything runs as noninteractive scripts calling Git and the `herdr` CLI on
+each host. Remote hosts use the terminal's SSH trust and authentication policy,
+and the UI thread never blocks. The GUI connection's API does not expose layouts,
+process details or agent sessions, which is why Teleport uses the CLI.
+
 ## Images
 
 On a selected SSH endpoint, drop one PNG, JPEG, GIF, WebP, or BMP image onto a pane

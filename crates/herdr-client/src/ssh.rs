@@ -33,9 +33,7 @@ impl Drop for SshChild {
 pub(crate) enum SshChild {}
 
 #[cfg(unix)]
-pub(super) fn quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
+pub(super) use crate::script::shell_quote as quote;
 
 // PATH first, excluding mise shims, followed by upstream's known install roots.
 // Keep paths in shell variables: discovered executable names are never eval'd.

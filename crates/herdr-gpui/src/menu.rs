@@ -13,6 +13,7 @@ mod pr;
 mod sessions;
 mod settings;
 mod state;
+mod teleport;
 mod workspace;
 mod workspace_close;
 mod worktree_open;
@@ -34,13 +35,12 @@ mod worktree_tests;
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) use state::Cover;
 pub(crate) use {
-    colors::{ONLINE, accent},
+    colors::{ONLINE, accent, danger, teleported},
     page::{Page, WorkspaceAction},
     state::{MenuState, Removal},
     worktree_source::WorktreeSource,
 };
 
-use colors::danger;
 use page::WorkspaceMenuAction;
 use state::Submission;
 use workspace::WorkspaceTarget;

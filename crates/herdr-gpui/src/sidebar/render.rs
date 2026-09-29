@@ -322,6 +322,7 @@ impl HerdrWindow {
                             (endpoint_index == self.selected_endpoint)
                                 .then_some(&self.menu.pr_cache),
                             &self.git,
+                            (&self.teleport_marks, &endpoint.id),
                             theme,
                         ),
                         removing: selected

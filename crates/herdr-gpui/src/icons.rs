@@ -62,6 +62,29 @@ pub(super) fn uncommitted(theme: &crate::config::Theme, size: f32) -> gpui::Div 
         )
 }
 
+/// A checkout whose work was teleported to another host.
+pub(super) fn teleported(theme: &crate::config::Theme, size: f32) -> gpui::Div {
+    use gpui::{Rgba, div, prelude::*, px, svg};
+    let color = crate::menu::teleported(theme);
+    let faded = |a: f32| Rgba { a, ..color };
+    div()
+        .size(px(size))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(crate::config::corners::SMALL))
+        .bg(faded(0.22))
+        .border_1()
+        .border_color(faded(0.7))
+        .child(
+            svg()
+                .path("icons/teleport.svg")
+                .size(px(size - 4.))
+                .text_color(color),
+        )
+}
+
 impl AssetSource for Icons {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
         let bytes: &'static [u8] = match path {
@@ -89,6 +112,10 @@ impl AssetSource for Icons {
             "icons/github.svg" => include_bytes!("../../../assets/icons/github.svg"),
             "icons/theme.svg" => include_bytes!("../../../assets/icons/theme.svg"),
             "icons/keyboard.svg" => include_bytes!("../../../assets/icons/keyboard.svg"),
+            "icons/teleport.svg" => include_bytes!("../../../assets/icons/teleport.svg"),
+            "icons/teleport-back.svg" => {
+                include_bytes!("../../../assets/icons/teleport-back.svg")
+            }
             "icons/refresh.svg" => include_bytes!("../../../assets/icons/refresh.svg"),
             "icons/chart.svg" => include_bytes!("../../../assets/icons/chart.svg"),
             "icons/pulse.svg" => include_bytes!("../../../assets/icons/pulse.svg"),
@@ -130,6 +157,8 @@ impl AssetSource for Icons {
             "icons/github.svg",
             "icons/theme.svg",
             "icons/keyboard.svg",
+            "icons/teleport.svg",
+            "icons/teleport-back.svg",
             "icons/refresh.svg",
             "icons/chart.svg",
             "icons/pulse.svg",
@@ -175,7 +204,7 @@ mod tests {
         assert!(Icons.load("unknown.svg").unwrap().is_none());
         assert_eq!(
             Icons.list("icons/").unwrap().len(),
-            31 + crate::usage::icon_paths().count()
+            33 + crate::usage::icon_paths().count()
         );
     }
 
