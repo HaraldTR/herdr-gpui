@@ -563,6 +563,50 @@ fn agent_icons_follow_names_and_reserve_narrow_label_width(cx: &mut gpui::TestAp
     }
 }
 
+/// The daemon's `state_text` token shows a status word beside each agent, in
+/// every layout, and nothing at all when the daemon's rows do not ask for it.
+#[gpui::test]
+fn agent_status_words_follow_the_daemon_sidebar_config(cx: &mut gpui::TestAppContext) {
+    use crate::config::{Density, LayoutMode};
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = fixture_window(window, cx);
+        view.live.snapshot = Some(Arc::new(snapshot(2)));
+        view
+    });
+    cx.simulate_resize(size(px(800.), px(900.)));
+    cx.run_until_parked();
+    for mode in [
+        LayoutMode::from(Density::Comfortable),
+        LayoutMode::Superset,
+        LayoutMode::Orca,
+        LayoutMode::Minimal,
+    ] {
+        for shown in [false, true] {
+            view.update(cx, |view, cx| {
+                view.config.layout.mode = mode;
+                view.config.sidebar.size = 12.;
+                view.sidebar_width = Some(320.);
+                view.config.agent_status_text = shown;
+                cx.notify();
+            });
+            let rendered = cx.update(|window, cx| {
+                cx.default_global::<TextProbes>().0.clear();
+                full_draw(window, cx).clear(cx);
+                cx.global::<TextProbes>()
+                    .0
+                    .get("working")
+                    .map(|(_, text, _)| text.clone())
+            });
+            assert_eq!(
+                cx.debug_bounds("status-agent-p0").is_some(),
+                shown,
+                "{mode:?} shown={shown}"
+            );
+            assert_eq!(rendered.as_deref(), shown.then_some("working"), "{mode:?}");
+        }
+    }
+}
+
 #[cfg(test)]
 /// Every layout keeps its text inside the box it was measured for and its
 /// rows inside the sidebar, and marks the focused row.

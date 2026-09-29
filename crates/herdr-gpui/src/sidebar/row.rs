@@ -6,6 +6,7 @@
 use super::layout_tests;
 use super::{
     ARROW_RESERVE, ICON_RESERVE, STATUS_WIDTH,
+    agents::status_style,
     cell::RowState,
     glyph_width,
     layout::{SidebarDensity, SidebarLook},
@@ -302,6 +303,10 @@ pub(super) fn row(
     workspace_icon: RowIcon,
     arrow: Option<Stateful<Div>>,
     badge: Option<RowBadge>,
+    // The status word the daemon's `state_text` token asks to show, when its
+    // sidebar config names it. Painted at the row's trailing edge in the dot's
+    // color so a status reads at a glance, not only by hue.
+    status_text: Option<&'static str>,
     look: SidebarLook,
     appearance: (&FontConfig, &Theme),
 ) -> Div {
@@ -346,7 +351,13 @@ pub(super) fn row(
     } else {
         0.
     };
-    let label_width = (available - pr_reserve).max(0.);
+    // The status word keeps its own trailing column, so the label yields to it
+    // the same way it yields to a badge.
+    let status_reserve = status_text.map_or(0., |text| {
+        (text.chars().count() as f32 * glyph_width(font)).ceil() + gap
+    });
+    let status_color = status_style(status).2;
+    let label_width = (available - pr_reserve - status_reserve).max(0.);
     let agent_icon = match kind {
         RowKind::Agent(icon) => Some(icon),
         RowKind::Workspace => None,
@@ -482,6 +493,18 @@ pub(super) fn row(
                     )
                 }),
         )
+        .when_some(status_text, |row, text| {
+            row.child(
+                div()
+                    .debug_selector(|| format!("status-{key}"))
+                    .flex_none()
+                    .h(px(line_height(font)))
+                    .flex()
+                    .items_center()
+                    .text_color(rgb(status_color))
+                    .child(label_text(text)),
+            )
+        })
         // The collapse column comes first so the badge can hug the row's edge;
         // a reserved-but-empty column keeps every badge on the same right edge.
         .when_some(arrow, |row, arrow| row.child(arrow))

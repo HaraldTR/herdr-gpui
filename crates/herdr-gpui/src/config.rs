@@ -82,6 +82,9 @@ pub struct Config {
     pub theme: String,
     pub confirm_close_tab: bool,
     pub show_agents: bool,
+    /// Show each agent's status word beside it, following the daemon's
+    /// `[ui.sidebar.agents]` rows when they name the `state_text` token.
+    pub agent_status_text: bool,
     /// Plan usage of the selected host's AI services in the status bar.
     pub usage: crate::usage::UsageConfig,
     pub option_as_alt: OptionAsAlt,
@@ -579,6 +582,7 @@ impl Default for Config {
             github: GitHubConfig::default(),
             confirm_close_tab: true,
             show_agents: true,
+            agent_status_text: false,
             usage: crate::usage::UsageConfig::default(),
             option_as_alt: OptionAsAlt::default(),
             open_links_in: LinkTarget::default(),
@@ -707,6 +711,8 @@ pub(crate) fn daemon_config_path(get: impl Fn(&str) -> Option<std::ffi::OsString
 struct Daemon {
     clipboard_toast: ClipboardToast,
     keys: DaemonKeys,
+    /// Whether the daemon's agent rows name the `state_text` token.
+    agent_status_text: bool,
 }
 
 /// A config file the GUI does not own can hold anything, including settings
@@ -725,6 +731,7 @@ fn daemon_settings(path: &Path) -> Daemon {
     Daemon {
         clipboard_toast: daemon_clipboard_toast(&table),
         keys: DaemonKeys::from_table(table.get("keys").and_then(toml::Value::as_table)),
+        agent_status_text: daemon_agent_status_text(&table),
     }
 }
 
@@ -747,6 +754,43 @@ fn daemon_clipboard_toast(table: &toml::Table) -> ClipboardToast {
         resolved.position = position;
     }
     resolved
+}
+
+/// Whether the daemon's `[ui.sidebar.agents]` rows ask for the `state_text`
+/// token. That is the TUI's status word beside each agent, so the GUI shows the
+/// same text instead of only the dot. Rows without it, or a differently shaped
+/// table, leave it off, matching the daemon's default rows.
+fn daemon_agent_status_text(table: &toml::Table) -> bool {
+    let Some(agents) = table
+        .get("ui")
+        .and_then(|ui| ui.get("sidebar")?.get("agents")?.as_table())
+    else {
+        return false;
+    };
+    agents.get("rows").is_some_and(rows_have_state_text)
+        || agents
+            .get("rows_by_agent")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|by_agent| by_agent.values().any(rows_have_state_text))
+}
+
+/// One sidebar row list: arrays of tokens, each a plain name or an inline table
+/// with a `token` key. Unknown shapes are ignored rather than treated as a match.
+fn rows_have_state_text(rows: &toml::Value) -> bool {
+    rows.as_array().is_some_and(|rows| {
+        rows.iter().any(|row| {
+            row.as_array().is_some_and(|tokens| {
+                tokens.iter().any(|token| {
+                    token.as_str() == Some("state_text")
+                        || token
+                            .as_table()
+                            .and_then(|token| token.get("token"))
+                            .and_then(toml::Value::as_str)
+                            == Some("state_text")
+                })
+            })
+        })
+    })
 }
 
 fn theme_directories() -> Result<Vec<PathBuf>> {
@@ -951,6 +995,7 @@ impl Config {
         config.features = settings.features;
         config.notifications = settings.notifications;
         config.clipboard_toast = settings.clipboard_toast.resolve(base.clipboard_toast);
+        config.agent_status_text = base.agent_status_text;
         if !settings.layout.sidebar_gap.is_finite()
             || !(0.0..=MAX_SIDEBAR_GAP).contains(&settings.layout.sidebar_gap)
         {
@@ -1611,6 +1656,59 @@ mod tests {
                 position: TopLeft
             }
         );
+        Ok(())
+    }
+
+    /// The daemon's `state_text` token turns the GUI's status word on; rows
+    /// without it, or a file the GUI cannot use, leave it off.
+    #[test]
+    fn daemon_sidebar_state_text_turns_agent_status_words_on() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let daemon = temp.0.join("config.toml");
+        for (text, expected) in [
+            ("", false),
+            ("[ui]\nstatus_indicators = \"dots\"\n", false),
+            (
+                "[ui.sidebar.agents]\nrows = [[\"state_icon\", \"workspace\", \"tab\"], [\"agent\"]]\n",
+                false,
+            ),
+            (
+                "[ui.sidebar.agents]\nrows = [[\"state_icon\", \"agent\", \"state_text\"], [\"agent\"]]\n",
+                true,
+            ),
+            (
+                "[ui.sidebar.agents]\nrows = [[{ token = \"state_text\", dim = true }]]\n",
+                true,
+            ),
+            (
+                "[ui.sidebar.agents.rows_by_agent]\nclaude = [[\"state_icon\", \"state_text\"]]\n",
+                true,
+            ),
+            (
+                "[ui.sidebar.agents.rows_by_agent]\nclaude = [[\"agent\"]]\n",
+                false,
+            ),
+            ("not toml", false),
+        ] {
+            fs::write(&daemon, text)?;
+            assert_eq!(
+                daemon_settings(&daemon).agent_status_text,
+                expected,
+                "{text}"
+            );
+        }
+        assert!(
+            !daemon_settings(&temp.0).agent_status_text,
+            "a directory is not a config"
+        );
+        assert!(!daemon_settings(&temp.0.join("absent.toml")).agent_status_text);
+
+        // Oversized files are skipped rather than parsed on every config load.
+        let mut oversized = "[ui.sidebar.agents]\nrows = [[\"state_text\"]]\n".to_owned();
+        oversized.push_str(&"# pad\n".repeat(MAX_DAEMON_CONFIG_BYTES as usize / 6));
+        assert!(oversized.len() as u64 > MAX_DAEMON_CONFIG_BYTES);
+        fs::write(&daemon, &oversized)?;
+        assert!(!daemon_settings(&daemon).agent_status_text);
         Ok(())
     }
 

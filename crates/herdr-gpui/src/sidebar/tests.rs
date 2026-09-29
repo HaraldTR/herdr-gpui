@@ -365,6 +365,7 @@ fn cells_hand_their_state_and_data_to_the_layout() {
             icon: crate::icons::AgentIcon::Generic,
             status: AgentStatus::Working,
             place: None,
+            status_text: None,
         }),
         &cx,
     )

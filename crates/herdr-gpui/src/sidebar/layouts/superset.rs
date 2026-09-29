@@ -221,6 +221,17 @@ impl RowLayout for Superset {
                     m.glyph,
                     0.5,
                 )
+            })
+            .when_some(agent.status_text, |line, text| {
+                line.label(
+                    div()
+                        .debug_selector(|| format!("status-{key}"))
+                        .text_size(px(m.small))
+                        .text_color(rgb(status_style(agent.status).2)),
+                    text,
+                    m.glyph,
+                    0.5,
+                )
             });
         shell(key, state, 0., line, cx)
     }
