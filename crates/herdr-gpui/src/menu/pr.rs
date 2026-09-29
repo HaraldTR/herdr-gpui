@@ -294,10 +294,10 @@ impl HerdrWindow {
                             .items_center()
                             .flex_wrap()
                             .gap(px(8.))
-                            .child(div().text_color(rgb(theme.palette[2])).child(
+                            .child(div().text_color(rgb(theme.ink(theme.palette[2]))).child(
                                 crate::sidebar::label_text(&format!("+{}", value.additions)),
                             ))
-                            .child(div().text_color(rgb(theme.palette[1])).child(
+                            .child(div().text_color(rgb(theme.ink(theme.palette[1]))).child(
                                 crate::sidebar::label_text(&format!("-{}", value.deletions)),
                             ))
                             .child(div().text_color(rgb(theme.muted)).child(format!(

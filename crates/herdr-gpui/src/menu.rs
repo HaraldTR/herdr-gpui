@@ -35,7 +35,7 @@ mod worktree_tests;
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) use state::Cover;
 pub(crate) use {
-    colors::{ONLINE, accent, danger, teleported},
+    colors::{accent, danger, online, teleported, tint},
     page::{Page, WorkspaceAction},
     state::{MenuState, Removal},
     worktree_source::WorktreeSource,

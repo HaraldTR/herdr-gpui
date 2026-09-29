@@ -51,7 +51,7 @@ pub(super) fn set_appearance(config: &Config, theme: &Theme, cx: &mut App) {
 
 fn palette_color(theme: &Theme, index: usize) -> Rgba {
     // Terminal ANSI colors can have very low contrast against UI backgrounds.
-    rgb(theme.foreground).blend(rgba((theme.palette[index] << 8) | 0x70))
+    crate::menu::tint(theme, index)
 }
 
 fn severity_color(theme: &Theme, level: Level) -> Rgba {

@@ -593,7 +593,11 @@ impl HerdrWindow {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(div().text_color(rgb(theme.palette[2])).child("Connected"))
+                            .child(
+                                div()
+                                    .text_color(rgb(theme.ink(theme.palette[2])))
+                                    .child("Connected"),
+                            )
                             .child(
                                 div()
                                     .id("github-account")
@@ -658,7 +662,7 @@ impl HerdrWindow {
                     .rounded(px(crate::config::corners::CONTROL))
                     .bg(rgb(theme.background))
                     .text_color(rgb(if auth.failed {
-                        theme.palette[1]
+                        theme.ink(theme.palette[1])
                     } else {
                         theme.muted
                     }))
@@ -667,7 +671,7 @@ impl HerdrWindow {
         }
         if let Some(note) = auth.store().note(auth.connected()) {
             let (color, text) = match note {
-                crate::github::Note::Warning(text) => (theme.palette[1], text),
+                crate::github::Note::Warning(text) => (theme.ink(theme.palette[1]), text),
                 crate::github::Note::Info(text) => (theme.muted, text),
             };
             body = body.child(div().mt(px(12.)).text_color(rgb(color)).child(text));

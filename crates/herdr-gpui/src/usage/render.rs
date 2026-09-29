@@ -205,7 +205,7 @@ impl HerdrWindow {
                 segment.child(
                     div()
                         .flex_none()
-                        .text_color(rgb(theme.palette[3]))
+                        .text_color(rgb(theme.ink(theme.palette[3])))
                         .child("!"),
                 )
             })
@@ -215,8 +215,8 @@ impl HerdrWindow {
 fn color(severity: Severity, theme: &crate::config::Theme, normal: u32) -> u32 {
     match severity {
         Severity::Normal => normal,
-        Severity::Warning => theme.palette[3],
-        Severity::Critical => theme.palette[1],
+        Severity::Warning => theme.ink(theme.palette[3]),
+        Severity::Critical => theme.ink(theme.palette[1]),
     }
 }
 

@@ -4,6 +4,7 @@
 //! `config-gpui.local.toml` holds persistent user overrides.
 use crate::{
     Error, Result,
+    contrast::Contrast,
     error::ThemeParseError,
     keymap::{Binding, DaemonKeys, Keymap},
 };
@@ -82,6 +83,8 @@ pub struct Config {
     pub theme: String,
     pub confirm_close_tab: bool,
     pub show_agents: bool,
+    /// How far the app's own marks and labels stand off its chrome.
+    pub contrast: Contrast,
     /// Show each agent's status word beside it, following the daemon's
     /// `[ui.sidebar.agents]` rows when they name the `state_text` token.
     pub agent_status_text: AgentStatusText,
@@ -580,6 +583,7 @@ impl Default for Config {
             github: GitHubConfig::default(),
             confirm_close_tab: true,
             show_agents: true,
+            contrast: Contrast::default(),
             agent_status_text: AgentStatusText::default(),
             usage: crate::usage::UsageConfig::default(),
             option_as_alt: OptionAsAlt::default(),
@@ -605,6 +609,7 @@ struct Settings {
     theme: Option<String>,
     confirm_close_tab: Option<bool>,
     show_agents: Option<bool>,
+    contrast: Contrast,
     usage: crate::usage::UsageConfig,
     option_as_alt: OptionAsAlt,
     open_links_in: LinkTarget,
@@ -1055,6 +1060,7 @@ impl Config {
         }
         config.confirm_close_tab = settings.confirm_close_tab.unwrap_or(true);
         config.show_agents = settings.show_agents.unwrap_or(true);
+        config.contrast = settings.contrast;
         settings.usage.validate()?;
         config.usage = settings.usage;
         config.option_as_alt = settings.option_as_alt;
@@ -1237,6 +1243,30 @@ impl Config {
         result.map_err(|error| error.at_path(path))
     }
 
+    /// Persist only the contrast setting, keeping the rest of the local file.
+    pub(crate) fn save_contrast(contrast: Contrast) -> Result<()> {
+        let (_lock, local) = Self::prepare_files(&Self::path()?)?;
+        Self::save_contrast_path(contrast, &local)
+    }
+
+    fn save_contrast_path(contrast: Contrast, path: &Path) -> Result<()> {
+        let result = (|| -> Result<()> {
+            let text = match fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == ErrorKind::NotFound => LOCAL_CONFIG.into(),
+                Err(error) => return Err(error.into()),
+            };
+            let mut document = text.parse::<toml_edit::DocumentMut>()?;
+            let mut value = toml_edit::Value::from(contrast.name());
+            if let Some(previous) = document.get("contrast").and_then(toml_edit::Item::as_value) {
+                *value.decor_mut() = previous.decor().clone();
+            }
+            document["contrast"] = toml_edit::Item::Value(value);
+            write_config(path, &document.to_string())
+        })();
+        result.map_err(|error| error.at_path(path))
+    }
+
     /// `None` removes the local override, inheriting the platform's managed default.
     pub(crate) fn save_font_family(face: FontFace, family: Option<&str>) -> Result<()> {
         let (_lock, local) = Self::prepare_files(&Self::path()?)?;
@@ -1327,6 +1357,7 @@ impl Config {
 
     pub fn theme(&self) -> Result<Theme> {
         self.theme_with_directories(theme_directories)
+            .map(|theme| theme.with_contrast(self.contrast))
     }
 
     fn theme_with_directories(
@@ -1401,6 +1432,8 @@ pub struct Theme {
     pub active: u32,
     pub muted: u32,
     pub palette: [u32; 256],
+    /// Applied by [`Theme::with_contrast`]; every theme loads as `Standard`.
+    pub contrast: Contrast,
 }
 
 impl Default for Theme {
@@ -1428,25 +1461,19 @@ impl Default for Theme {
             active: 0x2b2933,
             muted: 0x827e91,
             palette,
+            contrast: Contrast::Standard,
         }
     }
 }
 
 /// `percent` of `over` blended onto `base`, per channel.
-fn mix(base: u32, over: u32, percent: u32) -> u32 {
+pub(crate) fn mix(base: u32, over: u32, percent: u32) -> u32 {
     let channel = |shift: u32| {
         let base = (base >> shift) & 255;
         let over = (over >> shift) & 255;
         (base * (100 - percent) + over * percent) / 100
     };
     (channel(16) << 16) | (channel(8) << 8) | channel(0)
-}
-
-/// Luma of an sRGB color on the channels as stored, not linearized. Good
-/// enough to rank two colors or place one either side of the midpoint.
-fn luma(color: u32) -> f32 {
-    let channel = |shift: u32| ((color >> shift) & 255) as f32 / 255.;
-    0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
 }
 
 impl Theme {
@@ -1467,7 +1494,7 @@ impl Theme {
     /// Dimmed foreground for rows that are not the current one: upstream's
     /// subtext sits between its text and its muted overlay.
     pub fn subtext(&self) -> u32 {
-        mix(self.background, self.foreground, 78)
+        self.ink(mix(self.background, self.foreground, 78))
     }
 
     /// A wash of [`Self::primary`] over the chrome, for filled selections such
@@ -1481,17 +1508,39 @@ impl Theme {
     /// A fixed light-or-dark rule breaks on light themes, where the accent and
     /// the background sit on the same side of any threshold.
     pub fn text_on(&self, fill: u32) -> u32 {
-        let fill = luma(fill);
-        if (luma(self.background) - fill).abs() >= (luma(self.foreground) - fill).abs() {
+        let luminance = |color: u32| {
+            let channel = |shift: u32| ((color >> shift) & 255) as f32 / 255.;
+            0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+        };
+        let fill = luminance(fill);
+        if (luminance(self.background) - fill).abs() >= (luminance(self.foreground) - fill).abs() {
             self.background
         } else {
             self.foreground
         }
     }
 
-    /// Whether the chrome is light, so small marks drawn on it need darker ink.
-    pub fn is_light(&self) -> bool {
-        luma(self.surface) > 0.5
+    /// `color` as a colored mark or label drawn on this theme's chrome: moved
+    /// only as far as the contrast setting needs to read on the background,
+    /// the surface, and a selected row, keeping its hue. Never for terminal
+    /// cells, whose colors belong to the program that wrote them.
+    pub fn ink(&self, color: u32) -> u32 {
+        crate::contrast::ink_on_chrome(
+            color,
+            [self.background, self.surface, self.active],
+            self.contrast.mark_ratio(),
+        )
+    }
+
+    /// High contrast parts selected rows further from the surface and raises
+    /// dim labels to text contrast. Standard leaves the theme as drawn.
+    pub fn with_contrast(mut self, contrast: Contrast) -> Self {
+        self.contrast = contrast;
+        if contrast == Contrast::High {
+            self.active = mix(self.active, self.foreground, 12);
+            self.muted = self.ink(self.muted);
+        }
+        self
     }
 
     fn derive_chrome(&mut self) {
@@ -2247,6 +2296,60 @@ mod tests {
         assert!(std::error::Error::source(&error).is_some());
         assert_eq!(fs::read_to_string(&path)?, "usage = false\n");
         Ok(())
+    }
+
+    #[test]
+    fn contrast_parses_reaches_the_theme_and_saves_in_place() -> anyhow::Result<()> {
+        assert_eq!(Config::parse("")?.contrast, Contrast::Standard);
+        let high = Config::parse("theme = 'Catppuccin Latte'\ncontrast = 'high'")?;
+        assert_eq!(high.contrast, Contrast::High);
+        assert_eq!(high.theme()?.contrast, Contrast::High);
+        assert!(Config::parse("contrast = 'loud'").is_err());
+        assert!(Config::parse("contrast = true").is_err());
+
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config.toml");
+        let original =
+            "theme = 'Nord' # keep\ncontrast = 'standard' # mine\n[usage]\nshow = false\n";
+        fs::write(&path, original)?;
+        Config::save_contrast_path(Contrast::High, &path)?;
+        let saved = fs::read_to_string(&path)?;
+        assert_eq!(saved, original.replace("'standard'", "\"high\""));
+        assert_eq!(Config::parse(&saved)?.contrast, Contrast::High);
+        assert!(!Config::parse(&saved)?.usage.show);
+        fs::remove_file(&path)?;
+        Config::save_contrast_path(Contrast::High, &path)?;
+        let created = fs::read_to_string(&path)?;
+        assert!(created.starts_with(LOCAL_CONFIG), "{created}");
+        assert_eq!(Config::parse(&created)?.contrast, Contrast::High);
+        Ok(())
+    }
+
+    #[test]
+    fn high_contrast_parts_selected_rows_and_lifts_dim_labels_on_every_theme() {
+        let ratio = crate::contrast::ratio;
+        for name in Theme::BUILTIN_NAMES {
+            let standard = Theme::builtin(name).unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(standard.clone().with_contrast(Contrast::Standard), standard);
+            let high = standard.clone().with_contrast(Contrast::High);
+            // Terminal cells keep the program's colors.
+            assert_eq!(high.palette, standard.palette);
+            assert_eq!(
+                (high.background, high.foreground, high.cursor, high.surface),
+                (
+                    standard.background,
+                    standard.foreground,
+                    standard.cursor,
+                    standard.surface
+                )
+            );
+            assert!(ratio(high.active, high.surface) > ratio(standard.active, standard.surface));
+            for background in [high.background, high.surface, high.active] {
+                assert!(ratio(high.muted, background) >= 4.5, "{name} muted");
+                assert!(ratio(high.subtext(), background) >= 4.5, "{name} subtext");
+                assert!(ratio(high.foreground, background) >= 4.5, "{name} text");
+            }
+        }
     }
 
     #[test]

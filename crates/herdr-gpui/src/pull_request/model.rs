@@ -263,9 +263,15 @@ impl From<Option<String>> for Outcome {
 }
 
 impl PullRequest {
-    /// Shared by sidebar and titlebar badges and the workspace menu. Lifecycle
-    /// takes precedence; an open PR is green only when no known blocker remains.
+    /// Shared by sidebar and titlebar badges and the workspace menu, inked to
+    /// read on the chrome they sit on.
     pub fn color(&self, theme: &crate::config::Theme) -> u32 {
+        theme.ink(self.hue(theme))
+    }
+
+    /// Lifecycle takes precedence; an open PR is green only when no known
+    /// blocker remains.
+    fn hue(&self, theme: &crate::config::Theme) -> u32 {
         match self.state {
             State::Merged => return theme.palette[5],
             State::Closed => return theme.palette[1],

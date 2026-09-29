@@ -589,7 +589,7 @@ pub(super) fn row(
                                 .child(
                                     div()
                                         .flex_none()
-                                        .text_color(rgb(theme.palette[2]))
+                                        .text_color(rgb(theme.ink(theme.palette[2])))
                                         .child(label_text(&badge.additions)),
                                 )
                                 .child(
@@ -601,7 +601,7 @@ pub(super) fn row(
                                 .child(
                                     div()
                                         .flex_none()
-                                        .text_color(rgb(theme.palette[1]))
+                                        .text_color(rgb(theme.ink(theme.palette[1])))
                                         .child(label_text(&badge.deletions)),
                                 ),
                         )

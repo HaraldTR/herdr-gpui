@@ -96,7 +96,7 @@ impl HerdrWindow {
                                                 .debug_selector(|| {
                                                     "titlebar-git-pr-additions".into()
                                                 })
-                                                .text_color(rgb(theme.palette[2]))
+                                                .text_color(rgb(theme.ink(theme.palette[2])))
                                                 .child(format!(
                                                     "+{}",
                                                     crate::sidebar::compact(additions)
@@ -108,7 +108,7 @@ impl HerdrWindow {
                                                 .debug_selector(|| {
                                                     "titlebar-git-pr-deletions".into()
                                                 })
-                                                .text_color(rgb(theme.palette[1]))
+                                                .text_color(rgb(theme.ink(theme.palette[1])))
                                                 .child(format!(
                                                     "-{}",
                                                     crate::sidebar::compact(deletions)
@@ -132,7 +132,7 @@ impl HerdrWindow {
                                     button.child(
                                         div()
                                             .debug_selector(|| "titlebar-git-additions".into())
-                                            .text_color(rgb(theme.palette[2]))
+                                            .text_color(rgb(theme.ink(theme.palette[2])))
                                             .child(format!("+{}", status.additions)),
                                     )
                                 })
@@ -140,7 +140,7 @@ impl HerdrWindow {
                                     button.child(
                                         div()
                                             .debug_selector(|| "titlebar-git-deletions".into())
-                                            .text_color(rgb(theme.palette[1]))
+                                            .text_color(rgb(theme.ink(theme.palette[1])))
                                             .child(format!("-{}", status.deletions)),
                                     )
                                 })
@@ -171,7 +171,7 @@ impl HerdrWindow {
                                 .size(px(14.))
                                 .flex_none()
                                 .text_color(rgb(if running {
-                                    theme.palette[3]
+                                    theme.ink(theme.palette[3])
                                 } else {
                                     theme.muted
                                 })),

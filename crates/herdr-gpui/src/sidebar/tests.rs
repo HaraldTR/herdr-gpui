@@ -9,7 +9,10 @@ use super::{
     workspace_label,
     workspaces::workspace_entries,
 };
-use crate::config::{FontConfig, Theme};
+use crate::{
+    config::{FontConfig, Theme},
+    contrast::Contrast,
+};
 use herdr_client::protocol::{
     AgentStatus, ClientShellAgent, ClientShellSnapshot, ClientShellWorkspace,
 };
@@ -235,71 +238,68 @@ fn rows_weight_and_dim_their_text_like_upstream() {
     assert!(brightness(theme.subtext()) < brightness(theme.foreground));
 }
 
+const STATUSES: [AgentStatus; 5] = [
+    AgentStatus::Working,
+    AgentStatus::Blocked,
+    AgentStatus::Done,
+    AgentStatus::Idle,
+    AgentStatus::Unknown,
+];
+
 #[test]
-fn status_colors_keep_upstream_hues_on_dark_themes() {
-    // ANSI slots must not change the meaning of a status color.
+fn status_colors_keep_upstream_literals_where_they_already_read() {
+    // Upstream's default palette (Catppuccin Mocha), which its status dots use
+    // whatever terminal colors are loaded.
     for (status, color) in [
         (AgentStatus::Working, 0xf9e2af),
         (AgentStatus::Blocked, 0xf38ba8),
         (AgentStatus::Done, 0x94e2d5),
         (AgentStatus::Idle, 0xa6e3a1),
-        (AgentStatus::Unknown, 0x6c7086),
     ] {
         for name in ["Default", "Nord", "Dracula", "Catppuccin Mocha"] {
             let mut theme = Theme::builtin(name).unwrap();
             assert_eq!(status_style(status, &theme).2, color, "{name}");
+            // ANSI slots must not change the meaning of a status color.
             theme.palette.fill(0x123456);
             assert_eq!(status_style(status, &theme).2, color, "{name}");
         }
     }
+    // Upstream's Unknown grey falls just short of 3:1 on a selected row, even
+    // in Mocha itself, so it is lifted by only a few steps and stays grey.
+    let mocha = Theme::builtin("Catppuccin Mocha").unwrap();
+    let unknown = status_style(AgentStatus::Unknown, &mocha).2;
+    let channels = |color: u32| [16, 8, 0].map(|shift| ((color >> shift) & 255) as i32);
+    for (lifted, upstream) in channels(unknown).into_iter().zip(channels(0x6c7086)) {
+        assert!((0..=16).contains(&(lifted - upstream)), "{unknown:06x}");
+    }
 }
 
 #[test]
-fn status_colors_contrast_with_every_builtin_chrome() {
-    let luminance = |color: u32| {
-        let channel = |shift: u32| {
-            let value = ((color >> shift) & 255) as f64 / 255.;
-            if value <= 0.04045 {
-                value / 12.92
-            } else {
-                ((value + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
-    };
-    let contrast = |a: u32, b: u32| {
-        let (a, b) = (luminance(a), luminance(b));
-        (a.max(b) + 0.05) / (a.min(b) + 0.05)
-    };
+fn status_colors_reach_the_contrast_setting_on_every_builtin_theme() {
     for name in Theme::BUILTIN_NAMES {
-        let theme = Theme::builtin(name).unwrap();
-        for status in [
-            AgentStatus::Working,
-            AgentStatus::Blocked,
-            AgentStatus::Done,
-            AgentStatus::Idle,
-            AgentStatus::Unknown,
-        ] {
-            // Upstream's dark Unknown dot is meant to recede; keep its literal.
-            if status == AgentStatus::Unknown && !theme.is_light() {
-                continue;
-            }
-            let color = status_style(status, &theme).2;
-            for background in [theme.surface, theme.active] {
-                let ratio = contrast(color, background);
-                assert!(
-                    ratio >= 3.,
-                    "{name} {status:?} on {background:06x}: {ratio}"
-                );
+        for contrast in [Contrast::Standard, Contrast::High] {
+            let theme = Theme::builtin(name).unwrap().with_contrast(contrast);
+            for status in STATUSES {
+                let color = status_style(status, &theme).2;
+                for background in [theme.background, theme.surface, theme.active] {
+                    let ratio = crate::contrast::ratio(color, background);
+                    assert!(
+                        ratio >= contrast.mark_ratio(),
+                        "{name} {contrast:?} {status:?} on {background:06x}: {ratio}"
+                    );
+                }
             }
         }
     }
+    // Light chrome darkens the pastels rather than keeping upstream's literals.
     let latte = Theme::builtin("Catppuccin Latte").unwrap();
-    assert!(latte.is_light() && !Theme::default().is_light());
-    assert_ne!(
-        status_style(AgentStatus::Working, &latte).2,
-        status_style(AgentStatus::Working, &Theme::default()).2
-    );
+    let mocha = Theme::builtin("Catppuccin Mocha").unwrap();
+    for status in STATUSES {
+        assert_ne!(
+            status_style(status, &latte).2,
+            status_style(status, &mocha).2
+        );
+    }
 }
 
 #[test]
@@ -321,16 +321,17 @@ fn status_shapes_match_upstream_dots_and_wire_casing() {
         let agent: ClientShellAgent = serde_json::from_value(value).unwrap();
         assert_eq!(agent.agent_status, status);
         assert_eq!(serde_json::to_value(status).unwrap(), wire);
-        let (diameter, filled, color) = status_style(status, &Theme::default());
+        let theme = Theme::default();
+        let (diameter, filled, color) = status_style(status, &theme);
         assert_eq!(
             color,
-            match status {
+            theme.ink(match status {
                 AgentStatus::Working => 0xf9e2af,
                 AgentStatus::Blocked => 0xf38ba8,
                 AgentStatus::Done => 0x94e2d5,
                 AgentStatus::Idle => 0xa6e3a1,
                 AgentStatus::Unknown => 0x6c7086,
-            }
+            })
         );
         assert_eq!(filled, status != AgentStatus::Idle);
         assert_eq!(

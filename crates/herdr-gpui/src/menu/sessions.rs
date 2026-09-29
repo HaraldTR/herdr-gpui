@@ -407,7 +407,7 @@ impl HerdrWindow {
                         .flex_none()
                         .rounded_full()
                         .bg(rgb(if spec.online {
-                            colors::ONLINE
+                            colors::online(theme)
                         } else {
                             theme.muted
                         })),

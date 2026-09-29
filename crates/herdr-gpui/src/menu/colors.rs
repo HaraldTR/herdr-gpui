@@ -4,10 +4,18 @@
 use gpui::{Rgba, rgb, rgba};
 
 /// Mix an ANSI color with foreground so it stays readable on dark themes, where
-/// the palette entry alone can sit too close to the surface it is painted on.
-fn tint(theme: &crate::config::Theme, index: usize) -> Rgba {
-    rgb(theme.foreground).blend(rgba((theme.palette[index] << 8) | 0x70))
+/// the palette entry alone can sit too close to the surface it is painted on,
+/// then ink it so light themes and high contrast read too.
+pub(crate) fn tint(theme: &crate::config::Theme, index: usize) -> Rgba {
+    rgb(theme.ink(crate::config::mix(
+        theme.foreground,
+        theme.palette[index],
+        TINT_PERCENT,
+    )))
 }
+
+/// The share of the ANSI color in [`tint`].
+const TINT_PERCENT: u32 = 44;
 
 /// The theme's blue, as accents and links use it.
 pub(crate) fn accent(theme: &crate::config::Theme) -> Rgba {
@@ -33,7 +41,9 @@ pub(super) fn action_hover(theme: &crate::config::Theme) -> Rgba {
 
 /// The connected-or-running indicator the device picker, the session list, and
 /// the sidebar host headers all share, so one machine's state reads the same in each.
-pub(crate) const ONLINE: u32 = 0x63c68b;
+pub(crate) fn online(theme: &crate::config::Theme) -> u32 {
+    theme.ink(0x63c68b)
+}
 
 #[cfg(test)]
 mod tests {

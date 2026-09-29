@@ -172,22 +172,14 @@ pub(super) fn status_text(status: AgentStatus) -> &'static str {
 /// and never from the terminal's ANSI colors. Matching those literals keeps a
 /// dot the same color in both clients whatever terminal theme is loaded, where
 /// ANSI slots would drift: Xcode Dark paints its cyan purple. Mocha's pastels
-/// vanish on light chrome, so light themes get darker inks of the same hues.
+/// vanish on light chrome, so [`Theme::ink`] darkens them there, keeping hue.
 pub(super) fn status_style(status: AgentStatus, theme: &Theme) -> (f32, bool, u32) {
-    if theme.is_light() {
-        return match status {
-            AgentStatus::Working => (STATUS_WIDTH, true, 0x875b00),
-            AgentStatus::Blocked => (STATUS_WIDTH, true, 0xb52249),
-            AgentStatus::Done => (STATUS_WIDTH, true, 0x08796b),
-            AgentStatus::Idle => (STATUS_WIDTH, false, 0x34752a),
-            AgentStatus::Unknown => (STATUS_DOT_UNKNOWN, true, 0x626880),
-        };
-    }
-    match status {
+    let (diameter, filled, color) = match status {
         AgentStatus::Working => (STATUS_WIDTH, true, 0xf9e2af),
         AgentStatus::Blocked => (STATUS_WIDTH, true, 0xf38ba8),
         AgentStatus::Done => (STATUS_WIDTH, true, 0x94e2d5),
         AgentStatus::Idle => (STATUS_WIDTH, false, 0xa6e3a1),
         AgentStatus::Unknown => (STATUS_DOT_UNKNOWN, true, 0x6c7086),
-    }
+    };
+    (diameter, filled, theme.ink(color))
 }

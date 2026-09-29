@@ -171,7 +171,7 @@ impl RowLayout for Superset {
             slot(label, glyph, status, &m, theme)
         };
         let counts = if state.selected {
-            (theme.palette[2], theme.palette[1])
+            (theme.ink(theme.palette[2]), theme.ink(theme.palette[1]))
         } else {
             (theme.muted, theme.muted)
         };
