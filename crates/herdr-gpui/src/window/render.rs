@@ -178,7 +178,7 @@ impl Render for HerdrWindow {
                     // A press on a link may still turn into a drag across it,
                     // so the selection starts either way; the click that opens
                     // the link is the one that never left its half-cell.
-                    this.begin_selection(event.position, cx);
+                    this.begin_selection(event.position, event.click_count, cx);
                     if this.pressed_terminal_link.is_some() {
                         cx.stop_propagation();
                         return;
