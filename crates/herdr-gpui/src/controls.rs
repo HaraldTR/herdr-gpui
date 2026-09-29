@@ -28,6 +28,7 @@ pub enum Command {
     ResetFontSize,
     Settings,
     Keybinds,
+    Sessions,
     Themes,
     WorkspacePicker,
     Palette,
@@ -36,6 +37,9 @@ pub enum Command {
     Logs,
     About,
     OpenNotificationTarget,
+    NewBrowserTab,
+    InstallBrowserSkill,
+    SplitEditor,
 }
 
 pub struct CommandInfo {
@@ -259,6 +263,12 @@ pub const COMMANDS: &[CommandInfo] = &[
         shortcuts: &["cmd-/"],
     },
     CommandInfo {
+        command: Command::Sessions,
+        name: "sessions",
+        label: "Sessions",
+        shortcuts: &["cmd-shift-s"],
+    },
+    CommandInfo {
         command: Command::Themes,
         name: "themes",
         label: "Themes",
@@ -293,6 +303,24 @@ pub const COMMANDS: &[CommandInfo] = &[
         name: "about",
         label: "About Herdr",
         shortcuts: &[],
+    },
+    CommandInfo {
+        command: Command::NewBrowserTab,
+        name: "new_browser_tab",
+        label: "New Browser Tab",
+        shortcuts: &[],
+    },
+    CommandInfo {
+        command: Command::InstallBrowserSkill,
+        name: "install_browser_skill",
+        label: "Install Browser Skill for Agents",
+        shortcuts: &[],
+    },
+    CommandInfo {
+        command: Command::SplitEditor,
+        name: "split_editor",
+        label: "Split Editor",
+        shortcuts: &["cmd-\\"],
     },
 ];
 
@@ -401,6 +429,7 @@ pub fn request(command: Command, snapshot: &ClientShellSnapshot) -> Option<(Meth
         | Command::ResetFontSize
         | Command::Settings
         | Command::Keybinds
+        | Command::Sessions
         | Command::Themes
         | Command::WorkspacePicker
         | Command::Palette
@@ -408,7 +437,10 @@ pub fn request(command: Command, snapshot: &ClientShellSnapshot) -> Option<(Meth
         | Command::Quit
         | Command::Logs
         | Command::About
-        | Command::OpenNotificationTarget => return None,
+        | Command::OpenNotificationTarget
+        | Command::NewBrowserTab
+        | Command::InstallBrowserSkill
+        | Command::SplitEditor => return None,
     })
 }
 
@@ -427,7 +459,7 @@ mod tests {
     #[test]
     fn catalog_has_all_native_commands_and_gpui_shortcuts() {
         use Command::*;
-        let expected: [(Command, &[&str]); 41] = [
+        let expected: [(Command, &[&str]); 45] = [
             (OpenNotificationTarget, &["cmd-alt-n"]),
             (Logs, &[]),
             (NewWindow, &["cmd-alt-shift-n"]),
@@ -463,12 +495,16 @@ mod tests {
             (ResetFontSize, &["cmd-0"]),
             (Settings, &["cmd-,"]),
             (Keybinds, &["cmd-/"]),
+            (Sessions, &["cmd-shift-s"]),
             (Themes, &[]),
             (WorkspacePicker, &["cmd-p"]),
             (Palette, &["cmd-shift-p"]),
             (Reconnect, &[]),
             (Quit, &["cmd-q"]),
             (About, &[]),
+            (NewBrowserTab, &[]),
+            (InstallBrowserSkill, &[]),
+            (SplitEditor, &["cmd-\\"]),
         ];
         assert_eq!(COMMANDS.len(), expected.len());
         let shortcuts: std::collections::HashSet<_> =
@@ -524,12 +560,16 @@ mod tests {
             Command::ResetFontSize,
             Command::Settings,
             Command::Keybinds,
+            Command::Sessions,
             Command::Themes,
             Command::WorkspacePicker,
             Command::Palette,
             Command::Reconnect,
             Command::Quit,
             Command::About,
+            Command::NewBrowserTab,
+            Command::InstallBrowserSkill,
+            Command::SplitEditor,
         ] {
             assert!(request(command, &s).is_none(), "{command:?}");
         }

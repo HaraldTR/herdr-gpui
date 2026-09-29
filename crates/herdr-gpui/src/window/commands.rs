@@ -2,9 +2,10 @@
 //! ordered surface barrier so input cannot reach the previous pane while the
 //! navigation and its projection are still in flight.
 
-use super::HerdrWindow;
+use super::{Flash, HerdrWindow};
 use crate::{
-    config::{FONT_SIZE_RANGE, FONT_SIZE_STEP},
+    app::InitialAppearance,
+    config::{Config, FONT_SIZE_RANGE, FONT_SIZE_STEP, LayoutMode},
     controls::{self, Command},
     log_window,
     navigation::{NavigationTarget, OwnedNavigationTarget},
@@ -14,6 +15,40 @@ use gpui::{Context, Window};
 use std::time::Duration;
 
 impl HerdrWindow {
+    /// Switches the sidebar layout here at once, then keeps it: the choice is
+    /// saved to the local overrides off the UI thread, and the config watcher
+    /// brings every other window along.
+    pub(crate) fn set_layout(&mut self, mode: LayoutMode, cx: &mut Context<Self>) {
+        self.set_layout_with(mode, Config::save_layout, cx);
+    }
+
+    /// `save` persists the choice; tests pass one that leaves the real
+    /// config alone.
+    pub(crate) fn set_layout_with(
+        &mut self,
+        mode: LayoutMode,
+        save: impl FnOnce(LayoutMode) -> crate::Result<()> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if self.config.layout.mode == mode {
+            return;
+        }
+        self.config.layout.mode = mode;
+        // The menu reads its checkmark from the latest config.
+        if cx.has_global::<InitialAppearance>() {
+            cx.global_mut::<InitialAppearance>().config.layout.mode = mode;
+        }
+        crate::menus::install(cx);
+        cx.notify();
+        let save = cx.background_executor().spawn(async move { save(mode) });
+        cx.spawn(async move |_, _| {
+            if let Err(error) = save.await {
+                tracing::warn!(%error, "Could not save the sidebar layout");
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn navigate(
         &mut self,
         target: NavigationTarget<&str>,
@@ -176,8 +211,36 @@ impl HerdrWindow {
                 open_additional_window(self.endpoints[0].connection.target.clone(), cx);
                 return;
             }
+            // A page has no panes, so either close closes its tab, as in
+            // a web browser; nothing runs in it that needs confirming. A group
+            // standing in for a tab closes that tab, and an empty group of a
+            // split closes, as an editor group does.
             Command::ClosePane | Command::CloseTab => {
-                self.open_close_confirmation(command, window, cx);
+                let Some(group) = self.active_group() else {
+                    self.open_close_confirmation(command, window, cx);
+                    return;
+                };
+                match self.group_shown(group, cx) {
+                    crate::browser::Shown::Terminal => {
+                        self.open_close_confirmation(command, window, cx)
+                    }
+                    crate::browser::Shown::Page(_) | crate::browser::Shown::Elsewhere(_) => {
+                        self.close_group_tab(group, window, cx)
+                    }
+                    crate::browser::Shown::Empty => self.close_group(group, window, cx),
+                }
+                return;
+            }
+            Command::NewBrowserTab => {
+                self.open_browser_tab(None, window, cx);
+                return;
+            }
+            Command::SplitEditor => {
+                self.split_active_group(window, cx);
+                return;
+            }
+            Command::InstallBrowserSkill => {
+                self.install_browser_skill(window, cx);
                 return;
             }
             Command::Palette | Command::WorkspacePicker => {
@@ -190,6 +253,12 @@ impl HerdrWindow {
             }
             Command::Keybinds => {
                 self.open_keybinds(window, cx);
+                return;
+            }
+            Command::Sessions => {
+                // The button's own position, so the shortcut opens the list where
+                // clicking the button does.
+                self.open_sessions(self.sessions_anchor.get(), window, cx);
                 return;
             }
             Command::Themes => {
@@ -243,7 +312,127 @@ impl HerdrWindow {
             });
             self.marked.clear();
         }
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         cx.notify();
+    }
+
+    /// Installs the agent skill for browser tabs where Claude Code and other
+    /// agents look for skills, and keeps it current from now on. Only on
+    /// request: the one-time offer, the palette, or Preferences.
+    pub(crate) fn install_browser_skill(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::agent_skill::{AgentSkill, Choice};
+        let home = match crate::config::home() {
+            Ok(home) => home,
+            Err(error) => {
+                self.show_flash(Flash::warning(error.to_string()), cx);
+                return;
+            }
+        };
+        AgentSkill::choose(Choice::Installed, cx);
+        if self.menu.page == Some(crate::menu::Page::AgentSkill) {
+            self.dismiss_menu(window, cx);
+        }
+        let install = cx.background_executor().spawn(async move {
+            let text = crate::agent_skill::text(std::env::current_exe().ok().as_deref());
+            crate::agent_skill::install(&home, &text)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = install.await;
+            this.update(cx, |this, cx| {
+                let flash = match result {
+                    Ok(paths) => Flash::success(match paths.as_slice() {
+                        [path] => format!("Installed the browser skill at {}", path.display()),
+                        _ => format!("Installed the browser skill in {} places", paths.len()),
+                    }),
+                    Err(error) => Flash::warning(error.to_string()),
+                };
+                this.show_flash(flash, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Removes the skill files the app wrote and stops keeping them current.
+    pub(crate) fn remove_browser_skill(&mut self, cx: &mut Context<Self>) {
+        use crate::agent_skill::{AgentSkill, Choice};
+        let Ok(home) = crate::config::home() else {
+            return;
+        };
+        AgentSkill::choose(Choice::Declined, cx);
+        let remove = cx
+            .background_executor()
+            .spawn(async move { crate::agent_skill::remove(&home) });
+        cx.spawn(async move |this, cx| {
+            let result = remove.await;
+            this.update(cx, |this, cx| {
+                let flash = match result {
+                    Ok(paths) if paths.is_empty() => Flash::success("No browser skill to remove"),
+                    Ok(_) => Flash::success("Removed the browser skill"),
+                    Err(error) => Flash::warning(error.to_string()),
+                };
+                this.show_flash(flash, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Offers the agent skill once, when this is the first window ready to
+    /// show a dialog. Runs every tick; asking claims the question app-wide.
+    pub(crate) fn offer_browser_skill(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ready = self.menu.page.is_none() && self.active && self.live.snapshot.is_some();
+        if !ready || !crate::agent_skill::AgentSkill::take_ask(cx) {
+            return;
+        }
+        if self.open_menu(window, cx) {
+            self.menu.page = Some(crate::menu::Page::AgentSkill);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn render_agent_skill_offer(&self, cx: &mut Context<Self>) -> gpui::Div {
+        use gpui::{prelude::*, *};
+        let theme = &self.theme;
+        let button = |id: &'static str, label: &'static str, primary: bool| {
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .p(px(8.))
+                .rounded(px(crate::config::corners::CONTROL))
+                .when(primary, |button| button.bg(rgb(theme.active)))
+                .when(!primary, |button| button.hover(|s| s.bg(rgb(theme.active))))
+                .cursor_pointer()
+                .child(label)
+        };
+        div()
+            .debug_selector(|| "agent-skill-offer".into())
+            .child(div().p(px(8.)).child("Let agents show you pages?"))
+            .child(div().p(px(8.)).child(
+                "Agents in your panes can open pages and HTML drafts in browser tabs here, and read the notes you pin on them. A skill teaches them how.",
+            ))
+            .child(div().p(px(8.)).text_color(rgb(theme.muted)).child(
+                "Install writes herdr-gpui-browser/SKILL.md into ~/.claude/skills and ~/.agents/skills, whichever exist, and keeps it up to date. A skill of that name you wrote yourself is left alone. Remove it any time in Preferences.",
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.))
+                    .p(px(8.))
+                    .child(button("agent-skill-install", "Install", true).on_click(cx.listener(
+                        |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.install_browser_skill(window, cx);
+                        },
+                    )))
+                    .child(button("agent-skill-decline", "Not now", false).on_click(cx.listener(
+                        |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.dismiss_menu(window, cx);
+                        },
+                    ))),
+            )
     }
 }

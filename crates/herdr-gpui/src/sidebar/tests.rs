@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used)]
 
 use super::{
-    STATUS_DOT_UNKNOWN, STATUS_WIDTH,
-    agents::{agent_labels, status_style},
+    STATUS_DOT_UNKNOWN, STATUS_WIDTH, agent_name,
+    agents::{agent_labels, agent_place, status_style},
     layout_tests,
     render::header,
     row::first_text,
@@ -30,10 +30,7 @@ fn section_headings_use_the_configured_sidebar_font_size() {
                 &Theme::default(),
                 super::layout::for_mode(Default::default()),
             );
-            assert_eq!(
-                heading.text_style().as_ref().unwrap().font_size,
-                Some(px(size).into())
-            );
+            assert_eq!(heading.text_style().font_size, Some(px(size).into()));
         }
     }
 }
@@ -150,7 +147,8 @@ fn agent_rows_name_their_place_then_their_agent() {
         snapshot: &'a ClientShellSnapshot,
         host: Option<&'a str>,
     ) -> (Vec<(&'a str, bool)>, &'a str) {
-        agent_labels(&snapshot.agents[0], snapshot, host)
+        let agent = &snapshot.agents[0];
+        agent_labels(agent_name(agent), agent_place(agent, snapshot), host)
     }
     assert_eq!(
         labels(&snapshot, None),
@@ -308,4 +306,81 @@ fn status_shapes_match_upstream_dots_and_wire_casing() {
             }
         );
     }
+}
+
+#[test]
+fn cells_hand_their_state_and_data_to_the_layout() {
+    use super::{
+        cell::{AgentRow, Cell, RowContext, RowData, RowLayout, RowState, WorkspaceRow},
+        layout::for_mode,
+        row::{RowIcon, RowTree},
+    };
+    use gpui::{Div, div};
+    use std::cell::RefCell;
+
+    /// Records what each call was given instead of drawing it.
+    #[derive(Default)]
+    struct Recorder(RefCell<Vec<(String, RowState)>>);
+
+    impl RowLayout for Recorder {
+        fn workspace(&self, row: WorkspaceRow<'_>, state: RowState, _: &RowContext<'_>) -> Div {
+            self.0.borrow_mut().push((row.label.to_owned(), state));
+            div()
+        }
+        fn agent(&self, row: AgentRow<'_>, state: RowState, _: &RowContext<'_>) -> Div {
+            self.0.borrow_mut().push((row.key, state));
+            div()
+        }
+    }
+
+    let snapshot = layout_tests::snapshot(1);
+    let (font, theme) = (crate::config::Config::default().sidebar, Theme::default());
+    let cx = RowContext {
+        font: &font,
+        theme: &theme,
+        look: for_mode(Default::default()),
+        width: 232.,
+        host: None,
+    };
+    let recorder = Recorder::default();
+    let workspace = || {
+        RowData::Workspace(WorkspaceRow {
+            workspace: &snapshot.workspaces[0],
+            label: "herdr",
+            tree: RowTree::None,
+            icon: RowIcon::None,
+            fold: None,
+            grouped: false,
+            badge: None,
+            removing: false,
+        })
+    };
+    let _ = Cell::new(&recorder, workspace(), &cx).row();
+    let _ = Cell::new(&recorder, workspace(), &cx).selected(true).row();
+    let _ = Cell::new(
+        &recorder,
+        RowData::Agent(AgentRow {
+            key: "agent-p0".into(),
+            name: "Claude Code",
+            icon: crate::icons::AgentIcon::Generic,
+            status: AgentStatus::Working,
+            place: None,
+        }),
+        &cx,
+    )
+    .highlighted(true)
+    .row();
+    let state = |selected, highlighted| RowState {
+        selected,
+        highlighted,
+        ..RowState::default()
+    };
+    assert_eq!(
+        recorder.0.into_inner(),
+        vec![
+            ("herdr".into(), state(false, false)),
+            ("herdr".into(), state(true, false)),
+            ("agent-p0".into(), state(false, true)),
+        ]
+    );
 }

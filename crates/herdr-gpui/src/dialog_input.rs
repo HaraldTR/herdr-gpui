@@ -205,8 +205,10 @@ impl HerdrWindow {
             .overflow_hidden()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
+                    // Another field of the same dialog may hold focus.
+                    window.focus(&this.menu.focus, cx);
                     if let Some(input) = this.menu.input.as_mut()
                         && input.marked.is_none()
                         && let Some(index) = input.index_at(event.position)
@@ -220,6 +222,9 @@ impl HerdrWindow {
                 canvas(
                     |_, _, _| (),
                     move |bounds, _, window, cx| {
+                        // Unfocused, the draft reads as plain text: no caret or
+                        // selection that would look like it is about to be replaced.
+                        let focused = focus.is_focused(window);
                         window.handle_input(
                             &focus,
                             ElementInputHandler::new(bounds, entity.clone()),
@@ -253,7 +258,7 @@ impl HerdrWindow {
                             window.with_content_mask(Some(ContentMask { bounds }), |window| {
                                 let left = origin.x + line.x_for_index(input.selection.start);
                                 let right = origin.x + line.x_for_index(input.selection.end);
-                                if !input.selection.is_empty() {
+                                if focused && !input.selection.is_empty() {
                                     window.paint_quad(fill(
                                         Bounds::from_corners(
                                             point(left, bounds.top()),
@@ -262,14 +267,23 @@ impl HerdrWindow {
                                         rgb(this.theme.muted),
                                     ));
                                 }
-                                let _ = line.paint(origin, bounds.size.height, window, cx);
-                                window.paint_quad(fill(
-                                    Bounds::new(
-                                        point(origin.x + caret, bounds.top()),
-                                        size(px(1.), bounds.size.height),
-                                    ),
-                                    rgb(this.theme.foreground),
-                                ));
+                                let _ = line.paint(
+                                    origin,
+                                    bounds.size.height,
+                                    TextAlign::Left,
+                                    None,
+                                    window,
+                                    cx,
+                                );
+                                if focused {
+                                    window.paint_quad(fill(
+                                        Bounds::new(
+                                            point(origin.x + caret, bounds.top()),
+                                            size(px(1.), bounds.size.height),
+                                        ),
+                                        rgb(this.theme.foreground),
+                                    ));
+                                }
                                 if let Some(marked) = &input.marked {
                                     window.paint_quad(fill(
                                         Bounds::new(

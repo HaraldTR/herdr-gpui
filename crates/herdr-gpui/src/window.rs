@@ -13,10 +13,15 @@ mod images;
 mod input;
 mod lifecycle;
 mod mouse;
+mod pending_input;
 mod render;
 mod selection;
+mod tab_drag;
+mod tab_strip;
 mod toasts;
 mod transfers;
+#[cfg(test)]
+pub(crate) use transfers::tests::Peer as MockPeer;
 
 #[cfg(test)]
 mod font_size_tests;
@@ -32,7 +37,7 @@ use crate::{
     navigation::OwnedNavigationTarget,
     preferences,
     presentation::Presentation,
-    sidebar,
+    sessions, sidebar,
     state::LiveState,
     terminal::{Selection, WheelAccumulator},
     terminal_painter, updater,
@@ -54,12 +59,18 @@ pub(crate) struct HerdrWindow {
     pub(crate) configured_terminal_size: f32,
     pub(crate) theme: config::Theme,
     pub(crate) config_load: Option<Task<()>>,
+    pub(crate) font_size_saves: crate::font_sizes::FontSizeSaves,
     pub(crate) config_watch: Option<Task<()>>,
     pub(crate) config_load_revision: u64,
     pub(crate) endpoints: Vec<endpoint::Endpoint>,
     pub(crate) selected_endpoint: usize,
     pub(crate) selection_epoch: u64,
     pub(crate) catalog: endpoint::Catalog,
+    /// Local sessions on this machine, scanned on a worker while the popup is open.
+    pub(crate) sessions: sessions::Sessions,
+    /// Where the footer's sessions button last painted. The window owns it so a
+    /// shortcut and a click anchor the list at the same place.
+    pub(crate) sessions_anchor: std::rc::Rc<std::cell::Cell<Point<Pixels>>>,
     pub(crate) activation_deadline: Option<std::time::Instant>,
     pub(crate) pending_navigation: Option<OwnedNavigationTarget>,
     pub(crate) pending_toast: Option<u64>,
@@ -85,6 +96,7 @@ pub(crate) struct HerdrWindow {
     /// The resize cursor of the pane border under the pointer, if any.
     pub(crate) split_cursor: Option<CursorStyle>,
     pub(crate) pending_images: Vec<images::PendingImage>,
+    pub(crate) pending_input: pending_input::PendingInput,
     pub(crate) file_transfer: Option<transfers::FileTransfer>,
     /// The terminal cells the pointer is choosing. A release copies them and
     /// clears this, so a highlight only ever belongs to a drag in progress.
@@ -106,6 +118,7 @@ pub(crate) struct HerdrWindow {
     /// A teleport being set up or under way; a move outlives its dialog.
     pub(crate) teleport: Option<crate::teleport::Teleport>,
     pub(crate) git: git::Git,
+    pub(crate) usage: crate::usage::Usage,
     pub(crate) install_warning_shown: bool,
     pub(crate) collapsed_repos: std::collections::HashSet<String>,
     pub(crate) sidebar_visible: bool,
@@ -113,6 +126,10 @@ pub(crate) struct HerdrWindow {
     pub(crate) wheel: WheelAccumulator,
     pub(crate) sidebar_width: Option<f32>,
     pub(crate) sidebar_drag: Option<sidebar::SidebarDrag>,
+    /// A press on a workspace row that may lift it for reordering.
+    pub(crate) workspace_drag: Option<sidebar::WorkspaceDrag>,
+    /// A press on a tab that may lift it for reordering.
+    pub(crate) tab_drag: Option<tab_drag::TabDrag>,
     pub(crate) sidebar_split: Option<f32>,
     pub(crate) sidebar_split_modified: bool,
     pub(crate) sidebar_preferences: Option<preferences::Preferences>,
@@ -136,6 +153,9 @@ pub(crate) struct HerdrWindow {
     /// the window while the cached sidebar keeps its layout.
     pub(crate) surface_signal: Entity<SurfaceSignal>,
     pub(crate) _sidebar_invalidation: Subscription,
+    /// Browser tabs this window shows, and its pages for them.
+    pub(crate) browser: crate::browser::Browser,
+    pub(crate) _browser_tabs: Subscription,
 }
 
 /// See `HerdrWindow::surface_signal`.
@@ -164,6 +184,7 @@ impl HerdrWindow {
                     .endpoints
                     .iter()
                     .any(|endpoint| endpoint.connection.has_update())
+                    || view.group_terminals_updated()
                 {
                     view.tick(window, cx);
                 }
@@ -206,7 +227,34 @@ impl HerdrWindow {
             .snapshot
             .as_ref()
             .and_then(|s| s.focused_pane_id.clone());
+        let focused_tab = |live: &LiveState| {
+            live.snapshot
+                .as_ref()
+                .map(|s| (s.focused_workspace_id.clone(), s.focused_tab_id.clone()))
+        };
+        let old_tab = focused_tab(&self.live);
         self.poll_endpoints(cx);
+        // Switching Herdr tabs, from a shortcut, an agent, or the sidebar,
+        // moves the group holding the window's connection to the new tab, or
+        // brings the terminal back from behind a page. Arriving in another
+        // workspace does the same for that workspace's group, so its tab is
+        // the one just navigated to.
+        if let (Some((old_workspace, old_tab)), Some((workspace, Some(tab)))) =
+            (old_tab, focused_tab(&self.live))
+            && (old_workspace != workspace || old_tab.as_ref() != Some(&tab))
+        {
+            self.terminal_focus_moved(&tab, old_workspace != workspace, cx);
+        }
+        // After the focus check: a swap replaces `live` with another
+        // connection's, which is not a move of this one's focus.
+        if self.poll_group_terminals() {
+            self.redraw_terminal(cx);
+        }
+        self.reconcile_group_terminals(cx);
+        self.save_group_layouts(cx);
+        self.poll_browser(window, cx);
+        self.offer_browser_skill(window, cx);
+        self.poll_sessions(cx);
         self.flush_scrollbar(cx);
         self.flush_split(cx);
         #[cfg(target_os = "macos")]
@@ -215,6 +263,7 @@ impl HerdrWindow {
         self.poll_file_transfer(cx);
         self.update_workspace_dialog(window, cx);
         self.poll_teleport(window, cx);
+        self.poll_device_setup(window, cx);
         self.poll_worktree_source(cx);
         self.poll_hover_menu(std::time::Instant::now(), window, cx);
         if self.tick_flash(std::time::Instant::now()) {
@@ -238,6 +287,9 @@ impl HerdrWindow {
         if self.update_git() {
             cx.notify();
         }
+        if self.update_usage() {
+            cx.notify();
+        }
         if self.live.missing_installation && !self.install_warning_shown {
             self.install_warning_shown = true;
             self.show_install_modal(window, cx);
@@ -245,6 +297,25 @@ impl HerdrWindow {
         self.resize();
         self.report_focus();
         self.sync_window_title(window);
+    }
+
+    /// Plan usage follows the selected host: a remote host reports its own
+    /// agents' sign-ins, never this machine's.
+    fn update_usage(&mut self) -> bool {
+        let host = self
+            .config
+            .usage
+            .show
+            .then(|| self.endpoints.get(self.selected_endpoint))
+            .flatten()
+            .map(|endpoint| crate::usage::Host::from(&endpoint.connection.target));
+        self.usage.poll(
+            host,
+            &self.config.usage,
+            self.config_load_revision,
+            self.active,
+            std::time::Instant::now(),
+        )
     }
 
     pub(crate) fn new(
@@ -260,7 +331,7 @@ impl HerdrWindow {
             target
         };
         let focus = cx.focus_handle();
-        window.focus(&focus);
+        window.focus(&focus, cx);
         let weak = cx.weak_entity();
         let sidebar_view = cx.new(|_| sidebar::SidebarView::new(weak));
         let timer = cx.background_executor().clone();
@@ -292,9 +363,12 @@ impl HerdrWindow {
             config,
             theme,
             config_load: None,
+            font_size_saves: Default::default(),
             config_watch: None,
             config_load_revision: 0,
             catalog: endpoint::Catalog::new(&target),
+            sessions: sessions::Sessions::default(),
+            sessions_anchor: Default::default(),
             endpoints: vec![endpoint::Endpoint::new(
                 endpoint::LOCAL.into(),
                 "Local".into(),
@@ -326,6 +400,7 @@ impl HerdrWindow {
             split_drag: None,
             split_cursor: None,
             pending_images: Vec::new(),
+            pending_input: Default::default(),
             file_transfer: None,
             selection: None,
             flash: None,
@@ -339,6 +414,7 @@ impl HerdrWindow {
             removal: None,
             teleport: None,
             git: git::Git::default(),
+            usage: Default::default(),
             install_warning_shown: false,
             collapsed_repos: Default::default(),
             sidebar_visible: true,
@@ -346,6 +422,8 @@ impl HerdrWindow {
             wheel: WheelAccumulator::default(),
             sidebar_width: None,
             sidebar_drag: None,
+            workspace_drag: None,
+            tab_drag: None,
             sidebar_split: None,
             sidebar_split_modified: false,
             sidebar_preferences: None,
@@ -361,6 +439,9 @@ impl HerdrWindow {
             sidebar_view,
             surface_signal: cx.new(|_| SurfaceSignal),
             _sidebar_invalidation: Self::invalidate_sidebar(cx),
+            browser: crate::browser::Browser::new(cx),
+            // Another window, or an agent, may open or close a tab.
+            _browser_tabs: cx.observe_global::<crate::browser::Store>(|_, cx| cx.notify()),
             _activation: cx.observe_window_activation(window, |this, window, cx| {
                 this.active = window.is_window_active();
                 if !this.active {

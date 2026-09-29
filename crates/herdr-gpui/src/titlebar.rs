@@ -15,8 +15,10 @@ impl HerdrWindow {
             return;
         }
         self.menu.page = Some(Page::GitHub);
-        if connect && !self.menu.github.connected() && !self.menu.github.loading_profile() {
-            self.menu.github.start(&self.config);
+        // A device already covered by the main account opens the page rather
+        // than starting a second sign-in for itself.
+        if connect && self.pr_profile().is_none() && !self.github_auth().loading_profile() {
+            self.start_github();
         }
         cx.notify();
     }
@@ -142,22 +144,10 @@ impl HerdrWindow {
                                             .child(format!("-{}", status.deletions)),
                                     )
                                 })
-                                // Untracked files are staged by a commit
-                                // too, but have no diff against HEAD.
-                                .when(status.untracked > 0, |button| {
-                                    button.child(
-                                        div()
-                                            .debug_selector(|| "titlebar-git-untracked".into())
-                                            .text_color(rgb(theme.muted))
-                                            .child(
-                                                if status.additions == 0 && status.deletions == 0 {
-                                                    "Uncommitted"
-                                                } else {
-                                                    "*"
-                                                },
-                                            ),
-                                    )
-                                })
+                                .child(
+                                    crate::icons::uncommitted(theme, 18.)
+                                        .debug_selector(|| "titlebar-git-dirty".into()),
+                                )
                         },
                     ),
                 })
@@ -205,12 +195,7 @@ impl HerdrWindow {
     }
 
     pub(super) fn render_titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let image = self
-            .menu
-            .github
-            .profile
-            .as_ref()
-            .and_then(|p| p.avatar.clone());
+        let image = self.pr_profile().and_then(|p| p.avatar.clone());
         render(self.theme.surface)
             .children(self.render_git_button(cx))
             .child(
@@ -259,6 +244,7 @@ impl HerdrWindow {
                                             offset: point(px(0.), px(0.)),
                                             blur_radius: px(5.),
                                             spread_radius: px(1.),
+                                            inset: false,
                                         }])
                                     })
                                     .map(|circle| match image {
@@ -480,7 +466,7 @@ mod git_button_tests {
             for part in [
                 "titlebar-git-additions",
                 "titlebar-git-deletions",
-                "titlebar-git-untracked",
+                "titlebar-git-dirty",
             ] {
                 let bounds = cx.debug_bounds(part).unwrap();
                 assert!(bounds.right() <= button.left(), "{part} at width {width}");
@@ -513,7 +499,7 @@ mod git_button_tests {
 
     #[gpui::test]
     fn uncommitted_changes_hide_zero_counts(cx: &mut TestAppContext) {
-        for (additions, deletions, untracked) in [(0, 0, 1), (12, 0, 0), (0, 3, 0)] {
+        for (additions, deletions, untracked) in [(0, 0, 1), (12, 0, 0), (0, 3, 0), (433, 28, 1)] {
             let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
             cx.simulate_resize(size(px(360.), px(600.)));
             cx.update(|_, cx| {
@@ -546,11 +532,10 @@ mod git_button_tests {
                 cx.debug_bounds("titlebar-git-deletions").is_some(),
                 deletions > 0
             );
-            assert_eq!(
-                cx.debug_bounds("titlebar-git-untracked").is_some(),
-                untracked > 0
-            );
+            let dirty = cx.debug_bounds("titlebar-git-dirty").unwrap();
+            assert_eq!(dirty.size, size(px(18.), px(18.)));
             let button = cx.debug_bounds("titlebar-git").unwrap();
+            assert!(dirty.right() <= button.left());
             assert!(button.left() >= cx.debug_bounds("titlebar").unwrap().left());
             assert!(button.right() <= cx.debug_bounds("titlebar-avatar").unwrap().left());
         }
@@ -579,7 +564,7 @@ mod git_button_tests {
         });
         assert!(cx.debug_bounds("titlebar-git").is_some());
         assert!(cx.debug_bounds("titlebar-git-additions").is_none());
-        assert!(cx.debug_bounds("titlebar-git-untracked").is_none());
+        assert!(cx.debug_bounds("titlebar-git-dirty").is_none());
         assert!(
             cx.debug_bounds("titlebar-git-pr").is_none(),
             "no cached pull request, no badge"

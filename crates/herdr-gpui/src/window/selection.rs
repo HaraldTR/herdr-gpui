@@ -211,7 +211,7 @@ mod tests {
         });
         cx.update(|window, cx| {
             window.refresh();
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let (origin, cell) = view.read_with(cx, |view, _| {
             (
@@ -291,7 +291,7 @@ mod tests {
         });
         cx.update(|window, cx| {
             window.refresh();
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let (origin, width, height) = view.read_with(cx, |view, _| {
             (
@@ -340,7 +340,7 @@ mod tests {
         });
         cx.update(|window, cx| {
             window.refresh();
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let (origin, width) = view.read_with(cx, |view, _| (view.bounds.origin, view.cell_width));
         let at = |column: f32| origin + point(px(column * width), px(10.));
@@ -381,7 +381,7 @@ mod tests {
         cx.update(|window, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string("kept".into()));
             window.refresh();
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let (origin, width) = view.read_with(cx, |view, _| (view.bounds.origin, view.cell_width));
         let at = |column: f32| origin + point(px(column * width), px(10.));
@@ -433,7 +433,7 @@ mod tests {
         cx.update(|window, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string("kept".into()));
             window.refresh();
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let (origin, width) = view.read_with(cx, |view, _| (view.bounds.origin, view.cell_width));
         let at = |column: f32| origin + point(px(column * width), px(10.));
@@ -468,7 +468,7 @@ mod tests {
         });
         cx.update(|window, cx| {
             window.refresh();
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let (origin, width) = view.read_with(cx, |view, _| (view.bounds.origin, view.cell_width));
         let at = |column: f32| origin + point(px(column * width), px(10.));
@@ -542,7 +542,7 @@ mod tests {
         });
         cx.update(|window, cx| {
             window.refresh();
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let (origin, cell) = view.read_with(cx, |view, _| {
             (

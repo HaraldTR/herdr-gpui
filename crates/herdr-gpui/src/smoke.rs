@@ -173,7 +173,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                             cx.notify();
                         });
                     window.refresh();
-                    window.draw(cx).clear();
+                    window.draw(cx).clear(cx);
                     cx.default_global::<PaintedProbes>().check()?;
                     let probes = &cx.global::<PaintedProbes>().0;
                     let mut failed = false;
@@ -249,6 +249,64 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                 std::process::exit(1);
             }
         }
+        // The other row layouts place text by their own geometry, so they are
+        // held to what every layout owes: shaped glyphs match the text they
+        // were given, and none is cropped or wider than its box.
+        {
+            use crate::config::LayoutMode;
+            cx.update(|cx| cx.set_global(sidebar::layout_tests::VerifyChildGeometry(false)));
+            for mode in [LayoutMode::Superset, LayoutMode::Orca, LayoutMode::Minimal] {
+                        timer.timer(Duration::from_millis(100)).await;
+                        let result = AnyWindowHandle::from(handle).update(
+                            cx,
+                            |root, window, cx| -> Result<()> {
+                                use crate::sidebar::layout_tests::PaintedProbes;
+                                cx.default_global::<PaintedProbes>().0.clear();
+                                root.downcast::<HerdrWindow>()
+                                    .map_err(|_| anyhow!("unexpected root"))?
+                                    .update(cx, |view, cx| {
+                                        view.config.layout.mode = mode;
+                                        cx.notify();
+                                    });
+                                window.refresh();
+                                window.draw(cx).clear(cx);
+                                cx.default_global::<PaintedProbes>().check()?;
+                                let probes = &cx.global::<PaintedProbes>().0;
+                                // The long name must be cut short in every
+                                // layout, which proves ellipsizing natively.
+                                const LONG: &str =
+                                    "herdr-gpui-sidebar-rendering-regression-investigation";
+                                if !probes.get(LONG).is_some_and(|p| p.glyph_text.ends_with('\u{2026}')) {
+                                    bail!("{mode}: {LONG:?} was not ellipsized");
+                                }
+                                for input in ["herdr", "Claude Code", LONG] {
+                                    let p = probes
+                                        .get(input)
+                                        .with_context(|| format!("missing paint: {input}"))?;
+                                    // Orca shares one line between an agent and
+                                    // its place, so a name may end in an ellipsis.
+                                    let shown = p.glyph_text == input
+                                        || p.glyph_text.strip_suffix('\u{2026}').is_some_and(
+                                            |kept| input.starts_with(kept.trim_end()),
+                                        );
+                                    if p.glyph_text != p.cached
+                                        || !shown
+                                        || p.clipped
+                                        || p.width > p.bounds.size.width
+                                    {
+                                        bail!("{mode}: bad paint {input:?} {p:?}");
+                                    }
+                                }
+                                eprintln!("SIDEBAR verified layout={mode}");
+                                Ok(())
+                            },
+                        );
+                        if !matches!(result, Ok(Ok(()))) {
+                            eprintln!("SIDEBAR native FAIL: {result:?}");
+                            std::process::exit(1);
+                        }
+            }
+        }
         let _ = handle.update(cx, |view, _, cx| {
             // Later fixtures add PR badges and dialogs that change label budgets.
             cx.set_global(sidebar::layout_tests::VerifyChildGeometry(false));
@@ -277,7 +335,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                 cx.default_global::<sidebar::layout_tests::PaintedProbes>()
                     .0
                     .clear();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 let label = match step {
                     0 => "\u{25be}",
                     1 => "\u{25b8}",
@@ -370,7 +428,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                 });
                 cx.default_global::<sidebar::layout_tests::PaintedProbes>().0.clear();
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 let probes = &cx.global::<sidebar::layout_tests::PaintedProbes>().0;
                 if probes.contains_key("Claude Code") != show_agents
                     || !probes.contains_key("herdr")
@@ -408,7 +466,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                     std::process::exit(1);
                 }
                 let point = AnyWindowHandle::from(handle).update(cx, |_, window, cx| {
-                    window.draw(cx).clear();
+                    window.draw(cx).clear(cx);
                     cx.global::<sidebar::layout_tests::PaintedProbes>().0.get(if action == menu::WorkspaceAction::DeleteWorktree { "sidebar-child" } else { "agent-launcher" }).map(|probe| {
                         eprintln!("DIALOG native {action:?} viewport={:?}", window.viewport_size());
                          probe.bounds.center()
@@ -431,7 +489,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                         Ok(())
                     })?;
                     cx.default_global::<sidebar::layout_tests::PaintedProbes>().0.clear();
-                    window.draw(cx).clear();
+                    window.draw(cx).clear(cx);
                     let probes = &cx.global::<sidebar::layout_tests::PaintedProbes>().0;
                     for (text, probe) in probes.iter().filter(|(text, _)| text.starts_with("#8 ") || matches!(text.as_str(), "+1730" | "-31")) {
                         if probe.glyph_text != probe.cached || probe.clipped || probe.glyph_text.is_empty() {
@@ -456,7 +514,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                     for key in keys.split(' ') {
                         window.dispatch_keystroke(Keystroke::parse(key)?, cx);
                     }
-                    window.draw(cx).clear();
+                    window.draw(cx).clear(cx);
                     if view.read(cx).menu.page != Some(menu::Page::Dialog(action)) { bail!("workspace menu opened wrong dialog"); }
                     window.dispatch_action(Box::new(RunCommand { command: Command::Tab }), cx);
                     // Only the editable dialogs carry a text field; confirmations do not.
@@ -465,7 +523,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                         for ch in "long-label-\u{65e5}\u{672c}-\u{1f600}".repeat(4).chars() {
                             window.dispatch_keystroke(Keystroke::parse(&ch.to_string())?, cx);
                         }
-                        window.draw(cx).clear();
+                        window.draw(cx).clear(cx);
                         view.update(cx, |view, cx| -> Result<()> {
                             let input = view.menu.input.as_ref().context("missing native editor")?;
                             if input.text != "long-label-\u{65e5}\u{672c}-\u{1f600}".repeat(4) { bail!("native editor lost Unicode text"); }
@@ -505,7 +563,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                         }
                     });
                     cx.default_global::<sidebar::layout_tests::PaintedProbes>().0.clear();
-                    window.draw(cx).clear();
+                    window.draw(cx).clear(cx);
                     if state == 1 {
                         let probe = cx.global::<sidebar::layout_tests::PaintedProbes>().0.get("ABCD-1234").context("GitHub device code not painted")?;
                         if probe.clipped || probe.glyph_text != "ABCD-1234" { bail!("GitHub device code clipped"); }
@@ -537,7 +595,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
             std::process::exit(1);
         }
         let probes = cx.update(|cx| cx.default_global::<sidebar::layout_tests::PaintedProbes>().check());
-        if !matches!(probes, Ok(Ok(()))) {
+        if !matches!(probes, Ok(())) {
             eprintln!("SIDEBAR native paint FAIL: {probes:?}");
             std::process::exit(1);
         }
@@ -564,7 +622,7 @@ fn start_notifications(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                     view.menu.reset();
                     view.config.notifications.enabled = false;
                     view.config.notifications.delay_seconds = 3600;
-                    window.focus(&view.focus);
+                    window.focus(&view.focus, cx);
                     let selected = view.selected_endpoint;
                     let snapshot = view.live.snapshot.clone();
                     view.show_toast_preview(kind, cx);
@@ -578,7 +636,7 @@ fn start_notifications(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                     }
                     Ok(())
                 });
-                let drawn = AnyWindowHandle::from(handle).update(cx, |_, window, cx| window.draw(cx).clear());
+                let drawn = AnyWindowHandle::from(handle).update(cx, |_, window, cx| window.draw(cx).clear(cx));
                 if !matches!(result, Ok(Ok(()))) || drawn.is_err() {
                     eprintln!("NOTIFICATIONS native FAIL: {result:?} {drawn:?}");
                     std::process::exit(1);
@@ -608,7 +666,6 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
                 })
             })
         })
-        .context("updating app for decoy window")?
         .context("opening decoy window")?;
     handle
         .update(cx, |view, window, cx| {
@@ -650,8 +707,7 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
             cx.notify();
         })
         .context("preparing sidebar host fixtures")?;
-    cx.update(|cx| cx.activate(true))
-        .context("activating sidebar fixture")?;
+    cx.update(|cx| cx.activate(true));
     decoy
         .update(cx, |_, window, _| window.activate_window())
         .context("activating decoy window")?;
@@ -723,7 +779,7 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
             .update(cx, |_, window, cx| -> Result<_> {
                 cx.default_global::<PaintedProbes>().0.clear();
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 let probes = &cx.global::<PaintedProbes>().0;
                 for (name, prefix) in [
                     (REMOTE, "Synthetic host"),
@@ -764,7 +820,7 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
             .update(cx, |root, window, cx| -> Result<()> {
                 cx.default_global::<PaintedProbes>().0.clear();
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 let entity = root
                     .downcast::<HerdrWindow>()
                     .map_err(|_| anyhow!("unexpected root"))?;
@@ -861,7 +917,7 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
                 }
                 cx.default_global::<PaintedProbes>().0.clear();
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 for (name, prefix, expected_width) in [
                     (REMOTE, host_prefix, host_width),
                     ("agent-1-with-a-deliberately-long-label", agent_prefix, agent_width),
@@ -913,7 +969,7 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
                 })?;
                 cx.default_global::<PaintedProbes>().0.clear();
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 for name in [REMOTE, "agent-1-with-a-deliberately-long-label"] {
                     let probe = cx
                         .global::<PaintedProbes>()
@@ -963,7 +1019,7 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
         AnyWindowHandle::from(handle)
             .update(cx, |root, window, cx| -> Result<()> {
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 let entity = root
                     .downcast::<HerdrWindow>()
                     .map_err(|_| anyhow!("unexpected root"))?;
@@ -971,7 +1027,7 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
                 let other = scroll[1 - list].offset();
                 scroll[list].set_offset(point(px(0.), px(-80.)));
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 if scroll[list].offset().y != px(-80.) || scroll[1 - list].offset() != other {
                     bail!("scroll handles are not independent: list={list}");
                 }
@@ -1165,14 +1221,14 @@ pub fn start(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                 if frames == 0 {
                     // Exercise the regression: no foreground app or pre-existing input focus.
                     cx.hide();
-                    window.blur();
+                    window.blur(cx);
                 }
                 // on_next_frame runs BEFORE draw, and hidden windows may not receive it.
                 // Build the real native window's dispatch tree and input handler synchronously,
                 // without activating the app or relying on desktop/OS keyboard focus.
-                window.focus(&view.read(cx).focus);
+                window.focus(&view.read(cx).focus.clone(), cx);
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 frames += 1;
                 let focused = view.read(cx).focus.is_focused(window);
                 let active = window.is_window_active();
@@ -1252,12 +1308,12 @@ pub fn start(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                     }
                     6 if snapshot.workspaces.len() == 2 && focused_workspace != workspace && surface.panes.len() == 1 => {
                         let before = view.read(cx).presentation.probe;
-                        view.update(cx, |view, cx| { view.navigate(NavigationTarget::Workspace(&workspace), cx); window.focus(&view.focus); });
+                        view.update(cx, |view, cx| { view.navigate(NavigationTarget::Workspace(&workspace), cx); window.focus(&view.focus, cx); });
                         // Draw the frame that follows the focus change immediately: the client
                         // has just dropped its surface and the next projection is a round trip
                         // away, which is precisely when the terminal area used to blank.
                         window.refresh();
-                        window.draw(cx).clear();
+                        window.draw(cx).clear(cx);
                         let after = view.read(cx).presentation.probe;
                         if after.blank > before.blank {
                             bail!("space switch blanked the terminal area: {} empty frame(s); {}", after.blank - before.blank, diagnostic());
@@ -1288,7 +1344,7 @@ pub fn start(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                     10 if options.surface_size != old_size && last_queued_options == Some(options)
                         && surface.frame.width == options.surface_size.cols && surface.frame.height == options.surface_size.rows => {
                         eprintln!("GUI native resize verified: {:?} -> {:?}", old_size, options.surface_size);
-                        view.update(cx, |view, cx| { view.reconnect(); window.focus(&view.focus); cx.notify(); });
+                        view.update(cx, |view, cx| { view.reconnect(); window.focus(&view.focus, cx); cx.notify(); });
                     }
                     11 if snapshot.boot_id == boot && snapshot.workspaces.len() == 2 && snapshot.tabs.len() == 3
                         && focused_workspace == workspace && focused_tab == first_tab && has_output(&surface.frame, &marker) => {
@@ -1326,7 +1382,7 @@ pub fn start(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                 error => {
                     EXIT_CODE.store(1, Ordering::SeqCst);
                     eprintln!("GUI integration FAIL: {error:?}");
-                    let _ = cx.update(|cx| cx.quit());
+                    cx.update(|cx| cx.quit());
                     break;
                 }
             }
@@ -1336,14 +1392,14 @@ pub fn start(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
             if let Err(error) = clipboard::verify(handle, cx).await {
                 EXIT_CODE.store(1, Ordering::SeqCst);
                 eprintln!("GUI clipboard FAIL: {error:#}");
-                let _ = cx.update(|cx| cx.quit());
+                cx.update(|cx| cx.quit());
                 return;
             }
             #[cfg(target_os = "macos")]
             if let Err(error) = selection::verify(handle, cx).await {
                 EXIT_CODE.store(1, Ordering::SeqCst);
                 eprintln!("GUI selection FAIL: {error:#}");
-                let _ = cx.update(|cx| cx.quit());
+                cx.update(|cx| cx.quit());
                 return;
             }
             match second_window(handle, cx).await {
@@ -1352,7 +1408,7 @@ pub fn start(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                     if let Err(error) = clipboard::verify_remote(cx).await {
                         EXIT_CODE.store(1, Ordering::SeqCst);
                         eprintln!("GUI remote clipboard FAIL: {error:#}");
-                        let _ = cx.update(|cx| cx.quit());
+                        cx.update(|cx| cx.quit());
                         return;
                     }
                     eprintln!("GUI integration PASS: same boot={boot}, 3 workspaces / 4 tabs, persisted shell output after reconnect, external workspace pushed to idle GUI, second window on its own space");
@@ -1363,7 +1419,7 @@ pub fn start(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                     eprintln!("GUI second window FAIL: {error:#}");
                 }
             }
-            let _ = cx.update(|cx| cx.quit());
+            cx.update(|cx| cx.quit());
         }
     }).detach();
 }
@@ -1385,7 +1441,7 @@ async fn second_window(first: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> R
                 if draw {
                     // A hidden window still needs a draw to publish its geometry.
                     window.refresh();
-                    window.draw(cx).clear();
+                    window.draw(cx).clear(cx);
                 }
                 let view = view.read(cx);
                 Ok((view.live.clone(), view.local_error.clone()))
@@ -1436,7 +1492,6 @@ async fn second_window(first: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> R
         .context("the daemon has only one workspace to show")?;
     let second = cx
         .update(|cx| open_window(target, updater::Updater::secondary(), cx, false))
-        .context("updating the app for a second window")?
         .context("opening a second window")?;
     if AnyWindowHandle::from(second) == AnyWindowHandle::from(first) {
         bail!("the second window replaced the first");

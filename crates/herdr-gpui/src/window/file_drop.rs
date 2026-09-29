@@ -58,7 +58,7 @@ impl HerdrWindow {
             Ok(())
         });
         match result {
-            Ok(()) => window.focus(&self.focus),
+            Ok(()) => window.focus(&self.focus, cx),
             Err(error) => {
                 self.local_error = Some(format!("Files not pasted: {error}"));
                 cx.notify();
@@ -311,7 +311,7 @@ mod tests {
         cx.update(|window, cx| {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string("unchanged".into()));
             window.refresh();
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let entered = point(px(120.), px(100.));
         let submitted = point(px(520.), px(100.));

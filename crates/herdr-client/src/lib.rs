@@ -17,6 +17,7 @@ mod options;
 mod queue;
 mod script;
 mod session;
+mod sessions;
 mod ssh;
 mod transport;
 mod upload;
@@ -30,6 +31,7 @@ pub use herdr_protocol as protocol;
 
 pub use catalog::{
     SavedHost, load_saved_host_selection, load_saved_hosts, store_saved_host_selection,
+    valid_profile_id,
 };
 pub use clipboard::{ClipboardImageCancellation, ClipboardImageUpload};
 pub use connect::{connect, connect_with_connector, connect_with_surface_active};
@@ -42,5 +44,14 @@ pub use handle::{Client, ClientHandle};
 pub use method::Method;
 pub use options::ConnectOptions;
 pub use script::{ScriptHost, ScriptLimits, run_script, shell_quote};
+pub use sessions::{
+    LocalSession, RemoteSession, SessionState, delete_local_session, delete_remote_session,
+    list_local_sessions, list_remote_sessions,
+};
+#[cfg(unix)]
+pub use ssh::script_command;
+pub use ssh::{
+    Destination, HostProbe, probe_host, remote_config_value, remote_origin_url, resolve_destination,
+};
 pub use transport::Stream;
 pub use upload::{remove_uploaded_files, upload_files};

@@ -20,7 +20,7 @@ pub(super) async fn verify_remote(cx: &mut AsyncApp) -> Result<()> {
             cx,
             false,
         )
-    })??;
+    })?;
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let ready =
@@ -28,9 +28,9 @@ pub(super) async fn verify_remote(cx: &mut AsyncApp) -> Result<()> {
                 let view = root
                     .downcast::<HerdrWindow>()
                     .map_err(|_| anyhow!("unexpected root"))?;
-                window.focus(&view.read(cx).focus);
+                window.focus(&view.read(cx).focus.clone(), cx);
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 Ok(view.read(cx).input_ready())
             })??;
         if ready {

@@ -120,7 +120,7 @@ impl HerdrWindow {
         self.menu.page = Some(Page::Teleport);
         self.menu.error = None;
         self.teleport = Some(Teleport::start(source, label, hosts));
-        window.focus(&self.menu.focus);
+        window.focus(&self.menu.focus, cx);
         cx.notify();
     }
 }
@@ -236,7 +236,7 @@ mod tests {
                 };
                 view.menu.page = Some(Page::Teleport);
                 view.teleport = Some(Teleport::choosing(source, vec![candidate]));
-                window.focus(&view.menu.focus);
+                window.focus(&view.menu.focus, cx);
                 cx.notify();
             })
         });

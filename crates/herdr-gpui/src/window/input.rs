@@ -5,16 +5,15 @@
 use super::HerdrWindow;
 use crate::{
     connection::ConnectionBridge,
-    terminal::{InputTarget, WheelAccumulator, key_input, wheel_target},
+    terminal::{WheelAccumulator, key_input, wheel_target},
 };
 use gpui::{Context, KeyDownEvent, ScrollWheelEvent, Window};
-use herdr_client::protocol::ClientPaneInputEvent;
 
 impl HerdrWindow {
     pub(crate) fn open_terminal_link(
         &mut self,
         event: &gpui::ClickEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let pressed = self.pressed_terminal_link.take();
@@ -34,7 +33,14 @@ impl HerdrWindow {
                 .is_some_and(|(destination, _)| destination == &url)
         {
             cx.stop_propagation();
-            cx.open_url(&url);
+            let in_tab = (self.config.open_links_in == crate::config::LinkTarget::BrowserTab)
+                != event.down.modifiers.alt;
+            match crate::browser::WebUrl::try_from(url.as_str()) {
+                Ok(url) if in_tab && crate::browser::EMBEDDED => {
+                    self.open_browser_tab(Some(url), window, cx);
+                }
+                _ => cx.open_url(&url),
+            }
         }
     }
 
@@ -78,31 +84,6 @@ impl HerdrWindow {
             self.cell_width,
             self.config.terminal.line_height(),
         )
-    }
-
-    pub(crate) fn send(&mut self, event: ClientPaneInputEvent, cx: &mut Context<Self>) {
-        if self.menu.page.is_some() || !self.input_ready() || self.mouse_focus_pending() {
-            return;
-        }
-        if let (Some(handle), Some(snapshot), Some(surface)) = (
-            &self.endpoints[self.selected_endpoint].connection.handle,
-            &self.live.snapshot,
-            &self.live.surface,
-        ) {
-            let target = if let Some(popup) = &surface.popup {
-                InputTarget::Popup(popup.terminal_id.clone())
-            } else if let Some(pane) = &snapshot.focused_pane_id {
-                InputTarget::Pane(pane.clone())
-            } else {
-                return;
-            };
-            if let Err(error) =
-                ConnectionBridge::send_input(handle, &snapshot.boot_id, &target, event)
-            {
-                self.local_error = Some(format!("Input not sent: {error}"));
-                cx.notify();
-            }
-        }
     }
 
     pub(crate) fn scroll_wheel(
@@ -167,7 +148,12 @@ impl HerdrWindow {
             .config
             .option_as_alt
             .sends_alt(cx.keyboard_layout().id());
-        if event.keystroke.modifiers.platform && event.keystroke.key == "v" {
+        if event.keystroke.key == "escape"
+            && (self.cancel_workspace_drag(cx) | self.cancel_tab_drag(cx))
+        {
+            cx.stop_propagation();
+            window.prevent_default();
+        } else if event.keystroke.modifiers.platform && event.keystroke.key == "v" {
             self.paste(cx);
             cx.stop_propagation();
             window.prevent_default();

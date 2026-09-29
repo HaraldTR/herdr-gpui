@@ -186,7 +186,7 @@ pub fn start(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                         window.resize(size(px(1640.), px(1100.)));
                     }
                     window.refresh();
-                    window.draw(cx).clear();
+                    window.draw(cx).clear(cx);
                     let elapsed = start.elapsed().as_secs_f64() * 1000.;
                     let counts = *cx.global::<Counts>();
                     if frame > 0
@@ -291,7 +291,7 @@ pub fn start(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                         for redraw in 0..2 {
                             *cx.default_global::<Counts>() = Counts::default();
                             window.refresh();
-                            window.draw(cx).clear();
+                            window.draw(cx).clear(cx);
                             let c = cx.global::<Counts>();
                             if c.quads != 54
                                 || c.decorations != 1922
@@ -345,7 +345,7 @@ pub fn start(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                     }
                     *cx.default_global::<Counts>() = Counts::default();
                     let start = Instant::now();
-                    window.draw(cx).clear();
+                    window.draw(cx).clear(cx);
                     let elapsed = start.elapsed().as_secs_f64() * 1000.;
                     let counts = *cx.global::<Counts>();
                     if counts.paints != 1

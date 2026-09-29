@@ -79,24 +79,17 @@ pub(crate) fn agent_name(agent: &ClientShellAgent) -> &str {
     )
 }
 
-/// Upstream's default agent rows: host, workspace and tab on the first line,
-/// the agent itself on the second. The tab only earns its place when the
-/// workspace has more than one or the user named it, as upstream decides.
-pub(super) fn agent_labels<'a>(
-    agent: &'a ClientShellAgent,
+/// Where an agent runs: its workspace, and its tab when that earns a place,
+/// which upstream decides by the workspace having several tabs or the user
+/// naming it. `None` once the agent's workspace has gone.
+pub(super) fn agent_place<'a>(
+    agent: &ClientShellAgent,
     snapshot: &'a ClientShellSnapshot,
-    host: Option<&'a str>,
-) -> (Vec<(&'a str, bool)>, &'a str) {
-    let name = agent_name(agent);
-    // A pane whose workspace has gone leaves the agent to name the row.
-    let Some(workspace) = snapshot
+) -> Option<(&'a str, Option<&'a str>)> {
+    let workspace = snapshot
         .workspaces
         .iter()
-        .find(|workspace| workspace.workspace_id == agent.workspace_id)
-        .map(|workspace| workspace.label.as_str())
-    else {
-        return (vec![(name, true)], "");
-    };
+        .find(|workspace| workspace.workspace_id == agent.workspace_id)?;
     let tabs = snapshot
         .tabs
         .iter()
@@ -108,6 +101,20 @@ pub(super) fn agent_labels<'a>(
         .find(|tab| tab.tab_id == agent.tab_id)
         .filter(|tab| tabs > 1 || tab.custom_label)
         .map(|tab| tab.label.as_str());
+    Some((workspace.label.as_str(), tab))
+}
+
+/// Upstream's default agent rows: host, workspace and tab on the first line,
+/// the agent itself on the second. A pane whose workspace has gone leaves the
+/// agent to name the row.
+pub(super) fn agent_labels<'a>(
+    name: &'a str,
+    place: Option<(&'a str, Option<&'a str>)>,
+    host: Option<&'a str>,
+) -> (Vec<(&'a str, bool)>, &'a str) {
+    let Some((workspace, tab)) = place else {
+        return (vec![(name, true)], "");
+    };
     // Only the workspace carries the row's weight: upstream paints the host and
     // tab around it in its secondary color.
     let segments = [(host, false), (Some(workspace), true), (tab, false)]
@@ -122,7 +129,6 @@ pub(super) fn agent_labels<'a>(
 
 pub(super) fn status_indicator(status: AgentStatus, font: &FontConfig) -> Div {
     // Upstream dots: working/blocked/done filled, idle hollow, unknown a small dot.
-    let (diameter, filled, color) = status_style(status);
     div()
         .size(px(STATUS_WIDTH))
         .mt(px((line_height(font) - STATUS_WIDTH) / 2.))
@@ -130,14 +136,20 @@ pub(super) fn status_indicator(status: AgentStatus, font: &FontConfig) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .child(
-            div()
-                .size(px(diameter))
-                .rounded_full()
-                .border_1()
-                .border_color(rgb(color))
-                .when(filled, |dot| dot.bg(rgb(color))),
-        )
+        .child(status_dot(status))
+}
+
+/// The status dot alone, sized by its status, for callers that place it
+/// themselves.
+pub(crate) fn status_dot(status: AgentStatus) -> Div {
+    let (diameter, filled, color) = status_style(status);
+    div()
+        .flex_none()
+        .size(px(diameter))
+        .rounded_full()
+        .border_1()
+        .border_color(rgb(color))
+        .when(filled, |dot| dot.bg(rgb(color)))
 }
 
 /// Upstream draws status from its own palette, defaulting to Catppuccin Mocha,

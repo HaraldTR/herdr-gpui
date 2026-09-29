@@ -174,7 +174,9 @@ impl Source {
                     ImageFormat::Webp => "webp",
                     ImageFormat::Bmp => "bmp",
                     ImageFormat::Tiff => "tiff",
-                    ImageFormat::Svg => return Err(Error::ImageFormat),
+                    ImageFormat::Svg | ImageFormat::Ico | ImageFormat::Pnm => {
+                        return Err(Error::ImageFormat);
+                    }
                 };
                 (extension, image.bytes)
             }

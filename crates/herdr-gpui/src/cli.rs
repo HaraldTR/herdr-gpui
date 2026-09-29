@@ -1,18 +1,38 @@
 use herdr_client::ConnectTarget;
 use std::ffi::OsString;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum LaunchMode {
     #[default]
     Normal,
     Help,
     BuildInfo,
+    /// Talk to the running app, then exit without starting GPUI.
+    Browser(BrowserCommand),
     #[cfg(feature = "integration-test")]
     Integration,
     #[cfg(feature = "integration-test")]
     Sidebar,
     #[cfg(feature = "integration-test")]
     Performance,
+}
+
+/// `herdr-gpui browser ...`, answered by the running app.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BrowserCommand {
+    Open {
+        /// A web address or a local file, told apart when it runs.
+        target: String,
+        workspace: Option<String>,
+        focus: bool,
+    },
+    Reload,
+    /// Waits up to `wait` seconds for notes; zero only checks.
+    Feedback {
+        wait: u64,
+    },
+    Skill,
+    Help,
 }
 
 #[derive(Debug)]
@@ -37,6 +57,20 @@ pub enum CliError {
     UnknownOption(OsString),
     #[error("--socket cannot be combined with --session or --dev")]
     ConflictingConnectionOptions,
+    #[error("browser requires a command: open, reload, feedback, skill, or --help")]
+    MissingBrowserCommand,
+    #[error("Unknown browser command: {}", .0.to_string_lossy())]
+    UnknownBrowserCommand(OsString),
+    #[error("browser open requires one URL or file")]
+    MissingUrl,
+    #[error("--wait requires a number of seconds")]
+    InvalidWait,
+    #[error("browser open accepts one URL; unexpected {}", .0.to_string_lossy())]
+    UnexpectedArgument(OsString),
+    #[error("--workspace requires an ID")]
+    MissingWorkspace,
+    #[error("browser arguments must be UTF-8")]
+    InvalidBrowserEncoding(OsString),
     #[cfg(feature = "integration-test")]
     #[error("native test modes are mutually exclusive and may only be specified once")]
     ConflictingTestModes,
@@ -70,9 +104,85 @@ pub fn build_info() -> &'static str {
     &record[PREFIX_LEN..record.len() - 1]
 }
 
+fn utf8(value: OsString) -> Result<String, CliError> {
+    value
+        .into_string()
+        .map_err(CliError::InvalidBrowserEncoding)
+}
+
+fn parse_browser(mut args: impl Iterator<Item = OsString>) -> Result<BrowserCommand, CliError> {
+    let command = args.next().ok_or(CliError::MissingBrowserCommand)?;
+    match command.to_str() {
+        Some("--help" | "-h") => return Ok(BrowserCommand::Help),
+        Some(simple @ ("skill" | "reload")) => {
+            let command = if simple == "skill" {
+                BrowserCommand::Skill
+            } else {
+                BrowserCommand::Reload
+            };
+            return match args.next() {
+                None => Ok(command),
+                Some(extra) if extra == "--help" || extra == "-h" => Ok(BrowserCommand::Help),
+                Some(extra) => Err(CliError::UnexpectedArgument(extra)),
+            };
+        }
+        Some("feedback") => {
+            let mut wait = 0;
+            while let Some(arg) = args.next() {
+                match arg.to_str() {
+                    Some("--help" | "-h") => return Ok(BrowserCommand::Help),
+                    Some("--wait") => {
+                        wait = args
+                            .next()
+                            .and_then(|value| value.to_str()?.parse::<u64>().ok())
+                            .filter(|seconds| *seconds > 0)
+                            .ok_or(CliError::InvalidWait)?;
+                    }
+                    _ => return Err(CliError::UnexpectedArgument(arg)),
+                }
+            }
+            return Ok(BrowserCommand::Feedback { wait });
+        }
+        Some("open") => {}
+        _ => return Err(CliError::UnknownBrowserCommand(command)),
+    }
+    let (mut target, mut workspace, mut focus) = (None, None, true);
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--help" | "-h") => return Ok(BrowserCommand::Help),
+            Some("--no-focus") => focus = false,
+            Some("--workspace") => {
+                let value = args
+                    .next()
+                    .filter(|value| {
+                        !value.is_empty() && !value.as_encoded_bytes().starts_with(b"-")
+                    })
+                    .ok_or(CliError::MissingWorkspace)?;
+                workspace = Some(utf8(value)?);
+            }
+            _ if target.is_none() && !arg.as_encoded_bytes().starts_with(b"-") => {
+                target = Some(utf8(arg)?);
+            }
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+    Ok(BrowserCommand::Open {
+        target: target.ok_or(CliError::MissingUrl)?,
+        workspace,
+        focus,
+    })
+}
+
 impl LaunchOptions {
     pub fn parse(args: impl IntoIterator<Item = impl Into<OsString>>) -> Result<Self, CliError> {
-        let mut args = args.into_iter().map(Into::into);
+        let mut args = args.into_iter().map(Into::into).peekable();
+        if args.peek().is_some_and(|arg| arg == "browser") {
+            args.next();
+            return Ok(Self {
+                target: ConnectTarget::Local,
+                mode: LaunchMode::Browser(parse_browser(args)?),
+            });
+        }
         let mut socket = None;
         let mut session = None;
         let mut development = false;
@@ -190,6 +300,116 @@ mod tests {
                 "\n"
             )
         );
+    }
+
+    #[test]
+    fn browser_commands_never_start_the_gui() {
+        let mode = |args: &[&str]| LaunchOptions::parse(args.iter().copied()).map(|o| o.mode);
+        assert_eq!(
+            mode(&["browser", "open", "localhost:3000"]).unwrap(),
+            LaunchMode::Browser(BrowserCommand::Open {
+                target: "localhost:3000".into(),
+                workspace: None,
+                focus: true,
+            })
+        );
+        assert_eq!(
+            mode(&[
+                "browser",
+                "open",
+                "--no-focus",
+                "--workspace",
+                "w_2",
+                "https://a.test"
+            ])
+            .unwrap(),
+            LaunchMode::Browser(BrowserCommand::Open {
+                target: "https://a.test".into(),
+                workspace: Some("w_2".into()),
+                focus: false,
+            })
+        );
+        assert_eq!(
+            mode(&["browser", "skill"]).unwrap(),
+            LaunchMode::Browser(BrowserCommand::Skill)
+        );
+        assert_eq!(
+            mode(&["browser", "reload"]).unwrap(),
+            LaunchMode::Browser(BrowserCommand::Reload)
+        );
+        assert_eq!(
+            mode(&["browser", "feedback"]).unwrap(),
+            LaunchMode::Browser(BrowserCommand::Feedback { wait: 0 })
+        );
+        assert_eq!(
+            mode(&["browser", "feedback", "--wait", "300"]).unwrap(),
+            LaunchMode::Browser(BrowserCommand::Feedback { wait: 300 })
+        );
+        for help in [&["browser", "--help"][..], &["browser", "open", "-h"]] {
+            assert_eq!(
+                mode(help).unwrap(),
+                LaunchMode::Browser(BrowserCommand::Help)
+            );
+        }
+        for (args, expected) in [
+            (&["browser"][..], CliError::MissingBrowserCommand),
+            (
+                &["browser", "eval"],
+                CliError::UnknownBrowserCommand("eval".into()),
+            ),
+            (&["browser", "open"], CliError::MissingUrl),
+            (
+                &["browser", "open", "--workspace"],
+                CliError::MissingWorkspace,
+            ),
+            (
+                &["browser", "open", "a", "b"],
+                CliError::UnexpectedArgument("b".into()),
+            ),
+            (
+                &["browser", "open", "--new"],
+                CliError::UnexpectedArgument("--new".into()),
+            ),
+            (
+                &["browser", "skill", "x"],
+                CliError::UnexpectedArgument("x".into()),
+            ),
+            (
+                &["browser", "reload", "x"],
+                CliError::UnexpectedArgument("x".into()),
+            ),
+            (&["browser", "feedback", "--wait"], CliError::InvalidWait),
+            (
+                &["browser", "feedback", "--wait", "0"],
+                CliError::InvalidWait,
+            ),
+            (
+                &["browser", "feedback", "--wait", "soon"],
+                CliError::InvalidWait,
+            ),
+            (
+                &["browser", "feedback", "now"],
+                CliError::UnexpectedArgument("now".into()),
+            ),
+        ] {
+            assert_eq!(mode(args).unwrap_err(), expected, "{args:?}");
+        }
+        // Only a leading "browser" is the subcommand.
+        assert_eq!(
+            mode(&["--dev", "browser"]).unwrap_err(),
+            CliError::UnknownOption("browser".into())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn browser_arguments_must_be_utf8() {
+        use std::os::unix::ffi::OsStringExt;
+        let invalid = OsString::from_vec(b"https://a.test/\xff".to_vec());
+        let error =
+            LaunchOptions::parse([OsString::from("browser"), "open".into(), invalid.clone()])
+                .unwrap_err();
+        assert_eq!(error, CliError::InvalidBrowserEncoding(invalid));
     }
 
     #[test]

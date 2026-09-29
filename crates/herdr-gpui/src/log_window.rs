@@ -159,13 +159,13 @@ fn export_text(rows: &[Arc<Record>], dropped: u64) -> serde_json::Result<String>
 impl LogWindow {
     fn open_levels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.level_menu = LEVELS.iter().position(|level| *level == self.minimum);
-        window.focus(&self.menu_focus);
+        window.focus(&self.menu_focus, cx);
         cx.notify();
     }
 
     fn close_levels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.level_menu = None;
-        window.focus(&self.level_focus);
+        window.focus(&self.level_focus, cx);
         cx.notify();
     }
 
@@ -195,7 +195,7 @@ impl LogWindow {
         search.update(cx, |input, cx| {
             input.set_appearance(appearance.config.ui.clone(), appearance.theme.clone(), cx);
             input.set_placeholder("Search, namespace:herdr_gpui target:terminal_painter", cx);
-            window.focus(&input.focus);
+            window.focus(&input.focus, cx);
         });
         let appearance_subscription = cx.observe_global::<Appearance>(|this, cx| {
             let font = &cx.global::<Appearance>().config.terminal;
@@ -484,12 +484,12 @@ impl Render for LogWindow {
             .on_action(cx.listener(|_, _: &Close, window, _| window.remove_window()))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 this.level_menu = None;
-                window.focus(&this.search.read(cx).focus);
+                window.focus(&this.search.read(cx).focus.clone(), cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &FocusLevel, window, cx| {
                 this.level_menu = None;
-                window.focus(&this.level_focus);
+                window.focus(&this.level_focus, cx);
                 cx.notify();
             }))
             .size_full()
@@ -826,7 +826,7 @@ mod tests {
                 cx.run_until_parked();
                 cx.update(|window, cx| {
                     window.refresh();
-                    window.draw(cx).clear();
+                    window.draw(cx).clear(cx);
                 });
                 let search = cx.debug_bounds("theme-search").unwrap();
                 #[cfg(target_os = "macos")]
@@ -874,7 +874,7 @@ mod tests {
         });
         cx.simulate_resize(size(px(620.), px(650.)));
         cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         let search = cx.debug_bounds("theme-search").unwrap();
         assert!(search.size.width > px(500.));
         assert!(search.size.height > px(0.));
@@ -903,7 +903,7 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, cx| {
             window.refresh();
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let last = cx.debug_bounds("log-row-4999").unwrap();
         assert!(last.top() > search.bottom() && last.bottom() < px(650.));
@@ -945,7 +945,7 @@ mod tests {
             cx.run_until_parked();
             cx.update(|window, cx| {
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
             });
             let short = cx.debug_bounds("log-row-0").unwrap();
             let long = cx.debug_bounds("log-row-1").unwrap();
@@ -974,7 +974,7 @@ mod tests {
             cx.run_until_parked();
             cx.update(|window, cx| {
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
             });
             let last = cx.debug_bounds("log-row-4999").unwrap();
             view.read_with(cx, |view, _| {
@@ -1045,7 +1045,7 @@ mod tests {
             view
         });
         cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.simulate_input("SLOW");
         cx.executor().advance_clock(Duration::from_millis(250));
         cx.run_until_parked();
@@ -1055,11 +1055,11 @@ mod tests {
             assert!(Arc::ptr_eq(&view.rows[0], &retained[0]));
             assert!(Arc::ptr_eq(&view.rows[1], &retained[1]));
         });
-        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         let select = cx.debug_bounds("minimum-level").unwrap();
         cx.simulate_click(select.center(), Modifiers::default());
         cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         let warn = cx.debug_bounds("level-option-3").unwrap();
         cx.simulate_click(warn.center(), Modifiers::default());
         cx.executor().advance_clock(Duration::from_millis(250));
@@ -1128,8 +1128,8 @@ mod tests {
             LogWindow::new(window, cx)
         });
         cx.update(|window, cx| {
-            window.focus(&view.read(cx).focus);
-            window.draw(cx).clear();
+            window.focus(&view.read(cx).focus.clone(), cx);
+            window.draw(cx).clear(cx);
             assert!(!view.read(cx).search.read(cx).focus.is_focused(window));
         });
         cx.simulate_keystrokes("cmd-f");
@@ -1224,7 +1224,7 @@ mod tests {
         cx.simulate_keystrokes("cmd-l enter");
         cx.run_until_parked();
         cx.update(|window, cx| {
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
             assert!(view.read(cx).menu_focus.is_focused(window));
         });
         let menu = cx.debug_bounds("level-menu").unwrap();
@@ -1249,7 +1249,7 @@ mod tests {
         view.read_with(cx, |view, _| assert_eq!(view.minimum, Level::DEBUG));
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.simulate_click(point(px(600.), px(340.)), Modifiers::default());
         view.read_with(cx, |view, _| assert!(view.level_menu.is_none()));
         cx.simulate_keystrokes("shift-tab");

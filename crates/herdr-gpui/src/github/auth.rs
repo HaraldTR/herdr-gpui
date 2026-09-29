@@ -5,7 +5,7 @@
 #[cfg(any(test, feature = "integration-test"))]
 use super::VERIFY_URL;
 use super::{
-    Device, Profile, Reply, Result, SETUP_MESSAGE, Store, http::oauth, log, profile, save,
+    Account, Device, Profile, Reply, Result, SETUP_MESSAGE, Store, http::oauth, log, profile, save,
     token_reply,
 };
 use crate::Error;
@@ -38,6 +38,7 @@ pub(crate) struct Auth {
     pub(super) signed_out: bool,
     pub(super) reload_pending: bool,
     pub(super) store: Store,
+    pub(super) account: Account,
     pub(super) profile_incoming: Option<mpsc::Receiver<Result<Option<Profile>>>>,
     pub(super) next_session_check: Option<Instant>,
     pub profile: Option<Profile>,
@@ -47,6 +48,14 @@ pub(crate) struct Auth {
 }
 
 impl Auth {
+    /// A saved host's own sign-in. It starts empty; `initialize` loads it.
+    pub(crate) fn for_account(account: Account) -> Self {
+        Self {
+            account,
+            ..Self::default()
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn complete_profile_fixture(&mut self, result: Result<Option<Profile>>) {
         let (tx, rx) = mpsc::sync_channel(1);
@@ -89,8 +98,9 @@ impl Auth {
         self.cancelled = true;
         self.reload_pending = true;
         self.failed = false;
-        self.message =
-            Some("Checking GitHub account under the updated credential policy...".into());
+        // A host's first load is routine; the main account keeps its notice.
+        self.message = (self.account == Account::Main)
+            .then(|| "Checking GitHub account under the updated credential policy...".into());
         // Drain old workers before reloading, so rapid policy changes stay bounded.
         // Neither a late profile nor an accepted write can restore the old session.
         true
@@ -289,7 +299,8 @@ impl Auth {
     }
     pub fn poll(&mut self) -> bool {
         let store = self.store;
-        self.poll_with_store(move |token| save(token, store))
+        let account = self.account.clone();
+        self.poll_with_store(move |token| save(token, store, &account))
     }
     /// Credential backend chosen for this build and configuration.
     pub(crate) fn store(&self) -> Store {
@@ -299,9 +310,10 @@ impl Auth {
         &mut self,
         persist: impl FnOnce(Option<&SecretString>) -> Result<()> + Send + 'static,
     ) -> bool {
-        self.poll_with(persist, |token, store| match token {
+        let account = self.account.clone();
+        self.poll_with(persist, move |token, store| match token {
             Some(token) => profile(token).map(Some),
-            None => super::store::load_profile(store),
+            None => super::store::load_profile(store, &account),
         })
     }
     pub(super) fn poll_with(
@@ -478,7 +490,10 @@ impl Auth {
                         Ok(Reply::SignedOut) => {
                             self.credential_cleanup = false;
                             self.committing = false;
-                            self.message = Some("Signed out for this app session. Saved credential removed. Environment tokens are suppressed until app restart; GitHub grants are not revoked.".into());
+                            self.message = Some(match self.account {
+                                Account::Main => "Signed out for this app session. Saved credential removed. Environment tokens are suppressed until app restart; GitHub grants are not revoked.",
+                                Account::Host(_) => "Signed out of this device's account. Saved credential removed; GitHub grants are not revoked. Pull requests here use your main account.",
+                            }.into());
                         }
                         Ok(Reply::Authenticated(token)) => {
                             self.committing = false;

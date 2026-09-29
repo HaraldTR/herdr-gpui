@@ -16,6 +16,7 @@ accepted = [
     "BSD-3-Clause",
     "ISC",
     "Zlib",
+    "bzip2-1.0.6", # libbz2-rs-sys 0.2.5; source license retained in generated notices
     "0BSD", # doctest-file 1.1.1, recvmsg 1.0.0 (Windows named-pipe transport)
     "Unicode-3.0",
     "CC0-1.0",

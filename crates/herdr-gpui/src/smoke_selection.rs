@@ -5,10 +5,10 @@ use crate::sidebar::native_tests::Target;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(super) async fn verify(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> Result<()> {
-    let previous = cx.update(|cx| cx.read_from_clipboard())?;
+    let previous = cx.update(|cx| cx.read_from_clipboard());
     let result = cases(handle, cx).await;
     if let Some(previous) = previous {
-        cx.update(|cx| cx.write_to_clipboard(previous))?;
+        cx.update(|cx| cx.write_to_clipboard(previous));
     }
     result
 }
@@ -30,7 +30,7 @@ async fn cases(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> Result<(
             let view = root
                 .downcast::<HerdrWindow>()
                 .map_err(|_| anyhow!("unexpected window root"))?;
-            window.focus(&view.read(cx).focus);
+            window.focus(&view.read(cx).focus.clone(), cx);
             type_text(
                 &format!("printf '%s%s%s\\n' '{marker}' '{expected}' ':END'"),
                 &view,
@@ -107,7 +107,7 @@ async fn cases(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> Result<(
         })
         .await?;
 
-        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("before CJK drag".into())))?;
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("before CJK drag".into())));
         // AppKit reenters GPUI, so dispatch only after the update releases it.
         target.drag(
             if reverse { to } else { from },
@@ -120,7 +120,7 @@ async fn cases(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> Result<(
                 bail!("CJK clipboard mismatch: expected {expected:?}, got {actual:?}");
             }
             Ok(())
-        })??;
+        })?;
 
         // Fixed test strings contain no shell quotes. Hex readback distinguishes
         // actual shell output from both command echo and terminal cell padding.
@@ -188,9 +188,9 @@ pub(super) async fn wait<T>(
                 let view = root
                     .downcast::<HerdrWindow>()
                     .map_err(|_| anyhow!("unexpected window root"))?;
-                window.focus(&view.read(cx).focus);
+                window.focus(&view.read(cx).focus.clone(), cx);
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 let state = view.read(cx);
                 if state.local_error.is_some()
                     || state.live.error.is_some()

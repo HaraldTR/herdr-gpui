@@ -392,7 +392,7 @@ impl HerdrWindow {
                 cx,
             );
             input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
-            window.focus(&input.focus);
+            window.focus(&input.focus, cx);
         });
         let mut palette = Palette {
             search,
@@ -690,7 +690,7 @@ impl HerdrWindow {
                                 .collect()
                         }),
                     )
-                    .track_scroll(palette.scroll.clone())
+                    .track_scroll(&palette.scroll)
                     .flex_1()
                     .min_h_0(),
                 )
@@ -754,8 +754,8 @@ mod tests {
         });
         cx.update(|window, cx| {
             crate::bind_keys(cx);
-            window.focus(&view.read(cx).focus);
-            window.draw(cx).clear();
+            window.focus(&view.read(cx).focus.clone(), cx);
+            window.draw(cx).clear(cx);
             window.dispatch_keystroke(Keystroke::parse("cmd-alt-n").unwrap(), cx);
             assert!(view.read(cx).pending_navigation.is_none());
             assert_eq!(view.read(cx).endpoints[0].toasts.entries.len(), 1);

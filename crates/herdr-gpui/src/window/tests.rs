@@ -93,7 +93,7 @@ fn the_sidebar_gap_narrows_the_terminal_only_while_the_sidebar_shows(
     let draw = |cx: &mut gpui::VisualTestContext| {
         cx.update(|window, cx| {
             window.refresh();
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
     };
     let set_gap = |cx: &mut gpui::VisualTestContext, gap: f32, visible: bool| {

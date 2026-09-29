@@ -32,7 +32,9 @@ pub(super) fn read(image_only: bool) -> Result<Option<ClipboardItem>> {
                     Some(ImageFormat::Webp) => "org.webmproject.webp",
                     Some(ImageFormat::Bmp) => "com.microsoft.bmp",
                     Some(ImageFormat::Tiff) => "public.tiff",
-                    Some(ImageFormat::Svg) => return Err(Error::ImageFormat),
+                    Some(ImageFormat::Svg | ImageFormat::Ico | ImageFormat::Pnm) => {
+                        return Err(Error::ImageFormat);
+                    }
                 });
                 let Some(data) = pasteboard.dataForType(&kind) else {
                     return Ok(None);
@@ -162,7 +164,7 @@ mod linux {
                                 ImageFormat::Webp => image::ImageFormat::WebP,
                                 ImageFormat::Bmp => image::ImageFormat::Bmp,
                                 ImageFormat::Tiff => image::ImageFormat::Tiff,
-                                ImageFormat::Svg => {
+                                ImageFormat::Svg | ImageFormat::Ico | ImageFormat::Pnm => {
                                     return Err(Error::ImageFormat);
                                 }
                             };
@@ -344,7 +346,11 @@ mod tests {
                 assert_eq!(limit, TEXT_LIMIT);
                 Ok(Some(text.as_bytes().to_vec()))
             })?;
-            assert_eq!(item.and_then(|item| item.text()).as_deref(), Some(text));
+            // `ClipboardItem::text` reports empty text as `None`; inspect the entry.
+            assert!(matches!(
+                item.as_ref().map(ClipboardItem::entries),
+                Some([gpui::ClipboardEntry::String(entry)]) if entry.text() == text
+            ));
         }
         Ok(())
     }

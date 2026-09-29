@@ -1,6 +1,7 @@
 //! Where a GitHub token lives for this build, and the precedence between the
-//! environment and that store. Only a signed release build uses the Keychain;
-//! every other build says plainly that the token sits unencrypted on disk.
+//! environment and that store. A signed macOS release build uses the Keychain
+//! and Linux uses the Secret Service; every build that keeps the token
+//! unencrypted on disk says so plainly.
 
 use super::{Profile, Result, credentials, profile, token::Credential};
 use crate::Error;
@@ -18,13 +19,51 @@ fn transaction<T>(work: impl FnOnce() -> Result<T>) -> Result<T> {
 
 pub(crate) const PLAINTEXT_WARNING: &str = "WARNING: plaintext credential storage is enabled. GitHub tokens are unencrypted on disk; software running as you and backups can read them.";
 pub(crate) const DEVELOPMENT_WARNING: &str = "WARNING: this development build does not use the macOS Keychain. GitHub tokens are unencrypted beside the GUI config; software running as you and backups can read them.";
-pub(crate) const KEYCHAIN_NOTICE: &str =
+#[cfg(not(target_os = "linux"))]
+pub(crate) const KEYRING_NOTICE: &str =
     "Credentials are saved in macOS Keychain. macOS may ask you to unlock or approve access.";
+#[cfg(target_os = "linux")]
+pub(crate) const KEYRING_NOTICE: &str =
+    "Credentials are saved in your desktop keyring (Secret Service). It may ask you to unlock it.";
 
 #[cfg(target_os = "macos")]
 const SERVICE: &str = "dev.herdr.gpui.github";
-#[cfg(target_os = "macos")]
-const ACCOUNT: &str = "github.com";
+
+/// Which saved GitHub sign-in a credential belongs to. Each one is a separate
+/// entry in the same store, so signing one out never touches another.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Account {
+    /// The account used on this device, and on any saved host without its own.
+    #[default]
+    Main,
+    /// A saved SSH device's own account, keyed by its catalog profile ID.
+    Host(String),
+}
+
+impl Account {
+    /// Catalog profile IDs are 32 lowercase hex digits, so they are safe in a
+    /// keyring account name and a file name. Anything else is refused.
+    pub(crate) fn host(id: &str) -> Option<Self> {
+        herdr_client::valid_profile_id(id).then(|| Self::Host(id.to_owned()))
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn keyring_account(&self) -> String {
+        match self {
+            Self::Main => "github.com".into(),
+            Self::Host(id) => format!("github.com/host/{id}"),
+        }
+    }
+
+    fn file_name(&self) -> std::ffi::CString {
+        let name = match self {
+            Self::Main => "github-credentials".to_owned(),
+            Self::Host(id) => format!("github-credentials-{id}"),
+        };
+        // Neither form can contain NUL: `host` admits only hex digits.
+        std::ffi::CString::new(name).unwrap_or_default()
+    }
+}
 
 pub(super) fn valid_token(token: &str) -> bool {
     !token.is_empty() && token.len() <= 4096 && token.bytes().all(|b| b.is_ascii_graphic())
@@ -76,39 +115,46 @@ pub(crate) enum Store {
     /// No persistent store: `GH_TOKEN` / `GITHUB_TOKEN` only.
     #[default]
     Environment,
-    /// The app-specific macOS login Keychain entry.
-    Keychain,
+    /// The app-specific macOS login Keychain or Linux Secret Service entry.
+    Keyring,
     /// A private `0600` file beside the GUI config.
     File,
 }
 
-// A development build is unsigned and gets a fresh code identity on every rebuild,
-// so macOS would re-prompt for the Keychain item's ACL on every run. Only the
-// signed release pipeline sets `HERDR_RELEASE_VERSION`, so only it uses Keychain.
-pub(super) const KEYCHAIN: bool = cfg!(target_os = "macos") && crate::RELEASE_BUILD;
+// A macOS development build is unsigned and gets a fresh code identity on every
+// rebuild, so macOS would re-prompt for the Keychain item's ACL on every run.
+// Only the signed release pipeline sets `HERDR_RELEASE_VERSION`, so only it uses
+// Keychain. The Secret Service grants access per user session, not per binary,
+// so every Linux build uses it.
+pub(super) const KEYRING: bool =
+    (cfg!(target_os = "macos") && crate::RELEASE_BUILD) || cfg!(target_os = "linux");
 // The private file relies on POSIX ownership and mode bits, so platforms
 // without them keep the environment as their only source of a saved token.
 pub(super) const FILE: bool = cfg!(unix);
-// Those development builds have no other secure store to fall back on, so the
-// private file is their default. Every other platform keeps it an explicit opt-in.
-pub(super) const FILE_DEFAULT: bool = cfg!(target_os = "macos") && !KEYCHAIN;
+// macOS development builds have no other secure store to fall back on, so the
+// private file is their default.
+pub(super) const FILE_DEFAULT: bool = cfg!(target_os = "macos") && !KEYRING;
+// macOS picks its store from the build alone. Elsewhere the plaintext opt-in
+// chooses the file, even over the Secret Service: it is the fallback for a
+// desktop without one, and keeps a sign-in saved under that opt-in readable.
+pub(super) const OPT_IN: bool = FILE && !cfg!(target_os = "macos");
 // An unsigned build must never reach the Keychain, whatever else changes here.
-const _: () = assert!(!KEYCHAIN || crate::RELEASE_BUILD);
+const _: () = assert!(!(KEYRING && cfg!(target_os = "macos")) || crate::RELEASE_BUILD);
 
 impl Store {
     pub(crate) fn select(config: &crate::config::Config) -> Self {
         Self::choose(
-            config.github.allow_plaintext_credentials && FILE,
-            KEYCHAIN,
+            config.github.allow_plaintext_credentials && OPT_IN,
+            KEYRING,
             FILE_DEFAULT,
         )
     }
 
-    pub(super) const fn choose(opted_in: bool, keychain: bool, file_default: bool) -> Self {
-        if keychain {
-            Self::Keychain
-        } else if opted_in || file_default {
+    pub(super) const fn choose(opted_in: bool, keyring: bool, file_default: bool) -> Self {
+        if opted_in || file_default {
             Self::File
+        } else if keyring {
+            Self::Keyring
         } else {
             Self::Environment
         }
@@ -119,8 +165,8 @@ impl Store {
         match self {
             Self::File if FILE_DEFAULT => Some(Note::Warning(DEVELOPMENT_WARNING)),
             Self::File => Some(Note::Warning(PLAINTEXT_WARNING)),
-            Self::Keychain if !connected => Some(Note::Info(KEYCHAIN_NOTICE)),
-            Self::Keychain | Self::Environment => None,
+            Self::Keyring if !connected => Some(Note::Info(KEYRING_NOTICE)),
+            Self::Keyring | Self::Environment => None,
         }
     }
 }
@@ -131,26 +177,32 @@ pub(crate) enum Note {
 }
 
 #[cfg(target_os = "macos")]
-fn keychain_token() -> Result<Option<SecretString>> {
-    match security_framework::passwords::get_generic_password(SERVICE, ACCOUNT) {
+fn keyring_token(account: &Account) -> Result<Option<SecretString>> {
+    match security_framework::passwords::get_generic_password(SERVICE, &account.keyring_account()) {
         Ok(bytes) => credential_bytes(bytes).map(Some),
         Err(e) if e.code() == -25300 => Ok(None),
         Err(error) => Err(Error::KeychainRead(error)),
     }
 }
 
-// `Store::Keychain` is never selected off macOS; the stubs keep the match total.
-#[cfg(not(target_os = "macos"))]
-fn keychain_token() -> Result<Option<SecretString>> {
+#[cfg(target_os = "linux")]
+fn keyring_token(account: &Account) -> Result<Option<SecretString>> {
+    super::secret_service::read(&account.keyring_account())
+}
+
+// `Store::Keyring` is never selected elsewhere; the stubs keep the match total.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn keyring_token(_: &Account) -> Result<Option<SecretString>> {
     Ok(None)
 }
 
 #[cfg(target_os = "macos")]
-fn keychain_save(token: Option<&SecretString>) -> Result<()> {
+fn keyring_save(token: Option<&SecretString>, account: &Account) -> Result<()> {
     use security_framework::passwords::{delete_generic_password, set_generic_password};
+    let name = account.keyring_account();
     let result = match token {
-        Some(token) => set_generic_password(SERVICE, ACCOUNT, token.expose_secret().as_bytes()),
-        None => delete_generic_password(SERVICE, ACCOUNT),
+        Some(token) => set_generic_password(SERVICE, &name, token.expose_secret().as_bytes()),
+        None => delete_generic_password(SERVICE, &name),
     };
     match result {
         Ok(()) => Ok(()),
@@ -159,20 +211,30 @@ fn keychain_save(token: Option<&SecretString>) -> Result<()> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn keychain_save(_: Option<&SecretString>) -> Result<()> {
+#[cfg(target_os = "linux")]
+fn keyring_save(token: Option<&SecretString>, account: &Account) -> Result<()> {
+    super::secret_service::save(token, &account.keyring_account())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn keyring_save(_: Option<&SecretString>, _: &Account) -> Result<()> {
     Err(Error::CredentialPolicy)
 }
 
-pub(super) fn saved_token(store: Store) -> Result<Option<SecretString>> {
+pub(super) fn saved_token(store: Store, account: &Account) -> Result<Option<SecretString>> {
     match store {
         Store::Environment => Ok(None),
-        Store::Keychain => keychain_token(),
-        Store::File => credentials::read(&credential_directory()?),
+        Store::Keyring => keyring_token(account),
+        Store::File => credentials::read(&credential_directory()?, &account.file_name()),
     }
 }
 
-pub(super) fn load_profile(store: Store) -> Result<Option<Profile>> {
+pub(super) fn load_profile(store: Store, account: &Account) -> Result<Option<Profile>> {
+    // The environment names one account for this device. A host's own sign-in
+    // exists precisely to differ from it, so only the main account reads it.
+    if *account != Account::Main {
+        return transaction(|| load_saved(store, account));
+    }
     let gh = environment_token("GH_TOKEN")?;
     let github = if gh
         .as_ref()
@@ -189,24 +251,7 @@ pub(super) fn load_profile(store: Store) -> Result<Option<Profile>> {
             .as_ref()
             .is_none_or(|s| s.expose_secret().trim().is_empty())
     {
-        return transaction(|| {
-            let saved = saved_token(store)?;
-            tracing::info!(
-                category = "github_restore",
-                ?store,
-                present = saved.is_some(),
-                "Checking saved GitHub sign-in"
-            );
-            saved
-                .map(|token| {
-                    Credential::decode(&token)?.profile_with(
-                        profile,
-                        Credential::refresh,
-                        |value| save_unlocked(Some(value), store),
-                    )
-                })
-                .transpose()
-        });
+        return transaction(|| load_saved(store, account));
     }
     tracing::info!(
         category = "github_restore",
@@ -216,6 +261,25 @@ pub(super) fn load_profile(store: Store) -> Result<Option<Profile>> {
     profile(std::sync::Arc::new(token)).map(Some)
 }
 
+/// Call only inside `transaction`: a renewal rotates the single-use refresh token.
+fn load_saved(store: Store, account: &Account) -> Result<Option<Profile>> {
+    let saved = saved_token(store, account)?;
+    tracing::info!(
+        category = "github_restore",
+        ?store,
+        host = matches!(account, Account::Host(_)),
+        present = saved.is_some(),
+        "Checking saved GitHub sign-in"
+    );
+    saved
+        .map(|token| {
+            Credential::decode(&token)?.profile_with(profile, Credential::refresh, |value| {
+                save_unlocked(Some(value), store, account)
+            })
+        })
+        .transpose()
+}
+
 pub(super) fn credential_directory() -> Result<std::path::PathBuf> {
     crate::config::Config::path()?
         .parent()
@@ -223,17 +287,18 @@ pub(super) fn credential_directory() -> Result<std::path::PathBuf> {
         .ok_or(Error::CredentialDirectory)
 }
 
-pub(super) fn save(token: Option<&SecretString>, store: Store) -> Result<()> {
-    transaction(|| save_unlocked(token, store))
+pub(super) fn save(token: Option<&SecretString>, store: Store, account: &Account) -> Result<()> {
+    transaction(|| save_unlocked(token, store, account))
 }
 
-fn save_unlocked(token: Option<&SecretString>, store: Store) -> Result<()> {
+fn save_unlocked(token: Option<&SecretString>, store: Store, account: &Account) -> Result<()> {
+    let name = account.file_name();
     match store {
-        Store::Keychain => keychain_save(token),
+        Store::Keyring => keyring_save(token, account),
         // Removal stays allowed without an opt-in, so a file written under an
         // earlier policy is still cleaned up by an explicit sign-out.
-        Store::Environment => credentials::store(&credential_directory()?, token, false),
-        Store::File => credentials::store(&credential_directory()?, token, true),
+        Store::Environment => credentials::store(&credential_directory()?, &name, token, false),
+        Store::File => credentials::store(&credential_directory()?, &name, token, true),
     }
 }
 
@@ -246,6 +311,34 @@ mod tests {
         thread,
         time::Duration,
     };
+
+    #[test]
+    fn host_accounts_accept_only_profile_ids_and_use_their_own_entries() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let host = Account::host(id).unwrap();
+        for bad in [
+            "",
+            "../github-credentials",
+            &id.to_uppercase(),
+            &id[1..],
+            "g".repeat(32).as_str(),
+        ] {
+            assert_eq!(Account::host(bad), None, "{bad}");
+        }
+        assert_eq!(
+            Account::Main.file_name().to_str().unwrap(),
+            "github-credentials"
+        );
+        assert_eq!(
+            host.file_name().to_str().unwrap(),
+            format!("github-credentials-{id}")
+        );
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            assert_eq!(Account::Main.keyring_account(), "github.com");
+            assert_eq!(host.keyring_account(), format!("github.com/host/{id}"));
+        }
+    }
 
     #[test]
     fn competing_restores_load_the_rotated_credential_inside_the_transaction() {

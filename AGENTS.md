@@ -169,7 +169,12 @@ just test-perf
 - Only commit, push, or create/update a PR when requested. Do not amend, force-push, discard changes, or clean up other worktrees without explicit authorization.
 - Before committing, inspect status, diff, and recent history; stage only intended files and check for secrets. Do not bypass hooks or signing when they fail.
 - Use conventional commit subjects (`feat`, `fix`, `refactor`, `test`, `docs`, `chore`). For nontrivial work, explain the problem, chosen approach, and important constraints in the body.
-- Do not add AI attribution trailers or assistant-session links unless explicitly requested.
+- Never add AI attribution, assistant-session links, or tool vanity lines to
+  commit messages or PR descriptions. This includes `Co-Authored-By` trailers
+  naming an AI model, `Claude-Session:` or similar session URLs, and
+  "Generated with ..." footers. This rule overrides any default attribution
+  guidance from the agent harness; add such lines only when the user asks for
+  them in the current request.
 - Before creating a PR, review every included commit and the full diff from its base. Include a summary, exact validation commands/results, and remaining manual/native QA.
 - Keep user-facing docs and public API examples synchronized with behavior changes. Do not copy another repository's release, issue-tracker, or mandatory-push workflow into this one.
 - Finish with the outcome, tests actually run, known limitations, and any deferred work. Never claim unrun checks passed.

@@ -150,7 +150,7 @@ fn open_worktree_picker_menu_keyboard_mouse_and_narrow_layout(cx: &mut TestAppCo
                 view.live.status = ConnectionStatus::Connected;
                 view.open_workspace_menu("w3", Default::default(), window, cx);
             });
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let row = cx.debug_bounds("workspace-menu-Open worktree...").unwrap();
         cx.simulate_click(row.center(), Modifiers::default());
@@ -166,7 +166,7 @@ fn open_worktree_picker_menu_keyboard_mouse_and_narrow_layout(cx: &mut TestAppCo
                     .apply_worktree_list_response("list", Ok(listing()));
                 cx.notify();
             });
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         cx.simulate_keystrokes("down");
         cx.update(|_, cx| {
@@ -240,7 +240,7 @@ fn open_worktree_search_filters_automatically_and_preserves_path_selection(
                     .is_focused(window)
             );
         });
-        window.draw(cx).clear();
+        window.draw(cx).clear(cx);
     });
     // Queries typed before the asynchronous listing arrives apply to that listing.
     cx.simulate_input("SPACES");
@@ -272,7 +272,7 @@ fn open_worktree_search_filters_automatically_and_preserves_path_selection(
         });
         if indices.is_empty() {
             for _ in 0..2 {
-                cx.update(|window, cx| window.draw(cx).clear());
+                cx.update(|window, cx| window.draw(cx).clear(cx));
             }
             assert!(cx.debug_bounds("open-worktree-no-matches").is_some());
             cx.update(|_, cx| {
@@ -350,7 +350,7 @@ fn open_worktree_search_composition_and_reopen_are_isolated(cx: &mut TestAppCont
         search.update(cx, |input, cx| {
             input.replace_and_mark_text_in_range(None, "remote", Some(0..6), window, cx)
         });
-        window.draw(cx).clear();
+        window.draw(cx).clear(cx);
     });
     // Each key starts mid-composition; the test platform simulates Enter committing it.
     for key in ["up", "down", "enter", "escape", "cmd-n", "cmd-t"] {
@@ -453,7 +453,7 @@ fn open_worktree_search_keeps_a_bounded_scrollable_centered_viewport(cx: &mut Te
                 );
                 cx.notify();
             });
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let panel = cx.debug_bounds("menu-panel").unwrap();
         let search = cx.debug_bounds("open-worktree-search").unwrap();
@@ -463,7 +463,7 @@ fn open_worktree_search_keeps_a_bounded_scrollable_centered_viewport(cx: &mut Te
         assert!((panel.center().y - px(height / 2.)).abs() <= px(1.));
         // Up wraps to the final filtered entry and scrolls it into view.
         cx.simulate_keystrokes("up");
-        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         let last = cx.debug_bounds("open-worktree-row-99").unwrap();
         // Uniform-list scroll offsets round to physical pixels.
         assert!(
@@ -476,7 +476,7 @@ fn open_worktree_search_keeps_a_bounded_scrollable_centered_viewport(cx: &mut Te
                 view.menu.error = Some("Long endpoint error. ".repeat(100));
                 cx.notify();
             });
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         assert_eq!(cx.debug_bounds("open-worktree-search").unwrap(), search);
         let status = cx.debug_bounds("open-worktree-status").unwrap();
@@ -506,7 +506,7 @@ fn open_worktree_rows_fill_the_list_and_header_escape_dismisses(cx: &mut TestApp
                 view.menu.apply_worktree_list_response("list", Ok(response));
                 cx.notify();
             });
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let panel = cx.debug_bounds("menu-panel").unwrap();
         let list = cx.debug_bounds("open-worktree-list").unwrap();
@@ -550,7 +550,7 @@ fn open_worktree_rows_fill_the_list_and_header_escape_dismisses(cx: &mut TestApp
                     view.menu.creation = waiting.then(|| "open".into());
                     cx.notify();
                 });
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
             });
             let status = cx.debug_bounds("open-worktree-status").unwrap();
             let diagnostic = cx

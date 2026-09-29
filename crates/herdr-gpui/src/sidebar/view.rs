@@ -13,8 +13,8 @@
 use super::metrics::sidebar_width;
 use crate::window::HerdrWindow;
 use gpui::{
-    AnyView, Context, Empty, Entity, IntoElement, Render, StyleRefinement, Styled, WeakEntity,
-    Window, px,
+    AnyView, Context, Empty, Entity, IntoElement, Render, StyleRefinement, Styled, ViewElement,
+    WeakEntity, Window, px,
 };
 
 pub(crate) struct SidebarView {
@@ -59,7 +59,7 @@ pub(crate) fn cached(
     view: &Entity<SidebarView>,
     preferred: Option<f32>,
     window_width: f32,
-) -> AnyView {
+) -> ViewElement<AnyView> {
     let width = sidebar_width(preferred, window_width);
     AnyView::from(view.clone()).cached(
         StyleRefinement::default()

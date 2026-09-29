@@ -87,7 +87,7 @@ mod tests {
             view.update(cx, |v, cx| {
                 v.open_pane_menu("inactive", point(px(799.), px(599.)), window, cx)
             });
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let panel = cx.debug_bounds("menu-panel").unwrap();
         assert_eq!(panel.left(), (px(788.) - panel.size.width).round());
@@ -126,7 +126,7 @@ mod tests {
                 );
                 input.replace_and_mark_text_in_range(None, "\u{4e2d}", Some(0..1), window, cx);
             });
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         cx.simulate_keystrokes("enter");
         assert!(view.read_with(cx, |v, _| v.menu.page == Some(Page::RenamePane)));
@@ -135,7 +135,7 @@ mod tests {
                 input.set_text_selected("", cx);
                 input.replace_and_mark_text_in_range(None, "\u{4e2d}", Some(0..1), window, cx);
             });
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         cx.simulate_keystrokes("escape");
         assert!(
@@ -183,7 +183,7 @@ mod tests {
                 view.update(cx, |v, cx| {
                     v.open_pane_menu("inactive", point(px(799.), px(599.)), window, cx)
                 });
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
             });
             cx.simulate_mouse_down(point(px(5.), px(5.)), button, Modifiers::default());
             assert!(view.read_with(cx, |v, _| v.menu.page.is_none()));
@@ -199,7 +199,7 @@ mod tests {
         });
         cx.simulate_resize(size(px(800.), px(600.)));
         cx.update(|window, cx| {
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let position = cx.update(|window, cx| {
             view.update(cx, |v, cx| {
@@ -263,7 +263,7 @@ mod tests {
         });
         // Use the actual terminal mouse handler, not just menu construction.
         cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
-        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         // A second press before release must not dismiss the menu just opened.
         cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
         assert!(view.read_with(cx, |v, _| v.menu.page == Some(Page::Pane)));
@@ -612,7 +612,7 @@ impl HerdrWindow {
                     input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
                     input.set_placeholder("Pane name (blank clears)", cx);
                     input.set_text_selected(&target.label, cx);
-                    window.focus(&input.focus);
+                    window.focus(&input.focus, cx);
                 });
                 if let Some(pane) = &mut self.menu.pane {
                     pane.input = Some(input);
@@ -712,7 +712,7 @@ impl HerdrWindow {
                     pane.pending = Some(request);
                     pane.error = None;
                 }
-                window.focus(&self.menu.focus);
+                window.focus(&self.menu.focus, cx);
                 cx.notify();
             }
             Err(error) => self.pane_error(error, cx),
@@ -743,7 +743,7 @@ impl HerdrWindow {
                 if let Some(pane) = &mut self.menu.pane {
                     pane.pending = None;
                     if let Some(input) = &pane.input {
-                        window.focus(&input.read(cx).focus);
+                        window.focus(&input.read(cx).focus.clone(), cx);
                     }
                 }
                 self.pane_error(error, cx);

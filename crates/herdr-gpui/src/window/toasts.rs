@@ -442,8 +442,8 @@ mod tests {
         let (view, cx) = cx.add_window_view(fixture_window);
         cx.simulate_resize(size(px(1000.), px(600.)));
         cx.update(|window, cx| {
-            view.update(cx, |view, _| {
-                window.focus(&view.focus);
+            view.update(cx, |view, cx| {
+                window.focus(&view.focus, cx);
                 view.endpoints.push(crate::endpoint::Endpoint::new(
                     "preview".into(),
                     "Preview host".into(),
@@ -452,7 +452,7 @@ mod tests {
                 ));
                 view.selected_endpoint = 1;
             });
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let snapshot = view.read_with(cx, |view, _| view.live.snapshot.clone());
         let updater = view.read_with(cx, |view, _| view.updater.state().clone());
@@ -469,7 +469,7 @@ mod tests {
                 window.dispatch_action(Box::new(ShowToastPreview { kind }), cx);
             });
             cx.update(|window, cx| {
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 let view = view.read(cx);
                 let endpoint = &view.endpoints[1];
                 let (_, notice) = endpoint.toasts.entries.back().unwrap();
@@ -508,8 +508,8 @@ mod tests {
     fn notifications_layout_dismissal_and_focus_are_nonmodal(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(fixture_window);
         cx.update(|window, cx| {
-            view.update(cx, |view, _| {
-                window.focus(&view.focus);
+            view.update(cx, |view, cx| {
+                window.focus(&view.focus, cx);
                 view.marked = "composition".into();
                 view.endpoints[0].toasts.receive((0..3).map(|_| {
                     let mut wire = notification(&"long title ".repeat(100));
@@ -531,7 +531,7 @@ mod tests {
         for (width, height) in [(1000., 600.), (360., 240.)] {
             cx.simulate_resize(size(px(width), px(height)));
             cx.update(|window, cx| {
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 assert!(view.read(cx).focus.is_focused(window));
                 assert_eq!(view.read(cx).marked, "composition");
                 assert_eq!(view.read(cx).selected_endpoint, 0);
@@ -554,7 +554,7 @@ mod tests {
         }
         // Use a full-height card for the dismissal hit target.
         cx.simulate_resize(size(px(1000.), px(600.)));
-        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         let dismiss = cx.debug_bounds("toast-dismiss-local-0").unwrap();
         cx.simulate_click(dismiss.center(), Default::default());
         cx.update(|window, cx| {
@@ -590,7 +590,7 @@ mod tests {
                         .toasts
                         .receive([Notice::new(wire, Instant::now()).preview()]);
                 });
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
             });
             let bounds = cx.debug_bounds("toast-local-0").unwrap();
             if matches!(
@@ -625,7 +625,7 @@ mod tests {
                     view.endpoints.push(endpoint);
                 }
             });
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         assert!(cx.debug_bounds("toast-local-0").is_some());
         assert!(cx.debug_bounds("toast-one-0").is_none());

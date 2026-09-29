@@ -8,6 +8,17 @@ use crate::Error;
 use serde::Deserialize;
 use std::path::Path;
 
+/// Where a workspace's checkout lives, which decides how its GitHub
+/// repository is identified.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Origin {
+    /// This machine: local Git verifies the checkout before trusting it.
+    #[default]
+    Local,
+    /// A saved SSH device, named by its SSH target. Its Git runs there.
+    Ssh(String),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Input {
     pub checkout: Option<String>,

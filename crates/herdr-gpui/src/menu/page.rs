@@ -7,16 +7,29 @@ pub(crate) enum Page {
     About,
     Preferences,
     Devices,
+    /// Local sessions and remote devices, with the state of each.
+    Sessions,
+    /// Plan usage details for one agent on the selected host.
+    Usage(crate::usage::Provider),
     AddDevice,
+    /// A saved SSH device's context menu, from its sidebar host header.
+    Host,
+    RenameDevice,
+    RemoveDevice,
     Keybinds,
     Themes,
+    Fonts,
     Palette,
     ConfirmClose,
     Update,
     AppUpdate,
     Install,
+    /// The one-time offer to install the agent skill for browser tabs.
+    AgentSkill,
     Tab,
     RenameTab,
+    /// A group's "…" menu: closing tabs and splitting.
+    Group,
     Pane,
     RenamePane,
     Workspace,

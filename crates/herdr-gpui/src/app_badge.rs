@@ -85,7 +85,7 @@ pub(super) fn install(cx: &mut App) {
         badge.preview = action.enabled;
         badge.publish();
     });
-    cx.on_window_closed(|cx| {
+    cx.on_window_closed(|cx, _| {
         let open = cx.windows();
         let badge = cx.default_global::<Badge>();
         badge

@@ -8,6 +8,7 @@ use crate::terminal::*;
 use gpui::*;
 use herdr_client::protocol::{CellData, FrameData, PaneSurfacePane, SurfaceRect};
 use std::time::{Duration, Instant};
+use unicode_width::UnicodeWidthStr;
 
 /// The selection tints the cells it covers instead of replacing their colors:
 /// a terminal's own background is meaningful, and the glyphs above it stay
@@ -145,17 +146,61 @@ fn background_spans<'a>(
     row: &'a [CellData],
     theme: &'a Theme,
 ) -> impl Iterator<Item = (usize, usize, u32)> + 'a {
+    // A wide glyph's continuation cell shows the glyph's background, as a host
+    // terminal does: Herdr's ANSI renderer never draws that cell, so its own
+    // background is not meant to be seen. Like that renderer, a halfwidth
+    // katakana with a (semi-)voiced mark counts as two columns.
+    let wide = |symbol: &str| {
+        let mut chars = symbol.chars();
+        symbol.width() > 1
+            || matches!(
+                (chars.next(), chars.next(), chars.next()),
+                (
+                    Some('\u{ff66}'..='\u{ff9d}'),
+                    Some('\u{ff9e}' | '\u{ff9f}'),
+                    None
+                )
+            )
+    };
+    let bg = move |x: usize| {
+        let x = if x > 0 && wide(&row[x - 1].symbol) {
+            x - 1
+        } else {
+            x
+        };
+        cell_colors(&row[x], theme).1
+    };
     let mut start = 0;
     std::iter::from_fn(move || {
-        let color = cell_colors(row.get(start)?, theme).1;
+        row.get(start)?;
+        let color = bg(start);
         let mut end = start + 1;
-        while end < row.len() && cell_colors(&row[end], theme).1 == color {
+        while end < row.len() && bg(end) == color {
             end += 1;
         }
         let span = (start, end, color);
         start = end;
         Some(span)
     })
+}
+
+/// Where an IME composition sits: at the input cursor, shifted left only as
+/// far as it takes to end inside the grid. Text wider than the grid loses its
+/// start rather than its end, where the IME is editing.
+fn composition_origin(cursor: Point<Pixels>, width: Pixels, grid: Bounds<Pixels>) -> Point<Pixels> {
+    point(cursor.x.min(grid.right() - width), cursor.y)
+}
+
+/// The byte index of a UTF-16 offset, as the platform input handler counts.
+fn byte_index(text: &str, utf16: usize) -> usize {
+    let mut units = 0;
+    text.char_indices()
+        .find(|(_, c)| {
+            let found = units >= utf16;
+            units += c.len_utf16();
+            found
+        })
+        .map_or(text.len(), |(index, _)| index)
 }
 
 impl TerminalPainter {
@@ -533,6 +578,73 @@ impl TerminalPainter {
             tracing::warn!(category = "glyph_paint", count, "Terminal paint failed");
         }
     }
+
+    /// Paints an uncommitted IME composition over the cells at the input
+    /// cursor. It is shaped as one line rather than per cell, so it can span
+    /// wide glyphs, and it bypasses the glyph cache since it changes with
+    /// every keystroke. Nothing reaches the pane until the IME commits.
+    pub fn paint_composition(
+        &self,
+        text: &str,
+        cursor: Point<Pixels>,
+        grid: Bounds<Pixels>,
+        font: &Font,
+        window: &mut Window,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let line = self.shape(font, 0, text, window);
+        let origin = composition_origin(cursor, line.width, grid);
+        let bounds = Bounds::new(origin, size(line.width, px(self.cell_height)));
+        let color = rgb(self.theme.foreground);
+        // A layer of its own, painted after the frame, keeps it above the
+        // cells and the cursor it covers. It clips to the input area, so text
+        // wider than a popup never paints over the pane beneath it.
+        window.with_content_mask(Some(ContentMask { bounds: grid }), |window| {
+            window.paint_layer(bounds, |window| {
+                window.paint_quad(fill(bounds, rgb(self.theme.background)));
+                window.paint_quad(fill(
+                    Bounds::new(
+                        origin + point(px(0.), px(self.cell_height - 2.)),
+                        size(line.width, px(1.)),
+                    ),
+                    color,
+                ));
+                if paint_glyphs(&line, origin, px(self.cell_height), color, window).is_err() {
+                    tracing::warn!(category = "glyph_paint", "IME composition paint failed");
+                }
+            });
+        });
+    }
+
+    /// The bounds of `range` (UTF-16) within a composition painted by
+    /// `paint_composition`, so the IME can place its candidate window under
+    /// the clause being converted.
+    pub fn composition_bounds(
+        &self,
+        text: &str,
+        range: std::ops::Range<usize>,
+        cursor: Bounds<Pixels>,
+        grid: Bounds<Pixels>,
+        font: &Font,
+        window: &Window,
+    ) -> Bounds<Pixels> {
+        if text.is_empty() {
+            return cursor;
+        }
+        let line = self.shape(font, 0, text, window);
+        let origin = composition_origin(cursor.origin, line.width, grid);
+        let start = line.x_for_index(byte_index(text, range.start));
+        let end = line.x_for_index(byte_index(text, range.end));
+        let width = (end - start).max(cursor.size.width);
+        // A caret after the text, or a clause scrolled off the left, still
+        // anchors the candidate window inside the grid.
+        let x = (origin.x + start)
+            .min(grid.right() - width)
+            .max(grid.left());
+        Bounds::new(point(x, origin.y), size(width, cursor.size.height))
+    }
 }
 
 #[cfg(test)]
@@ -716,6 +828,33 @@ mod tests {
                     .iter()
                     .map(|c| cell_colors(c, &theme).1)
                     .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn wide_continuation_cells_take_the_glyph_background() {
+        let theme = Theme::default();
+        // The daemon sends continuation cells with a background of their own.
+        let mut row = vec![cell("\u{3053}"), cell(""), cell("x"), cell("")];
+        row[0].bg = 0x02373737;
+        row[1].bg = 0x02000000;
+        row[3].bg = 0x02000000;
+        assert_eq!(
+            background_spans(&row, &theme).collect::<Vec<_>>(),
+            vec![(0, 2, 0x373737), (2, 3, BACKGROUND), (3, 4, 0)]
+        );
+        // Halfwidth katakana with a voiced or semi-voiced mark is two columns
+        // wide in Herdr although its Unicode width is one.
+        for kana in ["\u{ff76}\u{ff9e}", "\u{ff8a}\u{ff9f}"] {
+            let mut row = vec![cell(kana), cell(""), cell("\u{ff76}"), cell("")];
+            row[0].bg = 0x02373737;
+            row[1].bg = 0x02000000;
+            row[3].bg = 0x02000000;
+            assert_eq!(
+                background_spans(&row, &theme).collect::<Vec<_>>(),
+                vec![(0, 2, 0x373737), (2, 3, BACKGROUND), (3, 4, 0)],
+                "{kana}"
             );
         }
     }
@@ -967,6 +1106,90 @@ mod tests {
         draw(symbols, font("Menlo"));
         assert_eq!(painter.borrow().glyphs.len(), glyphs::CACHE_LIMIT);
         assert_eq!(painter.borrow().glyphs.iter().count(), glyphs::CACHE_LIMIT);
+    }
+
+    #[test]
+    fn composition_stays_at_the_cursor_inside_the_grid() {
+        let grid = Bounds::new(point(px(10.), px(20.)), size(px(100.), px(40.)));
+        let cursor = point(px(30.), px(40.));
+        assert_eq!(composition_origin(cursor, px(50.), grid), cursor);
+        assert_eq!(
+            composition_origin(point(px(90.), px(40.)), px(50.), grid),
+            point(px(60.), px(40.)),
+            "shifted left just enough to end at the grid's edge"
+        );
+        assert_eq!(
+            composition_origin(cursor, px(200.), grid),
+            point(px(-90.), px(40.)),
+            "wider than the grid, it keeps its end, where the IME edits"
+        );
+    }
+
+    #[test]
+    fn composition_ranges_count_utf16_units() {
+        let text = "a\u{304b}\u{1f600}b";
+        assert_eq!(
+            [0, 1, 2, 3, 4, 5, 6].map(|utf16| byte_index(text, utf16)),
+            [0, 1, 4, 8, 8, 9, 9]
+        );
+        assert_eq!(byte_index("", 1), 0);
+    }
+
+    #[gpui::test]
+    fn composition_bounds_follow_the_converted_clause(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| Empty);
+        cx.draw(Point::default(), size(px(800.), px(600.)), |_, _| {
+            canvas(
+                |_, _, _| (),
+                |bounds, _, window, cx| {
+                    let mut painter = TerminalPainter::default();
+                    let font = font("Menlo");
+                    let cell_width = painter.cell_width(&font, window, cx);
+                    let cursor = Bounds::new(
+                        bounds.origin + point(px(cell_width * 4.), px(CELL_HEIGHT)),
+                        size(px(cell_width), px(CELL_HEIGHT)),
+                    );
+                    // Romaji mid-composition: the headless text system gives
+                    // CJK glyphs next to no advance, which would hide the
+                    // right-edge geometry. UTF-16 mapping is tested separately.
+                    let text = "kan";
+                    let bounds_of = |range, cursor| {
+                        painter.composition_bounds(text, range, cursor, bounds, &font, window)
+                    };
+                    assert_eq!(
+                        painter.composition_bounds("", 0..0, cursor, bounds, &font, window),
+                        cursor,
+                        "without a composition the IME anchors at the cursor"
+                    );
+                    let first = bounds_of(0..1, cursor);
+                    let second = bounds_of(1..2, cursor);
+                    let caret = bounds_of(3..3, cursor);
+                    assert_eq!(first.origin, cursor.origin);
+                    assert_eq!(second.origin.y, cursor.origin.y);
+                    assert!(second.origin.x > first.origin.x);
+                    assert!(caret.origin.x > second.origin.x);
+                    assert_eq!(caret.size, cursor.size);
+                    // At the right edge the text, and so every clause, shifts left.
+                    let edge = Bounds::new(
+                        point(bounds.right() - px(cell_width), cursor.origin.y),
+                        cursor.size,
+                    );
+                    let end = bounds_of(3..3, edge);
+                    assert_eq!(end.right(), bounds.right(), "the caret stays inside");
+                    assert_eq!(end.size, cursor.size);
+                    assert!(bounds_of(0..1, edge).origin.x < edge.origin.x);
+                    // Wider than the grid, the start scrolls off the left while
+                    // every clause still anchors inside the grid.
+                    let long = "k".repeat(200);
+                    let long_bounds = |range| {
+                        painter.composition_bounds(&long, range, cursor, bounds, &font, window)
+                    };
+                    assert_eq!(long_bounds(0..1).origin.x, bounds.left());
+                    assert_eq!(long_bounds(200..200).right(), bounds.right());
+                },
+            )
+            .size_full()
+        });
     }
 
     #[test]

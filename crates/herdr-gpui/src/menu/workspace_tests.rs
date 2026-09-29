@@ -126,7 +126,7 @@ fn close_dialog_blocks_submission_until_risks_are_explicitly_accepted(
             view.submit_workspace_dialog(window, cx);
             assert!(view.menu.error.is_none());
         });
-        window.draw(cx).clear();
+        window.draw(cx).clear(cx);
     });
     let panel = cx.debug_bounds("menu-panel").unwrap();
     let warning = cx.debug_bounds("close-git-status").unwrap();
@@ -204,14 +204,14 @@ fn workspace_dialogs_and_prs_are_fenced_by_host_and_generation(cx: &mut gpui::Te
             assert!(view.menu.page.is_none());
             assert!(view.menu.input.is_none());
             view.open_workspace_menu("w3", Default::default(), window, cx);
-            assert!(
-                view.menu
-                    .pr
-                    .message
-                    .as_deref()
-                    .unwrap()
-                    .contains("requires your owned local session socket")
+            // A saved SSH host resolves its repository on that host, so its
+            // lookup is accepted and scoped to it rather than to local Git.
+            assert_eq!(
+                view.pr_origin(),
+                Some(crate::pull_request::Origin::Ssh("unused".into()))
             );
+            assert!(view.menu.pr.message.is_none());
+            assert!(view.menu.pr.loading);
             view.open_workspace_dialog(WorkspaceAction::DeleteWorktree, window, cx);
             assert!(view.select_endpoint(crate::endpoint::LOCAL, cx));
             assert!(view.menu.deletion.is_none());
@@ -363,7 +363,7 @@ pub(crate) fn check_menu_interactions(
     for (position, selected) in [(second, Some(1)), (first, Some(0)), (outside, None)] {
         cx.simulate_mouse_move(position, None, Modifiers::default());
         cx.update(|window, cx| {
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
             assert_eq!(selection(view.read(cx)), selected);
         });
     }
@@ -378,36 +378,36 @@ pub(crate) fn check_menu_interactions(
     ] {
         cx.simulate_keystrokes(keys);
         cx.update(|window, cx| {
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
             assert_eq!(selection(view.read(cx)), Some(selected));
         });
     }
     cx.simulate_mouse_move(first, None, Modifiers::default());
     cx.update(|window, cx| {
-        window.draw(cx).clear();
+        window.draw(cx).clear(cx);
         assert_eq!(selection(view.read(cx)), Some(0));
     });
     // Keyboard selection replaces hover even while the pointer stays on the first row.
     cx.simulate_keystrokes("down");
     cx.update(|window, cx| {
-        window.draw(cx).clear();
+        window.draw(cx).clear(cx);
         assert_eq!(selection(view.read(cx)), Some(1));
     });
     cx.simulate_mouse_move(second, None, Modifiers::default());
     cx.update(|window, cx| {
-        window.draw(cx).clear();
+        window.draw(cx).clear(cx);
         assert_eq!(selection(view.read(cx)), Some(1));
     });
     cx.simulate_mouse_move(outside, None, Modifiers::default());
     cx.update(|window, cx| {
-        window.draw(cx).clear();
+        window.draw(cx).clear(cx);
         assert_eq!(selection(view.read(cx)), None);
     });
     cx.simulate_keystrokes("down");
     cx.update(|_, cx| assert_eq!(selection(view.read(cx)), Some(0)));
     cx.simulate_mouse_move(second, None, Modifiers::default());
     cx.update(|window, cx| {
-        window.draw(cx).clear();
+        window.draw(cx).clear(cx);
         assert_eq!(selection(view.read(cx)), Some(1));
     });
     cx.simulate_keystrokes("enter");
@@ -434,7 +434,7 @@ pub(crate) fn check_menu_interactions(
             }
             assert_eq!(view.menu.selected, None);
         });
-        window.draw(cx).clear();
+        window.draw(cx).clear(cx);
     });
 }
 
@@ -465,7 +465,7 @@ fn workspace_dialogs_centre_on_the_window_rather_than_the_pointer(cx: &mut gpui:
                     };
                     view.open_workspace_menu(id, anchor, window, cx);
                 });
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
             });
             // The menu itself still opens where the pointer asked for it.
             let menu = cx.debug_bounds("menu-panel").unwrap();
@@ -478,7 +478,7 @@ fn workspace_dialogs_centre_on_the_window_rather_than_the_pointer(cx: &mut gpui:
                 view.update(cx, |view, cx| {
                     view.open_workspace_dialog(action, window, cx)
                 });
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
             });
             let panel = cx.debug_bounds("menu-panel").unwrap();
             let offset = panel.center() - centre;
@@ -538,7 +538,7 @@ fn workspace_dialog_sections_and_buttons_stay_inside_the_panel(cx: &mut gpui::Te
                     }
                     view.menu.error = Some("fixture error".into());
                 });
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
             });
             let panel = cx.debug_bounds("menu-panel").unwrap();
             let cancel = cx.debug_bounds("dialog-cancel").unwrap();
@@ -561,9 +561,18 @@ fn workspace_dialog_sections_and_buttons_stay_inside_the_panel(cx: &mut gpui::Te
                 let path = cx.debug_bounds("dialog-path").unwrap();
                 (path, path)
             };
+            // The name comes first, on the same edge as the branch it names.
+            let name = (action == WorkspaceAction::NewWorktree)
+                .then(|| cx.debug_bounds("worktree-name").unwrap());
+            if let Some(name) = name {
+                assert!(name.bottom() <= field.top());
+                assert_eq!(name.left(), field.left());
+                assert_eq!(name.right(), field.right());
+            }
             let parts: Vec<_> = [field, subject, cancel, submit, error]
                 .into_iter()
                 .chain(waiting)
+                .chain(name)
                 .collect();
             for part in &parts {
                 assert!(
@@ -581,7 +590,11 @@ fn workspace_dialog_sections_and_buttons_stay_inside_the_panel(cx: &mut gpui::Te
                 }
             }
             // One gutter on both sides, and a trailing button row.
-            assert_eq!(field.left() - panel.left(), panel.right() - field.right());
+            assert_eq!(
+                subject.left() - panel.left(),
+                panel.right() - subject.right()
+            );
+            assert_eq!(field.right(), subject.right());
             assert!(cancel.right() <= submit.left());
             assert!(submit.right() < panel.right());
             assert!(error.bottom() <= cancel.top());

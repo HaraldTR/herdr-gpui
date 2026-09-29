@@ -225,6 +225,54 @@ fn connected_endpoint(id: &str) -> (Endpoint, Server) {
     (endpoint, server)
 }
 
+#[gpui::test]
+fn first_focus_claims_geometry_without_a_window_resize(cx: &mut gpui::TestAppContext) {
+    let (endpoint, mut server) = connected_endpoint("resize");
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.read_with(cx, |fixture, _| fixture.0.clone());
+    view.update(cx, |view, _| {
+        view.endpoints = vec![endpoint];
+        view.selected_endpoint = 0;
+        view.reset_selected();
+        view.active = true;
+        view.options.surface_size = ClientSurfaceSize {
+            cols: 150,
+            rows: 50,
+        };
+        // The initial size was queued before the surface became focusable.
+        view.last_queued_options = Some(view.options);
+        view.sent_focus = Some(false);
+        assert!(
+            !view.input_ready(),
+            "the initial surface still has the old size"
+        );
+        view.report_focus();
+        assert!(matches!(
+            server.receive(),
+            ClientMessage::ClientShellFocus { focused: true }
+        ));
+        assert_eq!(view.last_queued_options, Some(view.options));
+        assert!(!view.input_ready(), "focus alone does not enable input");
+        let surface = Arc::make_mut(view.live.surface.as_mut().unwrap());
+        surface.frame.width = 150;
+        surface.frame.height = 50;
+        assert!(view.input_ready(), "the resized surface enables input");
+
+        // Repeated polls must not keep resizing the terminal. A focus-loss
+        // message acts as an ordered sentinel after these no-op calls.
+        view.report_focus();
+        view.resize();
+        view.active = false;
+        view.report_focus();
+        assert!(matches!(
+            server.receive(),
+            ClientMessage::ClientShellFocus { focused: false }
+        ));
+    });
+}
+
 fn prepare_mouse(view: &mut HerdrWindow, endpoint: Endpoint) {
     view.endpoints.truncate(1);
     view.endpoints.push(endpoint);
@@ -341,6 +389,7 @@ fn text_paste_survives_a_settled_navigation(cx: &mut gpui::TestAppContext) {
     let paste = gpui::KeyDownEvent {
         keystroke: gpui::Keystroke::parse("cmd-v").unwrap(),
         is_held: false,
+        prefer_character_input: false,
     };
     let settled = |view: &HerdrWindow| crate::state::SurfaceActivation {
         request: "activate-1".into(),
@@ -411,6 +460,7 @@ fn connected_image_paste_captures_pane_before_immediate_text_and_enter(
     let enter = gpui::KeyDownEvent {
         keystroke: gpui::Keystroke::parse("enter").unwrap(),
         is_held: false,
+        prefer_character_input: false,
     };
     cx.update(|window, cx| {
         view.update(cx, |view, cx| {
@@ -801,6 +851,7 @@ fn connected_image_paste_key_down_ctrl_v_and_cmd_v(cx: &mut gpui::TestAppContext
                 let event = gpui::KeyDownEvent {
                     keystroke: gpui::Keystroke::parse(key).unwrap(),
                     is_held: false,
+                    prefer_character_input: false,
                 };
                 cx.update(|window, cx| {
                     view.update(cx, |view, cx| {
@@ -2089,7 +2140,7 @@ fn toast_navigation_queues_typed_targets_and_fences_input(cx: &mut gpui::TestApp
                 view.selected_endpoint = 1;
                 view.options = ConnectOptions::default();
                 view.reset_selected();
-                window.focus(&view.focus);
+                window.focus(&view.focus, cx);
                 view.marked = "composition".into();
                 assert!(view.input_ready());
                 view.tick_toasts(false, Instant::now());
@@ -2214,15 +2265,15 @@ fn toast_click_uses_origin_and_close_never_navigates(cx: &mut gpui::TestAppConte
     remote.toasts.receive([notice.clone(), notice]);
     cx.simulate_resize(size(px(1000.), px(600.)));
     cx.update(|window, cx| {
-        view.update(cx, |view, _| {
+        view.update(cx, |view, cx| {
             // The same IDs on Local must not win over the notification's origin.
             view.endpoints[0].live.snapshot = remote.live.snapshot.clone();
             view.endpoints[0].detached = true;
             view.endpoints.push(remote);
-            window.focus(&view.focus);
+            window.focus(&view.focus, cx);
             view.marked = "composition".into();
         });
-        window.draw(cx).clear();
+        window.draw(cx).clear(cx);
     });
     let dismiss = cx.debug_bounds("toast-dismiss-ssh:toast-0").unwrap();
     cx.simulate_click(dismiss.center(), Default::default());
@@ -2234,7 +2285,7 @@ fn toast_click_uses_origin_and_close_never_navigates(cx: &mut gpui::TestAppConte
         assert!(view.focus.is_focused(window));
         assert_eq!(view.endpoints[1].toasts.entries.len(), 1);
     });
-    cx.update(|window, cx| window.draw(cx).clear());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
     let card = cx.debug_bounds("toast-ssh:toast-1").unwrap();
     cx.simulate_click(card.center(), Default::default());
     view.update(cx, |view, _| {
@@ -2277,7 +2328,7 @@ fn toast_rendered_clicks_reject_replaced_removed_and_disabled_origins(
                 view.endpoints.truncate(1);
                 view.endpoints.push(remote);
             });
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         assert!(cx.debug_bounds("toast-ssh:toast-0").is_some());
         let (generation, inbox) = view.read_with(cx, |view, _| {
@@ -2916,9 +2967,9 @@ fn qa_play_sound_dispatches_without_daemon_or_pane(cx: &mut gpui::TestAppContext
         }
     });
     cx.update(|window, cx| {
-        view.read(cx).focus.focus(window);
-        window.draw(cx).clear();
-        let menus = crate::menus();
+        view.read(cx).focus.clone().focus(window, cx);
+        window.draw(cx).clear(cx);
+        let menus = crate::menus(Default::default());
         let qa = menus
             .iter()
             .find(|menu| menu.name.as_ref() == "QA")
@@ -3164,6 +3215,7 @@ fn every_focus_changing_command_fences_immediate_input_until_ack_and_surface(
                 let key = |key: &str| gpui::KeyDownEvent {
                     keystroke: gpui::Keystroke::parse(key).unwrap(),
                     is_held: false,
+                    prefer_character_input: false,
                 };
                 match command {
                     Command::ClosePane | Command::CloseTab if confirm_close_tab => {
@@ -3577,6 +3629,37 @@ fn split_request(server: &mut Server) -> serde_json::Value {
     request
 }
 
+/// Another host changing redraws the window but leaves the selected host's
+/// window state alone: a split request the window is still waiting on must
+/// not vanish because a different endpoint had news, and the selected host's
+/// own news still arrives.
+#[gpui::test]
+fn another_endpoint_changing_keeps_the_selected_window_state(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (selected, _server) = connected_endpoint("ssh:selected");
+    let (other, _other_server) = connected_endpoint("ssh:other");
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            prepare_mouse(view, selected);
+            view.endpoints.push(other);
+            view.poll_endpoints(cx);
+            view.live.drag_request = Some("gpui-pending".into());
+
+            view.endpoints[2].connection.inbox.lock().unwrap().dirty = true;
+            view.poll_endpoints(cx);
+            assert_eq!(view.live.drag_request.as_deref(), Some("gpui-pending"));
+
+            view.endpoints[1].connection.inbox.lock().unwrap().error = Some("news".into());
+            view.endpoints[1].connection.inbox.lock().unwrap().dirty = true;
+            view.poll_endpoints(cx);
+            assert_eq!(view.live.error.as_deref(), Some("news"));
+        });
+    });
+}
+
 #[gpui::test]
 fn connected_split_drag_sends_coalesced_ratios_and_stops_on_layout_change(
     cx: &mut gpui::TestAppContext,
@@ -3718,5 +3801,162 @@ fn connected_split_drag_sends_coalesced_ratios_and_stops_on_layout_change(
             assert!(view.live.drag_request.is_none());
             assert!(view.local_error.is_none());
         });
+    });
+}
+
+/// How the projection moves on while keys are typed between a newer snapshot
+/// and its matching surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Gap {
+    SameTarget,
+    FocusMoves,
+    PopupOpens,
+}
+
+/// Type `x` (IME commit) and Enter (key_down) during a snapshot/surface gap,
+/// then close it and send a sentinel through the same path.
+fn type_across_gap(
+    cx: &mut gpui::TestAppContext,
+    gap: Gap,
+) -> (
+    Server,
+    gpui::Entity<HerdrWindow>,
+    &mut gpui::VisualTestContext,
+) {
+    use gpui::EntityInputHandler;
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (endpoint, server) = connected_endpoint("gap");
+    let enter = gpui::KeyDownEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+        is_held: false,
+        prefer_character_input: false,
+    };
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            prepare_mouse(view, endpoint);
+            let inbox = view.endpoints[1].connection.inbox.clone();
+            let mut next = (**view.live.snapshot.as_ref().unwrap()).clone();
+            next.revision += 1;
+            if gap == Gap::FocusMoves {
+                next.focused_pane_id = Some("w1:p2".into());
+            }
+            let mut frame = (**view.live.surface.as_ref().unwrap()).clone();
+            frame.projection_revision = next.revision;
+            if gap == Gap::PopupOpens {
+                frame.popup = Some(Box::new(ClientShellPopupSurface {
+                    terminal_id: "popup-1".into(),
+                    title: String::new(),
+                    width: None,
+                    height: None,
+                    frame: frame.frame.clone(),
+                    mouse_reporting: false,
+                    sgr_pixel_mouse: false,
+                    pixel_width: 800,
+                    pixel_height: 480,
+                }));
+            }
+            inbox
+                .lock()
+                .unwrap()
+                .apply(ClientEvent::Snapshot(Arc::new(next)));
+            project_until(view, cx, "newer snapshot", |view| !view.input_ready());
+            view.replace_text_in_range(None, "x", window, cx);
+            view.key_down(&enter, window, cx);
+            assert_eq!(view.pending_input.len(), 2);
+            inbox
+                .lock()
+                .unwrap()
+                .apply(ClientEvent::Surface(Arc::new(frame)));
+            project_until(view, cx, "matching surface", HerdrWindow::input_ready);
+            assert_eq!(view.pending_input.len(), 0);
+            view.send(ClientPaneInputEvent::TextCommit("sentinel".into()), cx);
+        });
+    });
+    (server, view, cx)
+}
+
+fn pane_input(pane: &str, event: ClientPaneInputEvent) -> ClientMessage {
+    ClientMessage::ClientShellPaneInput {
+        pane_id: pane.into(),
+        events: vec![event],
+    }
+}
+
+#[gpui::test]
+fn input_typed_during_snapshot_surface_gap_reaches_pane_once_in_order(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (mut server, view, cx) = type_across_gap(cx, Gap::SameTarget);
+    let enter = crate::terminal::key_input(
+        &gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke::parse("enter").unwrap(),
+            is_held: false,
+            prefer_character_input: false,
+        },
+        false,
+    )
+    .unwrap();
+    for expected in [
+        ClientPaneInputEvent::TextCommit("x".into()),
+        enter,
+        ClientPaneInputEvent::TextCommit("sentinel".into()),
+    ] {
+        assert_eq!(server.receive(), pane_input("w1:p1", expected));
+    }
+    view.read_with(cx, |view, _| assert!(view.local_error.is_none()));
+}
+
+#[gpui::test]
+fn input_held_across_gap_is_discarded_when_focus_moves(cx: &mut gpui::TestAppContext) {
+    let (mut server, view, cx) = type_across_gap(cx, Gap::FocusMoves);
+    assert_eq!(
+        server.receive(),
+        pane_input("w1:p2", ClientPaneInputEvent::TextCommit("sentinel".into()))
+    );
+    view.read_with(cx, |view, _| assert!(view.local_error.is_some()));
+}
+
+#[gpui::test]
+fn input_held_across_gap_never_reaches_a_popup_that_opened(cx: &mut gpui::TestAppContext) {
+    let (mut server, view, cx) = type_across_gap(cx, Gap::PopupOpens);
+    assert_eq!(
+        server.receive(),
+        ClientMessage::ClientShellPopupInput {
+            terminal_id: "popup-1".into(),
+            events: vec![ClientPaneInputEvent::TextCommit("sentinel".into())],
+        }
+    );
+    view.read_with(cx, |view, _| assert!(view.local_error.is_some()));
+}
+
+#[gpui::test]
+fn input_held_across_gap_is_bounded_and_dropped_on_reset(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (endpoint, _server) = connected_endpoint("bound");
+    view.update(cx, |view, cx| {
+        prepare_mouse(view, endpoint);
+        view.poll_endpoints(cx);
+        let mut next = (**view.live.snapshot.as_ref().unwrap()).clone();
+        next.revision += 1;
+        view.endpoints[1]
+            .connection
+            .inbox
+            .lock()
+            .unwrap()
+            .apply(ClientEvent::Snapshot(Arc::new(next)));
+        project_until(view, cx, "newer snapshot", |view| !view.input_ready());
+        for _ in 0..300 {
+            view.send(ClientPaneInputEvent::TextCommit("x".into()), cx);
+        }
+        assert_eq!(view.pending_input.len(), 256);
+        assert!(view.local_error.is_some());
+        view.reset_selected();
+        assert_eq!(view.pending_input.len(), 0);
     });
 }

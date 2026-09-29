@@ -118,6 +118,9 @@ pub(super) struct Branches {
 pub(crate) struct WorktreeSource {
     pub(super) tab: Tab,
     pub(super) search: Entity<SearchInput>,
+    /// The workspace name for a typed branch. Left empty, the daemon keeps its
+    /// own default label.
+    pub(super) name: Entity<SearchInput>,
     /// Indices into the open tab's listing, in listed order.
     pub(super) filtered: Vec<usize>,
     /// How many rows the search keeps in each tab, in `Tab::ALL` order.
@@ -296,6 +299,24 @@ impl HerdrWindow {
                 .is_some_and(|source| source.search.read(cx).focus.is_focused(window))
     }
 
+    /// Whether the branch form's name field has focus, so its typing, Enter
+    /// aside, never reaches the branch draft.
+    pub(crate) fn worktree_name_focused(&self, window: &gpui::Window, cx: &gpui::App) -> bool {
+        self.menu.page == Some(Page::Dialog(WorkspaceAction::NewWorktree))
+            && self
+                .menu
+                .worktree
+                .as_ref()
+                .is_some_and(|source| source.name.read(cx).focus.is_focused(window))
+    }
+
+    /// The trimmed name typed for the new workspace, when there is one.
+    pub(super) fn worktree_name(&self, cx: &gpui::App) -> Option<String> {
+        let source = self.menu.worktree.as_ref()?;
+        let name = source.name.read(cx).text().trim();
+        (!name.is_empty()).then(|| name.to_owned())
+    }
+
     pub(super) fn open_worktree_source(
         &mut self,
         window: &mut gpui::Window,
@@ -314,9 +335,17 @@ impl HerdrWindow {
                 this.search_worktree_sources(&text, window, cx);
             },
         );
+        let name = cx.new(SearchInput::new);
+        name.update(cx, |input, cx| {
+            input.set_placeholder("Default name", cx);
+            input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
+        });
+        // The name is what most people change, so the form opens on it.
+        window.focus(&name.read(cx).focus.clone(), cx);
         self.menu.worktree = Some(WorktreeSource {
             tab: Tab::New,
             search,
+            name,
             filtered: Vec::new(),
             hits: Default::default(),
             selected: 0,
@@ -390,24 +419,25 @@ impl HerdrWindow {
         source.tab = tab;
         source.refresh();
         let search = source.search.clone();
+        let name = source.name.clone();
         let retry_branches = !source.branches.listed && !source.branches.loading;
         let list_checkouts = !source.checkouts.listed && source.checkouts.request.is_none();
         match tab {
-            Tab::New => window.focus(&self.menu.focus),
+            Tab::New => window.focus(&name.read(cx).focus.clone(), cx),
             Tab::Existing => {
                 if list_checkouts {
                     self.list_checkouts();
                 }
-                window.focus(&search.read(cx).focus);
+                window.focus(&search.read(cx).focus.clone(), cx);
             }
             Tab::Branches => {
                 if retry_branches {
                     self.list_branches(cx);
                 }
-                window.focus(&search.read(cx).focus);
+                window.focus(&search.read(cx).focus.clone(), cx);
             }
             Tab::Items(_) => {
-                window.focus(&search.read(cx).focus);
+                window.focus(&search.read(cx).focus.clone(), cx);
                 self.list_repo_items();
             }
         }
@@ -608,25 +638,14 @@ impl HerdrWindow {
         let Some(item) = source.item(row).cloned() else {
             return;
         };
-        if let Some(owner) = item.fork_owner.clone() {
-            self.menu.error = Some(
-                crate::Error::ForkPullRequest {
-                    number: item.number,
-                    owner,
-                }
-                .to_string(),
-            );
-            cx.notify();
-            return;
-        }
         self.menu.error = None;
         match (item.head.clone(), self.repo_items_request()) {
             // An existing pull request branch may only exist on the remote, so
-            // `origin/<branch>` is refreshed before the daemon is asked for it.
-            (Some(head), Ok((input, token))) => {
+            // its base ref is refreshed before the daemon is asked for it.
+            (Some(_), Ok((input, token))) => {
                 if let Some(source) = &mut self.menu.worktree {
+                    source.lookup.fetch_branch(input, token, &item);
                     source.pending = Some(Pending::Item(item));
-                    source.lookup.fetch_branch(input, token, &head);
                 }
                 cx.notify();
             }
@@ -703,9 +722,7 @@ impl HerdrWindow {
         source.refresh();
         let pending = match (ready, &source.pending) {
             // The fetch succeeded for the branch that is still being created.
-            (Some(branch), Some(Pending::Item(item)))
-                if item.head.as_deref() == Some(branch.as_str()) =>
-            {
+            (Some(branch), Some(Pending::Item(item))) if item.branch() == branch => {
                 source.pending.clone()
             }
             (Some(_), _) => None,
@@ -786,7 +803,7 @@ pub(super) fn pick_request(
 /// neither widens what may be created.
 ///
 /// A pull request's head may exist only on `origin`, so its base names the
-/// remote-tracking ref the fetch just updated. The daemon checks out a branch
+/// ref the fetch just updated (a dedicated PR ref for forks). The daemon checks out a branch
 /// that already exists locally and ignores the base in that case. An issue's
 /// branch is new, so it keeps the dialog's default base of `HEAD`.
 pub(super) fn item_request(
@@ -797,7 +814,7 @@ pub(super) fn item_request(
     let branch = item.branch();
     let (method, mut params) = target.request(snapshot, WorkspaceAction::NewWorktree, &branch)?;
     if item.head.is_some() {
-        params["base"] = format!("origin/{branch}").into();
+        params["base"] = item.base_ref().into();
     }
     // The checkout is named for what it is for, so the sidebar shows it too.
     params["label"] = item.label().into();

@@ -11,7 +11,7 @@ pub(super) const HOVER_MENU_DELAY: Duration = Duration::from_millis(600);
 /// Pointer drift, in pixels, that still counts as resting on the row.
 pub(super) const HOVER_MENU_SLOP: f32 = 3.;
 pub(super) const ROW_PADDING: f32 = 12.;
-pub(super) const STATUS_WIDTH: f32 = 8.;
+pub(crate) const STATUS_WIDTH: f32 = 8.;
 // Unknown stays a smaller dot so it reads as "no reported status" next to the full ones.
 pub(super) const STATUS_DOT_UNKNOWN: f32 = 3.;
 pub(crate) const LABEL_GAP: f32 = 8.;

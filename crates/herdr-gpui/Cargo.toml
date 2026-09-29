@@ -11,18 +11,27 @@ workspace = true
 
 [dependencies]
 url.workspace = true
+aes.workspace                  = true
 anyhow.workspace               = true
+cbc.workspace                  = true
 chrono.workspace               = true
 config_loader.workspace        = true
 ed25519-dalek.workspace        = true
 flate2.workspace               = true
-gpui                           = { features = ["runtime_shaders"], workspace = true }
+gpui.workspace                 = true
+# Unlike gpui 0.2.2, the platform crate enables nothing by default: without
+# font-kit (macOS) or a Linux backend, text silently goes to a no-op system.
+gpui_platform                  = { features = ["font-kit", "runtime_shaders", "wayland", "x11"], workspace = true }
 herdr-client.workspace         = true
 image                          = { features = ["bmp", "tiff"], workspace = true }
+pbkdf2.workspace               = true
+percent-encoding.workspace     = true
 rodio.workspace                = true
+rusqlite.workspace             = true
 secrecy.workspace              = true
 serde.workspace                = true
 serde_json.workspace           = true
+sha1.workspace                 = true
 sha2.workspace                 = true
 tar.workspace                  = true
 tempfile.workspace             = true
@@ -54,7 +63,20 @@ integration-test = [
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
 
+# wry has no working GPUI child-view backend on Linux yet; browser tabs there
+# open in the system browser instead.
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+gpui-wry.workspace = true
+wry.workspace      = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+futures-lite.workspace = true
+oo7.workspace          = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
+block2.workspace                = true
+objc2-core-foundation.workspace = true
+objc2-web-kit.workspace         = true
 cocoa                        = { optional = true, workspace = true }
 core-graphics                = { optional = true, workspace = true }
 foreign-types                = { optional = true, workspace = true }

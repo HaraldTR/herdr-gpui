@@ -2,7 +2,7 @@
 //! checkout, and the bounded subprocess policy they all run under. Output is
 //! size-capped and every call has a deadline, so no step can hang the worker.
 
-use super::{Input, Result, parse_graphql};
+use super::{Input, Origin, Result, parse_graphql};
 use crate::Error;
 #[cfg(unix)]
 use std::os::{fd::OwnedFd, unix::net::UnixStream};
@@ -16,12 +16,14 @@ use std::{
 
 pub(super) const OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 pub(super) const TIMEOUT: Duration = Duration::from_secs(15);
-const QUERY: &str = r#"query($owner: String!, $repo: String!, $branch: String!) {
+const QUERY: &str = r#"query($owner: String!, $repo: String!, $branch: String!, $limit: Int!) {
   repository(owner: $owner, name: $repo) {
-    pullRequests(first: 2, headRefName: $branch, orderBy: {field: UPDATED_AT, direction: DESC}) {
+    pullRequests(first: $limit, headRefName: $branch, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage }
       nodes {
         number url title state isDraft headRefName baseRefName additions deletions
         changedFiles updatedAt mergeStateStatus reviewDecision headRepositoryOwner { login }
+        headRepository { name }
         commits(last: 1) { nodes { commit { statusCheckRollup {
           contexts(first: 100) {
             pageInfo { hasNextPage }
@@ -33,35 +35,160 @@ const QUERY: &str = r#"query($owner: String!, $repo: String!, $branch: String!) 
   }
 }"#;
 
+/// How long a remote repository's origin is trusted before SSH reads it again.
+const ORIGIN_TTL: Duration = Duration::from_secs(10 * 60);
+const ORIGIN_LIMIT: usize = 64;
+
+/// GitHub repositories resolved on saved hosts, keyed by SSH target and Git
+/// directory. Bounded, and owned by the single PR worker thread.
+#[derive(Default)]
+pub(super) struct Origins(Vec<(String, String, Instant, (String, String))>);
+
+impl Origins {
+    fn resolve(
+        &mut self,
+        target: &str,
+        input: &Input,
+        now: Instant,
+        deadline: Instant,
+        cancelled: &impl Fn() -> bool,
+    ) -> crate::Result<(String, String)> {
+        self.0
+            .retain(|(_, _, resolved, _)| now.duration_since(*resolved) < ORIGIN_TTL);
+        if let Some((.., repository)) = self
+            .0
+            .iter()
+            .find(|(host, key, ..)| host == target && key == &input.repo_key)
+        {
+            return Ok(repository.clone());
+        }
+        let timeout = deadline
+            .checked_duration_since(now)
+            .ok_or(Error::PrTimeout)?;
+        // The daemon's branch is trusted as reported: this client cannot run
+        // local Git against the host's checkout to re-verify it.
+        let remote = herdr_client::remote_origin_url(target, &input.repo_key, timeout, cancelled)?
+            .ok_or(Error::PrOrigin)?;
+        let repository = crate::avatars::github_repo(&remote).ok_or(Error::PrOrigin)?;
+        if self.0.len() == ORIGIN_LIMIT {
+            self.0.remove(0);
+        }
+        self.0.push((
+            target.to_owned(),
+            input.repo_key.clone(),
+            now,
+            repository.clone(),
+        ));
+        Ok(repository)
+    }
+}
+
 #[cfg(test)]
 pub(super) fn fetch(
     input: &Input,
     token: &secrecy::SecretString,
     cancelled: impl Fn() -> bool,
 ) -> Result {
-    fetch_with_backoff(input, token, cancelled, &mut None)
+    fetch_with_backoff(
+        input,
+        &Origin::Local,
+        &mut Origins::default(),
+        token,
+        cancelled,
+        &mut None,
+    )
 }
 
 pub(super) fn fetch_with_backoff(
     input: &Input,
+    origin: &Origin,
+    origins: &mut Origins,
     token: &secrecy::SecretString,
     cancelled: impl Fn() -> bool,
     cooldown: &mut Option<Duration>,
 ) -> Result {
     let deadline = Instant::now() + TIMEOUT;
-    let (owner, repo) = local_repository(input, deadline, &cancelled)?;
+    let ((owner, repo), head) = match origin {
+        Origin::Local => {
+            let checkout = local_checkout(input, deadline, &cancelled)?;
+            let repository = origin_repository(&checkout, deadline, &cancelled)?;
+            let head = upstream_head(&input.branch, |key| {
+                let value = git(
+                    &checkout,
+                    &["config", "--default", "", "--get", key],
+                    deadline,
+                    &cancelled,
+                )?;
+                Ok((!value.is_empty()).then_some(value))
+            })?;
+            (repository, head)
+        }
+        Origin::Ssh(target) => {
+            let repository =
+                origins.resolve(target, input, Instant::now(), deadline, &cancelled)?;
+            let head = upstream_head(&input.branch, |key| {
+                let timeout = deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or(Error::PrTimeout)?;
+                Ok(herdr_client::remote_config_value(
+                    target,
+                    &input.repo_key,
+                    key,
+                    timeout,
+                    &cancelled,
+                )?)
+            })?;
+            (repository, head)
+        }
+    };
+    let branch = head
+        .as_ref()
+        .map_or(input.branch.as_str(), |head| head.branch.as_str());
     let timeout = deadline
         .checked_duration_since(Instant::now())
         .ok_or(Error::PrTimeout)?;
     let response = crate::github::graphql(
+        "pull_request",
         token,
         QUERY,
-        serde_json::json!({"owner":owner,"repo":repo,"branch":input.branch}),
+        serde_json::json!({"owner":owner,"repo":repo,"branch":branch,"limit":if head.is_some() { 100 } else { 2 }}),
         timeout,
         cancelled,
         cooldown,
     )?;
-    parse_graphql(response, &owner, &repo, &input.branch)
+    parse_graphql(response, &owner, &repo, branch, head.as_ref())
+}
+
+/// The remote head configured for this local branch, independent of its local name.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Head {
+    pub owner: String,
+    pub repo: String,
+    pub branch: String,
+}
+
+pub(super) fn upstream_head(
+    branch: &str,
+    mut config: impl FnMut(&str) -> crate::Result<Option<String>>,
+) -> crate::Result<Option<Head>> {
+    let remote = config(&format!("branch.{branch}.remote"))?;
+    let merge = config(&format!("branch.{branch}.merge"))?;
+    let (Some(remote), Some(merge)) = (remote, merge) else {
+        return Ok(None);
+    };
+    // An explicitly configured but unsupported upstream must not fall back to
+    // a potentially unrelated origin branch (including local `.` upstreams).
+    let branch = merge
+        .strip_prefix("refs/heads/")
+        .filter(|branch| !branch.is_empty())
+        .ok_or(Error::PrBranch)?;
+    let url = config(&format!("remote.{remote}.url"))?.ok_or(Error::PrOrigin)?;
+    let (owner, repo) = crate::avatars::github_repo(&url).ok_or(Error::PrOrigin)?;
+    Ok(Some(Head {
+        owner,
+        repo,
+        branch: branch.to_owned(),
+    }))
 }
 
 pub(crate) fn local_repository(
@@ -85,7 +212,27 @@ pub(crate) fn origin_repository(
         deadline,
         cancelled,
     )?;
-    crate::avatars::github_repo(&remote).ok_or(Error::PrOrigin)
+    crate::avatars::github_repo(&remote).ok_or_else(|| {
+        // An SSH host alias for a second account (`github-work:owner/repo`)
+        // is the usual reason; only the host is logged, never credentials.
+        tracing::debug!(
+            category = "github_origin",
+            host = remote_host(&remote),
+            "Origin remote is not a GitHub.com repository"
+        );
+        Error::PrOrigin
+    })
+}
+
+/// The host of a Git remote, without the user, credentials, or path.
+pub(super) fn remote_host(remote: &str) -> &str {
+    let authority = match remote.split_once("://") {
+        Some((_, rest)) => rest.split('/').next().unwrap_or_default(),
+        None => remote.split(':').next().unwrap_or_default(),
+    };
+    authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host)
 }
 
 /// Resolve the checkout a daemon workspace names and verify it still is that
@@ -390,5 +537,50 @@ fn collect(
                 .map_err(|error| Error::PrEncoding(error.utf8_error()));
         }
         thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    fn input(key: &str) -> Input {
+        Input {
+            checkout: None,
+            repo_key: key.into(),
+            branch: "main".into(),
+        }
+    }
+
+    #[test]
+    fn remote_origins_are_reused_until_they_expire() {
+        // Time only moves forward here: an `Instant` cannot go before boot.
+        let now = Instant::now();
+        let deadline = now + TIMEOUT;
+        // An invalid target fails before SSH, so reaching it proves a miss.
+        let target = "-not-dialled";
+        let mut origins = Origins(vec![(
+            target.into(),
+            "/repo/.git".into(),
+            now,
+            ("owner".into(), "repo".into()),
+        )]);
+        let mut resolve = |key: &str, at: Instant| {
+            origins.resolve(target, &input(key), at, deadline.max(at + TIMEOUT), &|| {
+                false
+            })
+        };
+        assert_eq!(
+            resolve("/repo/.git", now).unwrap(),
+            ("owner".into(), "repo".into())
+        );
+        // Another repository on the same host is not a hit.
+        assert!(matches!(
+            resolve("/other/.git", now),
+            Err(Error::Client(herdr_client::Error::InvalidSshTarget))
+        ));
+        assert!(resolve("/repo/.git", now + ORIGIN_TTL).is_err());
+        assert!(origins.0.is_empty());
     }
 }

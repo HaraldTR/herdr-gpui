@@ -138,7 +138,7 @@ impl HerdrWindow {
             self.menu.pr_cache.refresh(input, std::time::Instant::now());
         }
         self.marked.clear();
-        window.focus(&self.menu.focus);
+        window.focus(&self.menu.focus, cx);
         cx.notify();
     }
 
@@ -151,6 +151,15 @@ impl HerdrWindow {
             .connected()
             .then(|| self.menu.pr_cache.peek(&input.repo_key, &input.branch))
             .flatten()
+    }
+
+    /// A GitHub lookup for the focused branch is in flight or about to be.
+    fn git_pull_request_loading(&self) -> bool {
+        self.menu.github.connected()
+            && self
+                .git
+                .tracked()
+                .is_some_and(|input| self.menu.pr_cache.loading(input, std::time::Instant::now()))
     }
 
     /// Only an open pull request can be opened; a merged or closed one leaves
@@ -432,6 +441,35 @@ impl HerdrWindow {
                 );
             }
         } else {
+            if self.git_pull_request_loading() {
+                panel = panel.child(
+                    div()
+                        .debug_selector(|| "git-menu-pr-loading".into())
+                        .px(px(8.))
+                        .pb(px(10.))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .text_color(rgb(theme.muted))
+                        .child(
+                            svg()
+                                .path("icons/refresh.svg")
+                                .size(px(12.))
+                                .flex_none()
+                                .text_color(rgb(theme.muted))
+                                .with_animation(
+                                    "git-menu-pr-loading",
+                                    Animation::new(std::time::Duration::from_secs(1)).repeat(),
+                                    |icon, delta| {
+                                        icon.with_transformation(Transformation::rotate(
+                                            percentage(delta),
+                                        ))
+                                    },
+                                ),
+                        )
+                        .child("Loading pull request..."),
+                );
+            }
             panel = panel.child(self.render_git_summary());
         }
         panel = panel.child(
@@ -676,7 +714,7 @@ mod tests {
     use super::{Page, PrState, Row, summary};
     use crate::git::Status;
     use crate::sidebar::layout_tests::REPO_KEY;
-    use gpui::{TestAppContext, point, px, size};
+    use gpui::{TestAppContext, VisualTestContext, point, px, size};
     use std::sync::Arc;
 
     fn status(additions: u64, deletions: u64, untracked: u64) -> Status {
@@ -831,6 +869,54 @@ mod tests {
                 cx.notify();
             })
         });
+    }
+
+    #[gpui::test]
+    fn the_popup_says_when_it_is_waiting_on_github(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let input = crate::pull_request::Input {
+            checkout: None,
+            repo_key: REPO_KEY.into(),
+            branch: "develop".into(),
+        };
+        let draw = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            })
+        };
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.git = crate::git::Git::fixture(input.clone(), status(0, 0, 0));
+                view.menu.github = crate::github::Auth::connected_fixture();
+                view.menu.pr_cache.scope(
+                    (0, 1, "boot".into()),
+                    Arc::new("fixture".into()),
+                    crate::pull_request::Origin::Local,
+                );
+                view.menu
+                    .pr_cache
+                    .refresh(input.clone(), std::time::Instant::now());
+                view.open_git_menu(point(px(900.), px(20.)), window, cx);
+            })
+        });
+        draw(cx);
+        let loading = cx.debug_bounds("git-menu-pr-loading").unwrap();
+        assert!(loading.bottom() <= cx.debug_bounds("git-menu-summary").unwrap().top());
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                // The lookup finished: nothing queued, the answer cached.
+                view.menu.pr_cache.retain(|_| false);
+                let pr = crate::pull_request::fixture().unwrap();
+                view.menu
+                    .pr_cache
+                    .seed(input, pr, std::time::Instant::now());
+                cx.notify();
+            })
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("git-menu-pr-loading").is_none());
+        assert!(cx.debug_bounds("git-menu-pr").is_some());
     }
 
     #[gpui::test]

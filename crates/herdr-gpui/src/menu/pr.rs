@@ -1,16 +1,27 @@
 use super::{Page, WorkspaceMenuAction};
 use crate::{
     HerdrWindow,
-    pull_request::{Input, repository_input},
+    pull_request::{Input, Origin, repository_input},
 };
 use gpui::{prelude::*, *};
 use herdr_client::protocol::*;
 use std::sync::Arc;
 
 impl HerdrWindow {
+    /// Where the selected device's checkouts live, if pull requests can be
+    /// looked up for them: the verified local daemon, or a saved SSH device.
+    /// Any other socket may be forwarded from an unknown machine.
+    pub(crate) fn pr_origin(&self) -> Option<Origin> {
+        match &self.endpoints[self.selected_endpoint].connection.target {
+            herdr_client::ConnectTarget::Ssh { target, .. } => Some(Origin::Ssh(target.clone())),
+            _ if self.selected_endpoint == 0 && self.live.local_daemon_peer => Some(Origin::Local),
+            _ => None,
+        }
+    }
+
     pub(super) fn refresh_workspace_pr(&mut self) {
         self.menu.pr.clear();
-        if !self.menu.github.connected() {
+        if self.pr_profile().is_none() {
             return;
         }
         let result = (|| {
@@ -22,7 +33,7 @@ impl HerdrWindow {
             if target.worktree.is_none() || target.branch.as_deref().is_none_or(str::is_empty) {
                 return Err(crate::Error::PrMetadata);
             }
-            if self.selected_endpoint != 0 || !self.live.local_daemon_peer {
+            if self.pr_origin().is_none() {
                 return Err(crate::Error::PrUntrustedEndpoint);
             }
             if !self.workspace_pr_target_current() {
@@ -56,15 +67,16 @@ impl HerdrWindow {
             self.menu.pr_cache.clear();
             self.menu.pr_cache_connection = Some(Arc::downgrade(&endpoint.connection.inbox));
         }
-        if let (Some(snapshot), Some(profile)) = (&self.live.snapshot, &self.menu.github.profile) {
-            self.menu.pr_cache.scope(
-                (
-                    self.selection_epoch,
-                    endpoint.generation,
-                    snapshot.boot_id.clone(),
-                ),
-                profile.token.clone(),
+        if let (Some(snapshot), Some(profile), Some(origin)) =
+            (&self.live.snapshot, self.pr_profile(), self.pr_origin())
+        {
+            let scope = (
+                self.selection_epoch,
+                self.endpoints[self.selected_endpoint].generation,
+                snapshot.boot_id.clone(),
             );
+            let token = profile.token.clone();
+            self.menu.pr_cache.scope(scope, token, origin);
         }
     }
 
@@ -93,7 +105,7 @@ impl HerdrWindow {
 
     pub(crate) fn update_workspace_pr(&mut self) -> bool {
         let mut changed = false;
-        if !self.menu.github.connected() {
+        if self.pr_profile().is_none() {
             self.menu.pr_cache.clear();
             self.menu.pr.clear();
             if self.menu.workspace_selected == Some(WorkspaceMenuAction::PullRequest) {
@@ -102,8 +114,7 @@ impl HerdrWindow {
             }
             return changed;
         }
-        let eligible = self.selected_endpoint == 0
-            && self.live.local_daemon_peer
+        let eligible = self.pr_origin().is_some()
             && self.live.status.is_connected()
             && self.live.snapshot.is_some();
         if eligible {
@@ -165,7 +176,7 @@ impl HerdrWindow {
     }
 
     pub(super) fn open_workspace_pr(&self, cx: &mut Context<Self>) {
-        if self.menu.github.connected()
+        if self.pr_profile().is_some()
             && self.workspace_pr_target_current()
             && let Some(pr) = &self.menu.pr.value
         {
@@ -529,7 +540,7 @@ mod tests {
         for width in [320., 640., 1200.] {
             cx.simulate_resize(size(px(width), px(400.)));
             cx.update(|window, cx| {
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
             });
             let panel = cx.debug_bounds("menu-panel").unwrap();
             let title = cx.debug_bounds("workspace-pr-title").unwrap();
@@ -570,7 +581,7 @@ mod tests {
             })
         });
         cx.update(|window, cx| {
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let title = cx.debug_bounds("workspace-pr-title").unwrap().center();
         let rename = cx.debug_bounds("workspace-menu-Rename").unwrap().center();
@@ -610,7 +621,7 @@ mod tests {
         });
         cx.run_until_parked();
         cx.update(|window, cx| {
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         // GPUI retains removed debug selectors; measure the remaining action panel.
         // Five action rows and the target header: no PR section or stale metadata.
@@ -754,7 +765,11 @@ mod tests {
             .as_ref()
             .expect("existing GitHub sign-in unavailable");
         let mut lookup = crate::pull_request::Lookup::default();
-        lookup.request(input, profile.token.clone());
+        lookup.request(
+            input,
+            crate::pull_request::Origin::Local,
+            profile.token.clone(),
+        );
         let deadline = Instant::now() + Duration::from_secs(20);
         while lookup.loading && Instant::now() < deadline {
             lookup.poll();

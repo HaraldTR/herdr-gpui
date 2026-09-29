@@ -283,13 +283,7 @@ fn parse_catalog(bytes: &[u8]) -> Result<Catalog> {
     }
     let mut ids = HashSet::new();
     for host in &catalog.ssh {
-        if host.id.len() != 32
-            || !host
-                .id
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            || !ids.insert(&host.id)
-        {
+        if !valid_profile_id(&host.id) || !ids.insert(&host.id) {
             return Err(Error::ProfileId);
         }
         let label = host.label.trim();
@@ -307,6 +301,15 @@ fn parse_catalog(bytes: &[u8]) -> Result<Catalog> {
         return Err(Error::SelectionUnavailable);
     }
     Ok(catalog)
+}
+
+/// Upstream profile IDs are 32 lowercase hex digits, so they are also safe
+/// in file names and command arguments.
+pub fn valid_profile_id(id: &str) -> bool {
+    id.len() == 32
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 pub(crate) fn validate_target(target: &str) -> Result<()> {

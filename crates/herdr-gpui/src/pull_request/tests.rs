@@ -1,10 +1,10 @@
 #![allow(clippy::unwrap_used)]
 
 use super::{
-    Cache, Input, Lookup, Result,
+    Cache, Input, Lookup, Origin, Result,
     cache::{CACHE_LIMIT, ERROR_BACKOFF, REFRESH},
     clean,
-    fetch::{OUTPUT_LIMIT, TIMEOUT, fetch, local_repository, worktree_checkout},
+    fetch::{OUTPUT_LIMIT, TIMEOUT, fetch, local_repository, remote_host, worktree_checkout},
     fixture,
     lookup::Worker,
     model::{MergeState, State},
@@ -20,7 +20,7 @@ use std::{
 
 struct Peer {
     cache: Cache,
-    incoming: mpsc::Receiver<(u64, Input, Arc<secrecy::SecretString>)>,
+    incoming: mpsc::Receiver<(u64, Input, Origin, Arc<secrecy::SecretString>)>,
     outgoing: mpsc::SyncSender<(u64, Result, Option<Duration>)>,
 }
 
@@ -30,7 +30,11 @@ impl Peer {
         let (outgoing, results) = mpsc::sync_channel(1);
         let mut cache = Cache::default();
         cache.lookup.worker = Some(Worker { requests, results });
-        cache.scope((0, 1, "boot".into()), Arc::new("fixture".into()));
+        cache.scope(
+            (0, 1, "boot".into()),
+            Arc::new("fixture".into()),
+            Origin::Local,
+        );
         Self {
             cache,
             incoming,
@@ -39,7 +43,7 @@ impl Peer {
     }
 
     fn complete(&mut self, now: Instant, result: Result, cooldown: Option<Duration>) -> Input {
-        let (generation, input, _) = self.incoming.try_recv().unwrap();
+        let (generation, input, _, _) = self.incoming.try_recv().unwrap();
         self.outgoing.send((generation, result, cooldown)).unwrap();
         self.cache.poll(now);
         input
@@ -105,6 +109,24 @@ fn explicit_refresh_respects_account_backoff_and_bounds_the_queue() {
 }
 
 #[test]
+fn loading_covers_queued_and_in_flight_lookups_but_not_a_paused_account() {
+    let mut peer = Peer::new();
+    let now = Instant::now();
+    let input = input("feature");
+    assert!(!peer.cache.loading(&input, now));
+    peer.cache.refresh(input.clone(), now);
+    assert!(peer.cache.loading(&input, now), "queued for dispatch");
+    peer.cache.paused_until = Some(now + ERROR_BACKOFF);
+    assert!(!peer.cache.loading(&input, now), "a paused account waits");
+    peer.cache.paused_until = None;
+    peer.cache.poll(now);
+    assert!(peer.cache.loading(&input, now), "in flight");
+    assert!(!peer.cache.loading(&self::input("other"), now));
+    peer.complete(now, Ok(Some(fixture().unwrap())), None);
+    assert!(!peer.cache.loading(&input, now));
+}
+
+#[test]
 fn cache_prefetches_without_menu_and_refreshes_at_ttl_with_stale_data() {
     let mut peer = Peer::new();
     let now = Instant::now();
@@ -161,21 +183,32 @@ fn cache_prefetches_without_menu_and_refreshes_at_ttl_with_stale_data() {
 #[test]
 fn cache_fences_auth_scope_removed_branch_and_late_results() {
     let now = Instant::now();
-    for change in 0..6 {
+    for change in 0..7 {
         let mut peer = Peer::new();
         peer.cache.seed(input("cached"), fixture().unwrap(), now);
         peer.cache.schedule([input("old")], now);
         peer.cache.poll(now);
-        let (generation, _, _) = peer.incoming.try_recv().unwrap();
+        let (generation, _, _, _) = peer.incoming.try_recv().unwrap();
         let token = peer.cache.token.as_ref().unwrap().clone();
         match change {
             0 => peer.cache.clear(), // sign-out/disconnect
-            1 => peer
+            1 => peer.cache.scope(
+                (0, 1, "boot".into()),
+                Arc::new("other-account".into()),
+                Origin::Local,
+            ),
+            2 => peer
                 .cache
-                .scope((0, 1, "boot".into()), Arc::new("other-account".into())),
-            2 => peer.cache.scope((1, 1, "boot".into()), token),
-            3 => peer.cache.scope((0, 2, "boot".into()), token),
-            4 => peer.cache.scope((0, 1, "new-boot".into()), token),
+                .scope((1, 1, "boot".into()), token, Origin::Local),
+            3 => peer
+                .cache
+                .scope((0, 2, "boot".into()), token, Origin::Local),
+            4 => peer
+                .cache
+                .scope((0, 1, "new-boot".into()), token, Origin::Local),
+            5 => peer
+                .cache
+                .scope((0, 1, "boot".into()), token, Origin::Ssh("host".into())),
             _ => peer.cache.retain(|input| input.branch == "new"),
         }
         assert!(peer.cache.entries.is_empty());
@@ -198,7 +231,7 @@ fn signout_drains_private_results_without_starting_queued_work() {
     let now = Instant::now();
     peer.cache.schedule([input("active"), input("queued")], now);
     peer.cache.poll(now);
-    let (generation, _, _) = peer.incoming.try_recv().unwrap();
+    let (generation, _, _, _) = peer.incoming.try_recv().unwrap();
     peer.outgoing
         .send((generation, Ok(Some(fixture().unwrap())), None))
         .unwrap();
@@ -400,6 +433,114 @@ fn response() -> serde_json::Value {
 }
 
 #[test]
+fn upstream_matches_renamed_fork_branch_and_rejects_unrelated_heads() {
+    let head = super::fetch::upstream_head("pr/138", |key| {
+        Ok(match key {
+            "branch.pr/138.remote" => Some("contributor".into()),
+            "branch.pr/138.merge" => Some("refs/heads/feat/inline-ime-preedit".into()),
+            "remote.contributor.url" => Some("git@github.com:renga-kogahara/herdr-gpui.git".into()),
+            _ => panic!("unexpected config read: {key}"),
+        })
+    })
+    .unwrap()
+    .unwrap();
+    assert_eq!(head.branch, "feat/inline-ime-preedit");
+    let mut pr = response()[0].clone();
+    pr["headRefName"] = head.branch.clone().into();
+    pr["headRepositoryOwner"] = serde_json::json!({"login":"renga-kogahara"});
+    pr["headRepository"] = serde_json::json!({"name":"herdr-gpui"});
+    let graphql =
+        |nodes| serde_json::json!({"data":{"repository":{"pullRequests":{"nodes":nodes}}}});
+    let parse = |nodes| {
+        parse_graphql(
+            graphql(nodes),
+            "example",
+            "project",
+            &head.branch,
+            Some(&head),
+        )
+    };
+    let mut stranger = pr.clone();
+    stranger["headRepositoryOwner"] = serde_json::json!({"login":"stranger"});
+    assert!(parse(serde_json::json!([stranger])).unwrap().is_none());
+    assert_eq!(
+        parse(serde_json::json!([stranger, pr]))
+            .unwrap()
+            .unwrap()
+            .number,
+        8
+    );
+    let mut wrong_repo = pr.clone();
+    wrong_repo["headRepository"] = serde_json::json!({"name":"different-fork"});
+    assert!(parse(serde_json::json!([wrong_repo])).unwrap().is_none());
+    let mut wrong_branch = pr.clone();
+    wrong_branch["headRefName"] = "pr/138".into();
+    assert!(parse(serde_json::json!([wrong_branch])).unwrap().is_none());
+    assert!(matches!(
+        parse(serde_json::json!([pr, pr])),
+        Err(Error::PrAmbiguous)
+    ));
+    let mut truncated = graphql(serde_json::json!([pr]));
+    truncated["data"]["repository"]["pullRequests"]["pageInfo"] =
+        serde_json::json!({"hasNextPage":true});
+    assert!(matches!(
+        parse_graphql(truncated, "example", "project", &head.branch, Some(&head)),
+        Err(Error::PrAmbiguous)
+    ));
+}
+
+#[test]
+fn no_upstream_preserves_origin_owner_and_local_branch_matching() {
+    let head = super::fetch::upstream_head("feature", |_| Ok(None)).unwrap();
+    assert!(head.is_none());
+    let graphql =
+        |nodes| serde_json::json!({"data":{"repository":{"pullRequests":{"nodes":nodes}}}});
+    assert!(
+        parse_graphql(
+            graphql(response()),
+            "example",
+            "project",
+            "feature",
+            head.as_ref()
+        )
+        .unwrap()
+        .is_some()
+    );
+    let mut fork = response();
+    fork[0]["headRepositoryOwner"] = serde_json::json!({"login":"stranger"});
+    assert!(matches!(
+        parse_graphql(graphql(fork), "example", "project", "feature", None),
+        Err(Error::PrIdentity)
+    ));
+    assert!(matches!(
+        parse_graphql(graphql(response()), "example", "project", "pr/138", None),
+        Err(Error::PrIdentity)
+    ));
+}
+
+#[test]
+fn unsupported_upstream_and_config_errors_do_not_fall_back() {
+    for merge in ["refs/heads/feature", "refs/pull/138/head"] {
+        assert!(
+            super::fetch::upstream_head("feature", |key| Ok(Some(
+                match key {
+                    "branch.feature.remote" => "fork",
+                    "branch.feature.merge" => merge,
+                    "remote.fork.url" => "https://other.example/owner/repo.git",
+                    _ => panic!("unexpected key"),
+                }
+                .into()
+            )))
+            .is_err()
+        );
+    }
+    assert!(matches!(
+        super::fetch::upstream_head("feature", |_| Err(Error::PrCancelled)),
+        Err(Error::PrCancelled)
+    ));
+}
+
+#[test]
 fn native_graphql_normalizes_nullable_reviews_and_bounded_checks() {
     let mut pr = response()[0].clone();
     pr["reviewDecision"] = serde_json::Value::Null;
@@ -407,19 +548,20 @@ fn native_graphql_normalizes_nullable_reviews_and_bounded_checks() {
         "pageInfo":{"hasNextPage":true}, "nodes":[{"__typename":"StatusContext","state":"SUCCESS"}]
     }}}}]});
     let response = serde_json::json!({"data":{"repository":{"pullRequests":{"nodes":[pr]}}}});
-    let pr = parse_graphql(response.clone(), "example", "project", "feature")
+    let pr = parse_graphql(response.clone(), "example", "project", "feature", None)
         .unwrap()
         .unwrap();
     assert_eq!(pr.review(), "No review decision");
     assert!(pr.checks_summary.contains("1 passed"));
     assert!(pr.checks_summary.contains("first 100"));
-    assert!(parse_graphql(response, "wrong", "project", "feature").is_err());
+    assert!(parse_graphql(response, "wrong", "project", "feature", None).is_err());
     assert!(
         parse_graphql(
             serde_json::json!({"data":{"repository":null}}),
             "a",
             "b",
-            "c"
+            "c",
+            None
         )
         .is_err()
     );
@@ -428,7 +570,8 @@ fn native_graphql_normalizes_nullable_reviews_and_bounded_checks() {
             serde_json::json!({"data":{"repository":{"pullRequests":{"nodes":[]}}}}),
             "a",
             "b",
-            "c"
+            "c",
+            None
         )
         .unwrap()
         .is_none()
@@ -511,11 +654,11 @@ fn worker_discards_stale_results_and_runs_only_requested_jobs() {
         repo_key: "/fixture/.git".into(),
         branch: "feature".into(),
     };
-    lookup.request(input.clone(), Arc::new("fixture".into()));
+    lookup.request(input.clone(), Origin::Local, Arc::new("fixture".into()));
     lookup.poll();
-    let (old, _, _) = incoming.try_recv().unwrap();
+    let (old, _, _, _) = incoming.try_recv().unwrap();
     lookup.clear();
-    lookup.request(input, Arc::new("fixture".into()));
+    lookup.request(input, Origin::Local, Arc::new("fixture".into()));
     lookup.poll();
     assert!(incoming.try_recv().is_err(), "single in-flight request");
     outgoing
@@ -524,7 +667,7 @@ fn worker_discards_stale_results_and_runs_only_requested_jobs() {
     lookup.poll();
     assert!(lookup.value.is_none());
     assert!(lookup.loading);
-    let (current, _, _) = incoming.try_recv().unwrap();
+    let (current, _, _, _) = incoming.try_recv().unwrap();
     outgoing
         .send((current, Ok(Some(fixture().unwrap())), None))
         .unwrap();
@@ -726,4 +869,19 @@ fn local_git_verification_rejects_wrong_checkout_branch_and_remote_before_gh() {
             .to_string()
             .contains("absolute checkout")
     );
+}
+
+#[test]
+fn remote_host_drops_credentials_and_path() {
+    for (remote, host) in [
+        ("git@github.com:owner/repo.git", "github.com"),
+        ("github-work:owner_shortcode/repo", "github-work"),
+        (
+            "https://user:secret@github.example.com/owner/repo",
+            "github.example.com",
+        ),
+        ("ssh://git@gitlab.com:22/owner/repo", "gitlab.com:22"),
+    ] {
+        assert_eq!(remote_host(remote), host, "{remote}");
+    }
 }
