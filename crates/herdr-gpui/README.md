@@ -274,7 +274,9 @@ the in-app menu, the command palette, or `cmd-=` / `cmd--` / `cmd-0`. Adjustment
 are clamped to the same 8..48 range, apply to the terminal only, and are never
 written to disk, so a reload or a restart returns to the configured size.
 
-Set top-level `confirm_close_tab = false` to close tabs without confirmation
+A tab asks before closing only while one of its agents is working or blocked
+on a prompt; tabs whose agents are idle or done, or that have none, close at
+once. Set top-level `confirm_close_tab = false` to never ask for tabs
 (including their running processes), and `show_agents = false` to hide the Agents
 section and give Spaces the full sidebar height. Both default to `true`. Pane
 closures still ask for confirmation. Saved edits apply automatically.
@@ -1155,8 +1157,8 @@ Windows setup) nothing is saved and the window says so.
 - Right-click any tab without focusing it to open Rename.
   Actions retain the clicked tab/workspace and reject stale connections or targets.
   Rename selects the current label in a native IME-aware field, with inline errors;
-  Close uses the existing cancel-by-default confirmation unless
-  `confirm_close_tab = false`. Escape or an outside left/right click dismisses
+  Close uses the existing cancel-by-default confirmation when an agent in the
+  tab is working or blocked, unless `confirm_close_tab = false`. Escape or an outside left/right click dismisses
   the menu without sending terminal input.
 - Click workspace, tab, agent, or a visible split pane to focus through the API.
 - Right-click a visible pane, including an inactive split, for Rename, Split
@@ -1196,8 +1198,8 @@ Windows setup) nothing is saved and the window says so.
   to the running program; daemons that do not advertise it (Herdr 0.9.1 and
   older) leave it out of the palette and report why instead.
 - Cmd-W closes the focused pane and Cmd-Shift-W closes the focused tab only after
-  a confirmation dialog (tab confirmation can be disabled with
-  `confirm_close_tab = false`). **Cancel is selected by default**: Enter alone cancels;
+  a confirmation dialog (a tab asks only while an agent in it is working or
+  blocked, and never with `confirm_close_tab = false`). **Cancel is selected by default**: Enter alone cancels;
   Tab then Enter selects and confirms Close. Closing can terminate running
   processes, unlike quitting the GUI, which only detaches.
 - Cmd-Shift-P opens the command palette with native actions and configured daemon
