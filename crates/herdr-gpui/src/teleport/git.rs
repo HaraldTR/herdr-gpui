@@ -350,7 +350,8 @@ pub(crate) fn drop_reference(host: &Host, key: &str, reference: &str, cancelled:
     let _ = host.query(Step::Restore, &body, &[], cancelled);
 }
 
-#[cfg(test)]
+// Host scripts need /bin/sh; Teleport is not offered on other clients.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[path = "git_tests.rs"]
 mod tests;

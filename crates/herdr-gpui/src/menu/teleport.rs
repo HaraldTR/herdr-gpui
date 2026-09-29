@@ -35,7 +35,8 @@ fn repositories(snapshot: &ClientShellSnapshot) -> Vec<Repository> {
 
 impl HerdrWindow {
     /// Whether the menu's workspace can be teleported: a linked worktree on
-    /// a host Teleport can script, with another connected host to go to.
+    /// a host Teleport can script. It is offered even with no other host
+    /// connected, so the dialog can say why there is nowhere to go.
     pub(super) fn can_teleport(&self) -> bool {
         let Some(target) = &self.menu.target else {
             return false;
@@ -48,12 +49,6 @@ impl HerdrWindow {
                 .as_ref()
                 .is_none_or(|teleport| !teleport.moving())
             && host_for(&self.endpoints[self.selected_endpoint].connection.target).is_ok()
-            && self.endpoints.iter().enumerate().any(|(index, endpoint)| {
-                index != self.selected_endpoint
-                    && endpoint.enabled
-                    && endpoint.live.status.is_connected()
-                    && host_for(&endpoint.connection.target).is_ok()
-            })
     }
 
     pub(super) fn open_teleport(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -158,7 +153,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn teleport_is_offered_for_linked_worktrees_with_another_host(cx: &mut gpui::TestAppContext) {
+    fn teleport_is_offered_for_linked_worktrees_on_scriptable_hosts(cx: &mut gpui::TestAppContext) {
+        // Host scripts need a POSIX client, so Windows never offers Teleport.
+        let offered = usize::from(cfg!(any(target_os = "linux", target_os = "macos")));
         let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
@@ -166,7 +163,19 @@ mod tests {
                 let snapshot = std::sync::Arc::make_mut(view.live.snapshot.as_mut().unwrap());
                 snapshot.workspaces = crate::sidebar::layout_tests::snapshot(7).workspaces;
                 view.open_workspace_menu("w4", Default::default(), window, cx);
-                assert_eq!(teleport_items(view), 0, "no other host is connected");
+                assert_eq!(
+                    teleport_items(view),
+                    0,
+                    "a custom socket cannot be scripted"
+                );
+                view.dismiss_menu(window, cx);
+                view.endpoints[0].connection.target = herdr_client::ConnectTarget::Local;
+                view.open_workspace_menu("w4", Default::default(), window, cx);
+                assert_eq!(
+                    teleport_items(view),
+                    offered,
+                    "offered even with no other host"
+                );
                 view.dismiss_menu(window, cx);
 
                 let mut remote = crate::endpoint::Endpoint::new(
@@ -181,15 +190,7 @@ mod tests {
                 remote.live = view.live.clone();
                 view.endpoints.push(remote);
                 view.open_workspace_menu("w4", Default::default(), window, cx);
-                assert_eq!(
-                    teleport_items(view),
-                    0,
-                    "a custom socket cannot be scripted"
-                );
-                view.dismiss_menu(window, cx);
-                view.endpoints[0].connection.target = herdr_client::ConnectTarget::Local;
-                view.open_workspace_menu("w4", Default::default(), window, cx);
-                assert_eq!(teleport_items(view), 1);
+                assert_eq!(teleport_items(view), offered);
                 view.dismiss_menu(window, cx);
                 // A main checkout is not a worktree that can move.
                 view.open_workspace_menu("w3", Default::default(), window, cx);

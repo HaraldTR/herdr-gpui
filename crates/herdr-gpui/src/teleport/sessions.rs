@@ -304,7 +304,8 @@ fn rewrite_archive(archive: &[u8], from: &str, to: &str) -> Result<Vec<u8>> {
     builder.into_inner().map_err(io_error)
 }
 
-#[cfg(test)]
+// Host scripts need /bin/sh; Teleport is not offered on other clients.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[path = "sessions_tests.rs"]
 mod tests;

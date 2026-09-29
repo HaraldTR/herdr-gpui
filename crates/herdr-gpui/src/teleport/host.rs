@@ -220,6 +220,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn local_scripts_run_under_the_prelude() {
         let host = Host::new(&ConnectTarget::Local).unwrap();
         let cancelled = AtomicBool::new(false);

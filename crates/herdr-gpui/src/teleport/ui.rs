@@ -38,6 +38,8 @@ enum Stage {
 pub(crate) struct Teleport {
     source: Source,
     label: String,
+    /// Other connected hosts searched; none means nowhere to go yet.
+    hosts: usize,
     stage: Stage,
     selected: usize,
     cancelled: Arc<AtomicBool>,
@@ -71,6 +73,7 @@ fn spawn(
 
 impl Teleport {
     pub(crate) fn start(source: Source, label: String, hosts: Vec<HostRepositories>) -> Self {
+        let hosts_searched = hosts.len();
         let job_source = source.clone();
         let (cancelled, events) = spawn(move |sender, cancelled| {
             let _ = sender.send(Event::Discovered(job::discover(
@@ -82,6 +85,7 @@ impl Teleport {
         Self {
             source,
             label,
+            hosts: hosts_searched,
             stage: Stage::Discovering,
             selected: 0,
             cancelled,
@@ -96,6 +100,7 @@ impl Teleport {
         Self {
             source,
             label: "feature".into(),
+            hosts: 1,
             stage: Stage::Choosing(Discovery {
                 candidates,
                 unreachable: Vec::new(),
@@ -345,7 +350,12 @@ impl HerdrWindow {
                 ("Review", false)
             }
             Stage::Choosing(discovery) => {
-                if discovery.candidates.is_empty() {
+                if teleport.hosts == 0 {
+                    body = body.child(line(
+                        "No other host is connected. Connect one from Devices, then try again."
+                            .into(),
+                    ));
+                } else if discovery.candidates.is_empty() {
                     body = body.child(line(
                         "No other connected host has this repository open. Open its main checkout there first.".into(),
                     ));

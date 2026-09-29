@@ -29,6 +29,7 @@ pub(crate) fn host_for(target: &herdr_client::ConnectTarget) -> error::Result<ho
     host::Host::new(target)
 }
 
-#[cfg(test)]
+// Host scripts need /bin/sh; Teleport is not offered on other clients.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod live_tests;
