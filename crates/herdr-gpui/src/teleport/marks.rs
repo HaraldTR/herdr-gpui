@@ -121,6 +121,24 @@ impl Marks {
             .find(|m| m.endpoint == endpoint && m.repo_key == repo_key && m.branch == branch)
     }
 
+    /// The mark whose work arrived at this copy: on `endpoint`, same branch,
+    /// and the same repository or, failing a key match, the workspace that
+    /// was created for it.
+    pub(crate) fn arrived_at(
+        &self,
+        endpoint: &str,
+        repo_key: &str,
+        branch: &str,
+        workspace_id: &str,
+    ) -> Option<&Mark> {
+        self.marks.iter().rev().find(|m| {
+            m.destination.endpoint == endpoint
+                && m.branch == branch
+                && (m.destination.repo_key == repo_key
+                    || m.destination.workspace_id == workspace_id)
+        })
+    }
+
     /// Marks on `endpoint`, for noticing a teleport coming back to them.
     pub(crate) fn on(&self, endpoint: &str) -> impl Iterator<Item = &Mark> {
         self.marks.iter().filter(move |m| m.endpoint == endpoint)
@@ -260,6 +278,38 @@ mod tests {
         let mut reopened = Marks::at(Some(path));
         loaded(&mut reopened);
         assert!(reopened.find("local", "/r/.git", "feat").is_some());
+    }
+
+    #[test]
+    fn a_copy_finds_where_its_work_came_from() {
+        let mut marks = Marks::at(None);
+        loaded(&mut marks);
+        marks.add(mark("local", "feat"));
+        let found = marks
+            .arrived_at("ssh:box", "/home/me/r/.git", "feat", "w1")
+            .unwrap();
+        assert_eq!(found.endpoint, "local");
+        // A key spelled differently still matches the workspace created for it.
+        assert!(
+            marks
+                .arrived_at("ssh:box", "/other/.git", "feat", "w9")
+                .is_some()
+        );
+        assert!(
+            marks
+                .arrived_at("ssh:box", "/other/.git", "feat", "w1")
+                .is_none()
+        );
+        assert!(
+            marks
+                .arrived_at("ssh:box", "/home/me/r/.git", "other", "w9")
+                .is_none()
+        );
+        assert!(
+            marks
+                .arrived_at("local", "/home/me/r/.git", "feat", "w9")
+                .is_none()
+        );
     }
 
     #[test]

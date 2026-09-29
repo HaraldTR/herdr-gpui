@@ -63,6 +63,34 @@ impl HerdrWindow {
         )
     }
 
+    /// Where this copy's work was teleported from, when that host is still
+    /// one this window can send it back to.
+    pub(super) fn teleport_origin(&self) -> Option<&Mark> {
+        let target = self.menu.target.as_ref()?;
+        let mark = self.teleport_marks.arrived_at(
+            &self.endpoints[self.selected_endpoint].id,
+            &target.worktree.as_ref()?.key,
+            target.branch.as_deref()?,
+            &target.id,
+        )?;
+        self.endpoints
+            .iter()
+            .any(|endpoint| endpoint.id == mark.endpoint && endpoint.enabled)
+            .then_some(mark)
+    }
+
+    /// Teleport, already aimed at the host the work came from.
+    pub(super) fn teleport_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(origin) = self.teleport_origin().map(|mark| mark.endpoint.clone()) else {
+            return;
+        };
+        self.open_teleport(window, cx);
+        if let Some(teleport) = &mut self.teleport {
+            teleport.review_host(&origin);
+        }
+        cx.notify();
+    }
+
     pub(super) fn go_to_teleported(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(mark) = self.teleport_mark().cloned() else {
             return;
@@ -407,6 +435,60 @@ mod tests {
                 assert!(
                     actions(view).contains(&WorkspaceMenuAction::Teleport)
                         == cfg!(any(target_os = "linux", target_os = "macos"))
+                );
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn a_teleported_copy_offers_to_go_back_where_it_came_from(cx: &mut gpui::TestAppContext) {
+        use super::super::WorkspaceMenuAction;
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.live.status = crate::state::ConnectionStatus::Connected;
+                view.endpoints[0].connection.target = herdr_client::ConnectTarget::Local;
+                let snapshot = std::sync::Arc::make_mut(view.live.snapshot.as_mut().unwrap());
+                snapshot.workspaces = crate::sidebar::layout_tests::snapshot(7).workspaces;
+                // w4's work arrived here from the box.
+                view.teleport_marks.add(Mark {
+                    endpoint: "ssh:box".into(),
+                    repo_key: "/home/me/agent-launcher/.git".into(),
+                    branch: "worktree/sidebar-child".into(),
+                    destination: crate::teleport::MarkDestination {
+                        endpoint: crate::endpoint::LOCAL.into(),
+                        label: "Local".into(),
+                        repo_key: REPO_KEY.into(),
+                        workspace_id: "w4".into(),
+                    },
+                });
+                // Without the box among this window's hosts there is nowhere to go back to.
+                view.open_workspace_menu("w4", Default::default(), window, cx);
+                assert!(!actions(view).contains(&WorkspaceMenuAction::TeleportBack));
+                view.dismiss_menu(window, cx);
+
+                view.endpoints.push(crate::endpoint::Endpoint::new(
+                    "ssh:box".into(),
+                    "Box".into(),
+                    herdr_client::ConnectTarget::Ssh {
+                        target: "nobody@invalid.invalid".into(),
+                        session: "default".into(),
+                    },
+                    true,
+                ));
+                view.open_workspace_menu("w4", Default::default(), window, cx);
+                let offered = actions(view);
+                if !cfg!(any(target_os = "linux", target_os = "macos")) {
+                    assert!(!offered.contains(&WorkspaceMenuAction::TeleportBack));
+                    return;
+                }
+                assert!(offered.contains(&WorkspaceMenuAction::TeleportBack));
+                assert!(offered.contains(&WorkspaceMenuAction::Teleport));
+                view.activate_workspace_menu(WorkspaceMenuAction::TeleportBack, window, cx);
+                assert_eq!(view.menu.page, Some(Page::Teleport));
+                assert!(
+                    view.teleport.as_ref().unwrap().reviewing(),
+                    "goes straight to the review"
                 );
             })
         });

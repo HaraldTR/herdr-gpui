@@ -134,6 +134,15 @@ impl Teleport {
         self.events = events;
     }
 
+    /// Choose the host `endpoint_id` and start its review at once.
+    pub(crate) fn review_host(&mut self, endpoint_id: &str) {
+        self.selected = self
+            .hosts
+            .iter()
+            .position(|host| host.place.endpoint_id == endpoint_id);
+        self.review();
+    }
+
     fn review(&mut self) {
         let Stage::Choosing = &self.stage else {
             return;

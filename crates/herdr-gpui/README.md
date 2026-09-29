@@ -694,8 +694,9 @@ programs stop: its tabs are replaced by one idle `teleported` shell tab, and the
 workspace and checkout stay. Herdr has no moved or disabled state, so this
 client remembers the move (`teleported.json` in its state directory) and marks
 the row with a teleport icon. Its menu offers Go to teleported copy and Clear
-teleported mark instead of Teleport. Teleporting the work back picks that
-checkout as the destination: its current state, committed or not, is saved to
+teleported mark instead of Teleport. The copy on the destination offers
+Teleport back, which opens Teleport already aimed at the host the work came
+from. Teleporting the work back picks that checkout as the destination: its current state, committed or not, is saved to
 `refs/herdr-teleport/backup/...` first, then it takes the returning branch and
 changes, its tabs are rebuilt, and the mark is cleared.
 Everything runs as noninteractive scripts calling Git and the `herdr` CLI on
