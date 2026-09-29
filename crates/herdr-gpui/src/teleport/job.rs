@@ -10,11 +10,12 @@ use super::{
         remap_argv,
     },
     layout::{Node, tree},
+    provision::{self, Arrival},
     remote::{MatchReason, RepoIdentity},
     sessions::{Route, move_session},
     snapshot::{
         HostSnapshot, PaneInfoResult, ProcessInfo, ProcessInfoResult, SnapshotResult, TabCreated,
-        WorktreeCreated,
+        WorkspaceCreated, WorktreeCreated,
     },
 };
 use herdr_client::shell_quote;
@@ -56,24 +57,73 @@ pub(crate) struct Repository {
 #[derive(Debug, Clone)]
 pub(crate) struct HostRepositories {
     pub(crate) place: Place,
-    pub(crate) repositories: Vec<Repository>,
+    /// The host's open repositories from its GUI snapshot, or `None` when it
+    /// is not connected and they must be read through its CLI.
+    pub(crate) repositories: Option<Vec<Repository>>,
+}
+
+/// Where the worktree lands on a host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Destination {
+    /// The repository is open there already.
+    Open {
+        repository: Repository,
+        reason: MatchReason,
+    },
+    /// It is not open: open an existing checkout or clone one first.
+    Arrive(Arrival),
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct Candidate {
     pub(crate) place: Place,
-    pub(crate) repository: Repository,
-    pub(crate) reason: MatchReason,
+    pub(crate) destination: Destination,
+    /// `origin`'s URL, for a clone the destination can fetch itself.
+    pub(crate) origin: Option<String>,
+}
+
+impl Candidate {
+    fn rank(&self) -> (u8, Option<MatchReason>) {
+        match &self.destination {
+            Destination::Open { reason, .. } => (0, Some(*reason)),
+            Destination::Arrive(Arrival::Existing { .. }) => (1, None),
+            Destination::Arrive(Arrival::Clone { .. }) => (2, None),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct Discovery {
     pub(crate) candidates: Vec<Candidate>,
-    /// Hosts whose repositories could not be read, with the reason.
+    /// Hosts that could not be read, with the reason.
     pub(crate) unreachable: Vec<(String, Error)>,
 }
 
-/// Match the source repository against every other host's repositories.
+/// One repository per Git common directory, reached through its main
+/// checkout's workspace when that is open.
+pub(crate) fn repositories_of(snapshot: &HostSnapshot) -> Vec<Repository> {
+    let mut found: Vec<Repository> = Vec::new();
+    for workspace in &snapshot.workspaces {
+        let Some(tree) = &workspace.worktree else {
+            continue;
+        };
+        match found.iter_mut().find(|repo| repo.key == tree.repo_key) {
+            Some(repo) if !tree.is_linked_worktree => {
+                repo.workspace_id.clone_from(&workspace.workspace_id);
+            }
+            Some(_) => {}
+            None => found.push(Repository {
+                key: tree.repo_key.clone(),
+                label: tree.repo_name.clone(),
+                workspace_id: workspace.workspace_id.clone(),
+            }),
+        }
+    }
+    found
+}
+
+/// Find where the worktree can go on every other host: a matching open
+/// repository, else an existing checkout to open or a place to clone to.
 pub(crate) fn discover(
     source: &Source,
     hosts: Vec<HostRepositories>,
@@ -88,39 +138,69 @@ pub(crate) fn discover(
         name: source.repo_label.clone(),
         remotes: own.get(&source.repo_key).cloned().unwrap_or_default(),
     };
+    let origin = provision::source_repository(
+        &source.place.host,
+        &source.repo_key,
+        &source.repo_label,
+        cancelled,
+    )?;
     let mut discovery = Discovery::default();
     for host in hosts {
-        let keys: Vec<_> = host.repositories.iter().map(|r| r.key.clone()).collect();
-        let remotes = match git::remotes(&host.place.host, &keys, cancelled) {
-            Ok(remotes) => remotes,
+        match discover_host(&host, &identity, &origin, cancelled) {
+            Ok(candidates) => discovery.candidates.extend(candidates),
             Err(Error::Cancelled) => return Err(Error::Cancelled),
-            Err(error) => {
-                discovery
-                    .unreachable
-                    .push((host.place.label.clone(), error));
-                continue;
-            }
-        };
-        for repository in host.repositories {
-            let candidate = RepoIdentity {
-                name: repository.label.clone(),
-                remotes: remotes.get(&repository.key).cloned().unwrap_or_default(),
-            };
-            if let Some(reason) = identity.matches(&candidate) {
-                discovery.candidates.push(Candidate {
-                    place: host.place.clone(),
-                    repository,
-                    reason,
-                });
-            }
+            Err(error) => discovery
+                .unreachable
+                .push((host.place.label.clone(), error)),
         }
     }
     discovery.candidates.sort_by(|a, b| {
-        a.reason
-            .cmp(&b.reason)
+        a.rank()
+            .cmp(&b.rank())
             .then_with(|| a.place.label.cmp(&b.place.label))
     });
     Ok(discovery)
+}
+
+fn discover_host(
+    host: &HostRepositories,
+    identity: &RepoIdentity,
+    source: &provision::SourceRepository,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Candidate>> {
+    let repositories = match &host.repositories {
+        Some(repositories) => repositories.clone(),
+        None => {
+            let snapshot: SnapshotResult =
+                host.place
+                    .host
+                    .herdr(Step::Discover, &["api", "snapshot"], cancelled)?;
+            repositories_of(&snapshot.snapshot)
+        }
+    };
+    let keys: Vec<_> = repositories.iter().map(|r| r.key.clone()).collect();
+    let remotes = git::remotes(&host.place.host, &keys, cancelled)?;
+    let candidate = |destination| Candidate {
+        place: host.place.clone(),
+        destination,
+        origin: source.origin.clone(),
+    };
+    let open: Vec<Candidate> = repositories
+        .into_iter()
+        .filter_map(|repository| {
+            let theirs = RepoIdentity {
+                name: repository.label.clone(),
+                remotes: remotes.get(&repository.key).cloned().unwrap_or_default(),
+            };
+            let reason = identity.matches(&theirs)?;
+            Some(candidate(Destination::Open { repository, reason }))
+        })
+        .collect();
+    if !open.is_empty() {
+        return Ok(open);
+    }
+    let arrival = provision::probe(&host.place.host, source, identity, cancelled)?;
+    Ok(vec![candidate(Destination::Arrive(arrival))])
 }
 
 /// What the destination pane will do.
@@ -168,7 +248,8 @@ pub(crate) struct Review {
     pub(crate) branch: String,
     pub(crate) state: git::SourceState,
     pub(crate) tabs: Vec<TabPlan>,
-    pub(crate) reason: MatchReason,
+    /// Why an open repository was chosen; `None` when it arrives fresh.
+    pub(crate) reason: Option<MatchReason>,
 }
 
 impl Review {
@@ -256,13 +337,16 @@ pub(crate) fn review(
         .ok_or(Error::WorkspaceGone)?;
     let state = git::source_state(host, &worktree.checkout_path, cancelled)?;
     let branch = state.branch.clone().ok_or(Error::DetachedHead)?;
-    let dest = git::destination_branch(
-        &destination.place.host,
-        &destination.repository.key,
-        &branch,
-        cancelled,
-    )?;
-    git::check_destination(host, &worktree.checkout_path, &branch, &dest, cancelled)?;
+    // A fresh clone has no branch to collide with; anything already there does.
+    let key = match &destination.destination {
+        Destination::Open { repository, .. } => Some(repository.key.as_str()),
+        Destination::Arrive(Arrival::Existing { key, .. }) => Some(key.as_str()),
+        Destination::Arrive(Arrival::Clone { .. }) => None,
+    };
+    if let Some(key) = key {
+        let dest = git::destination_branch(&destination.place.host, key, &branch, cancelled)?;
+        git::check_destination(host, &worktree.checkout_path, &branch, &dest, cancelled)?;
+    }
 
     let tabs = snapshot.tabs_of(&source.workspace_id);
     let pane_ids: Vec<String> = snapshot
@@ -304,7 +388,10 @@ pub(crate) fn review(
         branch,
         state,
         tabs,
-        reason: destination.reason,
+        reason: match &destination.destination {
+            Destination::Open { reason, .. } => Some(*reason),
+            Destination::Arrive(_) => None,
+        },
     })
 }
 
@@ -379,8 +466,12 @@ pub(crate) fn run(
 ) -> Result<Outcome> {
     let from = &source.place.host;
     let to = &destination.place.host;
-    let key = &destination.repository.key;
     let mut warnings = Vec::new();
+
+    // The repository comes first: if it cannot be put on the destination,
+    // nothing on the source has been touched.
+    let repository = arrive(source, destination, &mut report, cancelled)?;
+    let key = &repository.key;
 
     // Notes are written into the source checkout first, so they travel with
     // the uncommitted changes.
@@ -426,7 +517,6 @@ pub(crate) fn run(
     git::capture(
         from,
         &review.checkout,
-        &review.branch,
         &reference,
         &dest.tips,
         &mut bundle,
@@ -444,6 +534,7 @@ pub(crate) fn run(
     let placed = place_worktree(
         source,
         destination,
+        &repository,
         review,
         &reference,
         &mut report,
@@ -529,6 +620,44 @@ pub(crate) fn run(
     })
 }
 
+/// The destination repository, opened as a space: as it is when already
+/// open, else after opening an existing checkout or cloning one.
+fn arrive(
+    source: &Source,
+    destination: &Candidate,
+    report: &mut impl FnMut(Step),
+    cancelled: &AtomicBool,
+) -> Result<Repository> {
+    let to = &destination.place.host;
+    let (path, key) = match &destination.destination {
+        Destination::Open { repository, .. } => return Ok(repository.clone()),
+        Destination::Arrive(Arrival::Existing { path, key }) => (path, key.clone()),
+        Destination::Arrive(Arrival::Clone { path }) => {
+            report(Step::Clone);
+            let key = provision::clone(
+                &source.place.host,
+                &source.repo_key,
+                to,
+                path,
+                destination.origin.as_deref(),
+                cancelled,
+            )?;
+            (path, key)
+        }
+    };
+    report(Step::Open);
+    let opened: WorkspaceCreated = to.herdr(
+        Step::Open,
+        &["workspace", "create", "--cwd", path, "--no-focus"],
+        cancelled,
+    )?;
+    Ok(Repository {
+        key,
+        label: source.repo_label.clone(),
+        workspace_id: opened.workspace.workspace_id,
+    })
+}
+
 /// A destination pane standing in for a source pane.
 #[derive(Debug, Clone)]
 struct Target {
@@ -543,6 +672,7 @@ struct Target {
 fn place_worktree(
     source: &Source,
     destination: &Candidate,
+    repository: &Repository,
     review: &Review,
     reference: &str,
     report: &mut impl FnMut(Step),
@@ -554,7 +684,7 @@ fn place_worktree(
         "worktree",
         "create",
         "--workspace",
-        &destination.repository.workspace_id,
+        &repository.workspace_id,
         "--branch",
         &review.branch,
         "--no-focus",

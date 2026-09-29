@@ -5,6 +5,8 @@
 pub(crate) enum Step {
     Discover,
     Review,
+    Clone,
+    Open,
     Handoff,
     Capture,
     Transfer,
@@ -22,6 +24,8 @@ impl Step {
         match self {
             Self::Discover => "finding matching repositories",
             Self::Review => "reviewing the move",
+            Self::Clone => "copying the repository to the destination",
+            Self::Open => "opening the repository on the destination",
             Self::Handoff => "asking agents for handoff notes",
             Self::Capture => "capturing commits and changes",
             Self::Transfer => "copying changes to the destination",

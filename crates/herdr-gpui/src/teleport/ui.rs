@@ -7,8 +7,11 @@
 
 use super::{
     error::{Error, Step},
-    job::{self, Action, Candidate, Discovery, HostRepositories, Outcome, Review, Source},
+    job::{
+        self, Action, Candidate, Destination, Discovery, HostRepositories, Outcome, Review, Source,
+    },
     launch::{Work, command_line},
+    provision::Arrival,
     remote::MatchReason,
 };
 use crate::{HerdrWindow, NavigationTarget, menu::Page, window::Flash};
@@ -215,6 +218,35 @@ fn reason_text(reason: MatchReason) -> &'static str {
     }
 }
 
+/// What a destination row says: where the worktree goes, and how.
+fn destination_text(candidate: &Candidate) -> (String, String) {
+    match &candidate.destination {
+        Destination::Open { repository, reason } => {
+            (repository.label.clone(), reason_text(*reason).to_owned())
+        }
+        Destination::Arrive(Arrival::Existing { path, .. }) => {
+            (path.clone(), "Opens the checkout already there".to_owned())
+        }
+        Destination::Arrive(Arrival::Clone { path }) => (
+            path.clone(),
+            match candidate.origin {
+                Some(_) => "Clones the repository there first".to_owned(),
+                None => "Copies the repository there first".to_owned(),
+            },
+        ),
+    }
+}
+
+fn name_only(candidate: &Candidate) -> bool {
+    matches!(
+        candidate.destination,
+        Destination::Open {
+            reason: MatchReason::Name,
+            ..
+        }
+    )
+}
+
 fn describe(work: &Work, action: &Action) -> String {
     let program = work.program().unwrap_or("shell");
     match action {
@@ -361,6 +393,7 @@ impl HerdrWindow {
                     ));
                 }
                 for (index, candidate) in discovery.candidates.iter().enumerate() {
+                    let (title, detail) = destination_text(candidate);
                     let selected = index == teleport.selected;
                     body = body.child(
                         div()
@@ -383,18 +416,12 @@ impl HerdrWindow {
                                             .flex_none()
                                             .child(candidate.place.label.clone()),
                                     )
-                                    .child(
-                                        div().truncate().child(candidate.repository.label.clone()),
-                                    ),
+                                    .child(div().truncate().child(title)),
                             )
                             .child(
                                 div()
-                                    .text_color(if candidate.reason == MatchReason::Name {
-                                        danger
-                                    } else {
-                                        muted
-                                    })
-                                    .child(reason_text(candidate.reason)),
+                                    .text_color(if name_only(candidate) { danger } else { muted })
+                                    .child(detail),
                             )
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
@@ -423,15 +450,15 @@ impl HerdrWindow {
             Stage::Ready(candidate, review) => {
                 let state = &review.state;
                 body = body
-                    .child(line(format!(
-                        "To {} · {}",
-                        candidate.place.label, candidate.repository.label
-                    )))
+                    .child({
+                        let (title, detail) = destination_text(candidate);
+                        line(format!("To {} · {title}. {detail}.", candidate.place.label))
+                    })
                     .child(line(format!(
                         "Branch {} · {} unpushed commit(s) · {} changed file(s), {} untracked",
                         review.branch, state.unpushed, state.changed, state.untracked
                     )));
-                if review.reason == MatchReason::Name {
+                if review.reason == Some(MatchReason::Name) {
                     body = body.child(
                         line(
                             "Matched by name only: this repository's remotes differ there.".into(),

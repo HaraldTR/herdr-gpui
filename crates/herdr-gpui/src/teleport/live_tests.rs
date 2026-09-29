@@ -5,7 +5,7 @@
 use super::{
     error::Step,
     host::Host,
-    job::{self, HostRepositories, Place, Repository, Source},
+    job::{self, Destination, HostRepositories, Place, Repository, Source},
     remote::MatchReason,
     snapshot::{HostSnapshot, ProcessInfoResult, SnapshotResult},
 };
@@ -296,18 +296,24 @@ fn teleport_between_two_daemons() {
         &source,
         vec![HostRepositories {
             place: place(&b, "b"),
-            repositories: vec![Repository {
+            repositories: Some(vec![Repository {
                 key: key(&repo_b),
                 label: "app".into(),
                 workspace_id: main_b.clone(),
-            }],
+            }]),
         }],
         &cancelled,
     )
     .unwrap();
     assert_eq!(discovery.candidates.len(), 1);
     let candidate = &discovery.candidates[0];
-    assert_eq!(candidate.reason, MatchReason::Origin);
+    assert!(matches!(
+        candidate.destination,
+        Destination::Open {
+            reason: MatchReason::Origin,
+            ..
+        }
+    ));
 
     let review = job::review(&source, candidate, &cancelled).unwrap();
     assert_eq!(review.branch, "feat");
@@ -370,4 +376,124 @@ fn teleport_between_two_daemons() {
     });
     let tab_list = b.herdr(&["tab", "list", "--workspace", &outcome.workspace_id]);
     assert_eq!(tab_list["tabs"][1]["label"], "server");
+}
+
+#[test]
+#[ignore = "requires HERDR_TEST_BINARY and starts two isolated daemons"]
+fn teleport_copies_the_repository_where_it_is_missing() {
+    let binary =
+        PathBuf::from(std::env::var_os("HERDR_TEST_BINARY").expect("set HERDR_TEST_BINARY"));
+    let a = Daemon::start(&binary, "c");
+    let b = Daemon::start(&binary, "d");
+
+    let repo = a.dir.join("code/app");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    fs::write(repo.join("README"), "base\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "base"]);
+    // Unresolvable, so the destination cannot clone from origin and the
+    // repository is copied from the source instead.
+    git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/me/app.git",
+        ],
+    );
+    let main = a.herdr(&[
+        "workspace",
+        "create",
+        "--cwd",
+        repo.to_str().unwrap(),
+        "--no-focus",
+    ]);
+    let main = main["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let created = a.herdr(&[
+        "worktree",
+        "create",
+        "--workspace",
+        &main,
+        "--branch",
+        "feat",
+        "--no-focus",
+    ]);
+    let source_ws = created["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let checkout = PathBuf::from(created["worktree"]["path"].as_str().unwrap());
+    fs::write(checkout.join("feature.txt"), "committed\n").unwrap();
+    git(&checkout, &["add", "-A"]);
+    git(&checkout, &["commit", "-q", "-m", "feature"]);
+    fs::write(checkout.join("notes.txt"), "untracked\n").unwrap();
+
+    let source = Source {
+        place: Place {
+            endpoint_id: "c".into(),
+            label: "c".into(),
+            host: a.host.clone(),
+        },
+        workspace_id: source_ws.clone(),
+        custom_label: None,
+        repo_key: repo.join(".git").to_string_lossy().into_owned(),
+        repo_label: "app".into(),
+        tab_labels: HashMap::new(),
+    };
+    let cancelled = AtomicBool::new(false);
+    // No GUI snapshot: the host is read through its CLI, as when disconnected.
+    let discovery = job::discover(
+        &source,
+        vec![HostRepositories {
+            place: Place {
+                endpoint_id: "d".into(),
+                label: "d".into(),
+                host: b.host.clone(),
+            },
+            repositories: None,
+        }],
+        &cancelled,
+    )
+    .unwrap();
+    assert!(
+        discovery.unreachable.is_empty(),
+        "{:?}",
+        discovery.unreachable
+    );
+    let place = b.dir.join("code/app");
+    let candidate = &discovery.candidates[0];
+    assert_eq!(
+        candidate.destination,
+        Destination::Arrive(super::provision::Arrival::Clone {
+            path: place.to_string_lossy().into_owned()
+        })
+    );
+
+    let review = job::review(&source, candidate, &cancelled).unwrap();
+    let outcome = job::run(&source, candidate, &review, |_| {}, &cancelled).unwrap();
+    assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+
+    let snapshot = b.snapshot();
+    let opened = job::repositories_of(&snapshot);
+    assert_eq!(opened.len(), 1, "the copied repository is open as a space");
+    assert_eq!(
+        git(&place, &["remote", "get-url", "origin"]).trim(),
+        "https://example.invalid/me/app.git"
+    );
+    let moved = snapshot.workspace(&outcome.workspace_id).unwrap();
+    let moved_checkout = PathBuf::from(&moved.worktree.as_ref().unwrap().checkout_path);
+    assert_eq!(
+        git(&moved_checkout, &["rev-parse", "HEAD"]),
+        git(&checkout, &["rev-parse", "HEAD"])
+    );
+    assert_eq!(
+        fs::read_to_string(moved_checkout.join("notes.txt")).unwrap(),
+        "untracked\n"
+    );
+    assert!(a.snapshot().workspace(&source_ws).is_none());
 }

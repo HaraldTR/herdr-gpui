@@ -220,12 +220,11 @@ pub(crate) fn check_destination(
     Ok(())
 }
 
-/// Bundle `branch` and the uncommitted work (as `reference`) into `bundle`,
+/// Bundle HEAD and the uncommitted work (as `reference`) into `bundle`,
 /// excluding commits among `tips` that the source also has.
 pub(crate) fn capture(
     host: &Host,
     checkout: &str,
-    branch: &str,
     reference: &str,
     tips: &[String],
     bundle: &mut File,
@@ -250,13 +249,12 @@ work=$(git commit-tree --no-gpg-sign "$all" -p "$index" -m 'herdr teleport: work
 git update-ref {reference} "$work"
 git cat-file --batch-check='%(objectname) %(objecttype)' < "$t/tips" |
     awk '$2 == "commit" {{ print "^" $1 }}' > "$t/revs"
-printf '%s\n' {branch_ref} {reference} >> "$t/revs"
+printf '%s\n' {reference} >> "$t/revs"
 git bundle create -q "$t/bundle" --stdin < "$t/revs" >&2
 cat "$t/bundle"
 "#,
         checkout = shell_quote(checkout),
         reference = shell_quote(reference),
-        branch_ref = shell_quote(&format!("refs/heads/{branch}")),
     );
     let tips = tips.join("\n") + "\n";
     host.run(
@@ -296,7 +294,11 @@ pub(crate) fn discard_upload(host: &Host, path: &str, cancelled: &AtomicBool) ->
     host.query(Step::Transfer, &body, &[], cancelled).map(drop)
 }
 
-/// Fetch the uploaded bundle into the destination repository.
+/// Fetch the uploaded bundle into the destination repository and point the
+/// branch at the source's HEAD, the work reference's grandparent. Only the
+/// reference is fetched: its two commits are new, so it is always in the
+/// bundle, whereas a branch whose commits the destination already has would
+/// be left out of it. An existing branch may only fast-forward.
 pub(crate) fn fetch(
     host: &Host,
     key: &str,
@@ -305,13 +307,23 @@ pub(crate) fn fetch(
     reference: &str,
     cancelled: &AtomicBool,
 ) -> Result<()> {
-    let branch_ref = format!("refs/heads/{branch}");
     let body = format!(
-        "git --git-dir {key} fetch --no-tags --no-write-fetch-head -q {bundle} {branch_spec} {reference_spec}\n",
+        r#"g() {{ git --git-dir {key} "$@"; }}
+g fetch --no-tags --no-write-fetch-head -q {bundle} {reference_spec}
+head=$(g rev-parse --verify {head})
+if old=$(g rev-parse -q --verify {branch_commit}); then
+    g merge-base --is-ancestor "$old" "$head" || {{ echo "branch has diverged" >&2; exit 1; }}
+    g update-ref {branch_ref} "$head" "$old"
+else
+    g update-ref {branch_ref} "$head" ''
+fi
+"#,
         key = shell_quote(key),
         bundle = shell_quote(bundle),
-        branch_spec = shell_quote(&format!("{branch_ref}:{branch_ref}")),
         reference_spec = shell_quote(&format!("{reference}:{reference}")),
+        head = shell_quote(&format!("{reference}~2^{{commit}}")),
+        branch_commit = shell_quote(&format!("refs/heads/{branch}^{{commit}}")),
+        branch_ref = shell_quote(&format!("refs/heads/{branch}")),
     );
     let sink = io::sink();
     host.run(Step::Fetch, &body, io::empty(), sink, TRANSFER, cancelled)

@@ -624,13 +624,19 @@ forcibly interrupted. A copy stalls out after 30 seconds without progress.
 Right-click a linked worktree and choose Teleport... to move it to another
 connected host: its branch and commits, staged, unstaged and untracked changes,
 tabs and splits, the programs running in them, and agent sessions. It is offered
-on Linux and macOS clients when the worktree's host and at least one other
-connected host are the local session or a saved SSH host; custom socket
-endpoints are not scripted.
+on Linux and macOS clients when the worktree's host is the local session or a
+saved SSH host; custom socket endpoints are not scripted.
 
-1. **Choose a destination.** Every other connected host's open repositories are
-   matched by normalized Git remote (`origin` first, then any remote), then by
-   repository name. A name-only match is flagged, because the remotes differ.
+1. **Choose a destination.** Every other enabled host is listed, connected or
+   not. Where the repository is open, it is matched by normalized Git remote
+   (`origin` first, then any remote), then by repository name; a name-only match
+   is flagged, because the remotes differ. Where it is not open, Teleport sets
+   it up: a checkout of the same repository at the same place under the home
+   directory (`~/code/app`) is opened as a space; otherwise the repository is
+   cloned there from `origin` without prompting, or, when that host cannot
+   reach `origin`, copied from this machine with its branches and tags and
+   `origin` restored. A different repository already at that place is left
+   alone and the copy goes to `<place>-teleport`.
 2. **Review.** The dialog lists the branch, unpushed commits, changed and
    untracked files, and what each pane becomes. The destination's branch must be
    absent or an ancestor of this one, and must not be checked out there.
@@ -639,9 +645,10 @@ endpoints are not scripted.
 
 Commits travel as a Git bundle holding only what the destination lacks. The
 uncommitted work travels as two temporary commits, built through a temporary
-index so the source checkout, index and branch are not modified. The
-destination's `herdr worktree create` checks the branch out under the same name,
-then the staged index and working tree are restored exactly, binary files
+index so the source checkout, index and branch are not modified. The branch is
+set to the source's commit, fast-forwarding a branch already there but never
+overwriting one that diverged. The destination's `herdr worktree create` checks
+it out under the same name, then the staged index and working tree are restored exactly, binary files
 included. Ignored files such as `.env` and build output stay behind, and so do
 submodule contents.
 

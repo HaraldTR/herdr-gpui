@@ -12,13 +12,17 @@ mod host;
 mod job;
 mod launch;
 mod layout;
+mod provision;
 mod remote;
 mod sessions;
 mod snapshot;
 mod ui;
 
 #[cfg(test)]
-pub(crate) use {job::Candidate, remote::MatchReason};
+pub(crate) use {
+    job::{Candidate, Destination},
+    remote::MatchReason,
+};
 pub(crate) use {
     job::{HostRepositories, Place, Repository, Source},
     ui::Teleport,

@@ -89,28 +89,35 @@ impl HerdrWindow {
             repo_label: worktree.label.clone(),
             tab_labels,
         };
-        let hosts: Vec<HostRepositories> = self
-            .endpoints
-            .iter()
-            .enumerate()
-            .filter(|(index, endpoint)| {
-                *index != self.selected_endpoint
-                    && endpoint.enabled
-                    && endpoint.live.status.is_connected()
-            })
-            .filter_map(|(_, endpoint)| {
-                let host = host_for(&endpoint.connection.target).ok()?;
-                let snapshot = endpoint.live.snapshot.as_ref()?;
-                Some(HostRepositories {
-                    place: Place {
-                        endpoint_id: endpoint.id.clone(),
-                        label: endpoint.label.clone(),
-                        host,
-                    },
-                    repositories: repositories(snapshot),
-                })
-            })
-            .collect();
+        // Every enabled host, connected or not: Teleport reaches each over its
+        // own SSH. A connected host's snapshot saves a round trip; the others
+        // are read through their CLI. The same machine listed twice is one host.
+        let mut hosts: Vec<HostRepositories> = Vec::new();
+        for (index, endpoint) in self.endpoints.iter().enumerate() {
+            if index == self.selected_endpoint || !endpoint.enabled {
+                continue;
+            }
+            let Ok(host) = host_for(&endpoint.connection.target) else {
+                continue;
+            };
+            if host == source.place.host || hosts.iter().any(|known| known.place.host == host) {
+                continue;
+            }
+            let repositories = endpoint
+                .live
+                .snapshot
+                .as_ref()
+                .filter(|_| endpoint.live.status.is_connected())
+                .map(|snapshot| repositories(snapshot));
+            hosts.push(HostRepositories {
+                place: Place {
+                    endpoint_id: endpoint.id.clone(),
+                    label: endpoint.label.clone(),
+                    host,
+                },
+                repositories,
+            });
+        }
         let label = target.label.clone();
         self.menu.page = Some(Page::Teleport);
         self.menu.error = None;
@@ -202,7 +209,7 @@ mod tests {
 
     #[gpui::test]
     fn the_destination_picker_renders_and_enter_starts_the_review(cx: &mut gpui::TestAppContext) {
-        use crate::teleport::{Candidate, MatchReason, host_for};
+        use crate::teleport::{Candidate, Destination, MatchReason, host_for};
         let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
@@ -228,12 +235,15 @@ mod tests {
                             session: "default".into(),
                         },
                     ),
-                    repository: Repository {
-                        key: "/r/.git".into(),
-                        label: "agent-launcher".into(),
-                        workspace_id: "w9".into(),
+                    destination: Destination::Open {
+                        repository: Repository {
+                            key: "/r/.git".into(),
+                            label: "agent-launcher".into(),
+                            workspace_id: "w9".into(),
+                        },
+                        reason: MatchReason::Name,
                     },
-                    reason: MatchReason::Name,
+                    origin: None,
                 };
                 view.menu.page = Some(Page::Teleport);
                 view.teleport = Some(Teleport::choosing(source, vec![candidate]));

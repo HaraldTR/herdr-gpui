@@ -211,6 +211,12 @@ pub(crate) struct CreatedWorktree {
     pub(crate) path: String,
 }
 
+/// `workspace_created`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct WorkspaceCreated {
+    pub(crate) workspace: CreatedWorkspace,
+}
+
 /// `tab_created`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct TabCreated {

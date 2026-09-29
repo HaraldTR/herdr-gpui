@@ -135,7 +135,6 @@ fn a_teleported_checkout_matches_its_source_exactly() {
     capture(
         &host,
         checkout,
-        "feature",
         reference,
         &dest.tips,
         &mut bundle,
@@ -259,4 +258,47 @@ fn parsers_tolerate_partial_output() {
     assert_eq!(parsed.tip, None);
     assert_eq!(parsed.checked_out.as_deref(), Some("/w/f x"));
     assert!(parsed.tips.is_empty());
+}
+
+#[test]
+fn a_branch_whose_commits_the_destination_has_still_moves() {
+    // As when the branch was pushed and the destination fetched it: every
+    // commit is excluded from the bundle, which then drops the branch ref.
+    let fx = fixture();
+    let host = Host::new(&ConnectTarget::Local).unwrap();
+    let cancelled = AtomicBool::new(false);
+    git(
+        &fx.destination,
+        &[
+            "fetch",
+            "-q",
+            fx.source.to_str().unwrap(),
+            "feature:refs/remotes/origin/feature",
+        ],
+    );
+    let dest_key = key(&fx.destination);
+    let dest = destination_branch(&host, &dest_key, "feature", &cancelled).unwrap();
+    let reference = "refs/herdr-teleport/pushed";
+    let mut bundle = tempfile::tempfile().unwrap();
+    capture(
+        &host,
+        fx.checkout.to_str().unwrap(),
+        reference,
+        &dest.tips,
+        &mut bundle,
+        &cancelled,
+    )
+    .unwrap();
+    use std::io::Seek;
+    bundle.rewind().unwrap();
+    let uploaded = upload(&host, bundle, &cancelled).unwrap();
+    fetch(
+        &host, &dest_key, &uploaded, "feature", reference, &cancelled,
+    )
+    .unwrap();
+    discard_upload(&host, &uploaded, &cancelled).unwrap();
+    assert_eq!(
+        git(&fx.destination, &["rev-parse", "feature"]),
+        git(&fx.checkout, &["rev-parse", "HEAD"])
+    );
 }
