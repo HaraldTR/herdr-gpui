@@ -352,10 +352,18 @@ pub(super) fn row(
         0.
     };
     // The status word keeps its own trailing column, so the label yields to it
-    // the same way it yields to a badge.
-    let status_reserve = status_text.map_or(0., |text| {
-        (text.chars().count() as f32 * glyph_width(font)).ceil() + gap
+    // the same way it yields to a badge, and like the badge it is clipped to
+    // the room left rather than painting past the row.
+    let status_width = status_text.map_or(0., |text| {
+        (text.chars().count() as f32 * glyph_width(font))
+            .ceil()
+            .min((available - pr_reserve - gap).max(0.))
     });
+    let status_reserve = if status_text.is_some() {
+        status_width + gap
+    } else {
+        0.
+    };
     let status_color = status_style(status).2;
     let label_width = (available - pr_reserve - status_reserve).max(0.);
     let agent_icon = match kind {
@@ -497,12 +505,14 @@ pub(super) fn row(
             row.child(
                 div()
                     .debug_selector(|| format!("status-{key}"))
+                    .w(px(status_width))
                     .flex_none()
                     .h(px(line_height(font)))
                     .flex()
                     .items_center()
+                    .overflow_hidden()
                     .text_color(rgb(status_color))
-                    .child(label_text(text)),
+                    .child(div().w(px(status_width)).truncate().child(label_text(text))),
             )
         })
         // The collapse column comes first so the badge can hug the row's edge;

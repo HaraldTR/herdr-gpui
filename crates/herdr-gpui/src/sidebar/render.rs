@@ -472,6 +472,7 @@ impl HerdrWindow {
                             status_text: self
                                 .config
                                 .agent_status_text
+                                .shown_for(agent.agent.as_deref())
                                 .then(|| status_text(agent.agent_status)),
                         }),
                         &row_cx,

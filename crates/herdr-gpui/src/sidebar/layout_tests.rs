@@ -565,9 +565,10 @@ fn agent_icons_follow_names_and_reserve_narrow_label_width(cx: &mut gpui::TestAp
 
 /// The daemon's `state_text` token shows a status word beside each agent, in
 /// every layout, and nothing at all when the daemon's rows do not ask for it.
+/// An agent's own `rows_by_agent` entry decides for it instead of `rows`.
 #[gpui::test]
 fn agent_status_words_follow_the_daemon_sidebar_config(cx: &mut gpui::TestAppContext) {
-    use crate::config::{Density, LayoutMode};
+    use crate::config::{AgentStatusText, Density, LayoutMode};
     let (view, cx) = cx.add_window_view(|window, cx| {
         let mut view = fixture_window(window, cx);
         view.live.snapshot = Some(Arc::new(snapshot(2)));
@@ -575,18 +576,26 @@ fn agent_status_words_follow_the_daemon_sidebar_config(cx: &mut gpui::TestAppCon
     });
     cx.simulate_resize(size(px(800.), px(900.)));
     cx.run_until_parked();
+    // The fixture's agents are Claude.
+    let settings = [
+        (AgentStatusText::default(), false),
+        (AgentStatusText::from_rows(true, []), true),
+        (AgentStatusText::from_rows(false, [("claude", true)]), true),
+        (AgentStatusText::from_rows(true, [("claude", false)]), false),
+        (AgentStatusText::from_rows(false, [("codex", true)]), false),
+    ];
     for mode in [
         LayoutMode::from(Density::Comfortable),
         LayoutMode::Superset,
         LayoutMode::Orca,
         LayoutMode::Minimal,
     ] {
-        for shown in [false, true] {
+        for (setting, shown) in &settings {
             view.update(cx, |view, cx| {
                 view.config.layout.mode = mode;
                 view.config.sidebar.size = 12.;
                 view.sidebar_width = Some(320.);
-                view.config.agent_status_text = shown;
+                view.config.agent_status_text = setting.clone();
                 cx.notify();
             });
             let rendered = cx.update(|window, cx| {
@@ -599,10 +608,51 @@ fn agent_status_words_follow_the_daemon_sidebar_config(cx: &mut gpui::TestAppCon
             });
             assert_eq!(
                 cx.debug_bounds("status-agent-p0").is_some(),
-                shown,
-                "{mode:?} shown={shown}"
+                *shown,
+                "{mode:?} {setting:?}"
             );
-            assert_eq!(rendered.as_deref(), shown.then_some("working"), "{mode:?}");
+            assert_eq!(
+                rendered.as_deref(),
+                shown.then_some("working"),
+                "{mode:?} {setting:?}"
+            );
+        }
+    }
+}
+
+/// A sidebar too narrow for the status word clips it within the row rather
+/// than letting it paint past the row's edge onto the terminal.
+#[gpui::test]
+fn agent_status_words_stay_inside_narrow_rows(cx: &mut gpui::TestAppContext) {
+    use crate::config::{AgentStatusText, Density, LayoutMode};
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = fixture_window(window, cx);
+        view.live.snapshot = Some(Arc::new(snapshot(2)));
+        view
+    });
+    cx.simulate_resize(size(px(800.), px(900.)));
+    cx.run_until_parked();
+    for density in [Density::Compact, Density::Normal, Density::Comfortable] {
+        for (width, font) in [(160., 12.), (160., 36.), (160., 48.), (240., 48.)] {
+            view.update(cx, |view, cx| {
+                view.config.layout.mode = LayoutMode::from(density);
+                view.config.sidebar.size = font;
+                view.sidebar_width = Some(width);
+                view.config.agent_status_text = AgentStatusText::from_rows(true, []);
+                cx.notify();
+            });
+            cx.update(|window, cx| {
+                cx.default_global::<TextProbes>().0.clear();
+                full_draw(window, cx).clear(cx);
+            });
+            let sidebar = cx.debug_bounds("sidebar").unwrap();
+            for key in ["status-agent-p0", "status-agent-p1"] {
+                let status = cx.debug_bounds(key).unwrap();
+                assert!(
+                    status.right() <= sidebar.right(),
+                    "{density:?} {width} {font}: {key} {status:?} past {sidebar:?}"
+                );
+            }
         }
     }
 }
