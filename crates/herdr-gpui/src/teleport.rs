@@ -21,11 +21,7 @@ mod snapshot;
 mod ui;
 
 #[cfg(test)]
-pub(crate) use {
-    job::{Candidate, Destination},
-    marks::Destination as MarkDestination,
-    remote::MatchReason,
-};
+pub(crate) use marks::Destination as MarkDestination;
 pub(crate) use {
     job::{HostRepositories, Place, Repository, Retired, Source},
     marks::{Mark, Marks},

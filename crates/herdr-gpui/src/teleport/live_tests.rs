@@ -293,9 +293,9 @@ fn teleport_between_two_daemons() {
         )]),
     };
     let cancelled = AtomicBool::new(false);
-    let discovery = job::discover(
+    let resolved = job::resolve(
         &source,
-        vec![HostRepositories {
+        &HostRepositories {
             place: place(&b, "b"),
             repositories: Some(vec![Repository {
                 key: key(&repo_b),
@@ -303,12 +303,11 @@ fn teleport_between_two_daemons() {
                 workspace_id: main_b.clone(),
             }]),
             retired: Vec::new(),
-        }],
+        },
         &cancelled,
     )
     .unwrap();
-    assert_eq!(discovery.candidates.len(), 1);
-    let candidate = &discovery.candidates[0];
+    let candidate = &resolved;
     assert!(matches!(
         candidate.destination,
         Destination::Open {
@@ -394,9 +393,9 @@ fn teleport_between_two_daemons() {
         branch: Some("feat".into()),
         tab_labels: HashMap::new(),
     };
-    let discovery = job::discover(
+    let resolved = job::resolve(
         &back,
-        vec![HostRepositories {
+        &HostRepositories {
             place: place(&a, "a"),
             repositories: Some(vec![Repository {
                 key: key(&repo_a),
@@ -408,11 +407,11 @@ fn teleport_between_two_daemons() {
                 branch: "feat".into(),
                 workspace_id: source_ws.clone(),
             }],
-        }],
+        },
         &cancelled,
     )
     .unwrap();
-    let home = &discovery.candidates[0];
+    let home = &resolved;
     assert!(matches!(home.destination, Destination::Reclaim { .. }));
     let review = job::review(&back, home, &cancelled).unwrap();
     let returned = job::run(&back, home, &review, |_| {}, &cancelled).unwrap();
@@ -504,9 +503,9 @@ fn teleport_copies_the_repository_where_it_is_missing() {
     };
     let cancelled = AtomicBool::new(false);
     // No GUI snapshot: the host is read through its CLI, as when disconnected.
-    let discovery = job::discover(
+    let resolved = job::resolve(
         &source,
-        vec![HostRepositories {
+        &HostRepositories {
             place: Place {
                 endpoint_id: "d".into(),
                 label: "d".into(),
@@ -514,17 +513,12 @@ fn teleport_copies_the_repository_where_it_is_missing() {
             },
             repositories: None,
             retired: Vec::new(),
-        }],
+        },
         &cancelled,
     )
     .unwrap();
-    assert!(
-        discovery.unreachable.is_empty(),
-        "{:?}",
-        discovery.unreachable
-    );
     let place = b.dir.join("code/app");
-    let candidate = &discovery.candidates[0];
+    let candidate = &resolved;
     assert_eq!(
         candidate.destination,
         Destination::Arrive(super::provision::Arrival::Clone {

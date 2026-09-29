@@ -278,56 +278,47 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_destination_picker_renders_and_enter_starts_the_review(cx: &mut gpui::TestAppContext) {
-        use crate::teleport::{Candidate, Destination, MatchReason, host_for};
+    fn hosts_are_listed_at_once_with_none_chosen_for_the_user(cx: &mut gpui::TestAppContext) {
+        use super::super::WorkspaceMenuAction;
         let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                let place = |id: &str, target: herdr_client::ConnectTarget| Place {
-                    endpoint_id: id.into(),
-                    label: format!("host {id}"),
-                    host: host_for(&target).unwrap(),
-                };
-                let source = Source {
-                    place: place("local", herdr_client::ConnectTarget::Local),
-                    workspace_id: "w4".into(),
-                    custom_label: None,
-                    repo_key: REPO_KEY.into(),
-                    repo_label: "agent-launcher".into(),
-                    branch: None,
-                    tab_labels: HashMap::new(),
-                };
-                let candidate = Candidate {
-                    // An unroutable target: the review worker fails fast.
-                    place: place(
-                        "box",
-                        herdr_client::ConnectTarget::Ssh {
-                            target: "nobody@invalid.invalid".into(),
-                            session: "default".into(),
-                        },
-                    ),
-                    destination: Destination::Open {
-                        repository: Repository {
-                            key: "/r/.git".into(),
-                            label: "agent-launcher".into(),
-                            workspace_id: "w9".into(),
-                        },
-                        reason: MatchReason::Name,
+                view.live.status = crate::state::ConnectionStatus::Connected;
+                view.endpoints[0].connection.target = herdr_client::ConnectTarget::Local;
+                let snapshot = std::sync::Arc::make_mut(view.live.snapshot.as_mut().unwrap());
+                snapshot.workspaces = crate::sidebar::layout_tests::snapshot(7).workspaces;
+                // Not connected, and unroutable: listing it must not wait on it.
+                view.endpoints.push(crate::endpoint::Endpoint::new(
+                    "ssh:box".into(),
+                    "Box".into(),
+                    herdr_client::ConnectTarget::Ssh {
+                        target: "nobody@invalid.invalid".into(),
+                        session: "default".into(),
                     },
-                    origin: None,
-                };
-                view.menu.page = Some(Page::Teleport);
-                view.teleport = Some(Teleport::choosing(source, vec![candidate]));
-                window.focus(&view.menu.focus, cx);
-                cx.notify();
+                    true,
+                ));
+                view.open_workspace_menu("w4", Default::default(), window, cx);
+                view.activate_workspace_menu(WorkspaceMenuAction::Teleport, window, cx);
+                assert_eq!(view.menu.page, Some(Page::Teleport));
             })
         });
+        // The first frame already lists the host.
         cx.run_until_parked();
         let panel = cx.debug_bounds("menu-panel").unwrap();
-        let row = cx.debug_bounds("teleport-candidate-0").unwrap();
+        let row = cx.debug_bounds("teleport-host-0").unwrap();
+        let dot = cx.debug_bounds("teleport-host-dot-0").unwrap();
+        assert!(
+            row.contains(&dot.center()),
+            "the online dot sits in its row"
+        );
         let submit = cx.debug_bounds("teleport-submit").unwrap();
         assert!(panel.contains(&row.origin) && panel.contains(&submit.origin));
+        // No host is chosen for the user: Enter does nothing until one is.
         cx.simulate_keystrokes("enter");
+        cx.update(|_, cx| {
+            assert!(!view.read(cx).teleport.as_ref().unwrap().reviewing());
+        });
+        cx.simulate_keystrokes("down enter");
         cx.update(|_, cx| {
             assert!(view.read(cx).teleport.as_ref().unwrap().reviewing());
         });

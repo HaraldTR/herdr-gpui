@@ -8,7 +8,7 @@
 use super::{
     error::{Error, Step},
     job::{
-        self, Action, Candidate, Destination, Discovery, GitHubAccess, HostRepositories, Outcome,
+        self, Action, Candidate, Destination, GitHubAccess, HostRepositories, Outcome, Place,
         Review, Source,
     },
     launch::{Work, command_line},
@@ -28,16 +28,14 @@ use std::{
 };
 
 enum Event {
-    Discovered(Result<Discovery, Error>),
-    Reviewed(Result<Review, Error>),
+    Reviewed(Result<Box<(Candidate, Review)>, Error>),
     Step(Step),
     Moved(Result<Outcome, Error>),
 }
 
 enum Stage {
-    Discovering,
-    Choosing(Discovery),
-    Reviewing(Candidate),
+    Choosing,
+    Reviewing(Place),
     Ready(Candidate, Box<Review>),
     Moving(Candidate, Option<Step>),
     Failed(String),
@@ -69,10 +67,12 @@ impl Follow {
 pub(crate) struct Teleport {
     source: Source,
     label: String,
-    /// Other connected hosts searched; none means nowhere to go yet.
-    hosts: usize,
+    /// Every host the worktree could go to, listed without probing any.
+    hosts: Vec<HostRepositories>,
     stage: Stage,
-    selected: usize,
+    /// The highlighted host. Nothing is chosen for the user: a move to the
+    /// wrong machine is costly, so the list starts without a selection.
+    selected: Option<usize>,
     cancelled: Arc<AtomicBool>,
     events: mpsc::Receiver<Event>,
 }
@@ -103,40 +103,16 @@ fn spawn(
 }
 
 impl Teleport {
+    /// Opens on the host list at once: which repository a host has, if any,
+    /// is only looked up for the host chosen.
     pub(crate) fn start(source: Source, label: String, hosts: Vec<HostRepositories>) -> Self {
-        let hosts_searched = hosts.len();
-        let job_source = source.clone();
-        let (cancelled, events) = spawn(move |sender, cancelled| {
-            let _ = sender.send(Event::Discovered(job::discover(
-                &job_source,
-                hosts,
-                cancelled,
-            )));
-        });
-        Self {
-            source,
-            label,
-            hosts: hosts_searched,
-            stage: Stage::Discovering,
-            selected: 0,
-            cancelled,
-            events,
-        }
-    }
-
-    /// A dialog already showing `candidates`, with no worker behind it.
-    #[cfg(test)]
-    pub(crate) fn choosing(source: Source, candidates: Vec<Candidate>) -> Self {
         let (_, events) = mpsc::channel();
         Self {
             source,
-            label: "feature".into(),
-            hosts: 1,
-            stage: Stage::Choosing(Discovery {
-                candidates,
-                unreachable: Vec::new(),
-            }),
-            selected: 0,
+            label,
+            hosts,
+            stage: Stage::Choosing,
+            selected: None,
             cancelled: Arc::new(AtomicBool::new(false)),
             events,
         }
@@ -159,18 +135,26 @@ impl Teleport {
     }
 
     fn review(&mut self) {
-        let Stage::Choosing(discovery) = &self.stage else {
+        let Stage::Choosing = &self.stage else {
             return;
         };
-        let Some(candidate) = discovery.candidates.get(self.selected).cloned() else {
+        let Some(host) = self
+            .selected
+            .and_then(|index| self.hosts.get(index))
+            .cloned()
+        else {
             return;
         };
         let source = self.source.clone();
-        let target = candidate.clone();
+        let place = host.place.clone();
         self.restart(move |sender, cancelled| {
-            let _ = sender.send(Event::Reviewed(job::review(&source, &target, cancelled)));
+            let reviewed = job::resolve(&source, &host, cancelled).and_then(|candidate| {
+                let review = job::review(&source, &candidate, cancelled)?;
+                Ok(Box::new((candidate, review)))
+            });
+            let _ = sender.send(Event::Reviewed(reviewed));
         });
-        self.stage = Stage::Reviewing(candidate);
+        self.stage = Stage::Reviewing(place);
     }
 
     fn teleport(&mut self) {
@@ -201,13 +185,10 @@ impl Teleport {
         while let Ok(event) = self.events.try_recv() {
             changed = true;
             match event {
-                Event::Discovered(Ok(discovery)) => {
-                    self.selected = 0;
-                    self.stage = Stage::Choosing(discovery);
-                }
-                Event::Reviewed(Ok(review)) => {
-                    if let Stage::Reviewing(candidate) = &self.stage {
-                        self.stage = Stage::Ready(candidate.clone(), Box::new(review));
+                Event::Reviewed(Ok(reviewed)) => {
+                    let (candidate, review) = *reviewed;
+                    if let Stage::Reviewing(_) = &self.stage {
+                        self.stage = Stage::Ready(candidate, Box::new(review));
                     }
                 }
                 Event::Step(step) => {
@@ -222,7 +203,7 @@ impl Teleport {
                     }
                     return (true, Some(result));
                 }
-                Event::Discovered(Err(error)) | Event::Reviewed(Err(error)) => {
+                Event::Reviewed(Err(error)) => {
                     self.stage = Stage::Failed(error.to_string());
                 }
             }
@@ -232,7 +213,8 @@ impl Teleport {
 
     fn destination_label(&self) -> Option<&str> {
         match &self.stage {
-            Stage::Reviewing(c) | Stage::Ready(c, _) | Stage::Moving(c, _) => Some(&c.place.label),
+            Stage::Reviewing(place) => Some(&place.label),
+            Stage::Ready(c, _) | Stage::Moving(c, _) => Some(&c.place.label),
             _ => None,
         }
     }
@@ -267,16 +249,6 @@ fn destination_text(candidate: &Candidate) -> (String, String) {
             },
         ),
     }
-}
-
-fn name_only(candidate: &Candidate) -> bool {
-    matches!(
-        candidate.destination,
-        Destination::Open {
-            reason: MatchReason::Name,
-            ..
-        }
-    )
 }
 
 fn describe(work: &Work, action: &Action) -> String {
@@ -416,15 +388,17 @@ impl HerdrWindow {
         match event.keystroke.key.as_str() {
             "escape" => self.dismiss_menu(window, cx),
             "up" | "down" => {
-                if let Stage::Choosing(discovery) = &teleport.stage
-                    && !discovery.candidates.is_empty()
+                if let Stage::Choosing = &teleport.stage
+                    && !teleport.hosts.is_empty()
                 {
-                    let count = discovery.candidates.len();
-                    teleport.selected = if event.keystroke.key == "up" {
-                        (teleport.selected + count - 1) % count
-                    } else {
-                        (teleport.selected + 1) % count
-                    };
+                    let count = teleport.hosts.len();
+                    let up = event.keystroke.key == "up";
+                    teleport.selected = Some(match teleport.selected {
+                        None if up => count - 1,
+                        None => 0,
+                        Some(index) if up => (index + count - 1) % count,
+                        Some(index) => (index + 1) % count,
+                    });
                     cx.notify();
                 }
             }
@@ -438,7 +412,7 @@ impl HerdrWindow {
             return;
         };
         match teleport.stage {
-            Stage::Choosing(_) => teleport.review(),
+            Stage::Choosing => teleport.review(),
             Stage::Ready(..) => teleport.teleport(),
             Stage::Failed(_) => {
                 self.teleport = None;
@@ -461,74 +435,77 @@ impl HerdrWindow {
         let line = |text: String| div().min_w_0().child(text);
         let mut body = div().flex().flex_col().gap(px(8.)).px(px(16.)).py(px(12.));
         let (primary, armed) = match &teleport.stage {
-            Stage::Discovering => {
-                body = body.child(
-                    line("Looking for this repository on your other hosts...".into())
-                        .text_color(muted),
-                );
-                ("Review", false)
-            }
-            Stage::Choosing(discovery) => {
-                if teleport.hosts == 0 {
+            Stage::Choosing => {
+                if teleport.hosts.is_empty() {
                     body = body.child(line(
-                        "No other host is connected. Connect one from Devices, then try again."
-                            .into(),
-                    ));
-                } else if discovery.candidates.is_empty() {
-                    body = body.child(line(
-                        "No other connected host has this repository open. Open its main checkout there first.".into(),
+                        "No other host is saved. Add one from Devices, then try again.".into(),
                     ));
                 }
-                for (index, candidate) in discovery.candidates.iter().enumerate() {
-                    let (title, detail) = destination_text(candidate);
-                    let selected = index == teleport.selected;
+                for (index, host) in teleport.hosts.iter().enumerate() {
+                    let selected = teleport.selected == Some(index);
+                    // A connected host's snapshot came with the list; the
+                    // others are reached over SSH once chosen.
+                    let connected = host.repositories.is_some();
+                    let detail = if connected {
+                        "Connected"
+                    } else {
+                        "Not connected; reached over SSH"
+                    };
                     body = body.child(
                         div()
-                            .id(("teleport-candidate", index))
-                            .debug_selector(move || format!("teleport-candidate-{index}"))
+                            .id(("teleport-host", index))
+                            .debug_selector(move || format!("teleport-host-{index}"))
                             .px(px(10.))
                             .py(px(6.))
                             .rounded(px(crate::config::corners::CONTROL))
                             .cursor_pointer()
                             .when(selected, |row| row.bg(rgb(theme.active)))
                             .hover(|row| row.bg(rgb(theme.active)))
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
                             .child(
                                 div()
-                                    .flex()
-                                    .gap(px(8.))
+                                    .flex_1()
                                     .min_w_0()
                                     .child(
                                         div()
+                                            .truncate()
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .flex_none()
-                                            .child(candidate.place.label.clone()),
+                                            .child(host.place.label.clone()),
                                     )
-                                    .child(div().truncate().child(title)),
+                                    .child(div().text_color(muted).child(detail)),
                             )
+                            // The same online dot as the Devices list and the
+                            // sidebar's host headers.
                             .child(
                                 div()
-                                    .text_color(if name_only(candidate) { danger } else { muted })
-                                    .child(detail),
+                                    .debug_selector(move || format!("teleport-host-dot-{index}"))
+                                    .size(px(7.))
+                                    .flex_none()
+                                    .rounded_full()
+                                    .bg(rgb(if connected {
+                                        crate::menu::ONLINE
+                                    } else {
+                                        theme.muted
+                                    })),
                             )
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 if let Some(teleport) = &mut this.teleport {
-                                    teleport.selected = index;
+                                    teleport.selected = Some(index);
                                 }
                                 this.submit_teleport(window, cx);
                             })),
                     );
                 }
-                for (host, error) in &discovery.unreachable {
-                    body = body.child(line(format!("{host}: {error}")).text_color(danger));
-                }
-                ("Review", !discovery.candidates.is_empty())
+                ("Review", teleport.selected.is_some())
             }
-            Stage::Reviewing(candidate) => {
+            Stage::Reviewing(place) => {
                 body = body.child(
                     line(format!(
                         "Checking {} and the running programs...",
-                        candidate.place.label
+                        place.label
                     ))
                     .text_color(muted),
                 );

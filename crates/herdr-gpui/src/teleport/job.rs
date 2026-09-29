@@ -111,13 +111,6 @@ impl Candidate {
     }
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct Discovery {
-    pub(crate) candidates: Vec<Candidate>,
-    /// Hosts that could not be read, with the reason.
-    pub(crate) unreachable: Vec<(String, Error)>,
-}
-
 /// One repository per Git common directory, reached through its main
 /// checkout's workspace when that is open.
 pub(crate) fn repositories_of(snapshot: &HostSnapshot) -> Vec<Repository> {
@@ -141,13 +134,14 @@ pub(crate) fn repositories_of(snapshot: &HostSnapshot) -> Vec<Repository> {
     found
 }
 
-/// Find where the worktree can go on every other host: a matching open
-/// repository, else an existing checkout to open or a place to clone to.
-pub(crate) fn discover(
+/// Where the worktree goes on `host`: the checkout it once left, a matching
+/// open repository, an existing checkout to open, or a place to clone to.
+/// Only the chosen host is looked at, so picking a host is instant.
+pub(crate) fn resolve(
     source: &Source,
-    hosts: Vec<HostRepositories>,
+    host: &HostRepositories,
     cancelled: &AtomicBool,
-) -> Result<Discovery> {
+) -> Result<Candidate> {
     let own = git::remotes(
         &source.place.host,
         std::slice::from_ref(&source.repo_key),
@@ -163,28 +157,17 @@ pub(crate) fn discover(
         &source.repo_label,
         cancelled,
     )?;
-    let mut discovery = Discovery::default();
-    for host in hosts {
-        match discover_host(
-            &host,
-            &identity,
-            &origin,
-            source.branch.as_deref(),
-            cancelled,
-        ) {
-            Ok(candidates) => discovery.candidates.extend(candidates),
-            Err(Error::Cancelled) => return Err(Error::Cancelled),
-            Err(error) => discovery
-                .unreachable
-                .push((host.place.label.clone(), error)),
-        }
-    }
-    discovery.candidates.sort_by(|a, b| {
-        a.rank()
-            .cmp(&b.rank())
-            .then_with(|| a.place.label.cmp(&b.place.label))
-    });
-    Ok(discovery)
+    let candidates = discover_host(
+        host,
+        &identity,
+        &origin,
+        source.branch.as_deref(),
+        cancelled,
+    )?;
+    candidates
+        .into_iter()
+        .min_by_key(Candidate::rank)
+        .ok_or(Error::WorkspaceGone)
 }
 
 fn discover_host(
@@ -219,6 +202,11 @@ fn discover_host(
                 remotes: remotes.get(&repository.key).cloned().unwrap_or_default(),
             };
             let reason = identity.matches(&theirs)?;
+            // Chosen without asking, a name alone is not enough when there
+            // are remotes to compare: that is likely another project.
+            if reason == MatchReason::Name && !identity.remotes.is_empty() {
+                return None;
+            }
             Some(candidate(Destination::Open { repository, reason }))
         })
         .collect();

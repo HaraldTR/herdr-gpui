@@ -627,16 +627,17 @@ tabs and splits, the programs running in them, and agent sessions. It is offered
 on Linux and macOS clients when the worktree's host is the local session or a
 saved SSH host; custom socket endpoints are not scripted.
 
-1. **Choose a destination.** Every other enabled host is listed, connected or
-   not. Where the repository is open, it is matched by normalized Git remote
-   (`origin` first, then any remote), then by repository name; a name-only match
-   is flagged, because the remotes differ. Where it is not open, Teleport sets
-   it up: a checkout of the same repository at the same place under the home
-   directory (`~/code/app`) is opened as a space; otherwise the repository is
-   cloned there from `origin` without prompting, or, when that host cannot
-   reach `origin`, copied from this machine with its branches and tags and
-   `origin` restored. A different repository already at that place is left
-   alone and the copy goes to `<place>-teleport`.
+1. **Choose a host.** Every other enabled host is listed at once, connected or
+   not; nothing is probed until one is chosen. The review then finds where the
+   worktree goes there: the checkout it once left (see below), else the
+   repository if it is open, matched by normalized Git remote (`origin` first,
+   then any remote) or, only when this repository has no remotes, by name.
+   Otherwise Teleport sets it up: a checkout of the same repository at the same
+   place under the home directory (`~/code/app`) is opened as a space; failing
+   that, the repository is cloned there from `origin` without prompting, or,
+   when that host cannot reach `origin`, copied from this machine with its
+   branches and tags and `origin` restored. A different repository already at
+   that place is left alone and the copy goes to `<place>-teleport`.
 2. **Review.** The dialog lists the branch, unpushed commits, changed and
    untracked files, and what each pane becomes. The destination's branch must be
    absent or an ancestor of this one, and must not be checked out there.
