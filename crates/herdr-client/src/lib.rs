@@ -22,6 +22,8 @@ mod ssh;
 mod transport;
 mod upload;
 
+#[cfg(all(test, unix))]
+mod test_executable;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;

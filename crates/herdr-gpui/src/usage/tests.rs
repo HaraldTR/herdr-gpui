@@ -330,7 +330,6 @@ struct FakeHost {
 #[cfg(unix)]
 impl FakeHost {
     fn new() -> Self {
-        use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
         let bin = home.join(".local/bin");
@@ -344,15 +343,15 @@ impl FakeHost {
         let log = root.path().join("log");
         // Records its arguments and the -K config it read from fd 3, then
         // answers a fixed body; `-w` output is emulated.
-        std::fs::write(
+        crate::test_executable::write(
             bin.join("curl"),
             format!(
                 "#!/bin/sh\nprintf 'args: %s\\n' \"$*\" >> '{log}'\ncat <&3 >> '{log}'\nprintf '{{\"token\":\"minted-secret\",\"ok\":true}}'\ncase \"$*\" in *herdr-status*) printf '\\n@@herdr-status 200';; esac\n",
                 log = log.display()
             ),
+            0o755,
         )
         .unwrap();
-        std::fs::set_permissions(bin.join("curl"), std::fs::Permissions::from_mode(0o755)).unwrap();
         Self { root }
     }
 

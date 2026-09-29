@@ -603,12 +603,11 @@ mod tests {
     /// removals, and fails the add of `host` the way a needed approval does.
     #[cfg(unix)]
     fn fake_cli(name: &str) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
-        use std::os::unix::fs::PermissionsExt;
         let root = std::env::temp_dir().join(format!("herdr-device-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&root)?;
         let binary = root.join("herdr");
         let log = root.join("log");
-        std::fs::write(
+        crate::test_executable::write(
             &binary,
             format!(
                 "#!/bin/sh\ncase \"$1 $2\" in\n\
@@ -619,8 +618,8 @@ mod tests {
                 log = log.display(),
                 id = "a".repeat(32),
             ),
+            0o700,
         )?;
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))?;
         Ok((binary, log))
     }
 
@@ -720,19 +719,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rename_passes_the_label_as_one_value_even_when_it_looks_like_a_flag() -> Result<()> {
-        use std::os::unix::fs::PermissionsExt;
         let root = std::env::temp_dir().join(format!("herdr-device-rename-{}", std::process::id()));
         std::fs::create_dir_all(&root)?;
         let binary = root.join("herdr");
         let log = root.join("log");
-        std::fs::write(
+        crate::test_executable::write(
             &binary,
             format!(
                 "#!/bin/sh\nprintf '%s|' \"$@\" > '{}'\n[ \"$3\" = missing ] && {{ echo 'machine profile missing was not found' >&2; exit 1; }}\nexit 0\n",
                 log.display()
             ),
+            0o700,
         )?;
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))?;
         let id = "0123456789abcdef0123456789abcdef";
         rename_with(binary.as_os_str(), id, "--work = box")?;
         assert_eq!(

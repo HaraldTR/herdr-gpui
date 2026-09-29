@@ -69,6 +69,8 @@ mod worktree_banner;
 mod performance;
 #[cfg(feature = "integration-test")]
 mod smoke;
+#[cfg(all(test, unix))]
+mod test_executable;
 
 pub use error::{Error, Result};
 
