@@ -72,6 +72,8 @@ position = "bottom-right"
 # primary first. "" or [] unbinds it. Assigning a keystroke here takes it away
 # from its default command. Modifiers: cmd (super on Linux), ctrl, alt, shift,
 # fn; keystrokes need at least one of cmd, ctrl, alt, or fn.
+# Herdr's own [keys] in config.toml (prefix chords included) add to these
+# defaults; a command named here keeps only the keystrokes listed here.
 # [keybindings]
 # new_tab = "cmd-t"
 # new_workspace = "cmd-shift-n"

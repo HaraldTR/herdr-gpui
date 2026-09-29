@@ -10,18 +10,24 @@ use crate::{
 use gpui::{prelude::*, *};
 
 impl HerdrWindow {
+    /// Reloads when the GUI overrides change, or the daemon's config whose
+    /// `[keys]` and clipboard toast the GUI also honors.
     pub(crate) fn watch_gui_config(&mut self, cx: &mut Context<Self>) {
         let Ok(path) = Config::local_path() else {
             return;
         };
+        let daemon = crate::config::daemon_config_path(|key| std::env::var_os(key));
         let executor = cx.background_executor().clone();
         self.config_watch = Some(cx.spawn(async move |this, cx| {
             let mut watch = crate::config::watch::Watch::default();
             let mut pending = None;
             loop {
-                let path = path.clone();
+                let (path, daemon) = (path.clone(), daemon.clone());
                 let sample = executor
-                    .spawn(async move { crate::config::watch::fingerprint(&path) })
+                    .spawn(async move {
+                        use crate::config::watch::fingerprint;
+                        [fingerprint(&path), fingerprint(&daemon)]
+                    })
                     .await;
                 let updated = this.update(cx, |this, cx| {
                     if let Some((sample, revision)) = pending
@@ -217,13 +223,7 @@ impl HerdrWindow {
             ("APPLICATION", vec![(vec!["cmd-v"], "Paste into terminal")]),
         ];
         for info in COMMANDS {
-            let keys: Vec<&str> = self
-                .config
-                .keybindings
-                .shortcuts(info.command)
-                .iter()
-                .map(String::as_str)
-                .collect();
+            let keys: Vec<&str> = self.config.keybindings.shortcuts(info.command).collect();
             if keys.is_empty() {
                 continue;
             }
@@ -350,7 +350,7 @@ impl HerdrWindow {
             div()
                 .py(px(14.))
                 .text_color(rgb(theme.muted))
-                .child("Native GUI shortcuts only. Terminal applications and daemon/TUI keybindings keep their own shortcuts."),
+                .child("Includes the prefix chords from Herdr's [keys] in config.toml. Daemon actions with no GUI command, and terminal applications, keep their own shortcuts."),
         );
         div()
             .flex()
@@ -443,17 +443,24 @@ impl HerdrWindow {
     }
 }
 
-/// The keycaps of one keystroke, capitalized for display. `cmd--` splits into
-/// `cmd` and a `-` key rather than an empty cap.
-fn keycaps(keystroke: &str) -> impl Iterator<Item = String> + '_ {
-    let (modifiers, key) = match keystroke.strip_suffix("--") {
-        Some(modifiers) => (modifiers, "-"),
-        None => keystroke.rsplit_once('-').unwrap_or(("", keystroke)),
-    };
-    modifiers
-        .split('-')
-        .filter(|modifier| !modifier.is_empty())
-        .chain(std::iter::once(key))
+/// The keycaps of a shortcut, capitalized for display, a prefix chord's
+/// keystrokes in turn. `cmd--` splits into `cmd` and a `-` key rather than an
+/// empty cap, as does a chord's bare `-`.
+fn keycaps(shortcut: &str) -> impl Iterator<Item = String> + '_ {
+    shortcut
+        .split(' ')
+        .flat_map(|keystroke| {
+            let (modifiers, key) = match keystroke.strip_suffix('-') {
+                Some(modifiers) if modifiers.is_empty() || modifiers.ends_with('-') => {
+                    (modifiers, "-")
+                }
+                _ => keystroke.rsplit_once('-').unwrap_or(("", keystroke)),
+            };
+            modifiers
+                .split('-')
+                .filter(|modifier| !modifier.is_empty())
+                .chain(std::iter::once(key))
+        })
         .map(|key| {
             let mut chars = key.chars();
             chars
@@ -475,7 +482,7 @@ fn shortcut_matches(query: &str, keys: &str, description: &str, section: &str) -
         // A key combination should match keycaps, not letters in an action's name.
         return query
             .split_whitespace()
-            .all(|token| keys.split('-').any(|key| key == token));
+            .all(|token| keys.split(['-', ' ']).any(|key| key == token));
     }
     let text = format!("{keys} {description} {section}")
         .to_lowercase()
@@ -792,6 +799,9 @@ mod tests {
         assert_eq!(caps("cmd--"), ["Cmd", "-"]);
         assert_eq!(caps("cmd-+"), ["Cmd", "+"]);
         assert_eq!(caps("f5"), ["F5"]);
+        assert_eq!(caps("ctrl-b c"), ["Ctrl", "B", "C"]);
+        assert_eq!(caps("ctrl-b -"), ["Ctrl", "B", "-"]);
+        assert_eq!(caps("ctrl-b shift-tab"), ["Ctrl", "B", "Shift", "Tab"]);
     }
 
     /// A saved `[keybindings]` change must reach the live keymap, the palette,
@@ -832,7 +842,10 @@ mod tests {
                     .map(|(name, binding)| (name.to_owned(), binding))
                     .collect();
                     let config = Config {
-                        keybindings: Keymap::with_overrides(&overrides)?,
+                        keybindings: Keymap::with_overrides(
+                            &overrides,
+                            &crate::keymap::DaemonKeys::default(),
+                        )?,
                         ..Config::default()
                     };
                     Ok((config, Default::default()))
@@ -853,7 +866,8 @@ mod tests {
         });
         view.read_with(cx, |view, _| {
             assert_eq!(view.config.keybindings.primary(Command::Workspace), "cmd-t");
-            assert_eq!(view.config.keybindings.primary(Command::Tab), "");
+            // Only Herdr's default chord is left once cmd-t moves away.
+            assert_eq!(view.config.keybindings.primary(Command::Tab), "ctrl-b c");
         });
 
         view.update(cx, |view, cx| {

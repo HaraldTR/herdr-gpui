@@ -5,7 +5,7 @@
 use crate::{
     Error, Result,
     error::ThemeParseError,
-    keymap::{Binding, Keymap},
+    keymap::{Binding, DaemonKeys, Keymap},
 };
 pub(crate) mod watch;
 use gpui::{Font, FontFallbacks};
@@ -702,25 +702,37 @@ pub(crate) fn daemon_config_path(get: impl Fn(&str) -> Option<std::ffi::OsString
     root.join("herdr/config.toml")
 }
 
+/// What the GUI honors from the daemon's own config.
+#[derive(Clone, Debug, Default)]
+struct Daemon {
+    clipboard_toast: ClipboardToast,
+    keys: DaemonKeys,
+}
+
 /// A config file the GUI does not own can hold anything, including settings
 /// from a newer herdr, so only the keys read here matter and anything
 /// unreadable, oversized, malformed, or unrecognized leaves the defaults alone.
-fn daemon_clipboard_toast(path: &Path) -> ClipboardToast {
-    let mut resolved = ClipboardToast::default();
+fn daemon_settings(path: &Path) -> Daemon {
     if fs::metadata(path).is_ok_and(|data| data.len() > MAX_DAEMON_CONFIG_BYTES) {
-        return resolved;
+        return Daemon::default();
     }
-    let Some(clipboard) = fs::read_to_string(path)
+    let Some(table) = fs::read_to_string(path)
         .ok()
         .and_then(|text| text.parse::<toml::Table>().ok())
-        .and_then(|table| {
-            table
-                .get("ui")?
-                .get("toast")?
-                .get("clipboard")?
-                .as_table()
-                .cloned()
-        })
+    else {
+        return Daemon::default();
+    };
+    Daemon {
+        clipboard_toast: daemon_clipboard_toast(&table),
+        keys: DaemonKeys::from_table(table.get("keys").and_then(toml::Value::as_table)),
+    }
+}
+
+fn daemon_clipboard_toast(table: &toml::Table) -> ClipboardToast {
+    let mut resolved = ClipboardToast::default();
+    let Some(clipboard) = table
+        .get("ui")
+        .and_then(|ui| ui.get("toast")?.get("clipboard")?.as_table())
     else {
         return resolved;
     };
@@ -816,21 +828,21 @@ impl Config {
             },
             Err(error) => return Err(Error::from(error).at_path(&local)),
         };
-        Self::parse_layers([DEFAULT_CONFIG, &text], daemon_clipboard_toast(daemon))
+        Self::parse_layers([DEFAULT_CONFIG, &text], &daemon_settings(daemon))
             .map_err(|error| error.at_path(&source))
     }
 
     /// `daemon` is the herdr config whose settings this GUI also honors. It is
     /// read for those keys alone and never written; a missing one is normal.
     fn load_path(path: &Path, daemon: &Path) -> Result<Self> {
-        let base = daemon_clipboard_toast(daemon);
+        let base = daemon_settings(daemon);
         let (_lock, local) = Self::prepare_files(path)?;
         let text =
             fs::read_to_string(&local).map_err(|error| Error::from(error).at_path(&local))?;
         // Validate the override independently so bad types/unknown keys cannot
         // disappear inside the merge. Empty arrays explicitly replace defaults.
-        Self::parse_over(&text, base).map_err(|error| error.at_path(&local))?;
-        Self::parse_layers([DEFAULT_CONFIG, &text], base).map_err(|error| error.at_path(&local))
+        Self::parse_over(&text, &base).map_err(|error| error.at_path(&local))?;
+        Self::parse_layers([DEFAULT_CONFIG, &text], &base).map_err(|error| error.at_path(&local))
     }
 
     /// Serialize migration, defaults refresh, and theme saves across GUI windows
@@ -863,8 +875,7 @@ impl Config {
         if let Some(text) = legacy {
             // Never replace an old user's file until its exact contents are
             // safely stored in the local file. A conflict needs human resolution.
-            Self::parse_over(text, ClipboardToast::default())
-                .map_err(|error| error.at_path(path))?;
+            Self::parse_over(text, &Daemon::default()).map_err(|error| error.at_path(path))?;
         }
         match fs::read_to_string(&local) {
             Ok(text) if legacy.is_some_and(|legacy| legacy != text) => {
@@ -912,19 +923,16 @@ impl Config {
     /// tests below read, since loading also consults the daemon's config.
     #[cfg(test)]
     fn parse(text: &str) -> Result<Self> {
-        Self::parse_over(text, ClipboardToast::default())
+        Self::parse_over(text, &Daemon::default())
     }
 
     /// `base` is what the daemon's own config asked for, which every key this
     /// file names overrides.
-    fn parse_over(text: &str, base: ClipboardToast) -> Result<Self> {
+    fn parse_over(text: &str, base: &Daemon) -> Result<Self> {
         Self::parse_layers([text], base)
     }
 
-    fn parse_layers<'a>(
-        texts: impl IntoIterator<Item = &'a str>,
-        base: ClipboardToast,
-    ) -> Result<Self> {
+    fn parse_layers<'a>(texts: impl IntoIterator<Item = &'a str>, base: &Daemon) -> Result<Self> {
         let mut builder = config_loader::Config::builder();
         for text in texts {
             builder = builder.add_source(config_loader::File::from_str(
@@ -942,14 +950,14 @@ impl Config {
         config.github = settings.github;
         config.features = settings.features;
         config.notifications = settings.notifications;
-        config.clipboard_toast = settings.clipboard_toast.resolve(base);
+        config.clipboard_toast = settings.clipboard_toast.resolve(base.clipboard_toast);
         if !settings.layout.sidebar_gap.is_finite()
             || !(0.0..=MAX_SIDEBAR_GAP).contains(&settings.layout.sidebar_gap)
         {
             return Err(Error::InvalidSidebarGap);
         }
         config.layout = settings.layout;
-        config.keybindings = Keymap::with_overrides(&settings.keybindings)?;
+        config.keybindings = Keymap::with_overrides(&settings.keybindings, &base.keys)?;
         if let Some(theme) = settings.theme {
             if theme.trim().is_empty() {
                 return Err(Error::EmptyTheme);
@@ -1974,7 +1982,7 @@ mod tests {
             assert_eq!(
                 face.size(&Config::parse_layers(
                     [DEFAULT_CONFIG, &known],
-                    ClipboardToast::default()
+                    &Daemon::default()
                 )?),
                 size
             );
@@ -2238,8 +2246,7 @@ mod tests {
         let text = fs::read_to_string(&path)?;
         assert!(text.contains("layout = \"orca\""), "{text}");
         assert!(text.contains("# New installs start"), "{text}");
-        let merged =
-            Config::parse_layers([DEFAULT_CONFIG, text.as_str()], ClipboardToast::default())?;
+        let merged = Config::parse_layers([DEFAULT_CONFIG, text.as_str()], &Daemon::default())?;
         assert_eq!(merged.layout.mode, LayoutMode::Orca);
         // A table gets its mode beside the gap, and keeps its comments.
         fs::write(
@@ -2405,16 +2412,14 @@ mod tests {
         let config = Config::parse(
             "[keybindings]\nnew_workspace = \"cmd-n\"\nnew_tab = [\"cmd-t\", \"ctrl-t\"]\nquit = \"\"",
         )?;
-        assert_eq!(config.keybindings.shortcuts(Command::Workspace), ["cmd-n"]);
-        assert_eq!(
-            config.keybindings.shortcuts(Command::Tab),
-            ["cmd-t", "ctrl-t"]
-        );
-        assert!(config.keybindings.shortcuts(Command::Quit).is_empty());
+        let shortcuts = |command| config.keybindings.shortcuts(command).collect::<Vec<_>>();
+        assert_eq!(shortcuts(Command::Workspace), ["cmd-n"]);
+        assert_eq!(shortcuts(Command::Tab), ["cmd-t", "ctrl-t"]);
+        assert!(shortcuts(Command::Quit).is_empty());
         // The managed defaults document the table without setting it.
         let layered = Config::parse_layers(
             [DEFAULT_CONFIG, "[keybindings]\nthemes = \"cmd-k\""],
-            ClipboardToast::default(),
+            &Daemon::default(),
         )?;
         assert_eq!(layered.keybindings.primary(Command::Themes), "cmd-k");
         assert_eq!(layered.keybindings.primary(Command::Tab), "cmd-t");
@@ -2427,6 +2432,59 @@ mod tests {
             Err(Error::KeystrokeWithoutModifier { .. })
         ));
         assert!(Config::parse("[keybindings]\nnew_tab = 5").is_err());
+        Ok(())
+    }
+
+    /// The daemon's `[keys]` reach the GUI keymap under the GUI's own
+    /// `[keybindings]`, and a daemon file the GUI cannot use falls back to
+    /// Herdr's defaults instead of failing the GUI config.
+    #[test]
+    fn daemon_keys_layer_under_gui_keybindings() -> anyhow::Result<()> {
+        use crate::Command;
+        let temp = TempDirectory::new()?;
+        let gui = temp.0.join("config-gpui.toml");
+        let local = gui.with_extension("local.toml");
+        let daemon = temp.0.join("config.toml");
+        let load = || Config::load_path(&gui, &daemon);
+        fs::write(&gui, "")?;
+        let shortcuts = |config: &Config, command| {
+            config
+                .keybindings
+                .shortcuts(command)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+
+        // No daemon file: Herdr's defaults.
+        assert_eq!(shortcuts(&load()?, Command::Tab), ["cmd-t", "ctrl-b c"]);
+
+        fs::write(
+            &daemon,
+            "[keys]\nprefix = \"ctrl+a\"\nsplit_vertical = [\"prefix+v\", \"prefix+\\\\\"]\nswitch_tab = [\"prefix+1..9\", \"alt+1..9\"]\n",
+        )?;
+        let config = load()?;
+        assert_eq!(
+            shortcuts(&config, Command::SplitRight),
+            ["cmd-d", "ctrl-a v", "ctrl-a \\"]
+        );
+        assert_eq!(
+            shortcuts(&config, Command::TabNumber(2)),
+            ["cmd-2", "ctrl-a 2", "alt-2"]
+        );
+        assert!(
+            config
+                .keybindings
+                .bindings()
+                .any(|binding| binding == (Command::TabNumber(2), "alt-2"))
+        );
+
+        // The GUI's own entry replaces the command's list, daemon chords too.
+        fs::write(&local, "[keybindings]\nsplit_right = \"cmd-d\"\n")?;
+        assert_eq!(shortcuts(&load()?, Command::SplitRight), ["cmd-d"]);
+
+        fs::write(&local, "")?;
+        fs::write(&daemon, "[keys\nprefix = ")?;
+        assert_eq!(shortcuts(&load()?, Command::Tab), ["cmd-t", "ctrl-b c"]);
         Ok(())
     }
 
@@ -2749,7 +2807,7 @@ mod tests {
                 "[terminal]\nfallback = ['first', 'second']",
                 "[terminal]\nfallback = []",
             ],
-            ClipboardToast::default(),
+            &Daemon::default(),
         )?;
         assert_eq!(merged.terminal.fallbacks, Some(vec![]));
         Ok(())
