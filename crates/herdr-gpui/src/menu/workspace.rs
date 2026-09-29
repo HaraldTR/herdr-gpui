@@ -284,6 +284,9 @@ impl HerdrWindow {
                 "Delete worktree checkout",
             ));
         }
+        if self.can_teleport() {
+            items.push((WorkspaceMenuAction::Teleport, "Teleport..."));
+        }
         // Only a workspace that heads a group of checkouts can fold anything.
         if let Some(key) = target.group_key() {
             items.push(if self.collapsed_repos_for_selection().contains(key) {
@@ -419,6 +422,7 @@ impl HerdrWindow {
                 self.toggle_selected_group(cx)
             }
             WorkspaceMenuAction::PullRequest => self.open_workspace_pr(cx),
+            WorkspaceMenuAction::Teleport => self.open_teleport(window, cx),
         }
     }
 

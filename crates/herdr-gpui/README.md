@@ -510,6 +510,62 @@ bridge files, they are not owned or deleted by Herdr on disconnect. Network loss
 can prevent cleanup, and kernel-blocked local filesystem operations cannot be
 forcibly interrupted. A copy stalls out after 30 seconds without progress.
 
+## Teleport
+
+Right-click a linked worktree and choose Teleport... to move it to another
+connected host: its branch and commits, staged, unstaged and untracked changes,
+tabs and splits, the programs running in them, and agent sessions. It is offered
+on Linux and macOS clients when the worktree's host and at least one other
+connected host are the local session or a saved SSH host; custom socket
+endpoints are not scripted.
+
+1. **Choose a destination.** Every other connected host's open repositories are
+   matched by normalized Git remote (`origin` first, then any remote), then by
+   repository name. A name-only match is flagged, because the remotes differ.
+2. **Review.** The dialog lists the branch, unpushed commits, changed and
+   untracked files, and what each pane becomes. The destination's branch must be
+   absent or an ancestor of this one, and must not be checked out there.
+3. **Teleport.** Closing the dialog does not stop a move in progress; its result
+   arrives as a flash, and success switches to the new workspace.
+
+Commits travel as a Git bundle holding only what the destination lacks. The
+uncommitted work travels as two temporary commits, built through a temporary
+index so the source checkout, index and branch are not modified. The
+destination's `herdr worktree create` checks the branch out under the same name,
+then the staged index and working tree are restored exactly, binary files
+included. Ignored files such as `.env` and build output stay behind, and so do
+submodule contents.
+
+Tabs, split directions and ratios, and custom tab and workspace labels are
+rebuilt. Each pane starts in the same directory relative to the checkout.
+Running commands start again with their arguments, with paths under the
+checkout moved to the new checkout. Environment variables, shell history,
+background jobs and unsaved editor buffers do not carry over.
+
+Agent sessions move in each agent's own format, so the full history resumes:
+
+| Agent | Moved as | Resumed with |
+| --- | --- | --- |
+| Claude Code | transcript into the new cwd's `~/.claude/projects` directory | `claude --resume <id>` |
+| Codex | rollout under `~/.codex/sessions` | `codex resume <id>` |
+| opencode | `opencode export`, then `opencode import` | `opencode --session <id>` |
+| pi, omp | session file into the new cwd's session directory | `pi --session <file>` |
+
+The checkout path is rewritten inside each moved session. Model and permission
+flags from the original command line are kept. Initial prompts are dropped. An
+agent the destination lacks, or one with no reported session, is asked first to
+write a handoff note to `.herdr/teleport/handoff-N.md`. The note travels with the
+changes, even where `.herdr` is ignored. The same agent, or else the first
+installed of Claude Code, Codex, opencode and pi, then starts with that note.
+Anything nothing can continue is listed as skipped.
+
+The source workspace closes only after the destination worktree, changes and
+tabs exist. Its checkout stays on disk and can be reopened with Open worktree....
+Everything runs as noninteractive scripts calling Git and the `herdr` CLI on
+each host. Remote hosts use the terminal's SSH trust and authentication policy,
+and the UI thread never blocks. The GUI connection's API does not expose layouts,
+process details or agent sessions, which is why Teleport uses the CLI.
+
 ## Images
 
 On a selected SSH endpoint, drop one PNG, JPEG, GIF, WebP, or BMP image onto a pane

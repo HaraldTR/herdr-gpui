@@ -33,9 +33,7 @@ impl Drop for SshChild {
 pub(crate) enum SshChild {}
 
 #[cfg(unix)]
-pub(super) fn quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
+pub(super) use crate::script::shell_quote as quote;
 
 #[cfg(unix)]
 fn bridge_command(session: &str) -> String {

@@ -103,6 +103,8 @@ pub(crate) struct HerdrWindow {
     pub(crate) menu: menu::MenuState,
     /// A `worktree.remove` queued after its dialog closed.
     pub(crate) removal: Option<menu::Removal>,
+    /// A teleport being set up or under way; a move outlives its dialog.
+    pub(crate) teleport: Option<crate::teleport::Teleport>,
     pub(crate) git: git::Git,
     pub(crate) install_warning_shown: bool,
     pub(crate) collapsed_repos: std::collections::HashSet<String>,
@@ -212,6 +214,7 @@ impl HerdrWindow {
         self.cancel_stale_image();
         self.poll_file_transfer(cx);
         self.update_workspace_dialog(window, cx);
+        self.poll_teleport(window, cx);
         self.poll_worktree_source(cx);
         self.poll_hover_menu(std::time::Instant::now(), window, cx);
         if self.tick_flash(std::time::Instant::now()) {
@@ -334,6 +337,7 @@ impl HerdrWindow {
             local_error: error,
             menu: menu::MenuState::new(cx),
             removal: None,
+            teleport: None,
             git: git::Git::default(),
             install_warning_shown: false,
             collapsed_repos: Default::default(),

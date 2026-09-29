@@ -41,6 +41,7 @@ mod sidebar;
 mod sound;
 mod state;
 mod tab_menu;
+mod teleport;
 mod terminal;
 mod terminal_painter;
 mod theme_picker;

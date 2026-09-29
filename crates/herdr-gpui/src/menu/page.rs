@@ -25,6 +25,8 @@ pub(crate) enum Page {
     Git,
     GitCommit,
     Dialog(WorkspaceAction),
+    /// Moving a linked worktree to another host.
+    Teleport,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +46,7 @@ pub(crate) enum WorkspaceMenuAction {
     Collapse,
     Expand,
     PullRequest,
+    Teleport,
 }
 
 impl WorkspaceMenuAction {
@@ -58,6 +61,7 @@ impl WorkspaceMenuAction {
             Self::Dialog(WorkspaceAction::DeleteWorktree) => "icons/trash.svg",
             Self::Collapse => "icons/chevron-up.svg",
             Self::Expand => "icons/chevron-down.svg",
+            Self::Teleport => "icons/teleport.svg",
             Self::PullRequest => return None,
         })
     }

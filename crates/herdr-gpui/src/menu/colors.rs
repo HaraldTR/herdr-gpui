@@ -15,6 +15,6 @@ pub(crate) fn accent(theme: &crate::config::Theme) -> Rgba {
 }
 
 /// The theme's red, as destructive actions and errors use it.
-pub(super) fn danger(theme: &crate::config::Theme) -> Rgba {
+pub(crate) fn danger(theme: &crate::config::Theme) -> Rgba {
     tint(theme, 1)
 }

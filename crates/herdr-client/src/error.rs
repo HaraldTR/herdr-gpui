@@ -165,6 +165,30 @@ pub enum Error {
         source: Box<Error>,
         cleanup: Box<Error>,
     },
+    #[error("host scripts require a Linux or macOS client")]
+    ScriptUnsupported,
+    #[error("could not start host script")]
+    ScriptSpawn(#[source] io::Error),
+    #[error("host script I/O failed")]
+    ScriptIo(#[source] io::Error),
+    #[error("could not read host script input")]
+    ScriptInput(#[source] io::Error),
+    #[error("could not write host script output")]
+    ScriptOutput(#[source] io::Error),
+    #[error("host script output exceeds limit")]
+    ScriptOutputLimit,
+    #[error("host script cancelled")]
+    ScriptCancelled,
+    #[error("host script made no progress before its deadline")]
+    ScriptTimeout,
+    #[error("host script worker panicked")]
+    ScriptWorker,
+    /// `stderr` is a bounded, control-free tail kept for diagnostics.
+    #[error("host script failed ({status}): {stderr}")]
+    ScriptExit {
+        status: std::process::ExitStatus,
+        stderr: String,
+    },
     #[error("endpoint selection is not a regular file")]
     SelectionNotFile,
     #[error("endpoint selection exceeds storage limit")]

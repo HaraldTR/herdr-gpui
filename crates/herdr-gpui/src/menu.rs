@@ -12,6 +12,7 @@ mod page;
 mod pr;
 mod settings;
 mod state;
+mod teleport;
 mod workspace;
 mod workspace_close;
 mod worktree_open;
@@ -28,13 +29,12 @@ mod worktree_open_tests;
 mod worktree_tests;
 
 pub(crate) use {
-    colors::accent,
+    colors::{accent, danger},
     page::{Page, WorkspaceAction},
     state::{MenuState, Removal},
     worktree_source::WorktreeSource,
 };
 
-use colors::danger;
 use page::WorkspaceMenuAction;
 use state::Submission;
 use workspace::WorkspaceTarget;

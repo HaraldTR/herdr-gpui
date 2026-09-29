@@ -88,6 +88,7 @@ impl AssetSource for Icons {
             "icons/github.svg" => include_bytes!("../../../assets/icons/github.svg"),
             "icons/theme.svg" => include_bytes!("../../../assets/icons/theme.svg"),
             "icons/keyboard.svg" => include_bytes!("../../../assets/icons/keyboard.svg"),
+            "icons/teleport.svg" => include_bytes!("../../../assets/icons/teleport.svg"),
             _ => return Ok(None),
         };
         Ok(Some(Cow::Borrowed(bytes)))
@@ -116,6 +117,7 @@ impl AssetSource for Icons {
             "icons/github.svg",
             "icons/theme.svg",
             "icons/keyboard.svg",
+            "icons/teleport.svg",
         ]
         .into_iter()
         .filter(|name| name.starts_with(path))
@@ -149,7 +151,7 @@ mod tests {
             assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] == 0));
         }
         assert!(Icons.load("unknown.svg").unwrap().is_none());
-        assert_eq!(Icons.list("icons/").unwrap().len(), 21);
+        assert_eq!(Icons.list("icons/").unwrap().len(), 22);
     }
 
     #[test]
