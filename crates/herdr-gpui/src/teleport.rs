@@ -6,6 +6,7 @@
 //! agent sessions, so every step runs as a background script that calls Git
 //! and the `herdr` CLI on the host concerned (locally or over SSH).
 
+mod credentials;
 mod error;
 mod git;
 mod host;

@@ -48,6 +48,13 @@ impl RemoteId {
         Some(Self(format!("{}/{path}", host.to_ascii_lowercase())))
     }
 
+    /// The lowercase host the repository lives on.
+    pub(crate) fn host(&self) -> &str {
+        self.0
+            .split_once('/')
+            .map_or(self.0.as_str(), |(host, _)| host)
+    }
+
     #[cfg(test)]
     pub(crate) fn as_str(&self) -> &str {
         &self.0

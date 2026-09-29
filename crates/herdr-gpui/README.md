@@ -653,6 +653,18 @@ it out under the same name, then the staged index and working tree are restored 
 included. Ignored files such as `.env` and build output stay behind, and so do
 submodule contents.
 
+When `origin` is on GitHub and the destination cannot reach it by itself (no
+SSH key there, or an unknown host key), the review says so and the move lends
+it this machine's `gh auth token`. The token travels over the script's stdin
+and is stored in the repository's Git directory, `.git/herdr/github-token` (mode
+600), so no working tree or commit ever holds it. A repository-local credential
+helper answers `https://github.com` from that file, `git@github.com:` URLs are
+rewritten to HTTPS for that repository, and `.envrc` gains an `export GH_TOKEN`
+that reads the file, for `gh` under direnv; it is excluded locally, and a
+repository that tracks its own `.envrc` is left untouched. Replace the file to
+rotate the token. If `gh` is not signed in here, the review warns that pull
+and push will not work there.
+
 Tabs, split directions and ratios, and custom tab and workspace labels are
 rebuilt. Each pane starts in the same directory relative to the checkout.
 Running commands start again with their arguments, with paths under the

@@ -15,6 +15,7 @@ pub(crate) enum Step {
     Restore,
     Tabs,
     Retire,
+    Credentials,
     Sessions,
     Launch,
 }
@@ -34,6 +35,7 @@ impl Step {
             Self::Restore => "restoring uncommitted changes",
             Self::Tabs => "recreating tabs",
             Self::Retire => "stopping programs in the source workspace",
+            Self::Credentials => "installing GitHub credentials on the destination",
             Self::Sessions => "moving agent sessions",
             Self::Launch => "starting programs",
         }
@@ -68,6 +70,8 @@ pub(crate) enum Error {
     SessionMissing { agent: &'static str },
     #[error("Could not use a local temporary file")]
     LocalFile(#[source] std::io::Error),
+    #[error("The GitHub CLI returned an unexpected token")]
+    InvalidToken,
     #[error("Teleport cancelled")]
     Cancelled,
 }

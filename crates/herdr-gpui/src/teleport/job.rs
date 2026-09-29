@@ -2,6 +2,7 @@
 //! find destinations, review what will move, and move it.
 
 use super::{
+    credentials,
     error::{Error, Result, Step},
     git,
     host::Host,
@@ -295,6 +296,18 @@ pub(crate) struct Review {
     pub(crate) tabs: Vec<TabPlan>,
     /// Why an open repository was chosen; `None` when it arrives fresh.
     pub(crate) reason: Option<MatchReason>,
+    pub(crate) github: GitHubAccess,
+}
+
+/// Whether the destination can pull and push to GitHub by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GitHubAccess {
+    /// It reaches `origin` already, or `origin` is not on GitHub.
+    Direct,
+    /// It cannot: this machine's `gh` token is installed for the repository.
+    Token,
+    /// It cannot, and `gh` here is not signed in to lend a token.
+    Unavailable,
 }
 
 impl Review {
@@ -425,6 +438,21 @@ pub(crate) fn review(
         .host
         .installed(Step::Review, &programs, cancelled)?;
 
+    let github = match destination
+        .origin
+        .as_deref()
+        .filter(|origin| credentials::is_github(origin))
+    {
+        Some(origin) if !credentials::reachable(&destination.place.host, origin, cancelled)? => {
+            if credentials::local_token(cancelled)?.is_some() {
+                GitHubAccess::Token
+            } else {
+                GitHubAccess::Unavailable
+            }
+        }
+        _ => GitHubAccess::Direct,
+    };
+
     let mut notes = 0;
     let tabs = tabs
         .iter()
@@ -439,6 +467,7 @@ pub(crate) fn review(
             Destination::Open { reason, .. } => Some(*reason),
             Destination::Arrive(_) | Destination::Reclaim { .. } => None,
         },
+        github,
     })
 }
 
@@ -652,6 +681,24 @@ pub(crate) fn run(
         }
         if let Some(argv) = line {
             launches.push((target, argv));
+        }
+    }
+
+    if review.github == GitHubAccess::Token {
+        report(Step::Credentials);
+        // Pull and push matter, but not more than the move: failures warn.
+        let installed = credentials::local_token(cancelled).and_then(|token| {
+            let token = token.ok_or(Error::InvalidToken)?;
+            credentials::install(to, &landing.checkout, &token, cancelled)
+        });
+        match installed {
+            Ok(credentials::Installed::Complete) => {}
+            Ok(credentials::Installed::WithoutEnvrc) => warnings.push(
+                "The repository tracks .envrc, so GH_TOKEN was not added; git pull and push still work"
+                    .to_owned(),
+            ),
+            Err(Error::Cancelled) => return Err(Error::Cancelled),
+            Err(error) => warnings.push(format!("GitHub access was not set up: {error}")),
         }
     }
 

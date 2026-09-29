@@ -8,7 +8,8 @@
 use super::{
     error::{Error, Step},
     job::{
-        self, Action, Candidate, Destination, Discovery, HostRepositories, Outcome, Review, Source,
+        self, Action, Candidate, Destination, Discovery, GitHubAccess, HostRepositories, Outcome,
+        Review, Source,
     },
     launch::{Work, command_line},
     marks::{Destination as MarkDestination, Mark},
@@ -544,6 +545,24 @@ impl HerdrWindow {
                         "Branch {} · {} unpushed commit(s) · {} changed file(s), {} untracked",
                         review.branch, state.unpushed, state.changed, state.untracked
                     )));
+                match review.github {
+                    GitHubAccess::Direct => {}
+                    GitHubAccess::Token => {
+                        body = body.child(line(format!(
+                            "{} cannot reach GitHub by itself, so your GitHub CLI token is installed for this repository there, for git pull and push.",
+                            candidate.place.label
+                        )));
+                    }
+                    GitHubAccess::Unavailable => {
+                        body = body.child(
+                            line(format!(
+                                "{} cannot reach GitHub, and the GitHub CLI here is not signed in, so pull and push will not work there.",
+                                candidate.place.label
+                            ))
+                            .text_color(danger),
+                        );
+                    }
+                }
                 if review.reason == Some(MatchReason::Name) {
                     body = body.child(
                         line(
