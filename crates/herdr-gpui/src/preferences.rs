@@ -1,6 +1,7 @@
 use crate::{
     HerdrWindow,
     config::{Config, FONT_SIZE_RANGE, Features, FontFace},
+    contrast::Contrast,
     font_picker::{FontTarget, shared_family},
     fonts::StyledFont,
     search_input::SearchInput,
@@ -79,6 +80,26 @@ impl HerdrWindow {
         cx.notify();
     }
 
+    /// Write one setting off the UI thread, then reload so the window shows
+    /// what the file now says rather than what was clicked.
+    fn save_preference(
+        &mut self,
+        save: impl FnOnce() -> crate::Result<()> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let text_system = cx.text_system().clone();
+        self.load_gui_config_with(
+            move || {
+                save()?;
+                let mut config = Config::load()?;
+                config.resolve_font_fallbacks(|| text_system.all_font_names());
+                let theme = config.theme()?;
+                Ok((config, theme))
+            },
+            cx,
+        );
+    }
+
     pub(super) fn render_preferences(&self, cx: &mut Context<Self>) -> Div {
         let theme = &self.theme;
         let font = &self.config.ui;
@@ -110,6 +131,26 @@ impl HerdrWindow {
                         .child(label),
                 )
                 .child(div().flex_1().min_w_0().text_right().child(value))
+        };
+        // A row that flips a setting when clicked, with a switch showing its state.
+        let toggle = |id: &'static str, label: &'static str, on: bool| {
+            row(id, label, if on { "On" } else { "Off" }.into())
+                .id(id)
+                .items_center()
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(theme.active)))
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .w(px(30.))
+                        .h(px(18.))
+                        .p(px(2.))
+                        .rounded_full()
+                        .bg(rgb(if on { theme.foreground } else { theme.muted }))
+                        .when(on, |track| track.justify_end())
+                        .child(div().size(px(14.)).rounded_full().bg(rgb(theme.background))),
+                )
         };
         let note = |text: &'static str| {
             div()
@@ -159,11 +200,33 @@ impl HerdrWindow {
                 "Show agents",
                 self.config.show_agents.to_string(),
             ))
-            .child(row(
-                "preferences-show-usage",
-                "Show usage",
-                self.config.usage.show.to_string(),
-            ))
+            .child(
+                toggle(
+                    "preferences-show-usage",
+                    "Show usage",
+                    self.config.usage.show,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    let show = !this.config.usage.show;
+                    this.save_preference(move || Config::save_usage_visibility(show), cx);
+                })),
+            )
+            .child(
+                toggle(
+                    "preferences-high-contrast",
+                    "High contrast",
+                    self.config.contrast == Contrast::High,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    let contrast = match this.config.contrast {
+                        Contrast::Standard => Contrast::High,
+                        Contrast::High => Contrast::Standard,
+                    };
+                    this.save_preference(move || Config::save_contrast(contrast), cx);
+                })),
+            )
             .child(row(
                 "preferences-confirm-close-tab",
                 "Confirm tab close",

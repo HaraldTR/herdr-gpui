@@ -244,11 +244,11 @@ impl HerdrWindow {
                 let inbox = endpoint.connection.inbox.clone();
                 let generation = endpoint.generation;
                 let id = *id;
-                let accent = match notice.kind {
+                let accent = self.theme.ink(match notice.kind {
                     SemanticNotificationKind::NeedsAttention => self.theme.palette[3],
                     SemanticNotificationKind::Finished => self.theme.palette[2],
                     _ => self.theme.primary(),
-                };
+                });
                 cards.push(
                     div()
                         .id(SharedString::from(format!(

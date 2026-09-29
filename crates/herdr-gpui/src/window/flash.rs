@@ -41,10 +41,10 @@ impl Flash {
 
     /// Green for something done, yellow for something declined.
     pub(crate) fn accent(&self, theme: &Theme) -> u32 {
-        match self.tone {
+        theme.ink(match self.tone {
             Tone::Success => theme.palette[2],
             Tone::Warning => theme.palette[3],
-        }
+        })
     }
 }
 

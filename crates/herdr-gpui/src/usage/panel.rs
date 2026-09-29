@@ -159,7 +159,7 @@ impl HerdrWindow {
                     .px(px(8.))
                     .pb(px(4.))
                     .text_size(small)
-                    .text_color(rgb(theme.palette[3]))
+                    .text_color(rgb(theme.ink(theme.palette[3])))
                     .child(error),
             );
         }

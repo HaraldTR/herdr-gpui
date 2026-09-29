@@ -3,7 +3,10 @@
 //! at terminal output.
 
 use super::{STATUS_DOT_UNKNOWN, STATUS_WIDTH, first_text, label_text, line_height};
-use crate::{HerdrWindow, config::FontConfig};
+use crate::{
+    HerdrWindow,
+    config::{FontConfig, Theme},
+};
 use gpui::{prelude::*, *};
 use herdr_client::protocol::{AgentStatus, ClientShellAgent, ClientShellSnapshot};
 
@@ -127,7 +130,7 @@ pub(super) fn agent_labels<'a>(
 
 // Match the expanded upstream shell order, including orphaned linked worktrees.
 
-pub(super) fn status_indicator(status: AgentStatus, font: &FontConfig) -> Div {
+pub(super) fn status_indicator(status: AgentStatus, font: &FontConfig, theme: &Theme) -> Div {
     // Upstream dots: working/blocked/done filled, idle hollow, unknown a small dot.
     div()
         .size(px(STATUS_WIDTH))
@@ -136,13 +139,13 @@ pub(super) fn status_indicator(status: AgentStatus, font: &FontConfig) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .child(status_dot(status))
+        .child(status_dot(status, theme))
 }
 
 /// The status dot alone, sized by its status, for callers that place it
 /// themselves.
-pub(crate) fn status_dot(status: AgentStatus) -> Div {
-    let (diameter, filled, color) = status_style(status);
+pub(crate) fn status_dot(status: AgentStatus, theme: &Theme) -> Div {
+    let (diameter, filled, color) = status_style(status, theme);
     div()
         .flex_none()
         .size(px(diameter))
@@ -168,13 +171,15 @@ pub(super) fn status_text(status: AgentStatus) -> &'static str {
 /// Upstream draws status from its own palette, defaulting to Catppuccin Mocha,
 /// and never from the terminal's ANSI colors. Matching those literals keeps a
 /// dot the same color in both clients whatever terminal theme is loaded, where
-/// ANSI slots would drift: Xcode Dark paints its cyan purple.
-pub(super) fn status_style(status: AgentStatus) -> (f32, bool, u32) {
-    match status {
+/// ANSI slots would drift: Xcode Dark paints its cyan purple. Mocha's pastels
+/// vanish on light chrome, so [`Theme::ink`] darkens them there, keeping hue.
+pub(super) fn status_style(status: AgentStatus, theme: &Theme) -> (f32, bool, u32) {
+    let (diameter, filled, color) = match status {
         AgentStatus::Working => (STATUS_WIDTH, true, 0xf9e2af),
         AgentStatus::Blocked => (STATUS_WIDTH, true, 0xf38ba8),
         AgentStatus::Done => (STATUS_WIDTH, true, 0x94e2d5),
         AgentStatus::Idle => (STATUS_WIDTH, false, 0xa6e3a1),
         AgentStatus::Unknown => (STATUS_DOT_UNKNOWN, true, 0x6c7086),
-    }
+    };
+    (diameter, filled, theme.ink(color))
 }

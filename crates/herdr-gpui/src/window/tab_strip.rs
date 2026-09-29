@@ -216,10 +216,12 @@ impl HerdrWindow {
                                 .items_center()
                                 .gap(px(DOT_GAP))
                                 .when(Lead::of(tab.agent_status) == Lead::Dot, |title| {
-                                    title.child(status_dot(tab.agent_status).debug_selector({
-                                        let id = id.clone();
-                                        move || slot.selector(&format!("tab-status-{id}"))
-                                    }))
+                                    title.child(
+                                        status_dot(tab.agent_status, &self.theme).debug_selector({
+                                            let id = id.clone();
+                                            move || slot.selector(&format!("tab-status-{id}"))
+                                        }),
+                                    )
                                 })
                                 .child(tab.label.clone()),
                         )

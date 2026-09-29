@@ -363,25 +363,29 @@ fn badge_colors_report_readiness_and_preserve_terminal_lifecycles() {
         let mut pr = parse(&wire.to_string(), "example", "project", "feature")
             .unwrap()
             .unwrap();
-        assert_eq!(pr.color(&theme), expected, "{merge}, {review}, {checks:?}");
+        assert_eq!(
+            pr.color(&theme),
+            theme.ink(expected),
+            "{merge}, {review}, {checks:?}"
+        );
         pr.is_draft = true;
-        assert_eq!(pr.color(&theme), theme.muted);
+        assert_eq!(pr.color(&theme), theme.ink(theme.muted));
         pr.state = State::Merged;
-        assert_eq!(pr.color(&theme), theme.palette[5]);
+        assert_eq!(pr.color(&theme), theme.ink(theme.palette[5]));
         pr.state = State::Closed;
-        assert_eq!(pr.color(&theme), theme.palette[1]);
+        assert_eq!(pr.color(&theme), theme.ink(theme.palette[1]));
     }
     // CheckRun status takes priority over a conclusion until completion, and a
     // failed check wins over pending checks and a nominally clean merge state.
     let mut pr = fixture().unwrap();
     pr.merge_state_status = MergeState::Clean;
     pr.review_decision = Default::default();
-    assert_eq!(pr.color(&theme), theme.palette[1]);
+    assert_eq!(pr.color(&theme), theme.ink(theme.palette[1]));
     pr.status_check_rollup = serde_json::from_value(serde_json::json!([
         {"__typename":"CheckRun", "status":"IN_PROGRESS", "conclusion":"SUCCESS"}
     ]))
     .unwrap();
-    assert_eq!(pr.color(&theme), theme.palette[3]);
+    assert_eq!(pr.color(&theme), theme.ink(theme.palette[3]));
 }
 
 #[test]

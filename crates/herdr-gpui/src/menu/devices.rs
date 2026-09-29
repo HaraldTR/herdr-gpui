@@ -208,7 +208,7 @@ impl HerdrWindow {
                             .flex_none()
                             .rounded_full()
                             .bg(rgb(if connected {
-                                colors::ONLINE
+                                colors::online(&self.theme)
                             } else {
                                 self.theme.muted
                             })),
@@ -453,7 +453,7 @@ impl HerdrWindow {
                                 .flex_none()
                                 .rounded_full()
                                 .bg(rgb(if endpoint.live.status.is_connected() {
-                                    colors::ONLINE
+                                    colors::online(&self.theme)
                                 } else {
                                     self.theme.muted
                                 })),

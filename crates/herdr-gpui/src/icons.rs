@@ -58,7 +58,7 @@ pub(super) fn uncommitted(theme: &crate::config::Theme, size: f32) -> gpui::Div 
             svg()
                 .path("icons/pencil.svg")
                 .size(px(size - 4.))
-                .text_color(rgb(theme.palette[3])),
+                .text_color(rgb(theme.ink(theme.palette[3]))),
         )
 }
 

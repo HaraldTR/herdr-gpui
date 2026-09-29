@@ -106,12 +106,12 @@ fn the_sidebar_gap_narrows_the_terminal_only_while_the_sidebar_shows(
         });
     };
 
-    // The shipped default already separates the two panes.
+    // The shipped default puts the first column against the divider.
     draw(cx);
     let sidebar = cx.debug_bounds("sidebar").unwrap();
     assert_eq!(
         view.read_with(cx, |view, _| view.bounds.origin.x),
-        sidebar.right() + px(crate::config::Layout::default().sidebar_gap),
+        sidebar.right(),
     );
 
     set_gap(cx, 0., true);

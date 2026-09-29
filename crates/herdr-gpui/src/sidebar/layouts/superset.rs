@@ -89,7 +89,7 @@ fn slot(
     theme: &Theme,
 ) -> Div {
     let dot = (status != AgentStatus::Unknown).then(|| {
-        let (diameter, filled, color) = status_style(status);
+        let (diameter, filled, color) = status_style(status, theme);
         div()
             .absolute()
             .top(px(-2.))
@@ -171,7 +171,7 @@ impl RowLayout for Superset {
             slot(label, glyph, status, &m, theme)
         };
         let counts = if state.selected {
-            (theme.palette[2], theme.palette[1])
+            (theme.ink(theme.palette[2]), theme.ink(theme.palette[1]))
         } else {
             (theme.muted, theme.muted)
         };
@@ -231,7 +231,7 @@ impl RowLayout for Superset {
                     div()
                         .debug_selector(|| format!("status-{key}"))
                         .text_size(px(m.small))
-                        .text_color(rgb(status_style(agent.status).2)),
+                        .text_color(rgb(status_style(agent.status, theme).2)),
                     text,
                     m.glyph,
                     0.5,

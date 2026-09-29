@@ -15,6 +15,7 @@ mod close_modal;
 mod config;
 mod connection;
 mod constants;
+mod contrast;
 mod control;
 mod controls;
 mod daemon;

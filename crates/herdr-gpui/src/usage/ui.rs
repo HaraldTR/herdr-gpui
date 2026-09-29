@@ -177,8 +177,8 @@ impl Ui {
         let theme = &self.theme;
         let color = match Severity::from(used) {
             Severity::Normal => crate::menu::accent(theme),
-            Severity::Warning => rgb(theme.palette[3]),
-            Severity::Critical => rgb(theme.palette[1]),
+            Severity::Warning => rgb(theme.ink(theme.palette[3])),
+            Severity::Critical => rgb(theme.ink(theme.palette[1])),
         };
         div()
             .relative()

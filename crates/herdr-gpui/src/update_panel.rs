@@ -94,7 +94,7 @@ impl HerdrWindow {
     pub(super) fn render_app_update(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let font = &self.config.ui;
         let theme = &self.theme;
-        let accent = rgb(theme.foreground).blend(rgba((theme.palette[4] << 8) | 0x70));
+        let accent = crate::menu::accent(theme);
         let state = self.update_preview.as_ref().unwrap_or(self.updater.state());
         let (message, action) = match state {
             State::Disabled(reason) => (format!("In-app updates unavailable: {reason}"), None),

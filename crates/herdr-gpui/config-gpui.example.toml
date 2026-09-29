@@ -16,6 +16,12 @@
 # Built-ins: Default, Nord, Dracula, Catppuccin Mocha, Catppuccin Latte.
 # Also accepts a Ghostty theme name, an absolute path, or a ~/ path.
 theme = "Default"
+# How far the app's own colors (status dots, pull request badges, diff counts,
+# warnings, dim labels) stand off the sidebar and menus. "standard" moves a
+# color only when it would fall below 3:1, as pastels do on light themes.
+# "high" raises them and dim labels to 4.5:1 and makes selected rows stand out
+# more. Terminal output always keeps its program's colors.
+contrast = "standard"
 
 # Ask before closing a tab (closing terminates its terminal processes).
 # Pane close confirmation is independent and remains enabled.

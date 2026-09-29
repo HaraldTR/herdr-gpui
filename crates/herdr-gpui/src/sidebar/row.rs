@@ -367,7 +367,7 @@ pub(super) fn row(
     } else {
         0.
     };
-    let status_color = status_style(status).2;
+    let status_color = status_style(status, theme).2;
     let label_width = (available - pr_reserve - status_reserve).max(0.);
     let agent_icon = match kind {
         RowKind::Agent(icon) => Some(icon),
@@ -433,7 +433,7 @@ pub(super) fn row(
         .child(if removing {
             removing_dot("worktree-removing", theme).mt(px((line_height(font) - STATUS_WIDTH) / 2.))
         } else {
-            status_indicator(status, font)
+            status_indicator(status, font, theme)
         })
         .child(
             div()
@@ -589,7 +589,7 @@ pub(super) fn row(
                                 .child(
                                     div()
                                         .flex_none()
-                                        .text_color(rgb(theme.palette[2]))
+                                        .text_color(rgb(theme.ink(theme.palette[2])))
                                         .child(label_text(&badge.additions)),
                                 )
                                 .child(
@@ -601,7 +601,7 @@ pub(super) fn row(
                                 .child(
                                     div()
                                         .flex_none()
-                                        .text_color(rgb(theme.palette[1]))
+                                        .text_color(rgb(theme.ink(theme.palette[1])))
                                         .child(label_text(&badge.deletions)),
                                 ),
                         )

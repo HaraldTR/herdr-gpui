@@ -19,6 +19,24 @@ const SLOW_PAINT: Duration = Duration::from_millis(16);
 const SCROLLBAR_INSET: f32 = 1.;
 const SCROLLBAR_ALPHA: u32 = 0xc0;
 
+fn background_extent(
+    grid: Size<Pixels>,
+    available: Size<Pixels>,
+    cell: Size<Pixels>,
+) -> Size<Pixels> {
+    let extend = |grid, available, cell| {
+        if available > grid && available - grid < cell {
+            available
+        } else {
+            grid
+        }
+    };
+    size(
+        extend(grid.width, available.width, cell.width),
+        extend(grid.height, available.height, cell.height),
+    )
+}
+
 #[derive(Default)]
 struct PaintTiming {
     count: u64,
@@ -311,6 +329,7 @@ impl TerminalPainter {
         &mut self,
         frame: &FrameData,
         origin: Point<Pixels>,
+        available: Option<Size<Pixels>>,
         cell_width: f32,
         font: &Font,
         selection: &[(u16, std::ops::Range<u16>)],
@@ -337,6 +356,16 @@ impl TerminalPainter {
                 px(f32::from(frame.height) * self.cell_height),
             ),
         );
+        // Only fill a sub-cell remainder. Retained frames during resize and
+        // mirrored groups must not stretch across whole missing rows/columns.
+        // Popups have no remainder; their background stays inside their grid.
+        let background = available.map_or(grid.size, |available| {
+            background_extent(
+                grid.size,
+                available,
+                size(px(cell_width), px(self.cell_height)),
+            )
+        });
         // The daemon's cell scrollbar is replaced by the pixel thumb painted below.
         let bars: Vec<SurfaceRect> = panes.iter().filter_map(|p| p.scrollbar_rect).collect();
         let in_bar = |index: usize| {
@@ -348,10 +377,20 @@ impl TerminalPainter {
         // per-primitive BoundsTree insert that dominates large grids. Within a
         // layer quads draw before glyphs, so decorations and the cursor take a
         // second layer above the text.
-        window.paint_layer(grid, |window| {
+        window.paint_layer(Bounds::new(origin, background), |window| {
             // Backgrounds precede all glyphs, including wide graphemes' skip cells.
             for (y, row) in frame.cells.chunks(usize::from(frame.width)).enumerate() {
                 let mut paint = |start: usize, end: usize, color| {
+                    let right = if end == usize::from(frame.width) {
+                        background.width
+                    } else {
+                        px(end as f32 * cell_width)
+                    };
+                    let bottom = if y + 1 == usize::from(frame.height) {
+                        background.height
+                    } else {
+                        px((y + 1) as f32 * self.cell_height)
+                    };
                     window.paint_quad(fill(
                         Bounds::new(
                             origin
@@ -359,7 +398,10 @@ impl TerminalPainter {
                                     px(start as f32 * cell_width),
                                     px(y as f32 * self.cell_height),
                                 ),
-                            size(px((end - start) as f32 * cell_width), px(self.cell_height)),
+                            size(
+                                right - px(start as f32 * cell_width),
+                                bottom - px(y as f32 * self.cell_height),
+                            ),
                         ),
                         rgb(color),
                     ));
@@ -652,6 +694,95 @@ mod tests {
     use super::*;
     use core::prelude::v1::test;
 
+    #[gpui::test]
+    fn edge_backgrounds_reach_the_canvas_without_stretching_popups(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| Empty);
+        for extend in [false, true] {
+            cx.draw(Point::default(), size(px(100.), px(100.)), |_, _| {
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, window, cx| {
+                        let frame = FrameData {
+                            width: 2,
+                            height: 2,
+                            cells: [0x123456, 0x654321, 0xabcdef, 0xfedcba]
+                                .into_iter()
+                                .map(|bg| CellData {
+                                    bg: 0x02000000 | bg,
+                                    ..cell(" ")
+                                })
+                                .collect(),
+                            cursor: None,
+                            hyperlinks: vec![],
+                            graphics: vec![],
+                        };
+                        let mut painter = TerminalPainter::default();
+                        painter.set_appearance(14., 20., Theme::default());
+                        painter.paint_frame(
+                            &frame,
+                            point(px(17.), px(23.)),
+                            extend.then(|| size(px(23.), px(47.))),
+                            10.,
+                            &font("Menlo"),
+                            &[],
+                            &[],
+                            window,
+                            cx,
+                        );
+                    },
+                )
+                .size_full()
+            });
+            cx.update(|window, _| {
+                let quads = window.painted_quads();
+                assert_eq!(quads.len(), 4);
+                for (x, y, width, height, color) in [
+                    (17., 23., 10., 20., 0x123456),
+                    (27., 23., if extend { 13. } else { 10. }, 20., 0x654321),
+                    (17., 43., 10., if extend { 27. } else { 20. }, 0xabcdef),
+                    (
+                        27.,
+                        43.,
+                        if extend { 13. } else { 10. },
+                        if extend { 27. } else { 20. },
+                        0xfedcba,
+                    ),
+                ] {
+                    let bounds = Bounds::new(point(px(x), px(y)), size(px(width), px(height)))
+                        .scale(window.scale_factor());
+                    assert!(
+                        quads
+                            .iter()
+                            .any(|quad| quad.bounds == bounds
+                                && quad.background == rgb(color).into())
+                    );
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn backgrounds_fill_only_fractional_cell_remainders() {
+        let cell = size(px(10.), px(20.));
+        let available = size(px(103.), px(67.));
+        let viewport = viewport(103., 67., 10., 20.);
+        let grid = size(
+            px(f32::from(viewport.cols) * 10.),
+            px(f32::from(viewport.rows) * 20.),
+        );
+        assert_eq!(grid, size(px(100.), px(60.)));
+        assert_eq!(background_extent(grid, available, cell), available);
+        for (available, expected) in [
+            (size(px(100.), px(60.)), grid),
+            (size(px(99.), px(59.)), grid),
+            (size(px(110.), px(80.)), grid),
+            (size(px(111.), px(67.)), size(px(100.), px(67.))),
+            (size(px(103.), px(81.)), size(px(103.), px(60.))),
+        ] {
+            assert_eq!(background_extent(grid, available, cell), expected);
+        }
+    }
+
     #[test]
     #[allow(clippy::unwrap_used)]
     fn paint_timing_threshold_interval_and_reset() {
@@ -784,6 +915,7 @@ mod tests {
                         painter.paint_frame(
                             &frame,
                             bounds.origin,
+                            None,
                             8.5,
                             &font("Menlo"),
                             &[],
@@ -916,6 +1048,7 @@ mod tests {
                         painter.paint_frame(
                             &frame,
                             bounds.origin,
+                            None,
                             12.81,
                             &font(family),
                             &[],
@@ -935,6 +1068,7 @@ mod tests {
                     painter.paint_frame(
                         &frame,
                         bounds.origin,
+                        None,
                         12.81,
                         &font("Menlo"),
                         &[],
@@ -984,6 +1118,7 @@ mod tests {
                         painter.borrow_mut().paint_frame(
                             &frame,
                             bounds.origin,
+                            None,
                             cell_width,
                             &font,
                             &[],

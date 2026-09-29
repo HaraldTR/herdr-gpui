@@ -96,7 +96,7 @@ impl HerdrWindow {
                                                 .debug_selector(|| {
                                                     "titlebar-git-pr-additions".into()
                                                 })
-                                                .text_color(rgb(theme.palette[2]))
+                                                .text_color(rgb(theme.ink(theme.palette[2])))
                                                 .child(format!(
                                                     "+{}",
                                                     crate::sidebar::compact(additions)
@@ -108,7 +108,7 @@ impl HerdrWindow {
                                                 .debug_selector(|| {
                                                     "titlebar-git-pr-deletions".into()
                                                 })
-                                                .text_color(rgb(theme.palette[1]))
+                                                .text_color(rgb(theme.ink(theme.palette[1])))
                                                 .child(format!(
                                                     "-{}",
                                                     crate::sidebar::compact(deletions)
@@ -132,7 +132,7 @@ impl HerdrWindow {
                                     button.child(
                                         div()
                                             .debug_selector(|| "titlebar-git-additions".into())
-                                            .text_color(rgb(theme.palette[2]))
+                                            .text_color(rgb(theme.ink(theme.palette[2])))
                                             .child(format!("+{}", status.additions)),
                                     )
                                 })
@@ -140,7 +140,7 @@ impl HerdrWindow {
                                     button.child(
                                         div()
                                             .debug_selector(|| "titlebar-git-deletions".into())
-                                            .text_color(rgb(theme.palette[1]))
+                                            .text_color(rgb(theme.ink(theme.palette[1])))
                                             .child(format!("-{}", status.deletions)),
                                     )
                                 })
@@ -171,7 +171,7 @@ impl HerdrWindow {
                                 .size(px(14.))
                                 .flex_none()
                                 .text_color(rgb(if running {
-                                    theme.palette[3]
+                                    theme.ink(theme.palette[3])
                                 } else {
                                     theme.muted
                                 })),
@@ -196,75 +196,119 @@ impl HerdrWindow {
 
     pub(super) fn render_titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let image = self.pr_profile().and_then(|p| p.avatar.clone());
-        render(self.theme.surface)
-            .children(self.render_git_button(cx))
-            .child(
+        // The toggle leads the bar so it stays put whether or not the sidebar
+        // below it is showing, and can always bring the sidebar back.
+        render(
+            self.theme.surface,
+            Some(
                 div()
-                    .debug_selector(|| "titlebar-account-slot".into())
+                    .id("toggle-sidebar")
+                    .debug_selector(|| "toggle-sidebar".into())
+                    .flex_none()
+                    .self_center()
+                    .mr(px(4.))
+                    .size(px(28.))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .flex_none()
-                    .w(px(40.))
-                    .h_full()
+                    .rounded(px(crate::config::corners::CONTROL))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(self.theme.active)))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.command(crate::controls::Command::ToggleSidebar, window, cx);
+                    }))
                     .child(
                         div()
-                            .id("titlebar-avatar")
-                            .group("titlebar-account")
-                            .debug_selector(|| "titlebar-avatar".into())
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(28.))
-                            .rounded_full()
-                            .cursor_pointer()
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.open_profile(true, window, cx);
-                            }))
-                            .on_mouse_down(
-                                MouseButton::Right,
-                                cx.listener(|this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.open_profile(false, window, cx);
-                                }),
-                            )
+                            .w(px(18.))
+                            .h(px(14.))
+                            .border_1()
+                            .border_color(rgb(self.theme.foreground))
+                            .rounded(px(2.))
                             .child(
                                 div()
-                                    .debug_selector(|| "titlebar-avatar-circle".into())
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .size(px(AVATAR))
-                                    .rounded_full()
-                                    .group_hover("titlebar-account", |s| {
-                                        s.shadow(vec![BoxShadow {
-                                            color: rgba((self.theme.foreground << 8) | 0x38).into(),
-                                            offset: point(px(0.), px(0.)),
-                                            blur_radius: px(5.),
-                                            spread_radius: px(1.),
-                                            inset: false,
-                                        }])
-                                    })
-                                    .map(|circle| match image {
-                                        Some(image) => {
-                                            circle.child(img(image).size(px(AVATAR)).rounded_full())
-                                        }
-                                        None => circle.child(
-                                            svg()
-                                                .path("icons/github.svg")
-                                                .size(px(AVATAR))
-                                                .text_color(rgb(self.theme.foreground)),
-                                        ),
+                                    .w(px(5.))
+                                    .h_full()
+                                    .border_r_1()
+                                    .border_color(rgb(self.theme.foreground))
+                                    .when(self.sidebar_visible, |bar| {
+                                        bar.bg(rgb(self.theme.foreground))
                                     }),
                             ),
-                    ),
-            )
+                    )
+                    .into_any_element(),
+            ),
+        )
+        .children(self.render_git_button(cx))
+        .child(
+            div()
+                .debug_selector(|| "titlebar-account-slot".into())
+                .flex()
+                .items_center()
+                .justify_center()
+                .flex_none()
+                .w(px(40.))
+                .h_full()
+                .child(
+                    div()
+                        .id("titlebar-avatar")
+                        .group("titlebar-account")
+                        .debug_selector(|| "titlebar-avatar".into())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(28.))
+                        .rounded_full()
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.open_profile(true, window, cx);
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(|this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.open_profile(false, window, cx);
+                            }),
+                        )
+                        .child(
+                            div()
+                                .debug_selector(|| "titlebar-avatar-circle".into())
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size(px(AVATAR))
+                                .rounded_full()
+                                .group_hover("titlebar-account", |s| {
+                                    s.shadow(vec![BoxShadow {
+                                        color: rgba((self.theme.foreground << 8) | 0x38).into(),
+                                        offset: point(px(0.), px(0.)),
+                                        blur_radius: px(5.),
+                                        spread_radius: px(1.),
+                                        inset: false,
+                                    }])
+                                })
+                                .map(|circle| match image {
+                                    Some(image) => {
+                                        circle.child(img(image).size(px(AVATAR)).rounded_full())
+                                    }
+                                    None => circle.child(
+                                        svg()
+                                            .path("icons/github.svg")
+                                            .size(px(AVATAR))
+                                            .text_color(rgb(self.theme.foreground)),
+                                    ),
+                                }),
+                        ),
+                ),
+        )
     }
 }
 
-pub(super) fn render(surface: u32) -> Stateful<Div> {
+/// `leading` sits right after the traffic lights, ahead of the draggable center.
+pub(super) fn render(surface: u32, leading: Option<AnyElement>) -> Stateful<Div> {
     // AppKit owns dragging; GPUI's macOS backend cannot start a custom move.
     div()
         .id("titlebar")
@@ -275,6 +319,7 @@ pub(super) fn render(surface: u32) -> Stateful<Div> {
         .h(px(HEIGHT))
         .bg(rgb(surface).blend(rgba(0xffffff1a)))
         .child(div().flex_none().w(px(80.)).h_full())
+        .children(leading)
         .child(
             div()
                 .debug_selector(|| "titlebar-center".into())
@@ -302,6 +347,27 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use crate::menu::Page;
     use gpui::{Bounds, Modifiers, MouseButton, MouseDownEvent, TestAppContext, point, px, size};
+
+    #[gpui::test]
+    fn sidebar_button_collapses_and_reopens_without_moving(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        for width in [1200., 360.] {
+            cx.simulate_resize(size(px(width), px(600.)));
+            for visible in [true, false] {
+                cx.update(|window, cx| {
+                    window.refresh();
+                    window.draw(cx).clear(cx);
+                });
+                assert_eq!(view.read_with(cx, |view, _| view.sidebar_visible), visible);
+                assert_eq!(cx.debug_bounds("sidebar").is_some(), visible);
+                let button = cx.debug_bounds("toggle-sidebar").unwrap();
+                assert_eq!(button.origin.x, px(80.));
+                assert_eq!(button.size, size(px(28.), px(28.)));
+                cx.simulate_click(button.center(), Modifiers::default());
+            }
+            assert!(view.read_with(cx, |view, _| view.sidebar_visible));
+        }
+    }
 
     #[gpui::test]
     fn account_icon_keeps_the_same_bounds_when_signed_out_failed_or_connected(
@@ -460,6 +526,11 @@ mod git_button_tests {
             let button = cx.debug_bounds("titlebar-git").unwrap();
             let avatar = cx.debug_bounds("titlebar-avatar").unwrap();
             let titlebar = cx.debug_bounds("titlebar").unwrap();
+            assert!(
+                cx.debug_bounds("titlebar-git-slot").unwrap().left()
+                    >= cx.debug_bounds("toggle-sidebar").unwrap().right(),
+                "width {width}"
+            );
             assert!(button.right() <= avatar.left(), "width {width}");
             assert!(button.left() >= titlebar.left());
             assert!(button.top() >= titlebar.top() && button.bottom() <= titlebar.bottom());
@@ -765,7 +836,7 @@ mod native_chrome_tests {
                 });
                 assert_eq!(
                     cx.debug_bounds("titlebar-center").unwrap(),
-                    Bounds::new(point(px(80.), px(0.)), size(px(width - 120.), px(34.)))
+                    Bounds::new(point(px(112.), px(0.)), size(px(width - 152.), px(34.)))
                 );
                 let body = cx.debug_bounds("window-body").unwrap();
                 let banner_height = if env!("HERDR_BUILD_WORKTREE") == "1" {

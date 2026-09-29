@@ -335,6 +335,8 @@ pub enum Error {
     UsageMissingCurl,
     #[error("Remote usage needs SSH, which this platform's client does not support.")]
     UsageUnsupported,
+    #[error("usage must be a TOML table")]
+    InvalidUsageTable,
     #[error("{0}")]
     Update(#[from] UpdateError),
     #[error("{0}")]

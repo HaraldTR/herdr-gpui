@@ -316,13 +316,13 @@ impl HerdrWindow {
                 .child(
                     div()
                         .debug_selector(|| "git-menu-uncommitted-additions".into())
-                        .text_color(rgb(theme.palette[2]))
+                        .text_color(rgb(theme.ink(theme.palette[2])))
                         .child(format!("+{}", crate::sidebar::compact(status.additions))),
                 )
                 .child(
                     div()
                         .debug_selector(|| "git-menu-uncommitted-deletions".into())
-                        .text_color(rgb(theme.palette[1]))
+                        .text_color(rgb(theme.ink(theme.palette[1])))
                         .child(format!("-{}", crate::sidebar::compact(status.deletions))),
                 ),
         )
@@ -393,13 +393,13 @@ impl HerdrWindow {
                             .flex()
                             .child(
                                 div()
-                                    .text_color(rgb(theme.palette[2]))
+                                    .text_color(rgb(theme.ink(theme.palette[2])))
                                     .child(format!("+{}", crate::sidebar::compact(pr.additions))),
                             )
                             .gap(px(6.))
                             .child(
                                 div()
-                                    .text_color(rgb(theme.palette[1]))
+                                    .text_color(rgb(theme.ink(theme.palette[1])))
                                     .child(format!("-{}", crate::sidebar::compact(pr.deletions))),
                             ),
                     ),
@@ -525,7 +525,7 @@ impl HerdrWindow {
                 div()
                     .debug_selector(|| "git-menu-running".into())
                     .p(px(8.))
-                    .text_color(rgb(theme.palette[3]))
+                    .text_color(rgb(theme.ink(theme.palette[3])))
                     .child(action.running_label()),
             );
         }
@@ -564,7 +564,7 @@ impl HerdrWindow {
                 div()
                     .debug_selector(|| "git-menu-error".into())
                     .p(px(8.))
-                    .text_color(rgb(theme.palette[1]))
+                    .text_color(rgb(theme.ink(theme.palette[1])))
                     .child(error.to_owned()),
             );
         }
