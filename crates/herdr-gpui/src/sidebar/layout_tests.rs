@@ -1094,6 +1094,8 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         _sidebar_invalidation: HerdrWindow::invalidate_sidebar(cx),
         browser: crate::browser::Browser::new(cx),
         _browser_tabs: cx.observe_global::<crate::browser::Store>(|_, cx| cx.notify()),
+        prefix_armed: false,
+        _prefix_interceptor: HerdrWindow::intercept_prefix(window, cx),
     }
 }
 

@@ -14,6 +14,7 @@ mod input;
 mod lifecycle;
 mod mouse;
 mod pending_input;
+mod prefix;
 mod render;
 mod selection;
 mod tab_drag;
@@ -154,6 +155,9 @@ pub(crate) struct HerdrWindow {
     /// Browser tabs this window shows, and its pages for them.
     pub(crate) browser: crate::browser::Browser,
     pub(crate) _browser_tabs: Subscription,
+    /// The daemon's prefix was typed, so the next keystroke completes a chord.
+    pub(crate) prefix_armed: bool,
+    pub(crate) _prefix_interceptor: Subscription,
 }
 
 /// See `HerdrWindow::surface_signal`.
@@ -438,9 +442,12 @@ impl HerdrWindow {
             browser: crate::browser::Browser::new(cx),
             // Another window, or an agent, may open or close a tab.
             _browser_tabs: cx.observe_global::<crate::browser::Store>(|_, cx| cx.notify()),
+            prefix_armed: false,
+            _prefix_interceptor: Self::intercept_prefix(window, cx),
             _activation: cx.observe_window_activation(window, |this, window, cx| {
                 this.active = window.is_window_active();
                 if !this.active {
+                    this.disarm_prefix();
                     this.cancel_terminal_mouse(cx);
                     this.selection = None;
                     this.pressed_terminal_link = None;

@@ -540,6 +540,20 @@ impl Render for HerdrWindow {
                     .bg(rgb(self.theme.surface))
                     .text_color(rgb(self.theme.foreground))
                     .children(self.render_usage(cx))
+                    .when_some(
+                        self.prefix_armed
+                            .then(|| self.config.keybindings.prefix_label())
+                            .flatten(),
+                        |bar, prefix| bar.child(
+                            div()
+                                .debug_selector(|| "prefix-armed".into())
+                                .flex_none()
+                                .px(px(6.))
+                                .rounded(px(crate::config::corners::SMALL))
+                                .bg(rgb(self.theme.active))
+                                .child(prefix),
+                        ),
+                    )
                     .when(!self.live.status.is_connected(), |bar| bar.child(
                         if matches!(self.live.status, ConnectionStatus::StartingDaemon) {
                             div()

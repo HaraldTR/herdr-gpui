@@ -378,8 +378,9 @@ The terminal keeps the remaining width, so the daemon is resized to the columns
 it actually has, and the gap is ignored while the sidebar is hidden.
 
 The `[clipboard_toast]` table controls the `copied to clipboard` flash shown
-after a terminal selection is copied. It is the one GUI setting that starts from
-the daemon's own config: `[ui.toast.clipboard]` in `config.toml` (resolved like
+after a terminal selection is copied. Like the keymap (see the daemon `[keys]`
+under keyboard shortcuts), it starts from the daemon's own config:
+`[ui.toast.clipboard]` in `config.toml` (resolved like
 the sound settings below) answers it first, so setting it there covers both
 clients, and each key here overrides that answer on its own.
 
@@ -1212,6 +1213,27 @@ Windows setup) nothing is saved and the window says so.
   away from its default command, keystrokes need a cmd, ctrl, alt, or fn
   modifier, and unknown names, unparseable keys, or one key on two configured
   commands reject the config. Saved changes rebind the keymap and menu bar live.
+- The daemon's own `[keys]` table in `config.toml` (resolved like
+  `[ui.toast.clipboard]` above) applies in the GUI too, Herdr's defaults
+  included, so a TUI habit such as `prefix+v` or `alt+1..9` works in both
+  clients. The prefix (`ctrl+b` unless `prefix` says otherwise) arms the
+  window, shown by a keycap in the status bar; the next keystroke runs its
+  chord or, when nothing is bound to it, is dropped, as in the TUI. Typing the
+  prefix twice sends it to the terminal, and Escape cancels. Chords work from
+  a menu's or dialog's text field too: the chord closes it and runs. Daemon actions
+  with a GUI command are `new_workspace`, `new_worktree`, `workspace_picker`
+  and `goto` (both Go To), `settings`, `help` (the shortcut reference),
+  `open_notification_target`, `new_tab`, `next_tab`, `previous_tab`,
+  `switch_tab`, `close_tab`, `split_vertical` (Split Right),
+  `split_horizontal` (Split Down), `focus_pane_*`, `cycle_pane_next`,
+  `cycle_pane_previous`, `zoom`, `close_pane`, `clear_pane`, and
+  `toggle_sidebar`; the rest stay TUI-only. Daemon keys add to the catalog
+  defaults and take a keystroke from its default command. A command named in
+  `[keybindings]` keeps exactly the keystrokes listed there, daemon chords
+  included, and a keystroke listed there outranks the daemon's, even the
+  prefix. Herdr validates its own file, so a daemon entry the GUI cannot
+  express (a `hyper` modifier, a direct key without cmd, ctrl, alt, or fn) is
+  skipped rather than rejected. Saving either file rebinds live.
 - Cmd-B toggles sidebar visibility locally without changing daemon state.
   Cmd-, opens Settings; Cmd-/ opens the grouped native shortcut reference.
   Native shortcut labels and keycaps come from the shared `controls::COMMANDS`
