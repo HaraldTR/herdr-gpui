@@ -168,12 +168,13 @@ pub(super) fn status_text(status: AgentStatus) -> &'static str {
     }
 }
 
-/// Keep status hues independent of ANSI slots, but use darker colors on light
-/// chrome so small dots and status words remain visible.
+/// Upstream draws status from its own palette, defaulting to Catppuccin Mocha,
+/// and never from the terminal's ANSI colors. Matching those literals keeps a
+/// dot the same color in both clients whatever terminal theme is loaded, where
+/// ANSI slots would drift: Xcode Dark paints its cyan purple. Mocha's pastels
+/// vanish on light chrome, so light themes get darker inks of the same hues.
 pub(super) fn status_style(status: AgentStatus, theme: &Theme) -> (f32, bool, u32) {
-    let channel = |shift: u32| ((theme.surface >> shift) & 255) as f32 / 255.;
-    let light = 0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0) > 0.5;
-    if light {
+    if theme.is_light() {
         return match status {
             AgentStatus::Working => (STATUS_WIDTH, true, 0x875b00),
             AgentStatus::Blocked => (STATUS_WIDTH, true, 0xb52249),

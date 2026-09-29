@@ -196,17 +196,17 @@ impl HerdrWindow {
 
     pub(super) fn render_titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let image = self.pr_profile().and_then(|p| p.avatar.clone());
-        render(self.theme.surface)
-            .relative()
-            // Reserve room after the traffic-light spacer for the fixed toggle.
-            .pl(px(32.))
-            .child(
+        // The toggle leads the bar so it stays put whether or not the sidebar
+        // below it is showing, and can always bring the sidebar back.
+        render(
+            self.theme.surface,
+            Some(
                 div()
                     .id("toggle-sidebar")
                     .debug_selector(|| "toggle-sidebar".into())
-                    .absolute()
-                    .left(px(80.))
-                    .top(px(3.))
+                    .flex_none()
+                    .self_center()
+                    .mr(px(4.))
                     .size(px(28.))
                     .flex()
                     .items_center()
@@ -236,76 +236,79 @@ impl HerdrWindow {
                                         bar.bg(rgb(self.theme.foreground))
                                     }),
                             ),
-                    ),
-            )
-            .children(self.render_git_button(cx))
-            .child(
-                div()
-                    .debug_selector(|| "titlebar-account-slot".into())
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .flex_none()
-                    .w(px(40.))
-                    .h_full()
-                    .child(
-                        div()
-                            .id("titlebar-avatar")
-                            .group("titlebar-account")
-                            .debug_selector(|| "titlebar-avatar".into())
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(28.))
-                            .rounded_full()
-                            .cursor_pointer()
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(|this, _, window, cx| {
+                    )
+                    .into_any_element(),
+            ),
+        )
+        .children(self.render_git_button(cx))
+        .child(
+            div()
+                .debug_selector(|| "titlebar-account-slot".into())
+                .flex()
+                .items_center()
+                .justify_center()
+                .flex_none()
+                .w(px(40.))
+                .h_full()
+                .child(
+                    div()
+                        .id("titlebar-avatar")
+                        .group("titlebar-account")
+                        .debug_selector(|| "titlebar-avatar".into())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(28.))
+                        .rounded_full()
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.open_profile(true, window, cx);
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(|this, _, window, cx| {
                                 cx.stop_propagation();
-                                this.open_profile(true, window, cx);
-                            }))
-                            .on_mouse_down(
-                                MouseButton::Right,
-                                cx.listener(|this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.open_profile(false, window, cx);
+                                this.open_profile(false, window, cx);
+                            }),
+                        )
+                        .child(
+                            div()
+                                .debug_selector(|| "titlebar-avatar-circle".into())
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size(px(AVATAR))
+                                .rounded_full()
+                                .group_hover("titlebar-account", |s| {
+                                    s.shadow(vec![BoxShadow {
+                                        color: rgba((self.theme.foreground << 8) | 0x38).into(),
+                                        offset: point(px(0.), px(0.)),
+                                        blur_radius: px(5.),
+                                        spread_radius: px(1.),
+                                        inset: false,
+                                    }])
+                                })
+                                .map(|circle| match image {
+                                    Some(image) => {
+                                        circle.child(img(image).size(px(AVATAR)).rounded_full())
+                                    }
+                                    None => circle.child(
+                                        svg()
+                                            .path("icons/github.svg")
+                                            .size(px(AVATAR))
+                                            .text_color(rgb(self.theme.foreground)),
+                                    ),
                                 }),
-                            )
-                            .child(
-                                div()
-                                    .debug_selector(|| "titlebar-avatar-circle".into())
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .size(px(AVATAR))
-                                    .rounded_full()
-                                    .group_hover("titlebar-account", |s| {
-                                        s.shadow(vec![BoxShadow {
-                                            color: rgba((self.theme.foreground << 8) | 0x38).into(),
-                                            offset: point(px(0.), px(0.)),
-                                            blur_radius: px(5.),
-                                            spread_radius: px(1.),
-                                            inset: false,
-                                        }])
-                                    })
-                                    .map(|circle| match image {
-                                        Some(image) => {
-                                            circle.child(img(image).size(px(AVATAR)).rounded_full())
-                                        }
-                                        None => circle.child(
-                                            svg()
-                                                .path("icons/github.svg")
-                                                .size(px(AVATAR))
-                                                .text_color(rgb(self.theme.foreground)),
-                                        ),
-                                    }),
-                            ),
-                    ),
-            )
+                        ),
+                ),
+        )
     }
 }
 
-pub(super) fn render(surface: u32) -> Stateful<Div> {
+/// `leading` sits right after the traffic lights, ahead of the draggable center.
+pub(super) fn render(surface: u32, leading: Option<AnyElement>) -> Stateful<Div> {
     // AppKit owns dragging; GPUI's macOS backend cannot start a custom move.
     div()
         .id("titlebar")
@@ -316,6 +319,7 @@ pub(super) fn render(surface: u32) -> Stateful<Div> {
         .h(px(HEIGHT))
         .bg(rgb(surface).blend(rgba(0xffffff1a)))
         .child(div().flex_none().w(px(80.)).h_full())
+        .children(leading)
         .child(
             div()
                 .debug_selector(|| "titlebar-center".into())

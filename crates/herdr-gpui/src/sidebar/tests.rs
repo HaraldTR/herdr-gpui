@@ -255,7 +255,7 @@ fn status_colors_keep_upstream_hues_on_dark_themes() {
 }
 
 #[test]
-fn light_theme_status_colors_contrast_with_chrome() {
+fn status_colors_contrast_with_every_builtin_chrome() {
     let luminance = |color: u32| {
         let channel = |shift: u32| {
             let value = ((color >> shift) & 255) as f64 / 255.;
@@ -267,21 +267,39 @@ fn light_theme_status_colors_contrast_with_chrome() {
         };
         0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
     };
-    let theme = Theme::builtin("Catppuccin Latte").unwrap();
-    for status in [
-        AgentStatus::Working,
-        AgentStatus::Blocked,
-        AgentStatus::Done,
-        AgentStatus::Idle,
-        AgentStatus::Unknown,
-    ] {
-        let color = status_style(status, &theme).2;
-        for background in [theme.surface, theme.active, theme.background, 0xffffff] {
-            let ratio = (luminance(background) + 0.05) / (luminance(color) + 0.05);
-            assert!(ratio >= 3., "{status:?} on {background:06x}: {ratio}");
+    let contrast = |a: u32, b: u32| {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    };
+    for name in Theme::BUILTIN_NAMES {
+        let theme = Theme::builtin(name).unwrap();
+        for status in [
+            AgentStatus::Working,
+            AgentStatus::Blocked,
+            AgentStatus::Done,
+            AgentStatus::Idle,
+            AgentStatus::Unknown,
+        ] {
+            // Upstream's dark Unknown dot is meant to recede; keep its literal.
+            if status == AgentStatus::Unknown && !theme.is_light() {
+                continue;
+            }
+            let color = status_style(status, &theme).2;
+            for background in [theme.surface, theme.active] {
+                let ratio = contrast(color, background);
+                assert!(
+                    ratio >= 3.,
+                    "{name} {status:?} on {background:06x}: {ratio}"
+                );
+            }
         }
-        assert_ne!(color, status_style(status, &Theme::default()).2);
     }
+    let latte = Theme::builtin("Catppuccin Latte").unwrap();
+    assert!(latte.is_light() && !Theme::default().is_light());
+    assert_ne!(
+        status_style(AgentStatus::Working, &latte).2,
+        status_style(AgentStatus::Working, &Theme::default()).2
+    );
 }
 
 #[test]

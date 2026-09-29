@@ -1442,6 +1442,13 @@ fn mix(base: u32, over: u32, percent: u32) -> u32 {
     (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
+/// Luma of an sRGB color on the channels as stored, not linearized. Good
+/// enough to rank two colors or place one either side of the midpoint.
+fn luma(color: u32) -> f32 {
+    let channel = |shift: u32| ((color >> shift) & 255) as f32 / 255.;
+    0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+}
+
 impl Theme {
     pub const BUILTIN_NAMES: &'static [&'static str] = &[
         "Default",
@@ -1474,16 +1481,17 @@ impl Theme {
     /// A fixed light-or-dark rule breaks on light themes, where the accent and
     /// the background sit on the same side of any threshold.
     pub fn text_on(&self, fill: u32) -> u32 {
-        let luminance = |color: u32| {
-            let channel = |shift: u32| ((color >> shift) & 255) as f32 / 255.;
-            0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
-        };
-        let fill = luminance(fill);
-        if (luminance(self.background) - fill).abs() >= (luminance(self.foreground) - fill).abs() {
+        let fill = luma(fill);
+        if (luma(self.background) - fill).abs() >= (luma(self.foreground) - fill).abs() {
             self.background
         } else {
             self.foreground
         }
+    }
+
+    /// Whether the chrome is light, so small marks drawn on it need darker ink.
+    pub fn is_light(&self) -> bool {
+        luma(self.surface) > 0.5
     }
 
     fn derive_chrome(&mut self) {
