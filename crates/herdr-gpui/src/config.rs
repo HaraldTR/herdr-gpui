@@ -1267,6 +1267,33 @@ impl Config {
         result.map_err(|error| error.at_path(path))
     }
 
+    /// Persist only the Agents section visibility, keeping the rest of the local file.
+    pub(crate) fn save_show_agents(show: bool) -> Result<()> {
+        let (_lock, local) = Self::prepare_files(&Self::path()?)?;
+        Self::save_show_agents_path(show, &local)
+    }
+
+    fn save_show_agents_path(show: bool, path: &Path) -> Result<()> {
+        let result = (|| -> Result<()> {
+            let text = match fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == ErrorKind::NotFound => LOCAL_CONFIG.into(),
+                Err(error) => return Err(error.into()),
+            };
+            let mut document = text.parse::<toml_edit::DocumentMut>()?;
+            let mut value = toml_edit::Value::from(show);
+            if let Some(previous) = document
+                .get("show_agents")
+                .and_then(toml_edit::Item::as_value)
+            {
+                *value.decor_mut() = previous.decor().clone();
+            }
+            document["show_agents"] = toml_edit::Item::Value(value);
+            write_config(path, &document.to_string())
+        })();
+        result.map_err(|error| error.at_path(path))
+    }
+
     /// `None` removes the local override, inheriting the platform's managed default.
     pub(crate) fn save_font_family(face: FontFace, family: Option<&str>) -> Result<()> {
         let (_lock, local) = Self::prepare_files(&Self::path()?)?;
@@ -2322,6 +2349,39 @@ mod tests {
         let created = fs::read_to_string(&path)?;
         assert!(created.starts_with(LOCAL_CONFIG), "{created}");
         assert_eq!(Config::parse(&created)?.contrast, Contrast::High);
+        Ok(())
+    }
+
+    #[test]
+    fn show_agents_saves_in_place_and_keeps_other_settings() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config.toml");
+        let original = "theme = 'Nord' # keep\nshow_agents = true # mine\n[usage]\nshow = false\n";
+        fs::write(&path, original)?;
+        Config::save_show_agents_path(false, &path)?;
+        let saved = fs::read_to_string(&path)?;
+        assert_eq!(
+            saved,
+            original.replace("show_agents = true", "show_agents = false")
+        );
+        let config = Config::parse(&saved)?;
+        assert!(!config.show_agents);
+        assert!(!config.usage.show);
+        Config::save_show_agents_path(true, &path)?;
+        assert_eq!(fs::read_to_string(&path)?, original);
+
+        // A key added to a file with tables must stay top-level, not join [usage].
+        fs::write(&path, "theme = 'Nord'\n[usage]\nshow = true\n")?;
+        Config::save_show_agents_path(false, &path)?;
+        let config = Config::parse(&fs::read_to_string(&path)?)?;
+        assert!(!config.show_agents);
+        assert!(config.usage.show);
+
+        fs::remove_file(&path)?;
+        Config::save_show_agents_path(false, &path)?;
+        let created = fs::read_to_string(&path)?;
+        assert!(created.starts_with(LOCAL_CONFIG), "{created}");
+        assert!(!Config::parse(&created)?.show_agents);
         Ok(())
     }
 

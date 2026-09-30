@@ -279,7 +279,8 @@ on a prompt; tabs whose agents are idle or done, or that have none, close at
 once. Set top-level `confirm_close_tab = false` to never ask for tabs
 (including their running processes), and `show_agents = false` to hide the Agents
 section and give Spaces the full sidebar height. Both default to `true`. Pane
-closures still ask for confirmation. Saved edits apply automatically.
+closures still ask for confirmation. Saved edits apply automatically. The
+**Show agents** switch in **Settings > Appearance** saves `show_agents` for you.
 
 `[notifications]` controls GUI-local in-app delivery, independently of the daemon:
 
