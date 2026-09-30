@@ -39,6 +39,7 @@ mod menus;
 mod motion;
 mod navigation;
 mod notifications;
+mod osc52;
 mod palette;
 mod pane_menu;
 mod preferences;

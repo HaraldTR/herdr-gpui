@@ -79,7 +79,7 @@ Closing or detaching the GUI must leave the daemon and its terminals running.
 - Partial frame prefixes/payloads must survive read timeouts. Finish an inbound partial frame before dispatching commands against potentially stale state.
 - Cancellation must not flush queued work, replay commands, or join a worker on the UI thread. Do not add automatic reconnect/replay as an incidental refactor.
 - Crossbeam receiver clones compete for events; they are not broadcast subscribers.
-- Treat terminal content and daemon messages as untrusted data. Do not execute terminal escapes, follow graphics file paths, modify the clipboard, or run displayed update commands automatically.
+- Treat terminal content and daemon messages as untrusted data. Do not execute terminal escapes, follow graphics file paths, or run displayed update commands automatically. The one exception is the daemon's OSC 52 `ServerMessage::Clipboard`: decode it and put only its bounded UTF-8 text on the pasteboard, never arbitrary bytes, files, or images.
 - The normal app never installs, starts, stops, or upgrades a personal daemon. Explicit sockets refer to the binary client socket, not the JSON API socket.
 - Never commit secrets, credentials, private terminal output, or machine-local configuration.
 

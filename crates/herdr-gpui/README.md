@@ -578,6 +578,12 @@ the highlight, and shows the `copied to clipboard` flash described under
 [Configuration](#configuration). Selection is client-local: it reads the surface
 the client already has, sends nothing to the daemon, and asks it for nothing.
 
+A program that copies with OSC 52 — many editors and agent CLIs do, especially
+when they own the mouse — is honored too: the daemon forwards the bytes to this
+client, which writes them to the same system clipboard and shows the same flash.
+Only bounded UTF-8 text is written; malformed, non-text, or oversized writes are
+dropped without replacing what was already on the clipboard.
+
 A selection stays inside the pane it started in, and a drag that leaves the pane
 or the window selects up to its edge rather than into its neighbor. A selection
 inside a popup takes the popup's own cells, never the panes it covers. Because
