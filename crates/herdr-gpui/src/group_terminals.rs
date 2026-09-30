@@ -333,6 +333,7 @@ impl HerdrWindow {
                 update.notifications_lost = false;
                 update.sound_events.clear();
                 update.reload_sound = false;
+                update.clipboard_writes.clear();
                 update.dialog_response = None;
                 parked.live = update;
                 changed = true;

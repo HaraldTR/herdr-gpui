@@ -42,6 +42,10 @@ pub struct LiveState {
         herdr_client::protocol::SemanticNotification,
     )>,
     pub(crate) reload_sound: bool,
+    /// Decoded OSC 52 clipboard writes from the daemon, in arrival order. The
+    /// UI thread drains them to the pasteboard; the queue is bounded like
+    /// sounds, since a pane may write faster than the window repaints.
+    pub(crate) clipboard_writes: std::collections::VecDeque<String>,
     pub(crate) sound_cancel: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) sound_connection_cancel: Arc<std::sync::atomic::AtomicBool>,
     pub snapshot: Option<Arc<ClientShellSnapshot>>,
@@ -95,6 +99,7 @@ impl Default for LiveState {
         Self {
             sound_events: Default::default(),
             reload_sound: false,
+            clipboard_writes: Default::default(),
             sound_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sound_connection_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             snapshot: None,
@@ -128,6 +133,7 @@ impl LiveState {
         let Self {
             sound_events,
             reload_sound,
+            clipboard_writes,
             sound_cancel,
             sound_connection_cancel,
             snapshot,
@@ -162,6 +168,7 @@ impl LiveState {
         };
         sound_events.is_empty()
             && !reload_sound
+            && clipboard_writes.is_empty()
             && Arc::ptr_eq(sound_cancel, &self.sound_cancel)
             && Arc::ptr_eq(sound_connection_cancel, &self.sound_connection_cancel)
             && same_arc(snapshot, &self.snapshot)
@@ -432,6 +439,18 @@ impl LiveState {
                     crate::notifications::Notice::new(notification, received)
                         .with_snapshot(self.snapshot.as_deref()),
                 );
+            }
+            ClientEvent::Message(ServerMessage::Clipboard { data }) => {
+                // OSC 52 bytes from a pane, base64-encoded by the daemon. Only
+                // bounded UTF-8 text is written; anything else is dropped.
+                if let Some(text) = crate::osc52::decode(&data) {
+                    while self.clipboard_writes.len() >= crate::osc52::MAX_PENDING {
+                        self.clipboard_writes.pop_front();
+                    }
+                    self.clipboard_writes.push_back(text);
+                } else {
+                    tracing::debug!("dropped an invalid or oversized clipboard payload");
+                }
             }
             ClientEvent::Message(ServerMessage::ReloadSoundConfig) => self.reload_sound = true,
             _ => return,
@@ -1087,7 +1106,7 @@ mod tests {
         assert!(old.only_surface_changed(&old.clone()));
 
         type Change = (&'static str, fn(&mut LiveState));
-        let changes: [Change; 9] = [
+        let changes: [Change; 10] = [
             ("snapshot", |s| {
                 s.snapshot = s.snapshot.as_deref().cloned().map(Arc::new);
             }),
@@ -1095,6 +1114,9 @@ mod tests {
             ("error", |s| s.error = Some("lost".into())),
             ("notification lost", |s| s.notifications_lost = true),
             ("sound", |s| s.reload_sound = true),
+            ("clipboard write", |s| {
+                s.clipboard_writes.push_back("x".into())
+            }),
             ("dialog answer", |s| {
                 s.dialog_response = Some(("remove".into(), Some(Ok(serde_json::Value::Null))));
             }),
@@ -1112,5 +1134,36 @@ mod tests {
             change(&mut changed);
             assert!(!old.only_surface_changed(&changed), "{what}");
         }
+    }
+
+    #[test]
+    fn daemon_clipboard_payloads_are_decoded_bounded_and_dropped_when_invalid() {
+        let mut state = LiveState::default();
+        state.apply(ClientEvent::Message(ServerMessage::Clipboard {
+            data: "aGVsbG8=".into(),
+        }));
+        state.apply(ClientEvent::Message(ServerMessage::Clipboard {
+            data: "not base64!".into(),
+        }));
+        assert_eq!(
+            state
+                .clipboard_writes
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["hello"]
+        );
+        // A pane that spams OSC 52 cannot grow the mailbox without bound, and
+        // only the newest writes survive: the seeded "hello" is evicted first.
+        for index in 0..crate::osc52::MAX_PENDING * 2 {
+            state.apply(ClientEvent::Message(ServerMessage::Clipboard {
+                data: "eA==".into(),
+            }));
+            assert_eq!(
+                state.clipboard_writes.len(),
+                (index + 2).min(crate::osc52::MAX_PENDING)
+            );
+        }
+        assert!(state.clipboard_writes.iter().all(|text| text == "x"));
     }
 }

@@ -171,11 +171,13 @@ impl ConnectionBridge {
         let notifications_lost = std::mem::take(&mut state.notifications_lost);
         let sounds = std::mem::take(&mut state.sound_events);
         let reload_sound = std::mem::take(&mut state.reload_sound);
+        let clipboard_writes = std::mem::take(&mut state.clipboard_writes);
         let mut update = state.clone();
         update.notifications = notifications;
         update.notifications_lost = notifications_lost;
         update.sound_events = sounds;
         update.reload_sound = reload_sound;
+        update.clipboard_writes = clipboard_writes;
         if let Some((_, result)) = &mut update.dialog_response {
             *result = response;
         }
@@ -298,6 +300,32 @@ mod tests {
         assert!(disconnected.notifications.is_empty());
         assert!(disconnected.sound_events.is_empty());
         assert!(disconnected.sound_cancel.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn clipboard_writes_move_out_of_the_mailbox_exactly_once() {
+        use herdr_client::protocol::ServerMessage;
+        let bridge = bridge();
+        bridge
+            .inbox
+            .lock()
+            .unwrap()
+            .apply(ClientEvent::Message(ServerMessage::Clipboard {
+                data: "aGVsbG8=".into(),
+            }));
+        let update = bridge.take_update().unwrap();
+        assert_eq!(
+            update
+                .clipboard_writes
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["hello"]
+        );
+        // Already delivered, so a poll without new work yields nothing.
+        assert!(bridge.take_update().is_none());
+        bridge.inbox.lock().unwrap().dirty = true;
+        assert!(bridge.take_update().unwrap().clipboard_writes.is_empty());
     }
 
     #[test]

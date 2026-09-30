@@ -5,7 +5,7 @@ use super::{
     state::ConnectionStatus,
 };
 use crate::{Error, Result};
-use gpui::Context;
+use gpui::{ClipboardItem, Context};
 use herdr_client::{ClientHandle, ConnectOptions, ConnectTarget, SavedHost};
 use std::{
     collections::HashSet,
@@ -753,6 +753,27 @@ impl HerdrWindow {
             && self.live.surface_ready()
     }
 
+    /// Writes daemon-forwarded OSC 52 payloads to the pasteboard and reports
+    /// the copy the way a local selection does. Returns whether anything was
+    /// written, so the window repaints for the flash.
+    fn apply_clipboard_writes(
+        &mut self,
+        writes: impl IntoIterator<Item = String>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut writes = writes.into_iter().peekable();
+        if writes.peek().is_none() {
+            return false;
+        }
+        for text in writes {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+        if self.config.clipboard_toast.enabled {
+            self.show_flash(crate::window::Flash::success("copied to clipboard"), cx);
+        }
+        true
+    }
+
     pub(super) fn poll_endpoints(&mut self, cx: &mut Context<Self>) {
         // Record the focused target the user last saw before a newer snapshot
         // can replace it; input held across a gap may only go there.
@@ -779,8 +800,12 @@ impl HerdrWindow {
         // inbox being busy for a poll, must not replace what the window has
         // stamped since, such as the split drag request it is waiting on.
         let mut selected_changed = false;
+        // OSC 52 writes are drained per endpoint so they are written once and
+        // never linger in a live state that a later poll would re-read.
+        let mut clipboard_writes = std::collections::VecDeque::new();
         for (index, endpoint) in self.endpoints.iter_mut().enumerate() {
             let updated = endpoint.poll(Instant::now());
+            clipboard_writes.append(&mut endpoint.live.clipboard_writes);
             selected_changed |= index == self.selected_endpoint && updated != Redraw::None;
             self.sound.poll(
                 &mut endpoint.sounds,
@@ -808,6 +833,9 @@ impl HerdrWindow {
                 selected_changed |= index == self.selected_endpoint;
                 changed = Redraw::Window;
             }
+        }
+        if self.apply_clipboard_writes(clipboard_writes, cx) {
+            changed = Redraw::Window;
         }
         self.restore_selection(cx);
         if self.tick_toasts(
@@ -1134,6 +1162,35 @@ mod tests {
             deadline
         ));
         assert!(endpoints[1].toasts.entries.is_empty());
+    }
+
+    /// A pane app's OSC 52 copy reaches the pasteboard and reports the same
+    /// copy a local selection does, unless the toast is configured off.
+    #[gpui::test]
+    fn daemon_clipboard_writes_reach_the_pasteboard_and_report(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        view.update(cx, |view, cx| {
+            assert!(view.apply_clipboard_writes(vec!["hello".into()], cx));
+            assert!(
+                view.flash.is_some(),
+                "the copy is reported like a selection"
+            );
+        });
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
+            Some("hello".into())
+        );
+        view.update(cx, |view, cx| {
+            view.config.clipboard_toast.enabled = false;
+            view.flash = None;
+            assert!(view.apply_clipboard_writes(vec!["quiet".into()], cx));
+            assert!(view.flash.is_none(), "a disabled toast stays silent");
+            assert!(!view.apply_clipboard_writes(Vec::new(), cx));
+        });
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
+            Some("quiet".into())
+        );
     }
 
     #[test]
