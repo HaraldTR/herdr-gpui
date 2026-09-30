@@ -36,6 +36,9 @@ const REFOCUS_AFTER: Duration = Duration::from_secs(1);
 const RETRY_AFTER: Duration = Duration::from_secs(2);
 /// Resizes settle for as long as the window's own do.
 const RESIZE_SETTLE: Duration = Duration::from_millis(150);
+/// A frame another client took is re-claimed more slowly than a settled
+/// resize, so the request is not resent while the daemon answers it.
+const RESIZE_REASSERT: Duration = Duration::from_secs(1);
 
 /// A terminal group's connection while another group has the keyboard.
 struct Parked {
@@ -59,6 +62,16 @@ impl Parked {
         self.connection.handle.is_some()
             && self.live.status.is_connected()
             && self.live.snapshot.is_some()
+    }
+
+    /// Whether the daemon's frame is the size this connection asked for.
+    /// Another client resizing the tab leaves the request stale even when
+    /// the connection's own options did not change.
+    fn surface_size_stale(&self) -> bool {
+        self.live.surface.as_ref().is_some_and(|surface| {
+            surface.frame.width != self.options.surface_size.cols
+                || surface.frame.height != self.options.surface_size.rows
+        })
     }
 
     /// The tab this connection focuses, when it is in `workspace`.
@@ -92,20 +105,23 @@ impl Parked {
         {
             self.asked = Some((tab.to_owned(), now));
         }
-        if self.last_queued_options == Some(self.options) {
+        let changed = self.last_queued_options != Some(self.options);
+        if self.last_queued_options == Some(self.options) && !self.surface_size_stale() {
             self.pending_resize = None;
             return;
         }
         match self.pending_resize {
-            Some((options, since))
-                if options == self.options && now.duration_since(since) >= RESIZE_SETTLE =>
-            {
-                if handle.resize(&boot, self.options).is_ok() {
+            Some((options, since)) if options == self.options => {
+                let wait = if changed {
+                    RESIZE_SETTLE
+                } else {
+                    RESIZE_REASSERT
+                };
+                if now.duration_since(since) >= wait && handle.resize(&boot, self.options).is_ok() {
                     self.last_queued_options = Some(self.options);
                     self.pending_resize = None;
                 }
             }
-            Some((options, _)) if options == self.options => {}
             _ => self.pending_resize = Some((self.options, now)),
         }
     }
@@ -779,6 +795,45 @@ pub(crate) mod tests {
         assert_eq!(surface_size.cols, 100);
         assert_eq!(parked.last_queued_options, Some(parked.options));
         assert!(parked.pending_resize.is_none());
+    }
+
+    #[test]
+    fn a_parked_connection_reasks_a_size_another_client_overrode() {
+        let mut peer = MockPeer::new();
+        let snapshot = fixture_snapshot();
+        let workspace = snapshot.focused_workspace_id.clone().unwrap();
+        let tab = snapshot.focused_tab_id.clone().unwrap();
+        let mut ids = crate::browser::GroupIds::default();
+        let mut parked = parked(
+            ids.next(),
+            (Scope::endpoint("local"), workspace),
+            herdr_client::ConnectTarget::Socket("/unused-parked.sock".into()),
+            &peer,
+            snapshot,
+        );
+        // The connection's own request is already the queued one, but the
+        // daemon projects a frame of another size: another client resized
+        // the tab, so the request must go out again.
+        parked.options.surface_size.cols = 100;
+        parked.last_queued_options = Some(parked.options);
+        let now = Instant::now();
+        parked.steer(&tab, now);
+        assert_eq!(
+            peer.receive(),
+            ClientMessage::ClientShellFocus { focused: false }
+        );
+        assert!(parked.pending_resize.is_some());
+        parked.steer(&tab, now + RESIZE_SETTLE + Duration::from_millis(10));
+        assert!(
+            parked.pending_resize.is_some(),
+            "a frame of another size is not re-claimed before it has been answered"
+        );
+        parked.steer(&tab, now + RESIZE_REASSERT + Duration::from_millis(10));
+        let ClientMessage::ClientShellResize { surface_size, .. } = peer.receive() else {
+            panic!("expected a resize");
+        };
+        assert_eq!(surface_size.cols, 100);
+        assert_eq!(parked.last_queued_options, Some(parked.options));
     }
 
     /// The fixture window, connected and showing tab `t0` of `w0`.

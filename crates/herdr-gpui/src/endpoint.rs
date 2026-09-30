@@ -730,11 +730,17 @@ impl HerdrWindow {
     // A coherent surface permits the deferred navigation attempt, not terminal
     // input while its toast target is still waiting for inbox validation.
     pub(crate) fn navigation_ready(&self) -> bool {
-        self.surface_activation_ready()
-            && self.live.surface.as_ref().is_some_and(|surface| {
-                surface.frame.width == self.options.surface_size.cols
-                    && surface.frame.height == self.options.surface_size.rows
-            })
+        self.surface_activation_ready() && self.surface_matches_options()
+    }
+
+    /// Whether the daemon's frame is the size this client asked for. A
+    /// mismatch means someone else resized the tab (a CLI, or another
+    /// window): the size has to be asked for again, not only waited on.
+    pub(crate) fn surface_matches_options(&self) -> bool {
+        self.live.surface.as_ref().is_some_and(|surface| {
+            surface.frame.width == self.options.surface_size.cols
+                && surface.frame.height == self.options.surface_size.rows
+        })
     }
 
     pub(crate) fn surface_activation_ready(&self) -> bool {
