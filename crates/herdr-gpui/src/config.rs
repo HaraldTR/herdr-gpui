@@ -117,6 +117,7 @@ pub struct Config {
     pub(crate) keybinding_overrides: BTreeMap<String, Binding>,
     /// Per saved device, by catalog profile ID.
     pub(crate) devices: BTreeMap<String, DeviceSettings>,
+    pub palette: crate::palette::PaletteConfig,
     /// Keys the file names that this build does not know, sorted. They are
     /// ignored, as Herdr ignores its own, so a config written by a newer
     /// build or with a typo still loads; `diagnostic` reports them.
@@ -748,6 +749,7 @@ impl Default for Config {
             keybinding_overrides: BTreeMap::new(),
             devices: BTreeMap::new(),
             unknown_keys: Vec::new(),
+            palette: crate::palette::PaletteConfig::default(),
             sidebar: font(monospace, 12.0),
             // Tabs are terminal chrome, so they read in the monospace face the
             // sidebar and terminal use, as they do in the reference UI.
@@ -781,6 +783,7 @@ struct Settings {
     layout: Layout,
     keybindings: BTreeMap<String, Binding>,
     devices: BTreeMap<String, DeviceSettings>,
+    palette: crate::palette::PaletteConfig,
 }
 
 /// Each key overrides the daemon's answer on its own, so naming one of them
@@ -1214,6 +1217,8 @@ impl Config {
             return Err(Error::TooManyDevices(MAX_DEVICES));
         }
         config.devices = settings.devices;
+        settings.palette.validate()?;
+        config.palette = settings.palette;
         if let Some(theme) = settings.theme {
             if theme.trim().is_empty() {
                 return Err(Error::EmptyTheme);
@@ -1927,6 +1932,37 @@ impl Theme {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn palette_defaults_overrides_and_validation() -> anyhow::Result<()> {
+        let defaults = Config::parse("")?;
+        assert!(defaults.palette.double_shift);
+        assert!(defaults.palette.project_roots.is_empty());
+        let config = Config::parse(
+            "[palette]\ndouble_shift = false\nproject_roots = ['~/Code', '$HOME/Projects']",
+        )?;
+        assert!(!config.palette.double_shift);
+        assert_eq!(config.palette.project_roots, ["~/Code", "$HOME/Projects"]);
+        for text in [
+            "[palette]\nproject_roots = ['']",
+            "[palette]\nproject_roots = ['   ']",
+            "[palette]\nproject_roots = ['x', 1]",
+            "[palette]\ndouble_shift = 'yes'",
+        ] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
+        assert_eq!(
+            Config::parse("[palette]\nunknown = true")?.unknown_keys,
+            ["palette.unknown"]
+        );
+        assert!(matches!(
+            Config::parse(&format!(
+                "[palette]\nproject_roots = [{}]",
+                vec!["'x'"; 17].join(",")
+            )),
+            Err(Error::PaletteProjectRoots)
+        ));
+        Ok(())
+    }
     use super::*;
     use anyhow::Context as _;
     use std::sync::atomic::{AtomicU64, Ordering};

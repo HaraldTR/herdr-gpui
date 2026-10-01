@@ -88,6 +88,7 @@ impl HerdrWindow {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.shift_taps.cancel();
         if self.menu.page.is_some() || !self.input_ready() {
             return;
         }

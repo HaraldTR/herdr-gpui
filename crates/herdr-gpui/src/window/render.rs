@@ -552,6 +552,25 @@ impl Render for HerdrWindow {
             || self.live.error.is_some())
         .then(|| self.live.status_text(self.local_error.as_deref()));
         div()
+            .on_modifiers_changed(cx.listener(Self::double_shift_modifiers))
+            .capture_any_mouse_down(cx.listener(|this, _, _, _| this.shift_taps.cancel()))
+            .child({
+                let entity = cx.weak_entity();
+                canvas(|_, _, _| (), move |_, _, window, _| {
+                    let scroll_entity = entity.clone();
+                    window.on_mouse_event(move |_: &ScrollWheelEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Capture {
+                            let _ = scroll_entity.update(cx, |this, _| this.shift_taps.cancel());
+                        }
+                    });
+                    let entity = entity.clone();
+                    window.on_mouse_event(move |_: &MouseMoveEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Capture {
+                            let _ = entity.update(cx, |this, _| this.shift_taps.cancel());
+                        }
+                    });
+                }).absolute().size_full()
+            })
             .on_action(cx.listener(|this, action: &crate::actions::SetLayout, _, cx| {
                 this.set_layout(action.mode, cx);
             }))

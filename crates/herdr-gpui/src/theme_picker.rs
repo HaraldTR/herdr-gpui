@@ -599,7 +599,7 @@ mod tests {
                     view.open_preferences_fixture(window, cx);
                     view.open_keybinds(window, cx);
                     view.open_theme_picker(window, cx);
-                    view.open_palette(false, window, cx);
+                    view.open_palette(crate::palette::Filter::All, window, cx);
                     view.show_install_modal(window, cx);
                     view.open_app_update(false, window, cx);
                     view.open_app_update(true, window, cx);

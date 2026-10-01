@@ -55,6 +55,18 @@ open_links_in = "system"
 # only) draw rows with a design of their own. View > Layout lists them all.
 layout = "normal"
 
+[palette]
+# Two short Shift taps open the unified palette in the focused GUI window.
+# Cmd-Shift-P opens All; Cmd-P starts on Navigation. Ordinary Shift typing and
+# selection do not count. Disable the gesture independently of keybindings.
+double_shift = true
+# Immediate non-hidden subdirectories, including folders without Git metadata.
+# Roots expand a leading ~ and $VAR / ${VAR}; unset variables show an error.
+# At most 16 roots. Child symlinks are skipped. Local folders open locally,
+# never on the selected SSH host. These settings do not read herdr-utils config.
+project_roots = []
+# Example override: project_roots = ["~/Code", "$HOME/Projects"]
+
 # Inherit shared [ui.toast] delivery, delay_seconds, and herdr.position.
 # Only delivery = "herdr" enables in-app toasts; "off", "terminal", and "system"
 # do not. QA previews bypass delivery policy. In config-gpui.local.toml, each

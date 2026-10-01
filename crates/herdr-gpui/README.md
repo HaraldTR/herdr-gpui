@@ -1694,11 +1694,44 @@ Windows setup) nothing is saved and the window says so.
   blocked, and never with `confirm_close_tab = false`). **Cancel is selected by default**: Enter alone cancels;
   Tab then Enter selects and confirms Close. Closing can terminate running
   processes, unlike quitting the GUI, which only detaches.
-- Cmd-Shift-P opens the command palette with native actions and configured daemon
-  command entries, including native Themes and Reconnect actions without dedicated
-  shortcuts. Cmd-P opens **Go To** instead: every workspace on every connected
-  host, each followed by one row per agent or terminal pane with its status,
-  tab, and directory. Choosing a row on another host switches to it first.
+- Double-tap Shift or press Cmd-Shift-P to open the unified **Command Palette**:
+  workspaces on connected hosts, agents and terminal panes, native GUI actions,
+  configured daemon commands, and local project folders. Cmd-P opens the same
+  palette on **Navigation**. Choose **All**, **Navigation**, **Commands**, or
+  **Projects**, or cycle filters with Tab / Shift-Tab without clearing the search.
+  Search ranks exact names, word prefixes, substrings, then fuzzy matches; host,
+  workspace, path, status, and command ID are searchable context. Up / Down selects,
+  Enter or a click activates, and Escape or an outside click dismisses without
+  sending terminal input. Choosing a destination on another host switches to it.
+  Double-Shift requires two short completed taps within 400 ms; shifted typing,
+  mouse interaction, held Shift, other modifiers, composition, and modal dialogs
+  do not trigger it. It is window-local, not a system-wide hotkey. Native browser
+  content may handle modifier events itself; use the native menu when needed.
+- Configure project discovery in `config-gpui.local.toml`:
+
+  ```toml
+  [palette]
+  double_shift = true # false disables only this gesture
+  project_roots = ["~/Code", "$HOME/Projects"]
+  ```
+
+  The palette lists immediate non-hidden folders, not just Git repositories.
+  A leading `~`, `$VAR`, and `${VAR}` expand without shell execution. Unset
+  variables, missing roots, or discovery limits show diagnostics while other
+  sources stay usable. Scans run in the background, visit at most 8192 directory
+  entries, and list at most 2048 projects across up to 16 roots. Roots may be
+  symlinks, but child symlinks are skipped; duplicate paths are listed once.
+  Selecting a folder focuses a workspace whose first surviving pane's launch directory
+  exactly matches it, or creates one with that directory and its basename label.
+  Foreground process directories and later splits do not claim a project while
+  that first pane remains. The snapshot does not identify an original root pane;
+  after it is closed, the first surviving pane supplies this directory.
+  Local folders always open on the local connection, even while viewing SSH;
+  an unavailable local connection produces an error, never a remote creation.
+  The palette waits for the daemon's creation response before following the new
+  workspace and does not automatically trust repositories. Dismissing a queued
+  creation does not undo it. The GUI owns these settings independently of
+  `herdr-utils`; use the same root paths in both configs if desired.
 - Every native shortcut can be rebound in `config-gpui.local.toml` under
   `[keybindings]`, keyed by command name (`new_tab`, `new_workspace`,
   `split_right`, `focus_tab_1`, `quit`, ...). A value is one keystroke or a list;
@@ -1760,7 +1793,7 @@ Windows setup) nothing is saved and the window says so.
   section, or key combination. Preferences, keybinds, theme/palette pickers, and
   close confirmations use themed centered modals and configured UI fonts;
   modal input does not reach the terminal.
-- Creation omits `cwd`, labels, environment overrides, and split ratio: the
+- Ordinary creation shortcuts omit `cwd`, labels, environment overrides, and split ratio: the
   daemon applies its existing defaults and directory policy. Workspace creation
   supplies the currently focused source workspace when available; tabs and splits
   target the current workspace/pane explicitly. An empty session can create a
