@@ -65,6 +65,25 @@ test-perf budget="30":
     cargo build --locked --release -p herdr-gpui --features integration-test
     HERDR_PERF_P95_MS="{{budget}}" target/release/herdr-gpui --performance-test
 
+# Compare UI variants written as GPUI code in `file` (the built-in demo when
+# empty) in a native window. "Send to agent" writes `feedback`; `capture` gets
+# a PNG of the window once it has drawn. Debug build, no daemon. The process
+# left running is the app itself, so its PID is the one to stop.
+# See .claude/skills/gpui-mockup.
+[positional-arguments]
+mockup file="" feedback="" capture="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    absolute() { case "$1" in ""|/*) printf '%s' "$1" ;; *) printf '%s/%s' {{quote(invocation_directory())}} "$1" ;; esac; }
+    file="$(absolute "$1")"
+    feedback="$(absolute "$2")"
+    capture="$(absolute "$3")"
+    HERDR_MOCKUP_FILE="$file" cargo build --locked -p herdr-gpui --features mockup
+    args=(--mockup)
+    if [ -n "$feedback" ]; then args+=(--feedback "$feedback"); fi
+    if [ -n "$capture" ]; then args+=(--capture "$capture"); fi
+    exec target/debug/herdr-gpui "${args[@]}"
+
 build-release:
     cargo build --locked --release -p herdr-gpui
 
