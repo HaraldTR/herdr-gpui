@@ -202,6 +202,16 @@ fn unchanged(original: &Snapshot, current: &Snapshot) -> Result<(), Error> {
     Ok(())
 }
 
+struct LockGuard(File);
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        // A forked child can retain a duplicate until exec despite CLOEXEC.
+        // Explicit unlock releases the lock without waiting for its last close.
+        let _ = flock(&self.0, FlockOperation::Unlock);
+    }
+}
+
 pub(super) fn save(path: &Path, original: &Snapshot, text: &str) -> Result<Snapshot, Error> {
     if text.len() as u64 > LIMIT {
         return Err(Error::TooLarge);
@@ -212,7 +222,7 @@ pub(super) fn save(path: &Path, original: &Snapshot, text: &str) -> Result<Snaps
     lock_name.push(name);
     lock_name.push(".gpui-lock");
     // Keep this lock inode permanently. Unlinking it could let two writers lock
-    // different inodes. The descriptor closes on every return and releases it.
+    // different inodes. The guard explicitly unlocks on every return.
     let lock = File::from(
         openat(
             &dir,
@@ -228,6 +238,7 @@ pub(super) fn save(path: &Path, original: &Snapshot, text: &str) -> Result<Snaps
         Err(rustix::io::Errno::WOULDBLOCK) => return Err(Error::Busy),
         Err(error) => return Err(io(error)),
     }
+    let _lock = LockGuard(lock);
     let current = read_at(&dir, name)?;
     unchanged(original, &current)?;
 
@@ -306,4 +317,28 @@ pub(super) fn save(path: &Path, original: &Snapshot, text: &str) -> Result<Snaps
         });
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guard_unlocks_while_duplicate_descriptor_remains_open() -> anyhow::Result<()> {
+        let temp = tempfile::NamedTempFile::new()?;
+        let lock = temp.reopen()?;
+        flock(&lock, FlockOperation::NonBlockingLockExclusive)?;
+        let duplicate = lock.try_clone()?;
+        let guard = LockGuard(lock);
+        let contender = temp.reopen()?;
+        assert_eq!(
+            flock(&contender, FlockOperation::NonBlockingLockExclusive),
+            Err(rustix::io::Errno::WOULDBLOCK)
+        );
+        drop(guard);
+        flock(&contender, FlockOperation::NonBlockingLockExclusive)?;
+        let _contender = LockGuard(contender);
+        drop(duplicate);
+        Ok(())
+    }
 }

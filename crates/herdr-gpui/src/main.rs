@@ -54,6 +54,7 @@ mod repo_items;
 mod search_input;
 mod sessions;
 mod settings_panel;
+mod settings_window;
 mod sidebar;
 mod sound;
 mod state;

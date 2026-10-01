@@ -41,7 +41,7 @@ impl ThemePicker {
 
 impl HerdrWindow {
     pub(super) fn open_theme_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.native_settings_save_in_flight() {
+        if self.native_settings_save_in_flight() || crate::settings_window::theme_pending(cx) {
             return;
         }
         if !self.open_menu(window, cx) {
@@ -596,7 +596,7 @@ mod tests {
             cx.update(|window, cx| {
                 view.update(cx, |view, cx| {
                     assert!(!view.open_menu(window, cx));
-                    view.open_preferences(window, cx);
+                    view.open_preferences_fixture(window, cx);
                     view.open_keybinds(window, cx);
                     view.open_theme_picker(window, cx);
                     view.open_palette(false, window, cx);
@@ -830,7 +830,7 @@ mod tests {
                     view.preview_picker_selection(cx);
                     assert_eq!(view.theme, Theme::builtin("Nord").unwrap());
                     if dismiss == 0 {
-                        view.open_preferences(window, cx);
+                        view.open_preferences_fixture(window, cx);
                     }
                     if dismiss == 1 {
                         view.dismiss_menu(window, cx);

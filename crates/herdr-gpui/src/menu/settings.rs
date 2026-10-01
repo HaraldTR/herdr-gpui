@@ -96,6 +96,16 @@ impl HerdrWindow {
     }
 
     pub(crate) fn open_preferences(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.theme_save_in_flight() {
+            return;
+        }
+        self.dismiss_menu(window, cx);
+        crate::settings_window::open(cx.weak_entity(), cx);
+    }
+
+    // Existing modal font/theme pickers still return to their own preferences page.
+    #[cfg(any(test, all(feature = "integration-test", target_os = "macos")))]
+    pub(crate) fn open_preferences_fixture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.open_menu(window, cx) {
             return;
         }
@@ -156,6 +166,7 @@ impl HerdrWindow {
         if self.config_load.is_some() || self.font_size_saves.is_busy() {
             return;
         }
+        let theme_revision = crate::settings_window::theme_load_revision(cx);
         let load = cx.background_executor().spawn(async move { load() });
         self.config_load = Some(cx.spawn(async move |this, cx| {
             let loaded = load.await;
@@ -165,7 +176,8 @@ impl HerdrWindow {
                 this.config_load_revision = this.config_load_revision.wrapping_add(1);
                 // Apply a coherent pair only after both have loaded successfully.
                 match loaded {
-                    Ok((mut config, theme)) => {
+                    Ok((mut config, mut theme)) => {
+                        crate::settings_window::apply_loaded_theme(&mut config, &mut theme, theme_revision, cx);
                         if let Some(shared) = &this.settings.shared {
                             config.apply_shared_notifications(shared);
                         }
@@ -194,6 +206,7 @@ impl HerdrWindow {
                             this.theme = theme;
                         }
                         this.apply_shared_theme(cx);
+                        crate::settings_window::apply_loaded_theme(&mut this.config, &mut this.theme, theme_revision, cx);
                         cx.set_global(crate::app::InitialAppearance {
                             config: this.config.clone(),
                             theme: this.theme.clone(),
@@ -201,6 +214,7 @@ impl HerdrWindow {
                         });
                         this.font_size_saves.apply_pending(&mut config);
                         this.config = config;
+                        crate::settings_window::apply_loaded_theme(&mut this.config, &mut this.theme, theme_revision, cx);
                         this.tick_toasts(
                             this.menu.page.is_some() || this.toasts_hidden,
                             std::time::Instant::now(),

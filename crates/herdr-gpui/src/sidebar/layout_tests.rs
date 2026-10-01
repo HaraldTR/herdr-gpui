@@ -1866,7 +1866,11 @@ fn check_sidebar(fixture: Entity<SidebarFixture>, cx: &mut gpui::VisualTestConte
             gpui::EntityInputHandler::unmark_text(input, window, cx)
         });
     });
-    cx.simulate_keystrokes("escape cmd-,");
+    cx.simulate_keystrokes("escape");
+    // Exercise the retained modal, not the standalone Settings command.
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.open_preferences_fixture(window, cx));
+    });
     // General has enough content to exercise the independent body scroll.
     cx.simulate_keystrokes("shift-tab");
     cx.simulate_resize(size(px(360.), px(240.)));
@@ -1971,9 +1975,9 @@ fn check_sidebar(fixture: Entity<SidebarFixture>, cx: &mut gpui::VisualTestConte
         }
     }
     cx.simulate_resize(size(px(800.), px(600.)));
-    cx.simulate_keystrokes("cmd-,");
     cx.update(|window, cx| {
         view.update(cx, |view, cx| {
+            view.open_preferences_fixture(window, cx);
             view.select_settings_tab(crate::settings_panel::Tab::Theme, window, cx)
         });
     });
@@ -2084,7 +2088,10 @@ fn check_sidebar(fixture: Entity<SidebarFixture>, cx: &mut gpui::VisualTestConte
         assert!(view.read(cx).menu.page.is_none());
         assert!(view.read(cx).focus.is_focused(window));
     });
-    cx.simulate_keystrokes("cmd-b cmd-,");
+    cx.simulate_keystrokes("cmd-b");
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.open_preferences_fixture(window, cx));
+    });
     cx.update(|_, cx| {
         assert!(view.read(cx).sidebar_visible);
         assert!(view.read(cx).menu.page == Some(crate::menu::Page::Preferences));
@@ -2935,7 +2942,7 @@ fn the_sidebar_menu_stays_clear_of_the_window_chrome(cx: &mut gpui::TestAppConte
 }
 
 #[gpui::test]
-fn device_footer_filters_both_lists_and_opens_settings(cx: &mut gpui::TestAppContext) {
+fn device_footer_filters_both_lists_and_keeps_settings_visible(cx: &mut gpui::TestAppContext) {
     let (fixture, cx) = cx.add_window_view(|window, cx| {
         crate::bind_keys(cx);
         let view = cx.new(|cx| fixture_window(window, cx));
@@ -3030,8 +3037,12 @@ fn device_footer_filters_both_lists_and_opens_settings(cx: &mut gpui::TestAppCon
         full_draw(window, cx).clear(cx);
     });
     assert!(cx.debug_bounds("host-ssh:fixture").is_some());
-    let settings = cx.debug_bounds("device-settings").unwrap().center();
-    cx.simulate_click(settings, Modifiers::default());
+    assert!(cx.debug_bounds("device-settings").is_some());
+    // Command routing belongs to settings_window tests; this fixture keeps
+    // testing the legacy modal without starting the personal config loader.
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.open_preferences_fixture(window, cx));
+    });
     cx.update(|_, cx| {
         assert_eq!(
             view.read(cx).menu.page,
@@ -3374,7 +3385,7 @@ fn preferences_list_feature_flags(cx: &mut gpui::TestAppContext) {
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
                 view.config.features.sidebar_hover_menu = enabled;
-                view.open_preferences(window, cx);
+                view.open_preferences_fixture(window, cx);
                 view.select_settings_tab(crate::settings_panel::Tab::General, window, cx);
             });
             full_draw(window, cx).clear(cx);
@@ -3415,9 +3426,9 @@ fn preferences_tabs_stay_on_one_row_and_font_input_keeps_native_focus(
         window.focus(&focus, cx);
         window.draw(cx).clear(cx);
     });
-    cx.simulate_keystrokes("cmd-,");
     // Opening the modal changes the focus tree; paint it before routing the next key.
     cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.open_preferences_fixture(window, cx));
         window.draw(cx).clear(cx);
         assert!(view.read(cx).menu.page == Some(crate::menu::Page::Preferences));
         assert!(view.read(cx).menu.focus.is_focused(window));

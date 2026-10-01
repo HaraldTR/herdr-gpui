@@ -76,6 +76,9 @@ fn native_fixture(fixture: Fixture) {
         gui: None,
     };
     let mut command = gui_command(&isolated.sandbox, |name| std::env::var_os(name));
+    if let Some(path) = std::env::var_os("HERDR_TEST_SETTINGS_CAPTURE") {
+        command.env("HERDR_TEST_SETTINGS_CAPTURE", path);
+    }
     match fixture {
         Fixture::Sidebar => {}
         Fixture::Notifications => {

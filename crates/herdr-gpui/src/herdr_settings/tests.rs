@@ -409,6 +409,7 @@ fn advisory_lock_is_nonblocking_and_released_after_saves() -> anyhow::Result<()>
         .err()
         .ok_or_else(|| anyhow::anyhow!("ignored held lock"))?;
     assert!(matches!(source(&error), Some(Error::Busy)));
+    flock(&lock, FlockOperation::Unlock)?;
     drop(lock);
     let settings = settings.save(Edit::Sound(true))?;
     assert!(settings.sound_enabled);

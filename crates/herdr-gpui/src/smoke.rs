@@ -735,7 +735,7 @@ async fn sidebar_preferences(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncAp
 
     let original_size = handle.update(cx, |_, window, _| window.viewport_size())?;
     handle.update(cx, |view, window, cx| {
-        view.open_preferences(window, cx);
+        view.open_preferences_fixture(window, cx);
     })?;
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -1001,8 +1001,10 @@ async fn sidebar_preferences(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncAp
             .await;
     }
     eprintln!(
-        "SIDEBAR native preferences PASS: all 7 tabs in a single scrolling row at 800/320px, indicator glyphs, font editor focus, Tab/Escape isolation; no saves"
+        "SIDEBAR native legacy preferences PASS: all 7 tabs in a single scrolling row at 800/320px, indicator glyphs, font editor focus, Tab/Escape isolation; no saves"
     );
+
+    crate::settings_window::verify_native(handle, cx).await?;
     Ok(())
 }
 

@@ -270,13 +270,37 @@ together; invalid edits keep the last valid settings and show a load error.
 Reload waits while a theme preview/save is active. The manual GUI config reload
 action remains available; daemon config reload is separate.
 
-Preferences has **Theme, Indicators, Sound, Toasts, Integrations, Font, and General**
-tabs on one row, horizontally scrollable in narrow windows. Tab/Shift-Tab
-switches sections and reveals the selected tab when a font field is not focused.
-Font family and size controls save each native font role independently, retaining
-configured fallbacks and unrelated settings in `config-gpui.local.toml`.
-Esc leaves a font editor before
-closing the modal.
+Settings opens a separate, reusable native window with **Appearance, Fonts,
+Indicators, Sound, Notifications, Integrations, and General** in a sidebar.
+The terminal stays usable while Settings is open. Cmd-W (or Ctrl-W) closes only
+Settings; reopening activates the existing window instead of creating a duplicate.
+Local preferences remain editable if the originating session window closes.
+
+Appearance provides a large live preview and a searchable, virtualized theme
+catalog, including every discovered Ghostty theme rather than a small shortlist.
+Typing filters the entire catalog without changing the applied theme. Clicking a
+result or navigating with the arrow keys applies it immediately to Settings,
+open app windows, and Logs. There is no Apply button. Theme selection is an
+in-memory draft: browsing does not write or reload the TOML configuration.
+Uncached theme definition files load in the background; recent definitions are
+cached for quick switching.
+
+Closing Settings, through its native close button or Cmd-W/Ctrl-W, saves only the
+final theme selection. Quitting also flushes that selection. Closing waits for
+accepted work without blocking the UI; a save failure keeps Settings open with
+the draft and an error so it can be retried. Other controls keep their existing
+automatic-save behavior without resetting the live theme.
+
+**This app** browses native themes; **Herdr** edits the shared theme selection,
+which changes the GUI only when it follows Herdr rather than a native override.
+Follow Herdr and high contrast remain available independently.
+
+Fonts supports searching installed families, setting all roles together, and
+editing roles independently. Size steppers coalesce repeated changes; click a
+size to type an integer from 8 through 48. Enter or blur saves, Escape cancels.
+Accepted saves survive closing Settings. Family and size edits preserve configured
+fallbacks and unrelated settings in `config-gpui.local.toml`. General retains
+browser-skill installation/removal and configuration paths.
 
 Theme, indicator style, sound, and toast delivery are **shared with the local
 Herdr TUI**. They read `HERDR_CONFIG_PATH`, otherwise
@@ -1134,14 +1158,14 @@ Windows setup) nothing is saved and the window says so.
   for limits, location, and the startup authentication requirement. Neither cache
   reads nor downloads block rendering; sign-out discards profile refresh results.
 - In-app sidebar menu for settings, keybinds, config reload, update information,
-  and detach/reconnect. Tabbed Preferences combines shared Herdr settings,
+  and detach/reconnect. The standalone Settings window combines shared Herdr settings,
   daemon agent integrations, editable native fonts, and general configuration.
   A searchable installed-font picker can set all four families
   together or each independently (including Platform default), while sizes have
   −/+ controls and editable whole-number fields (8–48; Enter or leave to save,
   Escape to cancel). Size changes appear immediately; repeated clicks stay enabled
   while a background writer coalesces the latest size for each font. Save failures
-  appear in the Preferences footer and restore the previous size. Both families
+  appear in the Settings footer and restore the previous size. Both families
   and sizes save to the local GUI overrides file and reload in all windows.
 - A searchable theme picker previews the available names from built-ins and
   Herdr/Ghostty theme folders. Selecting a theme applies and saves it while

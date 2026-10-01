@@ -384,6 +384,28 @@ impl Settings {
         Ok(self.colors(light).theme())
     }
 
+    /// Pure preview of a theme edit, retaining custom colors and legacy accent.
+    /// Like saving a named theme, this disables automatic light/dark switching.
+    pub(crate) fn preview_theme(
+        &self,
+        name: &str,
+        light: bool,
+    ) -> crate::Result<crate::config::Theme> {
+        let name = palette::canonical(name).ok_or_else(|| Error::Theme(name.into()))?;
+        let mut document = self
+            .original
+            .text
+            .as_deref()
+            .unwrap_or("")
+            .parse::<DocumentMut>()
+            .map_err(Error::from)?;
+        set(&mut document, &["theme", "name"], name.into())?;
+        set(&mut document, &["theme", "auto_switch"], false.into())?;
+        let mut snapshot = self.original.clone();
+        snapshot.text = Some(document.to_string());
+        Self::parse(self.path.clone(), snapshot)?.theme(light)
+    }
+
     fn colors(&self, light: bool) -> &palette::Palette {
         &self.palettes[usize::from(light)]
     }

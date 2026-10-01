@@ -1,0 +1,1172 @@
+//! Prepared controls for the standalone window; persistence belongs to its serial save path.
+use super::{Section, SettingsWindow};
+use crate::{
+    agent_skill::{AgentSkill, Choice},
+    config::{Config, FONT_SIZE_RANGE, FontFace, LayoutMode, corners},
+    font_picker::{FontTarget, shared_family},
+    herdr_settings::{Edit, IndicatorStyle, ToastDelivery},
+    search_input::{Changed, SearchInput},
+};
+use gpui::{prelude::*, *};
+
+const FACES: [(FontFace, &str); 4] = [
+    (FontFace::Sidebar, "Sidebar"),
+    (FontFace::Tabs, "Tabs"),
+    (FontFace::Terminal, "Terminal"),
+    (FontFace::Ui, "UI"),
+];
+
+pub(super) struct Controls {
+    search: Entity<SearchInput>,
+    target: FontTarget,
+    names: Vec<String>,
+    filtered: Vec<usize>,
+    scroll: UniformListScrollHandle,
+    discovering: bool,
+    initialized: bool,
+    pending_sizes: Vec<(FontFace, f32)>,
+    saving_sizes: Vec<(FontFace, f32)>,
+    size_editor: Option<SizeEditor>,
+    local_path: String,
+    _search_changed: Subscription,
+}
+
+struct SizeEditor {
+    face: FontFace,
+    input: Entity<SearchInput>,
+    invalid: bool,
+    _blur: Subscription,
+}
+
+fn parse_size(text: &str) -> Option<f32> {
+    let text = text.trim();
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let value = f32::from(text.parse::<u8>().ok()?);
+    FONT_SIZE_RANGE.contains(&value).then_some(value)
+}
+
+impl Controls {
+    pub(super) fn new(cx: &mut Context<SettingsWindow>) -> Self {
+        let search = cx.new(SearchInput::new);
+        search.update(cx, |input, cx| {
+            input.set_placeholder("Search installed fonts...", cx)
+        });
+        let subscription = cx.subscribe(&search, |this, search, _: &Changed, cx| {
+            this.controls.filtered = filter_fonts(&this.controls.names, search.read(cx).text());
+            this.controls.scroll.scroll_to_item(0, ScrollStrategy::Top);
+            cx.notify();
+        });
+        Self {
+            search,
+            target: FontTarget::All,
+            names: Vec::new(),
+            filtered: Vec::new(),
+            scroll: UniformListScrollHandle::new(),
+            discovering: true,
+            initialized: false,
+            pending_sizes: Vec::new(),
+            saving_sizes: Vec::new(),
+            size_editor: None,
+            local_path: Config::local_path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|error| format!("Unavailable ({error})")),
+            _search_changed: subscription,
+        }
+    }
+
+    fn size(&self, face: FontFace, config: &Config) -> f32 {
+        self.pending_sizes
+            .iter()
+            .chain(&self.saving_sizes)
+            .find_map(|(candidate, size)| (*candidate == face).then_some(*size))
+            .unwrap_or_else(|| face.size(config))
+    }
+}
+
+fn filter_fonts(names: &[String], query: &str) -> Vec<usize> {
+    let query = query.trim().to_lowercase();
+    names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| name.to_lowercase().contains(&query).then_some(index))
+        .collect()
+}
+
+fn stepped_size(size: f32, step: f32) -> Option<f32> {
+    if !size.is_finite() || !step.is_finite() {
+        return None;
+    }
+    Some((size.round() + step.round()).clamp(*FONT_SIZE_RANGE.start(), *FONT_SIZE_RANGE.end()))
+}
+
+fn queue_size(pending: &mut Vec<(FontFace, f32)>, face: FontFace, size: f32) {
+    if let Some((_, desired)) = pending.iter_mut().find(|(candidate, _)| *candidate == face) {
+        *desired = size;
+    } else {
+        pending.push((face, size));
+    }
+}
+
+impl SettingsWindow {
+    pub(super) fn initialize_controls(&mut self, cx: &mut Context<Self>) {
+        self.sync_controls(cx);
+        if self.controls.initialized {
+            return;
+        }
+        self.controls.initialized = true;
+        let text_system = cx.text_system().clone();
+        let discovery = cx.background_executor().spawn(async move {
+            let mut names: Vec<_> = text_system
+                .all_font_names()
+                .into_iter()
+                .filter(|name| !name.trim().is_empty())
+                .collect();
+            names.sort_by_cached_key(|name| (name.to_lowercase(), name.clone()));
+            names.dedup();
+            names
+        });
+        cx.spawn(async move |this, cx| {
+            let names = discovery.await;
+            let _ = this.update(cx, |this, cx| {
+                this.controls.filtered = filter_fonts(&names, this.controls.search.read(cx).text());
+                this.controls.names = names;
+                this.controls.discovering = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Called after a root load/save completes, with its busy flag already cleared.
+    pub(super) fn sync_controls(&mut self, cx: &mut Context<Self>) {
+        self.controls.search.update(cx, |input, cx| {
+            input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
+        });
+        if let Some(editor) = &self.controls.size_editor {
+            editor.input.update(cx, |input, cx| {
+                input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
+            });
+        }
+        if !self.busy() {
+            self.controls.saving_sizes.clear();
+            self.flush_control_sizes(cx);
+        }
+    }
+
+    fn flush_control_sizes(&mut self, cx: &mut Context<Self>) {
+        if self.busy() || self.controls.pending_sizes.is_empty() {
+            return;
+        }
+        // Only touched faces are written. A reload cannot erase later clicks, and
+        // we never persist a stale copy of the other faces' configuration.
+        let sizes = std::mem::take(&mut self.controls.pending_sizes);
+        self.controls.saving_sizes = sizes.clone();
+        self.save_control_sizes(sizes, cx);
+    }
+
+    pub(super) fn take_pending_control_sizes(&mut self) -> Vec<(FontFace, f32)> {
+        std::mem::take(&mut self.controls.pending_sizes)
+    }
+
+    fn step_control_size(&mut self, face: FontFace, step: f32, cx: &mut Context<Self>) {
+        if self.quitting {
+            return;
+        }
+        let current = self.controls.size(face, &self.config);
+        if let Some(size) = stepped_size(current, step)
+            && size != current
+        {
+            self.accept_control_size(face, size, cx);
+        }
+    }
+
+    pub(super) fn accept_control_size(
+        &mut self,
+        face: FontFace,
+        size: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if self.quitting || !FONT_SIZE_RANGE.contains(&size) || size.fract() != 0. {
+            return;
+        }
+        if self.controls.size(face, &self.config) == size {
+            return;
+        }
+        queue_size(&mut self.controls.pending_sizes, face, size);
+        self.flush_control_sizes(cx);
+        cx.notify();
+    }
+
+    fn begin_control_size_edit(
+        &mut self,
+        face: FontFace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.quitting {
+            return;
+        }
+        if !self.finish_control_size_edit(true, cx) {
+            self.finish_control_size_edit(false, cx);
+        }
+        let size = self.controls.size(face, &self.config);
+        let input = cx.new(SearchInput::new);
+        input.update(cx, |input, cx| {
+            input.set_text_selected(&size.to_string(), cx);
+            input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
+        });
+        let focus = input.read(cx).focus.clone();
+        let blur = cx.on_blur(&focus, window, |this, _, cx| {
+            if !this.finish_control_size_edit(true, cx) {
+                this.finish_control_size_edit(false, cx);
+            }
+        });
+        self.controls.size_editor = Some(SizeEditor {
+            face,
+            input,
+            invalid: false,
+            _blur: blur,
+        });
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    pub(super) fn finish_control_size_edit(&mut self, save: bool, cx: &mut Context<Self>) -> bool {
+        let Some(editor) = &mut self.controls.size_editor else {
+            return true;
+        };
+        let size = if save {
+            if editor.input.read(cx).is_composing() {
+                return false;
+            }
+            let Some(size) = parse_size(editor.input.read(cx).text()) else {
+                editor.invalid = true;
+                cx.notify();
+                return false;
+            };
+            Some(size)
+        } else {
+            None
+        };
+        let face = editor.face;
+        self.controls.size_editor = None;
+        if let Some(size) = size {
+            self.accept_control_size(face, size, cx);
+        }
+        cx.notify();
+        true
+    }
+
+    fn control_size_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(event.keystroke.key.as_str(), "enter" | "escape") {
+            return;
+        }
+        let Some(editor) = &self.controls.size_editor else {
+            return;
+        };
+        cx.stop_propagation();
+        if editor.input.read(cx).is_composing() {
+            return;
+        }
+        window.prevent_default();
+        if self.finish_control_size_edit(event.keystroke.key == "enter", cx) {
+            window.focus(&self.focus, cx);
+        }
+    }
+
+    fn control_card(&self, title: &'static str) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(18.))
+            .min_w_0()
+            .p(px(24.))
+            .rounded(px(corners::PANEL))
+            .border_1()
+            .border_color(rgb(self.theme.active))
+            .bg(rgb(self.theme.surface))
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+    }
+
+    fn control_note(&self, text: impl Into<SharedString>) -> Div {
+        div()
+            .min_w_0()
+            .text_color(rgb(self.theme.muted))
+            .child(text.into())
+    }
+
+    fn control_row(&self, label: &'static str, value: impl Into<SharedString>) -> Div {
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap(px(12.))
+            .child(div().text_color(rgb(self.theme.muted)).child(label))
+            .child(div().min_w_0().child(value.into()))
+    }
+
+    fn control_choice(
+        &self,
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        selected: bool,
+        enabled: bool,
+    ) -> Stateful<Div> {
+        div()
+            .id(id.into())
+            .px(px(14.))
+            .py(px(10.))
+            .min_w_0()
+            .rounded(px(corners::CONTROL))
+            .border_1()
+            .border_color(if selected {
+                crate::menu::accent(&self.theme)
+            } else {
+                rgb(self.theme.active)
+            })
+            .bg(rgb(if selected {
+                self.theme.active
+            } else {
+                self.theme.background
+            }))
+            .when(enabled, |item| {
+                item.cursor_pointer()
+                    .hover(|style| style.bg(rgb(self.theme.active)))
+            })
+            .when(!enabled, |item| item.opacity(0.5))
+            .child(label.into())
+    }
+
+    fn controls_shared_ready(&self) -> bool {
+        cfg!(unix) && self.shared.is_some() && !self.busy() && self.error.is_none()
+    }
+
+    pub(super) fn render_controls(&self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let content = match self.section {
+            Section::Fonts => self.render_font_controls(cx),
+            Section::Indicators => self.render_indicator_controls(cx),
+            Section::Sound => self.render_sound_controls(cx),
+            Section::Notifications => self.render_notification_controls(cx),
+            Section::General => self.render_general_controls(cx),
+            Section::Appearance | Section::Integrations => div(),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(24.))
+            .min_w_0()
+            .when(
+                !cfg!(unix)
+                    && matches!(
+                        self.section,
+                        Section::Indicators | Section::Sound | Section::Notifications
+                    ),
+                |body| {
+                    body.child(
+                        self.control_note("Shared Herdr settings are read-only on this platform."),
+                    )
+                },
+            )
+            .when(
+                self.shared.is_none()
+                    && matches!(
+                        self.section,
+                        Section::Indicators | Section::Sound | Section::Notifications
+                    ),
+                |body| {
+                    body.child(self.control_note(
+                        "Shared settings are unavailable. Reload from General to retry.",
+                    ))
+                },
+            )
+            .child(content)
+    }
+
+    fn render_font_controls(&self, cx: &mut Context<Self>) -> Div {
+        let mut roles = div().flex().flex_wrap().gap(px(8.));
+        for (target, label) in std::iter::once((FontTarget::All, "All"))
+            .chain(FACES.map(|(face, label)| (FontTarget::Face(face), label)))
+        {
+            roles = roles.child(
+                self.control_choice(
+                    format!("settings-font-role-{label}"),
+                    label,
+                    self.controls.target == target,
+                    true,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.controls.target = target;
+                    cx.notify();
+                })),
+            );
+        }
+        let family = match self.controls.target {
+            FontTarget::All => shared_family(&self.config).unwrap_or("Mixed"),
+            FontTarget::Face(FontFace::Sidebar) => &self.config.sidebar.family,
+            FontTarget::Face(FontFace::Tabs) => &self.config.tabs.family,
+            FontTarget::Face(FontFace::Terminal) => &self.config.terminal.family,
+            FontTarget::Face(FontFace::Ui) => &self.config.ui.family,
+        };
+        let ready = !self.busy();
+        let family_card = self
+            .control_card("Font family")
+            .child(roles)
+            .child(self.control_row("Current family", family.to_owned()))
+            .child(self.controls.search.clone())
+            .child(
+                self.control_choice(
+                    "settings-font-default",
+                    "Use platform default",
+                    false,
+                    ready,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let target = this.controls.target;
+                    this.save_native(
+                        move || match target {
+                            FontTarget::All => Config::save_all_font_families(None),
+                            FontTarget::Face(face) => Config::save_font_family(face, None),
+                        },
+                        cx,
+                    );
+                })),
+            )
+            .child(self.control_note(if self.controls.discovering {
+                "Loading installed fonts...".into()
+            } else {
+                format!(
+                    "{} of {} installed families",
+                    self.controls.filtered.len(),
+                    self.controls.names.len()
+                )
+            }))
+            .when(!self.controls.filtered.is_empty(), |card| {
+                card.child(
+                    uniform_list(
+                        "settings-font-results",
+                        self.controls.filtered.len(),
+                        cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                            range
+                                .map(|index| {
+                                    let family =
+                                        this.controls.names[this.controls.filtered[index]].clone();
+                                    this.control_choice(
+                                        format!("settings-font-result-{index}"),
+                                        family.clone(),
+                                        false,
+                                        !this.busy(),
+                                    )
+                                    .w_full()
+                                    .h(px(this.config.ui.line_height() + 24.))
+                                    .overflow_hidden()
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            let target = this.controls.target;
+                                            let family = family.clone();
+                                            this.save_native(
+                                                move || match target {
+                                                    FontTarget::All => {
+                                                        Config::save_all_font_families(Some(
+                                                            &family,
+                                                        ))
+                                                    }
+                                                    FontTarget::Face(face) => {
+                                                        Config::save_font_family(
+                                                            face,
+                                                            Some(&family),
+                                                        )
+                                                    }
+                                                },
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                })
+                                .collect()
+                        }),
+                    )
+                    .h(px(240.))
+                    .track_scroll(&self.controls.scroll),
+                )
+            })
+            .when(
+                !self.controls.discovering && self.controls.filtered.is_empty(),
+                |card| card.child(self.control_note("No matching fonts.")),
+            );
+        let mut sizes = self.control_card("Text sizes");
+        for (face, label) in FACES {
+            let size = self.controls.size(face, &self.config);
+            let mut buttons = div().flex().items_center().gap(px(12.));
+            for (symbol, step, enabled) in [("-", -1., size > 8.), ("+", 1., size < 48.)] {
+                if step > 0. {
+                    buttons = buttons.child(match &self.controls.size_editor {
+                        Some(editor) if editor.face == face => div()
+                            .w(px(96.))
+                            .on_key_down(cx.listener(Self::control_size_key))
+                            .child(editor.input.clone())
+                            .when(editor.invalid, |field| {
+                                field.child(div().text_size(px(10.)).child("Whole size: 8-48"))
+                            })
+                            .into_any_element(),
+                        _ => div()
+                            .id(format!("settings-size-value-{}", face.name()))
+                            .debug_selector(move || format!("settings-size-value-{}", face.name()))
+                            .w(px(72.))
+                            .text_center()
+                            .cursor_pointer()
+                            .child(format!("{size} px"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.begin_control_size_edit(face, window, cx)
+                            }))
+                            .into_any_element(),
+                    });
+                }
+                buttons = buttons.child(
+                    self.control_choice(
+                        format!("settings-size-{}-{symbol}", face.name()),
+                        symbol,
+                        false,
+                        enabled,
+                    )
+                    .when(enabled, |button| {
+                        button.on_click(cx.listener(move |this, _, window, cx| {
+                            if !this.finish_control_size_edit(true, cx) {
+                                this.finish_control_size_edit(false, cx);
+                            }
+                            window.focus(&this.focus, cx);
+                            this.step_control_size(face, step, cx)
+                        }))
+                    }),
+                );
+            }
+            sizes = sizes.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.))
+                    .child(label)
+                    .child(buttons),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(24.))
+            .child(family_card)
+            .child(sizes)
+    }
+
+    fn render_indicator_controls(&self, cx: &mut Context<Self>) -> Div {
+        use herdr_client::protocol::AgentStatus;
+        let mut card = self.control_card("Agent status indicators");
+        let ready = self.controls_shared_ready();
+        let light = matches!(
+            cx.window_appearance(),
+            WindowAppearance::Light | WindowAppearance::VibrantLight
+        );
+        for (label, style) in [
+            ("Dots", IndicatorStyle::Dots),
+            ("Symbols", IndicatorStyle::Symbols),
+        ] {
+            let selected = self
+                .shared
+                .as_ref()
+                .is_some_and(|shared| shared.indicators == style);
+            let mut choice = self
+                .control_choice(
+                    format!("settings-indicators-{label}"),
+                    label,
+                    selected,
+                    ready,
+                )
+                .flex()
+                .flex_col()
+                .gap(px(18.))
+                .when(ready, |choice| {
+                    choice.on_click(cx.listener(move |this, _, _, cx| {
+                        this.save_shared(Edit::Indicators(style), cx)
+                    }))
+                });
+            if let Some(shared) = &self.shared {
+                let mut preview = div().flex().flex_wrap().gap(px(20.));
+                for (status, name, symbol) in [
+                    (AgentStatus::Working, "Working", "\u{25d0}"),
+                    (AgentStatus::Blocked, "Blocked", "\u{d7}"),
+                    (AgentStatus::Done, "Done", "\u{2713}"),
+                    (AgentStatus::Idle, "Idle", "\u{25cb}"),
+                    (AgentStatus::Unknown, "Unknown", "\u{b7}"),
+                ] {
+                    let color = rgb(self.theme.ink(shared.status_color(status, light)));
+                    let mark = div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(self.config.ui.size))
+                        .h(px(self.config.ui.line_height()))
+                        .when(style == IndicatorStyle::Symbols, |mark| {
+                            mark.text_color(color).child(symbol)
+                        })
+                        .when(style == IndicatorStyle::Dots, |mark| {
+                            mark.child(
+                                div()
+                                    .size(px(if status == AgentStatus::Unknown {
+                                        3.
+                                    } else {
+                                        7.
+                                    }))
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(color)
+                                    .when(status != AgentStatus::Idle, |dot| dot.bg(color)),
+                            )
+                        });
+                    preview = preview.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(mark)
+                            .child(name),
+                    );
+                }
+                choice = choice.child(preview);
+            }
+            card = card.child(choice);
+        }
+        card
+    }
+
+    fn render_sound_controls(&self, cx: &mut Context<Self>) -> Div {
+        let ready = self.controls_shared_ready();
+        let mut choices = div().flex().gap(px(8.));
+        for (label, enabled) in [("On", true), ("Off", false)] {
+            choices =
+                choices.child(
+                    self.control_choice(
+                        format!("settings-sound-{label}"),
+                        label,
+                        self.shared
+                            .as_ref()
+                            .is_some_and(|shared| shared.sound_enabled == enabled),
+                        ready,
+                    )
+                    .when(ready, |button| {
+                        button.on_click(cx.listener(move |this, _, _, cx| {
+                            this.save_shared(Edit::Sound(enabled), cx)
+                        }))
+                    }),
+                );
+        }
+        let source_alive = self.source.upgrade().is_some();
+        self.control_card("Agent sounds").child(choices)
+            .child(self.control_note("Uses shared sound paths and per-agent overrides. Missing custom sounds fall back to bundled sounds."))
+            .child(self.control_choice("settings-sound-preview", "Play test sound", false, source_alive)
+                .when(source_alive, |button| button.on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(source) = this.source.upgrade() {
+                        source.read(cx).sound.preview();
+                    }
+                }))))
+            .child(self.control_note(if source_alive { "Preview plays only when requested, even when sounds are off." } else { "Open a main Herdr window to preview audio." }))
+    }
+
+    fn render_notification_controls(&self, cx: &mut Context<Self>) -> Div {
+        let ready = self.controls_shared_ready();
+        let mut delivery = self.control_card("Notification delivery");
+        for (label, mode, note) in [
+            ("Off", ToastDelivery::Off, "Disable shared notifications"),
+            ("Herdr", ToastDelivery::Herdr, "In-app notifications"),
+            (
+                "Terminal",
+                ToastDelivery::Terminal,
+                "Other clients only; not delivered by this GUI",
+            ),
+            (
+                "System",
+                ToastDelivery::System,
+                "Other clients only; OS notifications are not supported by this GUI",
+            ),
+        ] {
+            let selected = self
+                .shared
+                .as_ref()
+                .is_some_and(|shared| shared.toast_delivery == mode);
+            delivery = delivery.child(
+                self.control_choice(format!("settings-delivery-{label}"), label, selected, ready)
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .size(px(14.))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(rgb(self.theme.muted))
+                            .when(selected, |radio| radio.bg(crate::menu::accent(&self.theme))),
+                    )
+                    .child(self.control_note(note))
+                    .when(ready, |button| {
+                        button.on_click(cx.listener(move |this, _, _, cx| {
+                            this.save_shared(Edit::Toasts(mode), cx)
+                        }))
+                    }),
+            );
+        }
+        let notifications = self.config.notifications;
+        div().flex().flex_col().gap(px(24.)).child(delivery)
+            .child(self.control_card("Native notification overrides")
+                .child(self.control_row("Effective in-app notifications", if notifications.enabled { "On" } else { "Off" }))
+                .child(self.control_row("Delay", format!("{} seconds", notifications.delay_seconds)))
+                .child(self.control_row("Position", format!("{:?}", notifications.position)))
+                .child(self.control_note("Local [notifications] overrides take precedence over shared delivery settings.")))
+    }
+
+    fn save_skill(&mut self, choice: Choice, cx: &mut Context<Self>) {
+        self.save_skill_with(
+            choice,
+            move || {
+                let home = crate::config::home()?;
+                match choice {
+                    Choice::Installed => {
+                        let text =
+                            crate::agent_skill::text(std::env::current_exe().ok().as_deref());
+                        crate::agent_skill::install(&home, &text)?;
+                    }
+                    Choice::Declined => {
+                        crate::agent_skill::remove(&home)?;
+                    }
+                }
+                Ok(())
+            },
+            Self::loader(cx),
+            cx,
+        );
+    }
+
+    fn save_skill_with(
+        &mut self,
+        choice: Choice,
+        operation: impl FnOnce() -> crate::Result<()> + Send + 'static,
+        load: impl FnOnce() -> crate::Result<super::Loaded> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.save_with_completion(
+            operation,
+            load,
+            false,
+            move |cx| AgentSkill::choose(choice, cx),
+            cx,
+        );
+    }
+
+    fn render_skill_controls(&self, cx: &mut Context<Self>) -> Div {
+        let installed = AgentSkill::choice(cx) == Some(Choice::Installed);
+        let (id, label, choice) = if installed {
+            (
+                "settings-remove-browser-skill",
+                "Remove browser skill",
+                Choice::Declined,
+            )
+        } else {
+            (
+                "settings-install-browser-skill",
+                "Install browser skill",
+                Choice::Installed,
+            )
+        };
+        self.control_card("Browser skill")
+            .child(self.control_row("Status", if installed { "Installed, kept up to date" } else { "Not installed" }))
+            .child(self.control_note("Teaches local agents to use browser tabs and page notes. Installs in existing ~/.claude and ~/.agents directories; removal deletes only app-managed copies."))
+            .child(self.control_choice(id, label, false, !self.busy())
+                .debug_selector(move || id.into())
+                .when(!self.busy(), |button| button.on_click(cx.listener(move |this, _, _, cx| this.save_skill(choice, cx)))))
+    }
+
+    fn render_general_controls(&self, cx: &mut Context<Self>) -> Div {
+        let ready = !self.busy();
+        let general = self
+            .control_card("Interface")
+            .child(
+                self.control_choice(
+                    "settings-usage",
+                    format!(
+                        "Show usage: {}",
+                        if self.config.usage.show { "On" } else { "Off" }
+                    ),
+                    self.config.usage.show,
+                    ready,
+                )
+                .when(ready, |button| {
+                    button.on_click(cx.listener(|this, _, _, cx| {
+                        let show = !this.config.usage.show;
+                        this.save_native(move || Config::save_usage_visibility(show), cx);
+                    }))
+                }),
+            )
+            .child(self.control_row("Show agents", self.config.show_agents.to_string()))
+            .child(self.control_row(
+                "Confirm tab close",
+                self.config.confirm_close_tab.to_string(),
+            ))
+            .child(self.control_note(
+                "Show agents and tab-close confirmation are configured in the local override file.",
+            ));
+        let mut layouts = div().flex().flex_wrap().gap(px(8.));
+        for mode in LayoutMode::ALL {
+            layouts = layouts.child(
+                self.control_choice(
+                    format!("settings-layout-{}", mode.name()),
+                    mode.label(),
+                    self.config.layout.mode == mode,
+                    ready,
+                )
+                .when(ready, |button| {
+                    button.on_click(cx.listener(move |this, _, _, cx| {
+                        this.save_native(move || Config::save_layout(mode), cx)
+                    }))
+                }),
+            );
+        }
+        div().flex().flex_col().gap(px(24.)).child(general)
+            .child(self.render_skill_controls(cx))
+            .child(self.control_card("Sidebar layout").child(layouts)
+                .child(self.control_row("Sidebar gap", format!("{} px", self.config.layout.sidebar_gap))))
+            .child(self.control_card("Clipboard feedback")
+                .child(self.control_row("Copied notification", if self.config.clipboard_toast.enabled { "On" } else { "Off" }))
+                .child(self.control_row("Position", format!("{:?}", self.config.clipboard_toast.position))))
+            .child(self.control_card("Configuration")
+                .child(self.control_note("GUI local overrides"))
+                .child(div().min_w_0().child(self.controls.local_path.clone()))
+                .child(self.control_note("Shared Herdr configuration"))
+                .child(div().min_w_0().child(self.shared.as_ref().map(|shared| shared.path.display().to_string()).unwrap_or_else(|| "Unavailable".into())))
+                .child(self.control_choice("settings-reload", "Reload configuration", false, ready)
+                    .when(ready, |button| button.on_click(cx.listener(|this, _, _, cx| {
+                        this.reload(cx);
+                    }))))
+                .child(self.control_note("Saved file edits reload automatically. Reloading GUI settings does not reload the daemon.")))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    fn skill_fixture(window: &mut Window, cx: &mut Context<SettingsWindow>) -> SettingsWindow {
+        let source = cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx));
+        let mut view = SettingsWindow::new(source.downgrade(), cx);
+        view.section = Section::General;
+        view
+    }
+
+    fn skill_load() -> crate::Result<super::super::Loaded> {
+        Ok(super::super::Loaded {
+            config: Config::default(),
+            theme: Default::default(),
+            shared: None,
+            error: None,
+        })
+    }
+
+    #[gpui::test]
+    fn browser_skill_general_card_tracks_choice_without_a_source(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(AgentSkill::unasked()));
+        let (view, cx) = cx.add_window_view(skill_fixture);
+        cx.simulate_resize(size(px(960.), px(1200.)));
+        for choice in [None, Some(Choice::Installed), Some(Choice::Declined)] {
+            cx.update(|window, cx| {
+                if let Some(choice) = choice {
+                    AgentSkill::choose(choice, cx);
+                }
+                view.update(cx, |view, cx| {
+                    assert!(view.source.upgrade().is_none());
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+            });
+            assert_eq!(
+                cx.debug_bounds("settings-install-browser-skill").is_some(),
+                choice != Some(Choice::Installed)
+            );
+            assert_eq!(
+                cx.debug_bounds("settings-remove-browser-skill").is_some(),
+                choice == Some(Choice::Installed)
+            );
+        }
+        // Busy buttons must not invoke the real installer even when clicked.
+        view.update(cx, |view, cx| {
+            view.saving = true;
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let button = cx.debug_bounds("settings-install-browser-skill").unwrap();
+        cx.simulate_click(button.center(), Modifiers::default());
+        view.update(cx, |view, cx| {
+            assert_eq!(AgentSkill::choice(cx), Some(Choice::Declined));
+            assert!(view.save_completion.is_none());
+            view.saving = false;
+        });
+    }
+
+    #[gpui::test]
+    fn browser_skill_choice_changes_only_after_success_and_serializes(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(AgentSkill::unasked()));
+        let (view, cx) = cx.add_window_view(skill_fixture);
+        for (choice, succeeds, expected) in [
+            (Choice::Installed, false, None),
+            (Choice::Installed, true, Some(Choice::Installed)),
+            (Choice::Declined, false, Some(Choice::Installed)),
+            (Choice::Declined, true, Some(Choice::Declined)),
+        ] {
+            view.update(cx, |view, cx| {
+                let before = AgentSkill::choice(cx);
+                view.save_skill_with(
+                    choice,
+                    move || {
+                        if succeeds {
+                            Ok(())
+                        } else {
+                            Err(crate::Error::MissingHome)
+                        }
+                    },
+                    skill_load,
+                    cx,
+                );
+                assert!(view.busy());
+                assert_eq!(AgentSkill::choice(cx), before);
+                view.save_skill_with(
+                    choice,
+                    || panic!("overlapping skill operation"),
+                    skill_load,
+                    cx,
+                );
+            });
+            cx.run_until_parked();
+            view.read_with(cx, |view, cx| {
+                assert!(!view.busy());
+                assert_eq!(AgentSkill::choice(cx), expected);
+                assert_eq!(view.error.is_some(), !succeeds);
+                assert_eq!(
+                    view.status.as_deref(),
+                    Some(if succeeds {
+                        "Saved"
+                    } else {
+                        "Save failed; reloaded current preferences"
+                    })
+                );
+            });
+        }
+        // A successful file operation remains successful if config reload fails.
+        view.update(cx, |view, cx| {
+            view.save_skill_with(
+                Choice::Installed,
+                || Ok(()),
+                || Err(crate::Error::MissingHome),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            assert_eq!(AgentSkill::choice(cx), Some(Choice::Installed));
+            assert!(view.error.is_some());
+        });
+    }
+
+    #[test]
+    fn font_filter_keeps_all_four_hundred_families_and_matches_case_insensitively() {
+        let names: Vec<_> = (0..400).map(|i| format!("Family {i:03}")).collect();
+        assert_eq!(filter_fonts(&names, "").len(), 400);
+        assert_eq!(
+            filter_fonts(&names, " FAMILY 39 "),
+            (390..400).collect::<Vec<_>>()
+        );
+        assert_eq!(filter_fonts(&names, "Family 399"), vec![399]);
+        assert!(filter_fonts(&names, "missing").is_empty());
+    }
+
+    #[test]
+    fn size_steps_are_integral_bounded_and_reject_non_finite_values() {
+        assert_eq!(stepped_size(8., -1.), Some(8.));
+        assert_eq!(stepped_size(48., 1.), Some(48.));
+        assert_eq!(stepped_size(14.2, 1.), Some(15.));
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(stepped_size(invalid, 1.), None);
+            assert_eq!(stepped_size(14., invalid), None);
+        }
+    }
+
+    #[test]
+    fn rapid_size_intents_coalesce_without_erasing_other_faces() {
+        let mut pending = Vec::new();
+        queue_size(&mut pending, FontFace::Sidebar, 15.);
+        queue_size(&mut pending, FontFace::Terminal, 18.);
+        queue_size(&mut pending, FontFace::Sidebar, 16.);
+        assert_eq!(
+            pending,
+            vec![(FontFace::Sidebar, 16.), (FontFace::Terminal, 18.)]
+        );
+    }
+
+    #[gpui::test]
+    fn busy_size_clicks_survive_config_refresh_without_starting_a_write(cx: &mut TestAppContext) {
+        let (source, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let settings = cx.new(|cx| SettingsWindow::new(source.downgrade(), cx));
+        settings.update(cx, |settings, cx| {
+            settings.saving = true;
+            settings.controls.saving_sizes = vec![(FontFace::Sidebar, 20.)];
+            for _ in 0..20 {
+                settings.step_control_size(FontFace::Sidebar, 1., cx);
+            }
+            settings.step_control_size(FontFace::Terminal, 1., cx);
+            settings.config.sidebar.size = 12.;
+            settings.sync_controls(cx);
+            assert_eq!(
+                settings.controls.size(FontFace::Sidebar, &settings.config),
+                40.
+            );
+            assert_eq!(settings.controls.pending_sizes.len(), 2);
+            assert_eq!(
+                settings.controls.saving_sizes,
+                vec![(FontFace::Sidebar, 20.)]
+            );
+            // Keep the test entirely in memory: completion and persistence are
+            // exercised by the root save tests, not the user's configuration.
+            settings.controls.pending_sizes.clear();
+            settings.saving = false;
+            settings.sync_controls(cx);
+            assert_eq!(
+                settings.controls.size(FontFace::Sidebar, &settings.config),
+                12.
+            );
+        });
+    }
+
+    #[test]
+    fn numeric_size_accepts_only_bounded_ascii_integers() {
+        for (text, expected) in [
+            ("8", Some(8.)),
+            (" 48 ", Some(48.)),
+            ("24", Some(24.)),
+            ("7", None),
+            ("49", None),
+            ("12.5", None),
+            ("-12", None),
+            ("", None),
+            ("２４", None),
+            ("NaN", None),
+            ("999999", None),
+        ] {
+            assert_eq!(parse_size(text), expected, "{text:?}");
+        }
+    }
+
+    fn numeric_fixture(window: &mut Window, cx: &mut Context<SettingsWindow>) -> SettingsWindow {
+        let source = cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx));
+        let mut view = SettingsWindow::new(source.downgrade(), cx);
+        view.section = Section::Fonts;
+        // Accepted intents remain in memory while assertions inspect the queue.
+        view.saving = true;
+        view.controls.discovering = false;
+        window.focus(&view.focus, cx);
+        view
+    }
+
+    #[gpui::test]
+    fn numeric_enter_blur_and_escape_use_the_same_size_queue(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(numeric_fixture);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.begin_control_size_edit(FontFace::Terminal, window, cx);
+            })
+        });
+        cx.simulate_input("23");
+        cx.simulate_keystrokes("enter");
+        view.read_with(cx, |view, _| {
+            assert!(view.controls.size_editor.is_none());
+            assert_eq!(view.controls.pending_sizes, vec![(FontFace::Terminal, 23.)]);
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.begin_control_size_edit(FontFace::Terminal, window, cx);
+            })
+        });
+        cx.simulate_input("41");
+        cx.simulate_keystrokes("escape");
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.controls.pending_sizes, vec![(FontFace::Terminal, 23.)])
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.begin_control_size_edit(FontFace::Sidebar, window, cx);
+            })
+        });
+        cx.simulate_input("18");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.focus(&view.read(cx).focus.clone(), cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+        view.update(cx, |view, _| {
+            assert!(view.controls.size_editor.is_none());
+            assert_eq!(
+                view.take_pending_control_sizes(),
+                vec![(FontFace::Terminal, 23.), (FontFace::Sidebar, 18.)]
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn numeric_invalid_and_composition_do_not_enqueue_writes(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(numeric_fixture);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.begin_control_size_edit(FontFace::Ui, window, cx);
+            })
+        });
+        cx.simulate_input("99");
+        cx.simulate_keystrokes("enter");
+        view.read_with(cx, |view, _| {
+            assert!(view.controls.size_editor.as_ref().unwrap().invalid);
+            assert!(view.controls.pending_sizes.is_empty());
+        });
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.begin_control_size_edit(FontFace::Ui, window, cx);
+                let input = view.controls.size_editor.as_ref().unwrap().input.clone();
+                input.update(cx, |input, cx| {
+                    input.replace_and_mark_text_in_range(None, "二十四", Some(3..3), window, cx)
+                });
+                for key in ["enter", "escape"] {
+                    view.control_size_key(
+                        &KeyDownEvent {
+                            keystroke: Keystroke::parse(key).unwrap(),
+                            is_held: false,
+                            prefer_character_input: false,
+                        },
+                        window,
+                        cx,
+                    );
+                    assert!(view.controls.size_editor.is_some());
+                    assert!(view.controls.pending_sizes.is_empty());
+                }
+                input.update(cx, |input, cx| input.unmark_text(window, cx));
+                assert!(!view.finish_control_size_edit(true, cx));
+                assert!(view.finish_control_size_edit(false, cx));
+                assert!(view.controls.pending_sizes.is_empty());
+            })
+        });
+    }
+}

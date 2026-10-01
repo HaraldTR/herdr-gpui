@@ -152,7 +152,7 @@ mod tests {
         let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.open_preferences(window, cx);
+                view.open_preferences_fixture(window, cx);
                 view.select_settings_tab(crate::settings_panel::Tab::Font, window, cx);
                 view.font_size_saves.task =
                     Some(cx.spawn(async |_, _| std::future::pending().await));
