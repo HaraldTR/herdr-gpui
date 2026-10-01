@@ -20,7 +20,31 @@ pub(crate) enum Step {
     Launch,
 }
 
+/// The steps of a move, in the order `job::run` reports them. A move skips
+/// the ones it does not need, so the bar may jump, but never goes back.
+const MOVE: [Step; 13] = [
+    Step::Clone,
+    Step::Open,
+    Step::Handoff,
+    Step::Capture,
+    Step::Transfer,
+    Step::Fetch,
+    Step::CreateWorktree,
+    Step::Restore,
+    Step::Tabs,
+    Step::Retire,
+    Step::Sessions,
+    Step::Credentials,
+    Step::Launch,
+];
+
 impl Step {
+    /// The share of a move already done when this step starts.
+    pub(crate) fn progress(self) -> f32 {
+        let done = MOVE.iter().position(|step| *step == self).unwrap_or(0);
+        done as f32 / MOVE.len() as f32
+    }
+
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Discover => "finding matching repositories",
@@ -94,6 +118,15 @@ pub(crate) fn decode(step: Step) -> impl FnOnce(serde_json::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn move_progress_only_moves_forward() {
+        let shares: Vec<f32> = MOVE.iter().map(|step| step.progress()).collect();
+        assert_eq!(shares.first(), Some(&0.));
+        assert!(shares.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(shares.iter().all(|share| *share < 1.));
+        assert_eq!(Step::Discover.progress(), 0.);
+    }
 
     #[test]
     fn script_failures_keep_step_and_source() {

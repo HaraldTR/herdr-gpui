@@ -358,6 +358,61 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn a_progress_bar_shows_the_review_and_fills_with_the_move(cx: &mut gpui::TestAppContext) {
+        use super::super::WorkspaceMenuAction;
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.live.status = crate::state::ConnectionStatus::Connected;
+                view.endpoints[0].connection.target = herdr_client::ConnectTarget::Local;
+                let snapshot = std::sync::Arc::make_mut(view.live.snapshot.as_mut().unwrap());
+                snapshot.workspaces = crate::sidebar::layout_tests::snapshot(7).workspaces;
+                view.endpoints.push(crate::endpoint::Endpoint::new(
+                    "ssh:box".into(),
+                    "Box".into(),
+                    herdr_client::ConnectTarget::Ssh {
+                        target: "nobody@invalid.invalid".into(),
+                        session: "default".into(),
+                    },
+                    true,
+                ));
+                view.open_workspace_menu("w4", Default::default(), window, cx);
+                view.activate_workspace_menu(WorkspaceMenuAction::Teleport, window, cx);
+            })
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("teleport-progress").is_none(),
+            "nothing runs while choosing"
+        );
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        let panel = cx.debug_bounds("menu-panel").unwrap();
+        let bar = cx.debug_bounds("teleport-progress").unwrap();
+        assert!(panel.contains(&bar.origin) && bar.right() <= panel.right());
+        assert!(cx.debug_bounds("teleport-progress-fill").is_some());
+
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.teleport.as_mut().unwrap().fetching();
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        let bar = cx.debug_bounds("teleport-progress").unwrap();
+        let fill = cx.debug_bounds("teleport-progress-fill").unwrap();
+        assert_eq!(fill.left(), bar.left());
+        // Fetch starts after five of the thirteen move steps.
+        assert!((fill.size.width - bar.size.width * (5. / 13.)).abs() < gpui::px(1.));
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.teleport = None;
+                view.dismiss_menu(window, cx);
+            })
+        });
+    }
+
     fn actions(view: &HerdrWindow) -> Vec<super::super::WorkspaceMenuAction> {
         view.workspace_items()
             .into_iter()

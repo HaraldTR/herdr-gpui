@@ -16,7 +16,12 @@ use super::{
     provision::Arrival,
     remote::MatchReason,
 };
-use crate::{HerdrWindow, NavigationTarget, menu::Page, window::Flash};
+use crate::{
+    HerdrWindow, NavigationTarget,
+    menu::Page,
+    progress::{self, Progress},
+    window::Flash,
+};
 use gpui::{prelude::*, *};
 use std::{
     sync::{
@@ -121,6 +126,24 @@ impl Teleport {
     #[cfg(test)]
     pub(crate) fn reviewing(&self) -> bool {
         matches!(self.stage, Stage::Reviewing(_))
+    }
+
+    /// Turn a review into a move that has reached `Step::Fetch`, without
+    /// running either.
+    #[cfg(test)]
+    pub(crate) fn fetching(&mut self) {
+        let Stage::Reviewing(place) = &self.stage else {
+            return;
+        };
+        let candidate = Candidate {
+            place: place.clone(),
+            destination: Destination::Arrive(Arrival::Clone {
+                path: "/tmp/repo".into(),
+            }),
+            origin: None,
+        };
+        self.cancelled.store(true, Ordering::Release);
+        self.stage = Stage::Moving(candidate, Some(Step::Fetch));
     }
 
     pub(crate) fn moving(&self) -> bool {
@@ -441,6 +464,14 @@ impl HerdrWindow {
         let font = &self.config.ui;
         let muted = rgb(theme.muted);
         let danger = crate::menu::danger(theme);
+        let bar = |progress| {
+            progress::bar(
+                "teleport-progress",
+                progress,
+                crate::menu::accent(theme).into(),
+                rgb(theme.active).into(),
+            )
+        };
         let line = |text: String| div().min_w_0().child(text);
         let mut body = div().flex().flex_col().gap(px(8.)).px(px(16.)).py(px(12.));
         let (primary, armed) = match &teleport.stage {
@@ -511,7 +542,7 @@ impl HerdrWindow {
                 ("Review", teleport.selected.is_some())
             }
             Stage::Reviewing(place) => {
-                body = body.child(
+                body = body.child(bar(Progress::Busy)).child(
                     line(format!(
                         "Checking {} and the running programs...",
                         place.label
@@ -587,6 +618,7 @@ impl HerdrWindow {
             Stage::Moving(candidate, step) => {
                 body = body
                     .child(line(format!("Moving to {}...", candidate.place.label)))
+                    .child(bar(Progress::Working(step.map_or(0., Step::progress))))
                     .child(
                         line(step.map_or("Starting", Step::label).to_owned())
                             .debug_selector(|| "teleport-step".into())
