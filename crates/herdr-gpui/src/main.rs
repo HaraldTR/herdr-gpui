@@ -46,6 +46,7 @@ mod palette;
 mod pane_menu;
 mod preferences;
 mod presentation;
+mod progress;
 mod pull_request;
 mod reorder;
 mod repo_items;
