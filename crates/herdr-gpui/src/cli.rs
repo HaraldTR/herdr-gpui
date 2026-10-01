@@ -9,6 +9,9 @@ pub enum LaunchMode {
     BuildInfo,
     /// Talk to the running app, then exit without starting GPUI.
     Browser(BrowserCommand),
+    /// Show the UI variants compiled in from `HERDR_MOCKUP_FILE`.
+    #[cfg(feature = "mockup")]
+    Mockup(MockupOptions),
     #[cfg(feature = "integration-test")]
     Integration,
     #[cfg(feature = "integration-test")]
@@ -33,6 +36,17 @@ pub enum BrowserCommand {
     },
     Skill,
     Help,
+}
+
+/// `herdr-gpui --mockup [--feedback PATH] [--capture PATH]`: never connects
+/// to a daemon.
+#[cfg(feature = "mockup")]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MockupOptions {
+    /// Where "Send to agent" writes the user's picks and notes.
+    pub feedback: Option<std::path::PathBuf>,
+    /// Where to save a PNG of the window once it has drawn.
+    pub capture: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
@@ -71,6 +85,12 @@ pub enum CliError {
     MissingWorkspace,
     #[error("browser arguments must be UTF-8")]
     InvalidBrowserEncoding(OsString),
+    #[cfg(feature = "mockup")]
+    #[error("{0} requires a path")]
+    MissingMockupPath(&'static str),
+    #[cfg(feature = "mockup")]
+    #[error("{0} may only be specified once")]
+    DuplicateMockupPath(&'static str),
     #[cfg(feature = "integration-test")]
     #[error("native test modes are mutually exclusive and may only be specified once")]
     ConflictingTestModes,
@@ -173,6 +193,28 @@ fn parse_browser(mut args: impl Iterator<Item = OsString>) -> Result<BrowserComm
     })
 }
 
+/// The arguments after a leading `--mockup`. Paths stay OS strings.
+#[cfg(feature = "mockup")]
+fn parse_mockup(mut args: impl Iterator<Item = OsString>) -> Result<LaunchMode, CliError> {
+    let mut options = MockupOptions::default();
+    while let Some(arg) = args.next() {
+        let (flag, slot) = match arg.to_str() {
+            Some("--help" | "-h") => return Ok(LaunchMode::Help),
+            Some("--feedback") => ("--feedback", &mut options.feedback),
+            Some("--capture") => ("--capture", &mut options.capture),
+            _ => return Err(CliError::UnknownOption(arg)),
+        };
+        let path = args
+            .next()
+            .filter(|value| !value.is_empty() && !value.as_encoded_bytes().starts_with(b"-"))
+            .ok_or(CliError::MissingMockupPath(flag))?;
+        if slot.replace(path.into()).is_some() {
+            return Err(CliError::DuplicateMockupPath(flag));
+        }
+    }
+    Ok(LaunchMode::Mockup(options))
+}
+
 impl LaunchOptions {
     pub fn parse(args: impl IntoIterator<Item = impl Into<OsString>>) -> Result<Self, CliError> {
         let mut args = args.into_iter().map(Into::into).peekable();
@@ -181,6 +223,14 @@ impl LaunchOptions {
             return Ok(Self {
                 target: ConnectTarget::Local,
                 mode: LaunchMode::Browser(parse_browser(args)?),
+            });
+        }
+        #[cfg(feature = "mockup")]
+        if args.peek().is_some_and(|arg| arg == "--mockup") {
+            args.next();
+            return Ok(Self {
+                target: ConnectTarget::Local,
+                mode: parse_mockup(args)?,
             });
         }
         let mut socket = None;
@@ -507,6 +557,90 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!("Unknown option: {}", path.to_string_lossy())
+        );
+    }
+
+    #[cfg(feature = "mockup")]
+    #[test]
+    fn mockup_mode_takes_feedback_and_capture_paths() {
+        let mode = |args: &[&str]| LaunchOptions::parse(args.iter().copied()).map(|o| o.mode);
+        assert_eq!(
+            mode(&["--mockup"]).unwrap(),
+            LaunchMode::Mockup(MockupOptions::default())
+        );
+        assert_eq!(
+            mode(&[
+                "--mockup",
+                "--capture",
+                "/tmp/m/shot.png",
+                "--feedback",
+                "/tmp/m/feedback.md"
+            ])
+            .unwrap(),
+            LaunchMode::Mockup(MockupOptions {
+                feedback: Some("/tmp/m/feedback.md".into()),
+                capture: Some("/tmp/m/shot.png".into()),
+            })
+        );
+        assert_eq!(mode(&["--mockup", "-h"]).unwrap(), LaunchMode::Help);
+        for (args, expected, message) in [
+            (
+                &["--mockup", "--feedback"][..],
+                CliError::MissingMockupPath("--feedback"),
+                "--feedback requires a path",
+            ),
+            (
+                &["--mockup", "--capture", "--dev"],
+                CliError::MissingMockupPath("--capture"),
+                "--capture requires a path",
+            ),
+            (
+                &["--mockup", "--feedback", "a", "--feedback", "b"],
+                CliError::DuplicateMockupPath("--feedback"),
+                "--feedback may only be specified once",
+            ),
+            (
+                &["--mockup", "--capture", "a", "--capture", "b"],
+                CliError::DuplicateMockupPath("--capture"),
+                "--capture may only be specified once",
+            ),
+            (
+                &["--mockup", "--dev"],
+                CliError::UnknownOption("--dev".into()),
+                "Unknown option: --dev",
+            ),
+        ] {
+            let error = mode(args).unwrap_err();
+            assert_eq!(error, expected, "{args:?}");
+            assert_eq!(error.to_string(), message);
+        }
+        // Like `browser`, only a leading `--mockup` selects the mode, so it
+        // can never be mixed with connection options.
+        assert_eq!(
+            mode(&["--dev", "--mockup"]).unwrap_err(),
+            CliError::UnknownOption("--mockup".into())
+        );
+    }
+
+    #[cfg(all(feature = "mockup", unix))]
+    #[test]
+    fn mockup_paths_need_not_be_utf8() {
+        use std::os::unix::ffi::OsStringExt;
+        let path = OsString::from_vec(b"/tmp/mockup-\xff".to_vec());
+        let options = LaunchOptions::parse([
+            OsString::from("--mockup"),
+            "--feedback".into(),
+            path.clone(),
+            "--capture".into(),
+            path.clone(),
+        ])
+        .unwrap();
+        assert_eq!(
+            options.mode,
+            LaunchMode::Mockup(MockupOptions {
+                feedback: Some(path.clone().into()),
+                capture: Some(path.into()),
+            })
         );
     }
 

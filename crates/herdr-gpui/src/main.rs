@@ -36,6 +36,8 @@ mod keymap;
 mod log_window;
 mod menu;
 mod menus;
+#[cfg(feature = "mockup")]
+mod mockup;
 mod motion;
 mod navigation;
 mod notifications;
