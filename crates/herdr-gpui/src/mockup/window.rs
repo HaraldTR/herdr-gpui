@@ -276,6 +276,19 @@ impl MockupWindow {
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
         if key == "escape" {
+            // Escape belongs to the native input system during composition.
+            if self
+                .cards
+                .iter()
+                .map(|card| &card.note)
+                .chain([&self.overall])
+                .any(|input| {
+                    let input = input.read(cx);
+                    input.focus.is_focused(window) && input.is_composing()
+                })
+            {
+                return;
+            }
             window.focus(&self.focus, cx);
             cx.notify();
             return;
@@ -640,6 +653,34 @@ mod tests {
         // Escape hands the keys back to the window.
         cx.simulate_keystrokes("escape 1");
         view.read_with(cx, |view, _| assert_eq!(view.solo, Some(0)));
+    }
+
+    #[gpui::test]
+    fn escape_preserves_composing_notes_and_leaves_committed_notes(cx: &mut TestAppContext) {
+        let (view, cx) = open(None, cx);
+        let notes = view.read_with(cx, |view, _| {
+            [view.cards[0].note.clone(), view.overall.clone()]
+        });
+        for note in notes {
+            note.update_in(cx, |note, window, cx| {
+                window.focus(&note.focus, cx);
+                note.replace_and_mark_text_in_range(None, "に", Some(1..1), window, cx);
+                assert!(note.is_composing());
+            });
+            cx.simulate_keystrokes("escape");
+            cx.update(|window, cx| {
+                assert!(note.read(cx).focus.is_focused(window));
+            });
+            note.update_in(cx, |note, window, cx| {
+                note.replace_text_in_range(None, "日本", window, cx);
+                assert!(!note.is_composing());
+            });
+            cx.simulate_keystrokes("escape");
+            cx.update(|window, cx| {
+                assert!(view.read(cx).focus.is_focused(window));
+                assert_eq!(note.read(cx).text(), "日本");
+            });
+        }
     }
 
     #[gpui::test]

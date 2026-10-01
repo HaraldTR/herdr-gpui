@@ -70,13 +70,14 @@ test-perf budget="30":
 # a PNG of the window once it has drawn. Debug build, no daemon. The process
 # left running is the app itself, so its PID is the one to stop.
 # See .claude/skills/gpui-mockup.
+[positional-arguments]
 mockup file="" feedback="" capture="":
     #!/usr/bin/env bash
     set -euo pipefail
-    absolute() { case "$1" in ""|/*) printf '%s' "$1" ;; *) printf '%s/%s' "{{invocation_directory()}}" "$1" ;; esac; }
-    file="$(absolute "{{file}}")"
-    feedback="$(absolute "{{feedback}}")"
-    capture="$(absolute "{{capture}}")"
+    absolute() { case "$1" in ""|/*) printf '%s' "$1" ;; *) printf '%s/%s' {{quote(invocation_directory())}} "$1" ;; esac; }
+    file="$(absolute "$1")"
+    feedback="$(absolute "$2")"
+    capture="$(absolute "$3")"
     HERDR_MOCKUP_FILE="$file" cargo build --locked -p herdr-gpui --features mockup
     args=(--mockup)
     if [ -n "$feedback" ]; then args+=(--feedback "$feedback"); fi
