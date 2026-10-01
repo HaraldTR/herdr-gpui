@@ -112,6 +112,8 @@ impl AssetSource for Icons {
             "icons/github.svg" => include_bytes!("../../../assets/icons/github.svg"),
             "icons/theme.svg" => include_bytes!("../../../assets/icons/theme.svg"),
             "icons/keyboard.svg" => include_bytes!("../../../assets/icons/keyboard.svg"),
+            "icons/coffee.svg" => include_bytes!("../../../assets/icons/coffee.svg"),
+            "icons/coffee-full.svg" => include_bytes!("../../../assets/icons/coffee-full.svg"),
             "icons/teleport.svg" => include_bytes!("../../../assets/icons/teleport.svg"),
             "icons/teleport-back.svg" => {
                 include_bytes!("../../../assets/icons/teleport-back.svg")
@@ -157,6 +159,8 @@ impl AssetSource for Icons {
             "icons/github.svg",
             "icons/theme.svg",
             "icons/keyboard.svg",
+            "icons/coffee.svg",
+            "icons/coffee-full.svg",
             "icons/teleport.svg",
             "icons/teleport-back.svg",
             "icons/refresh.svg",
@@ -204,7 +208,7 @@ mod tests {
         assert!(Icons.load("unknown.svg").unwrap().is_none());
         assert_eq!(
             Icons.list("icons/").unwrap().len(),
-            33 + crate::usage::icon_paths().count()
+            35 + crate::usage::icon_paths().count()
         );
     }
 

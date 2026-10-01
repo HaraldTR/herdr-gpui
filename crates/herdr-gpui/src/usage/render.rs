@@ -244,10 +244,11 @@ pub(super) fn ago(elapsed: Duration) -> String {
     }
 }
 
-struct Hint {
-    text: SharedString,
-    foreground: u32,
-    surface: u32,
+/// A small tooltip in the status bar's colors.
+pub(crate) struct Hint {
+    pub(crate) text: SharedString,
+    pub(crate) foreground: u32,
+    pub(crate) surface: u32,
 }
 
 impl Render for Hint {

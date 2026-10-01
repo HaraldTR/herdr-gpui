@@ -23,6 +23,7 @@ mod tests;
 
 pub(crate) use model::{Host, Provider};
 pub(crate) use panel::PANEL_WIDTH;
+pub(crate) use render::Hint;
 pub use settings::UsageConfig;
 
 use cookies::CookieJar;

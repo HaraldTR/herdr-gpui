@@ -18,6 +18,10 @@ use gpui::{prelude::*, *};
 use herdr_client::ConnectOptions;
 use std::time::Duration;
 
+/// The status bar's 24-unit SVG icons pad their artwork, so they are drawn at
+/// this size to look as large as the 12px ring of the report-issue button.
+const STATUS_GLYPH: f32 = 16.;
+
 impl Render for HerdrWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.restore_menu_focus(window, cx);
@@ -592,6 +596,57 @@ impl Render for HerdrWindow {
                                 div().debug_selector(|| "connection-message".into()).child(status)
                             )),
                     )
+                    .when(crate::caffeine::SUPPORTED, |bar| {
+                        let awake = crate::caffeine::active(cx);
+                        let (foreground, surface) = (self.theme.foreground, self.theme.surface);
+                        bar.child(
+                            div()
+                                .id("status-caffeine")
+                                .debug_selector(|| "status-caffeine".into())
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .px_2()
+                                .h_full()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgb(self.theme.active)))
+                                .child(
+                                    svg()
+                                        .path(if awake {
+                                            "icons/coffee-full.svg"
+                                        } else {
+                                            "icons/coffee.svg"
+                                        })
+                                        .size(px(STATUS_GLYPH))
+                                        .flex_none()
+                                        .text_color(rgb(if awake {
+                                            self.theme.primary()
+                                        } else {
+                                            self.theme.foreground
+                                        })),
+                                )
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| crate::usage::Hint {
+                                        text: if awake {
+                                            "Keeping the display awake".into()
+                                        } else {
+                                            "Keep the display awake".into()
+                                        },
+                                        foreground,
+                                        surface,
+                                    })
+                                    .into()
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Err(error) = crate::caffeine::toggle(cx) {
+                                        this.show_flash(
+                                            super::Flash::warning(error.to_string()),
+                                            cx,
+                                        );
+                                    }
+                                })),
+                        )
+                    })
                     .child(
                         div()
                                     .id("status-theme")
@@ -607,7 +662,7 @@ impl Render for HerdrWindow {
                             .child(
                                 svg()
                                     .path("icons/theme.svg")
-                                    .size(px(12.))
+                                    .size(px(STATUS_GLYPH))
                                     .flex_none()
                                     .text_color(rgb(self.theme.foreground)),
                             )
@@ -631,7 +686,7 @@ impl Render for HerdrWindow {
                             .child(
                                 svg()
                                     .path("icons/keyboard.svg")
-                                    .size(px(12.))
+                                    .size(px(STATUS_GLYPH))
                                     .flex_none()
                                     .text_color(rgb(self.theme.foreground)),
                             )

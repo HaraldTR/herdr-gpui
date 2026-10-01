@@ -10,6 +10,7 @@ mod app_badge;
 mod app_icon;
 mod avatars;
 mod browser;
+mod caffeine;
 mod cli;
 mod close_modal;
 mod config;
