@@ -640,6 +640,16 @@ fn shortcut_opens_the_dialog_for_the_focused_repository(cx: &mut gpui::TestAppCo
                 expected,
                 "{focused}"
             );
+            // A linked checkout still branches from where it stands.
+            assert_eq!(
+                menu.target.as_ref().map(|target| target.base_label()),
+                expected.map(|_| if focused == "w4" {
+                    "worktree/sidebar-child"
+                } else {
+                    "HEAD"
+                }),
+                "{focused}"
+            );
         });
     }
     // Every refusal says why in the flash instead of doing nothing visible.
@@ -705,6 +715,50 @@ fn shortcut_opens_the_dialog_for_the_focused_repository(cx: &mut gpui::TestAppCo
         });
         assert!(cx.debug_bounds("flash").is_some(), "{reason:?}");
     }
+}
+
+/// A linked checkout's own menu offers a new worktree too. The dialog runs
+/// through the main checkout and says which branch it starts from.
+#[gpui::test]
+fn linked_checkout_menu_creates_from_its_branch(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = cx.add_window_view(sidebar::layout_tests::fixture_window);
+    cx.simulate_resize(gpui::size(gpui::px(900.), gpui::px(700.)));
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            let snapshot = std::sync::Arc::make_mut(view.live.snapshot.as_mut().unwrap());
+            snapshot.workspaces = sidebar::layout_tests::snapshot(7).workspaces;
+            view.live.status = crate::state::ConnectionStatus::Connected;
+            view.live.local_daemon_peer = true;
+            view.menu.reset();
+            view.open_workspace_menu("w4", Default::default(), window, cx);
+            let items = view.workspace_items();
+            assert!(items.iter().any(|(_, label)| *label == "New worktree"));
+            // Opening an existing checkout stays a main checkout action.
+            assert!(!items.iter().any(|(_, label)| *label == "Open worktree..."));
+            view.open_workspace_dialog(WorkspaceAction::NewWorktree, window, cx);
+            let target = view.menu.target.as_ref().unwrap();
+            assert_eq!(target.id, "w3");
+            assert_eq!(target.base_label(), "worktree/sidebar-child");
+        });
+    });
+    draw(cx);
+    assert!(cx.debug_bounds("dialog-checkout").is_some());
+
+    // Without its main checkout open, the row is not offered.
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            let snapshot = std::sync::Arc::make_mut(view.live.snapshot.as_mut().unwrap());
+            snapshot.workspaces.retain(|w| w.workspace_id != "w3");
+            view.menu.reset();
+            view.open_workspace_menu("w4", Default::default(), window, cx);
+            assert!(
+                !view
+                    .workspace_items()
+                    .iter()
+                    .any(|(_, label)| *label == "New worktree")
+            );
+        });
+    });
 }
 
 /// The name field is what the dialog opens on, and its typing never edits the

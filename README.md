@@ -99,6 +99,8 @@ just run
 
 `just run` uses the optimized release build with the QA menu enabled;
 `just run-debug` is notably slower with a dense terminal on screen.
+On macOS both build a local bundle identified as `so.pen.herdr-gpui.dev`, so
+it never shares a Dock tile or icon cache with an installed release.
 Without `just`: `cargo run --locked --release -p herdr-gpui --features qa-menu`.
 
 Install the Herdr daemon separately. The app starts an already-installed local

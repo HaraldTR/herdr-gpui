@@ -1044,6 +1044,50 @@ fn actions_target_clicked_workspace_and_match_daemon_schemas() {
     assert_eq!(target.close_label(), "Close");
 }
 
+/// A linked checkout creates through its main checkout, the only source the
+/// daemon accepts, but starts the new branch from its own branch.
+#[test]
+fn linked_checkouts_create_from_their_own_branch() {
+    use super::workspace::NewWorktreeUnavailable;
+    let mut snapshot = sidebar::layout_tests::snapshot(7);
+    let main = WorkspaceTarget::for_new_worktree(&snapshot, &snapshot.workspaces[3]).unwrap();
+    assert_eq!((main.id.as_str(), main.base_label()), ("w3", "HEAD"));
+
+    let target = WorkspaceTarget::for_new_worktree(&snapshot, &snapshot.workspaces[4]).unwrap();
+    assert_eq!(target.id, "w3");
+    assert_eq!(target.base_label(), "worktree/sidebar-child");
+    assert_eq!(
+        target
+            .request(&snapshot, WorkspaceAction::NewWorktree, "feature/next")
+            .unwrap(),
+        (
+            Method::WorktreeCreate,
+            serde_json::json!({"workspace_id": "w3", "base": "refs/heads/worktree/sidebar-child",
+                "focus": true, "trust_repository": false, "branch": "feature/next"})
+        )
+    );
+    // The branch came from the daemon, so it is checked like a typed one.
+    let hostile = WorkspaceTarget {
+        base: Some("-x".into()),
+        ..WorkspaceTarget::new(&snapshot, &snapshot.workspaces[3])
+    };
+    assert!(matches!(
+        hostile.request(&snapshot, WorkspaceAction::NewWorktree, ""),
+        Err(crate::Error::InvalidBranchName)
+    ));
+
+    snapshot.workspaces[4].branch = None;
+    assert_eq!(
+        WorkspaceTarget::for_new_worktree(&snapshot, &snapshot.workspaces[4]).err(),
+        Some(NewWorktreeUnavailable::Detached)
+    );
+    snapshot.workspaces.remove(3);
+    assert_eq!(
+        WorkspaceTarget::for_new_worktree(&snapshot, &snapshot.workspaces[4]).err(),
+        Some(NewWorktreeUnavailable::MainCheckoutClosed)
+    );
+}
+
 #[test]
 fn branch_only_workspace_can_create_until_git_identity_disappears() {
     let mut snapshot = sidebar::layout_tests::snapshot(7);

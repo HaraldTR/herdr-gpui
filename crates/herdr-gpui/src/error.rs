@@ -48,6 +48,8 @@ pub enum Error {
     SoundTimeout,
     #[error("Audio playback cancelled")]
     SoundCancelled,
+    #[error("Could not keep the display awake")]
+    Caffeine(#[source] io::Error),
     #[error(
         "PR lookup requires your owned local session socket or a saved SSH device. Other socket locations are unsupported."
     )]
