@@ -756,12 +756,14 @@ fn check_layouts(modes: &[crate::config::LayoutMode], cx: &mut gpui::TestAppCont
                         "{context}: badge {badge:?} {row:?}"
                     );
                     assert!(cx.debug_bounds("dirty-sidebar-child").is_some());
-                    let teleported = cx
-                        .debug_bounds("teleported-sidebar-child")
-                        .unwrap_or_else(|| panic!("{context}: no teleported mark"));
-                    assert!(teleported.right() <= row.right(), "{context}");
-                    assert!(cx.debug_bounds("teleported-herdr").is_none(), "{context}");
                 }
+                // Every layout, Minimal included, marks a teleported checkout.
+                let row = cx.debug_bounds("row-sidebar-child").unwrap();
+                let teleported = cx
+                    .debug_bounds("teleported-sidebar-child")
+                    .unwrap_or_else(|| panic!("{context}: no teleported mark"));
+                assert!(teleported.right() <= row.right(), "{context}");
+                assert!(cx.debug_bounds("teleported-herdr").is_none(), "{context}");
                 // Only the focused workspace draws a selection mark in the
                 // layouts whose highlight exists only while selected.
                 assert!(cx.debug_bounds("highlight-herdr").is_some() || mode == LayoutMode::Orca);
@@ -4221,5 +4223,28 @@ fn every_layout_looks_different(cx: &mut gpui::TestAppContext) {
             panic!("{mode} draws the same as {other}: {signature:?}");
         }
         seen.push((mode, signature));
+    }
+}
+
+#[test]
+fn teleported_names_fade_but_stay_legible() {
+    use crate::config::Theme;
+    use crate::contrast::{Contrast, ratio};
+    for name in Theme::BUILTIN_NAMES {
+        for contrast in [Contrast::Standard, Contrast::High] {
+            let theme = Theme::builtin(name).unwrap().with_contrast(contrast);
+            for color in [theme.foreground, theme.subtext()] {
+                let faded = super::row::left_behind(color, &theme);
+                let context = format!("{name} {contrast:?} {color:06x} -> {faded:06x}");
+                assert!(
+                    ratio(faded, theme.background) < ratio(color, theme.background),
+                    "{context}: not faded"
+                );
+                assert!(
+                    ratio(faded, theme.background) >= Contrast::Standard.mark_ratio() - 0.01,
+                    "{context}: unreadable"
+                );
+            }
+        }
     }
 }

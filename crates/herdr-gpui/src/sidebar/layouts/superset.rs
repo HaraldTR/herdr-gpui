@@ -7,7 +7,7 @@ use super::{
         agents::status_style,
         cell::{AgentRow, RowContext, RowLayout, RowState, WorkspaceRow},
         line_height,
-        row::{RowIcon, RowLift, RowTree, removing_dot},
+        row::{RowIcon, RowLift, RowTree, left_behind, removing_dot},
     },
     parts::{self, Line, glyph_at, wash},
 };
@@ -180,7 +180,11 @@ impl RowLayout for Superset {
             .fill(
                 div()
                     .debug_selector(|| format!("name-{label}"))
-                    .text_color(rgb(text_color(state, theme))),
+                    .text_color(rgb(if teleported {
+                        left_behind(text_color(state, theme), theme)
+                    } else {
+                        text_color(state, theme)
+                    })),
                 label,
             )
             .when(teleported, |line| {
