@@ -11,7 +11,8 @@ prerelease/build suffixes, or leading zeros.
 Packaging and `just bundle` require Python 3 and read a versioned identity record
 embedded in the supplied executable, never the packaging checkout's Git state.
 Linked-worktree binaries select `assets/icons/herdr-square-worktree-1024.png` or
-`assets/icons/Herdr-worktree.icns`; other builds use the standard assets. On
+`assets/icons/Herdr-worktree.icns` and `Herdr-worktree.car`; other builds use the
+standard assets. On
 Linux a release installs `herdr-icon-square-clean.svg` as the hicolor `scalable`
 icon, because icon themes list no size above 512x512; the worktree PNG goes to
 `share/pixmaps`, the lookup fallback. Distribution packages are built only from
@@ -131,7 +132,7 @@ Linux format ships the tarball's exact bytes. nfpm is the only packaging tool;
 `scripts/release/install-nfpm.sh` downloads its pinned release and checks a
 SHA-256 copied from that release's Sigstore-verified `checksums.txt`. Package
 dependencies are declared explicitly, not inferred: the binary requires
-GLIBC_2.39 (it is built on Ubuntu 24.04), links ALSA, FreeType, xcb and
+GLIBC_2.39 (it is built on Ubuntu 24.04), links ALSA, FreeType, Fontconfig, xcb and
 xkbcommon, and dlopens the Vulkan loader and libwayland-client. RPM
 requirements are sonames so they resolve on any RPM distribution. Entries are
 stamped with the release date, and the release host name is kept out of the

@@ -209,7 +209,7 @@ impl HerdrWindow {
         search.update(cx, |input, cx| {
             input.set_placeholder("Search worktrees...", cx);
             input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
-            window.focus(&input.focus);
+            window.focus(&input.focus, cx);
         });
         let subscription = cx.subscribe(
             &search,
@@ -307,7 +307,7 @@ impl HerdrWindow {
                 )
                 .debug_selector(|| "open-worktree-list".into())
                 .w_full()
-                .track_scroll(picker.scroll.clone())
+                .track_scroll(&picker.scroll)
                 .flex_1()
                 .min_h_0(),
             );

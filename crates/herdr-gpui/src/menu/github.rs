@@ -1,11 +1,171 @@
-use crate::{HerdrWindow, fonts::StyledFont};
+use crate::{
+    HerdrWindow,
+    fonts::StyledFont,
+    github::{Account, Auth, Profile},
+};
 use gpui::{prelude::*, *};
+use herdr_client::ConnectTarget;
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::Action;
     use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn successful_signin_dismisses_only_the_signin_panel_and_restores_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.github_fixture(false, window, cx);
+                view.menu
+                    .github
+                    .complete_profile_fixture(Ok(crate::github::Auth::connected_fixture().profile));
+                view.poll_github(window, cx);
+                assert!(view.menu.github.connected());
+                assert!(view.menu.page.is_none());
+                assert!(view.focus.is_focused(window));
+
+                // Reopening the account panel and renewing an active session
+                // must not dismiss a panel the user deliberately opened.
+                view.open_menu(window, cx);
+                view.menu.page = Some(crate::menu::Page::GitHub);
+                view.menu
+                    .github
+                    .complete_profile_fixture(Ok(crate::github::Auth::connected_fixture().profile));
+                view.poll_github(window, cx);
+                assert!(view.menu.page == Some(crate::menu::Page::GitHub));
+
+                view.menu.github = crate::github::Auth::default();
+                view.menu.page = Some(crate::menu::Page::Menu);
+                view.menu
+                    .github
+                    .complete_profile_fixture(Ok(crate::github::Auth::connected_fixture().profile));
+                view.poll_github(window, cx);
+                assert!(view.menu.page == Some(crate::menu::Page::Menu));
+
+                view.github_fixture(false, window, cx);
+                view.menu
+                    .github
+                    .complete_profile_fixture(Err(crate::Error::GitHubAuthentication));
+                view.poll_github(window, cx);
+                assert!(view.menu.page == Some(crate::menu::Page::GitHub));
+                assert!(!view.menu.github.connected());
+            });
+        });
+    }
+
+    const HOST: &str = "ssh:0123456789abcdef0123456789abcdef";
+
+    /// Adds a saved SSH device, selects it, and gives it its own account slot.
+    fn select_host(view: &mut crate::HerdrWindow, host: crate::github::Auth) {
+        view.endpoints.push(crate::endpoint::Endpoint::new(
+            HOST.into(),
+            "Work box".into(),
+            herdr_client::ConnectTarget::Ssh {
+                target: "me@work".into(),
+                session: "default".into(),
+            },
+            true,
+        ));
+        view.selected_endpoint = 1;
+        view.menu.github_hosts.insert(HOST.into(), host);
+    }
+
+    fn login(profile: Option<&crate::github::Profile>) -> Option<&str> {
+        profile.map(|profile| profile.login.as_str())
+    }
+
+    #[gpui::test]
+    fn a_host_uses_its_own_account_and_falls_back_to_the_main_one(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.menu.github = crate::github::Auth::connected_fixture();
+                select_host(view, crate::github::Auth::default());
+                // Without its own sign-in, the host reads PRs as the main account
+                // while the page offers a separate one for this device.
+                assert!(!view.github_auth().connected());
+                assert_eq!(login(view.pr_profile()), Some("fixture-user"));
+                assert_eq!(
+                    view.pr_origin(),
+                    Some(crate::pull_request::Origin::Ssh("me@work".into()))
+                );
+                view.open_menu(window, cx);
+                view.menu.page = Some(crate::menu::Page::GitHub);
+                assert!(view.github_actions().contains(&Action::Start));
+
+                let mut work = crate::github::Auth::connected_fixture();
+                work.profile.as_mut().unwrap().login = "work-user".into();
+                view.menu.github_hosts.insert(HOST.into(), work);
+                assert_eq!(login(view.pr_profile()), Some("work-user"));
+
+                // Signing out on the host's page leaves the main account alone.
+                view.github_action(Action::SignOut, window, cx);
+                assert!(!view.menu.github_hosts[HOST].connected());
+                assert!(view.menu.github.connected());
+                assert_eq!(login(view.pr_profile()), Some("fixture-user"));
+
+                // Back on Local, the page and lookups use the main account.
+                view.selected_endpoint = 0;
+                assert!(std::ptr::eq(view.github_auth(), &view.menu.github));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn host_note_names_the_account_pull_requests_use(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.github_fixture(false, window, cx);
+                view.menu.github = crate::github::Auth::connected_fixture();
+            });
+            crate::sidebar::layout_tests::full_draw(window, cx).clear(cx);
+        });
+        assert!(cx.debug_bounds("github-host-note").is_none());
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                select_host(view, crate::github::Auth::default());
+                cx.notify();
+            });
+            crate::sidebar::layout_tests::full_draw(window, cx).clear(cx);
+        });
+        assert!(cx.debug_bounds("github-host-note").is_some());
+    }
+
+    #[gpui::test]
+    fn removed_hosts_drop_their_account_from_memory(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        cx.update(|_, cx| {
+            view.update(cx, |view, _| {
+                select_host(view, crate::github::Auth::connected_fixture());
+                view.sync_github_hosts();
+                assert!(view.menu.github_hosts.contains_key(HOST));
+                view.selected_endpoint = 0;
+                view.endpoints.truncate(1);
+                view.sync_github_hosts();
+                assert!(view.menu.github_hosts.is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn signout_uses_the_theme_danger_color(cx: &mut TestAppContext) {
+        use gpui::Styled;
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                let mut button = view.github_button(Action::SignOut, "Sign out", cx);
+                assert_eq!(
+                    button.text_style().color,
+                    Some(crate::menu::danger(&view.theme).into())
+                );
+            })
+        });
+    }
 
     #[gpui::test]
     fn connected_panel_is_content_sized_with_only_header_close(cx: &mut TestAppContext) {
@@ -20,7 +180,7 @@ mod tests {
                     view.github_fixture(false, window, cx);
                     view.menu.github = crate::github::Auth::connected_fixture();
                 });
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
             });
             let panel = cx.debug_bounds("menu-panel").unwrap();
             assert!(panel.size.width <= gpui::px(400.));
@@ -104,8 +264,103 @@ impl Action {
 }
 
 impl HerdrWindow {
+    /// The saved SSH device whose own account the GitHub page manages, when
+    /// that device is selected. Local and explicit sockets use the main account.
+    fn github_host(&self) -> Option<&str> {
+        let endpoint = &self.endpoints[self.selected_endpoint];
+        matches!(endpoint.connection.target, ConnectTarget::Ssh { .. })
+            .then_some(endpoint.id.as_str())
+            .filter(|id| self.menu.github_hosts.contains_key(*id))
+    }
+
+    /// The account the GitHub page shows and signs in or out.
+    pub(crate) fn github_auth(&self) -> &Auth {
+        self.github_host()
+            .and_then(|id| self.menu.github_hosts.get(id))
+            .unwrap_or(&self.menu.github)
+    }
+
+    fn github_auth_mut(&mut self) -> &mut Auth {
+        match self.github_host().map(str::to_owned) {
+            Some(id) => self
+                .menu
+                .github_hosts
+                .get_mut(&id)
+                .unwrap_or(&mut self.menu.github),
+            None => &mut self.menu.github,
+        }
+    }
+
+    /// Start signing in the account the GitHub page shows.
+    pub(crate) fn start_github(&mut self) {
+        let host = self.github_host().map(str::to_owned);
+        let menu = &mut self.menu;
+        host.and_then(|id| menu.github_hosts.get_mut(&id))
+            .unwrap_or(&mut menu.github)
+            .start(&self.config);
+    }
+
+    /// The account pull requests on the selected device are read with: the
+    /// device's own sign-in when it has one, otherwise the main account.
+    pub(crate) fn pr_profile(&self) -> Option<&Profile> {
+        self.github_host()
+            .and_then(|id| self.menu.github_hosts.get(id)?.profile.as_ref())
+            .or(self.menu.github.profile.as_ref())
+    }
+
+    /// Keep one account per saved SSH device. A removed device's account is
+    /// dropped from memory; its saved credential stays until signed out, so
+    /// re-adding the device finds it again.
+    pub(crate) fn sync_github_hosts(&mut self) {
+        let hosts = &mut self.menu.github_hosts;
+        hosts.retain(|id, _| {
+            self.endpoints.iter().any(|endpoint| {
+                &endpoint.id == id
+                    && matches!(endpoint.connection.target, ConnectTarget::Ssh { .. })
+            })
+        });
+        // Headless windows never touch saved credentials, like the main account.
+        if self.avatars.is_none() {
+            return;
+        }
+        for endpoint in &self.endpoints {
+            if !matches!(endpoint.connection.target, ConnectTarget::Ssh { .. })
+                || hosts.contains_key(&endpoint.id)
+            {
+                continue;
+            }
+            let Some(account) =
+                crate::endpoint::saved_profile_id(&endpoint.id).and_then(Account::host)
+            else {
+                continue;
+            };
+            let mut auth = Auth::for_account(account);
+            auth.initialize(&self.config);
+            hosts.insert(endpoint.id.clone(), auth);
+        }
+    }
+
+    pub(crate) fn poll_github(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_github_hosts();
+        self.prune_device_removals();
+        let connected = self.github_auth().connected();
+        let mut changed = self.menu.github.poll();
+        for auth in self.menu.github_hosts.values_mut() {
+            changed |= auth.poll();
+        }
+        if changed {
+            if !connected
+                && self.github_auth().connected()
+                && self.menu.page == Some(super::Page::GitHub)
+            {
+                self.dismiss_menu(window, cx);
+            }
+            cx.notify();
+        }
+    }
+
     fn github_actions(&self) -> Vec<Action> {
-        let auth = &self.menu.github;
+        let auth = self.github_auth();
         let mut actions = Vec::new();
         if auth.code().is_some() {
             actions.extend([Action::Copy, Action::Open]);
@@ -125,16 +380,16 @@ impl HerdrWindow {
         }
         match action {
             Action::Copy => {
-                if let Some(code) = self.menu.github.copy_code() {
+                if let Some(code) = self.github_auth_mut().copy_code() {
                     cx.write_to_clipboard(ClipboardItem::new_string(code.to_owned()));
                 }
             }
             Action::Open => cx.open_url(crate::github::VERIFY_URL),
-            Action::Start => self.menu.github.start(&self.config),
+            Action::Start => self.start_github(),
             Action::SignOut => {
                 self.menu.pr_cache.clear();
                 self.menu.pr.clear();
-                self.menu.github.sign_out();
+                self.github_auth_mut().sign_out();
             }
             Action::Close => self.dismiss_menu(window, cx),
         }
@@ -186,8 +441,8 @@ impl HerdrWindow {
             let action = match key {
                 "escape" => Some(Action::Close),
                 "c" => {
-                    if self.menu.github.busy() {
-                        self.menu.github.cancel();
+                    if self.github_auth().busy() {
+                        self.github_auth_mut().cancel();
                     }
                     None
                 }
@@ -228,7 +483,12 @@ impl HerdrWindow {
     ) -> Stateful<Div> {
         let theme = &self.theme;
         let primary = matches!(action, Action::Open | Action::Start);
-        let accent = rgb(theme.foreground).blend(rgba((theme.palette[4] << 8) | 0x70));
+        let danger = action == Action::SignOut;
+        let accent = if danger {
+            super::danger(theme)
+        } else {
+            super::accent(theme)
+        };
         let selected = self.menu.github_selected == Some(action);
         div()
             .id(action.id())
@@ -236,10 +496,14 @@ impl HerdrWindow {
             .flex_none()
             .px(px(12.))
             .py(px(7.))
-            .rounded(px(5.))
+            .rounded(px(crate::config::corners::CONTROL))
             .border_1()
             .border_color(if selected {
-                rgb(theme.foreground)
+                if danger {
+                    accent
+                } else {
+                    rgb(theme.foreground)
+                }
             } else {
                 rgb(theme.active)
             })
@@ -250,6 +514,8 @@ impl HerdrWindow {
             })
             .text_color(if primary {
                 rgb(theme.background)
+            } else if danger {
+                accent
             } else {
                 rgb(theme.foreground)
             })
@@ -268,7 +534,7 @@ impl HerdrWindow {
     }
 
     pub(super) fn render_github_auth(&self, cx: &mut Context<Self>) -> Div {
-        let auth = &self.menu.github;
+        let auth = self.github_auth();
         let theme = &self.theme;
         let font = &self.config.ui;
         let mut body = div()
@@ -278,6 +544,26 @@ impl HerdrWindow {
             .overflow_y_scroll()
             .track_scroll(&self.menu.github_scroll)
             .p(px(16.));
+        let host = self
+            .github_host()
+            .map(|_| self.endpoints[self.selected_endpoint].label.as_str());
+        if let Some(label) = host {
+            let note = match (&auth.profile, &self.menu.github.profile) {
+                (Some(_), _) => format!("Pull requests on {label} use this account."),
+                (None, Some(main)) => format!(
+                    "Pull requests on {label} use your main account @{}. Sign in to use a different account for this device.",
+                    main.login
+                ),
+                (None, None) => format!("Sign in to view pull requests on {label}."),
+            };
+            body = body.child(
+                div()
+                    .debug_selector(|| "github-host-note".into())
+                    .mb(px(12.))
+                    .text_color(rgb(theme.muted))
+                    .child(note),
+            );
+        }
         if let Some(profile) = &auth.profile {
             body = body.child(
                 div()
@@ -307,7 +593,11 @@ impl HerdrWindow {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(div().text_color(rgb(theme.palette[2])).child("Connected"))
+                            .child(
+                                div()
+                                    .text_color(rgb(theme.ink(theme.palette[2])))
+                                    .child("Connected"),
+                            )
                             .child(
                                 div()
                                     .id("github-account")
@@ -324,7 +614,7 @@ impl HerdrWindow {
                 .child(
                     div()
                         .p(px(16.))
-                        .rounded(px(6.))
+                        .rounded(px(crate::config::corners::CONTROL))
                         .border_1()
                         .border_color(rgb(theme.active))
                         .bg(rgb(theme.background))
@@ -369,10 +659,10 @@ impl HerdrWindow {
                     .debug_selector(|| "github-status".into())
                     .mt(px(16.))
                     .p(px(10.))
-                    .rounded(px(5.))
+                    .rounded(px(crate::config::corners::CONTROL))
                     .bg(rgb(theme.background))
                     .text_color(rgb(if auth.failed {
-                        theme.palette[1]
+                        theme.ink(theme.palette[1])
                     } else {
                         theme.muted
                     }))
@@ -381,7 +671,7 @@ impl HerdrWindow {
         }
         if let Some(note) = auth.store().note(auth.connected()) {
             let (color, text) = match note {
-                crate::github::Note::Warning(text) => (theme.palette[1], text),
+                crate::github::Note::Warning(text) => (theme.ink(theme.palette[1]), text),
                 crate::github::Note::Info(text) => (theme.muted, text),
             };
             body = body.child(div().mt(px(12.)).text_color(rgb(color)).child(text));
@@ -406,6 +696,9 @@ impl HerdrWindow {
             let label = match action {
                 Action::Open => "Open GitHub (O)",
                 Action::Start if auth.failed => "Try again (S)",
+                Action::Start if host.is_some() && self.menu.github.connected() => {
+                    "Use another account (S)"
+                }
                 Action::Start => "Sign in (S)",
                 Action::SignOut => "Sign out (D)",
                 Action::Copy | Action::Close => continue,
@@ -446,7 +739,7 @@ impl HerdrWindow {
                             .cursor_pointer()
                             .px(px(8.))
                             .py(px(4.))
-                            .rounded(px(4.))
+                            .rounded(px(crate::config::corners::CONTROL))
                             .when(self.menu.github_selected == Some(Action::Close), |style| {
                                 style.bg(rgb(theme.active))
                             })

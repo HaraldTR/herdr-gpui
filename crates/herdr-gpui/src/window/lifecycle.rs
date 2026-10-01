@@ -5,18 +5,76 @@
 use super::HerdrWindow;
 use crate::{WINDOW_TITLE, sidebar};
 use gpui::Window;
+use herdr_client::Method;
+use serde_json::json;
+use std::time::{Duration, Instant};
+
+/// A drag or the full screen animation passes through many sizes, and each
+/// resize makes every pane's program redraw, agents re-rendering whole
+/// transcripts. Only the size the window settles on is sent.
+pub(crate) const RESIZE_SETTLE: Duration = Duration::from_millis(150);
+
+/// A frame another client took is re-claimed more slowly than a settled
+/// window resize, so the request is not resent while the daemon answers it.
+pub(crate) const RESIZE_REASSERT: Duration = Duration::from_secs(1);
 
 impl HerdrWindow {
     pub(crate) fn resize(&mut self) {
-        if self.last_queued_options == Some(self.options) {
+        self.resize_at(Instant::now());
+    }
+
+    pub(crate) fn resize_at(&mut self, now: Instant) {
+        // Another client (a CLI, or another window) can resize the tab the
+        // window shows. The window's own options still hold, so the early
+        // return below would leave a frame that no longer matches them: ask
+        // for the size again whenever the daemon's frame disagrees.
+        let stale = self.live.surface.is_some() && !self.surface_matches_options();
+        let changed = self.last_queued_options != Some(self.options);
+        if self.last_queued_options == Some(self.options) && !stale {
+            self.pending_resize = None;
             return;
+        }
+        // The first geometry goes out at once; later changes wait to settle.
+        if self.last_queued_options.is_some() {
+            match self.pending_resize {
+                Some((options, since)) if options == self.options => {
+                    let wait = if changed {
+                        RESIZE_SETTLE
+                    } else {
+                        RESIZE_REASSERT
+                    };
+                    if now.duration_since(since) < wait {
+                        return;
+                    }
+                }
+                _ => {
+                    self.pending_resize = Some((self.options, now));
+                    return;
+                }
+            }
         }
         if let (Some(handle), Some(snapshot)) = (
             &self.endpoints[self.selected_endpoint].connection.handle,
             &self.live.snapshot,
         ) {
             match handle.resize(&snapshot.boot_id, self.options) {
-                Ok(()) => self.last_queued_options = Some(self.options),
+                Ok(()) => {
+                    self.last_queued_options = Some(self.options);
+                    // The daemon sizes a tab for the client that last
+                    // focused, selected or interacted with it. A resize
+                    // alone does not claim it back from another client (a
+                    // CLI, another window, or a TUI attached to the same
+                    // tab), so claim it: select the tab again and re-report
+                    // the window's focus.
+                    self.sent_focus = None;
+                    if let Some(tab) = snapshot.focused_tab_id.clone() {
+                        let _ = handle.request(
+                            &snapshot.boot_id,
+                            Method::TabFocus,
+                            json!({ "tab_id": tab }),
+                        );
+                    }
+                }
                 Err(error) => self.local_error = Some(format!("Resize: {error}")),
             }
         }
@@ -53,10 +111,13 @@ impl HerdrWindow {
 
     pub(crate) fn report_focus(&mut self) {
         // The first positive report acknowledges the daemon's active tab. Wait
-        // until its surface is ready, but do not flap focus on later frame gaps.
+        // until its surface is coherent, but not necessarily our size: focus
+        // claims tab geometry, so waiting for that size can deadlock startup.
+        // Do not flap focus on later frame gaps.
         let focused = self.active
             && self.endpoints[self.selected_endpoint].surface_requested()
-            && (self.sent_focus == Some(true) || self.input_ready());
+            && (self.sent_focus == Some(true)
+                || (self.pending_toast.is_none() && self.surface_activation_ready()));
         // Update the authoritative event inbox, not just the rendered clone.
         if let Ok(mut state) = self.endpoints[self.selected_endpoint]
             .connection

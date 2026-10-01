@@ -6,6 +6,15 @@ pub(super) const PNG: &[u8] = if env!("HERDR_BUILD_WORKTREE").as_bytes()[0] == b
     include_bytes!("../../../assets/icons/herdr-ui-icon-clean.png")
 };
 
+// AppKit selects a directly rendered representation for the Dock's size and
+// backing scale, rather than downsampling the About box's single large PNG.
+#[cfg(target_os = "macos")]
+const ICNS: &[u8] = if env!("HERDR_BUILD_WORKTREE").as_bytes()[0] == b'1' {
+    include_bytes!("../../../assets/icons/Herdr-worktree.icns")
+} else {
+    include_bytes!("../../../assets/icons/Herdr.icns")
+};
+
 #[cfg(target_os = "macos")]
 pub fn install() {
     use objc2::{AnyThread, MainThreadMarker};
@@ -22,7 +31,7 @@ pub fn install() {
     {
         return;
     }
-    let Some(image) = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(PNG)) else {
+    let Some(image) = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(ICNS)) else {
         tracing::error!("Unable to decode the embedded Herdr icon");
         return;
     };
@@ -47,16 +56,59 @@ pub fn verify_native() -> anyhow::Result<()> {
         .applicationIconImage()
         .context("NSApplication has no icon")?;
     let size = image.size();
-    if !image.isValid() || size.width != 1024. || size.height != 1024. {
+    if !image.isValid() || size.width != 512. || size.height != 512. {
         anyhow::bail!("invalid native icon: {size:?}");
     }
-    eprintln!("ICON native PASS: valid NSApplication image, 1024x1024");
+    eprintln!("ICON native PASS: valid NSApplication image, 512x512 points");
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::PNG;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn dock_icons_decode_with_all_standard_and_retina_representations() {
+        use objc2::AnyThread;
+        use objc2_app_kit::NSImage;
+        use objc2_foundation::NSData;
+
+        let stable = include_bytes!("../../../assets/icons/Herdr.icns").as_slice();
+        let worktree = include_bytes!("../../../assets/icons/Herdr-worktree.icns").as_slice();
+        assert_ne!(stable, worktree);
+        assert_eq!(
+            super::ICNS,
+            if env!("HERDR_BUILD_WORKTREE") == "1" {
+                worktree
+            } else {
+                stable
+            }
+        );
+        for bytes in [stable, worktree] {
+            let image = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(bytes))
+                .expect("embedded ICNS must decode in AppKit");
+            assert!(image.isValid());
+            assert_eq!(image.size().width, 512.);
+            assert_eq!(image.size().height, 512.);
+            let representations = image.representations();
+            assert_eq!(representations.len(), 10);
+            for points in [16, 32, 128, 256, 512] {
+                for scale in [1, 2] {
+                    assert!(
+                        representations.iter().any(|rep| {
+                            rep.pixelsWide() == points * scale
+                                && rep.pixelsHigh() == points * scale
+                                && rep.size().width == points as f64
+                                && rep.size().height == points as f64
+                        }),
+                        "missing {points}pt @{scale}x representation"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn embedded_icon_is_a_nonempty_1024_square_png() {

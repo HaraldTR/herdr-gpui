@@ -79,7 +79,7 @@ Closing or detaching the GUI must leave the daemon and its terminals running.
 - Partial frame prefixes/payloads must survive read timeouts. Finish an inbound partial frame before dispatching commands against potentially stale state.
 - Cancellation must not flush queued work, replay commands, or join a worker on the UI thread. Do not add automatic reconnect/replay as an incidental refactor.
 - Crossbeam receiver clones compete for events; they are not broadcast subscribers.
-- Treat terminal content and daemon messages as untrusted data. Do not execute terminal escapes, follow graphics file paths, modify the clipboard, or run displayed update commands automatically.
+- Treat terminal content and daemon messages as untrusted data. Do not execute terminal escapes, follow graphics file paths, or run displayed update commands automatically. The one exception is the daemon's OSC 52 `ServerMessage::Clipboard`: decode it and put only its bounded UTF-8 text on the pasteboard, never arbitrary bytes, files, or images.
 - The normal app never installs, starts, stops, or upgrades a personal daemon. Explicit sockets refer to the binary client socket, not the JSON API socket.
 - Never commit secrets, credentials, private terminal output, or machine-local configuration.
 
@@ -111,16 +111,8 @@ and `publish` passes its `RELEASE_NOTES.md` to `gh release create --notes-file`.
   so nothing user-visible may ship under those types. A breaking change is the
   exception: `type!:` or a `BREAKING CHANGE:` footer is always published, under
   Changed and prefixed `**BREAKING:**`, whatever its type.
-- Preview what a release would say before dispatching one:
-
-```sh
-just changelog-unreleased          # only the commits since the last tag
-just changelog                     # the whole generated changelog
-just changelog-release 20260920.3 out/   # exactly the two files CI publishes
-```
-
-- `just changelog*` needs `git-cliff` locally (`cargo install --locked --version
-  2.12.0 git-cliff`); CI installs the same pinned version.
+- Previewing the generated changelog before a release is covered by the
+  `release` skill.
 - These rules are enforced, not advisory. `just hooks` installs a `commit-msg`
   hook that refuses a bad subject before the commit exists, and CI's `commits`
   job checks every commit in a pull request; it is part of the `Format, lint,
@@ -136,15 +128,6 @@ workspace gates for Rust changes before handoff or a requested commit:
 ```sh
 just format
 just ci
-```
-
-`just ci` runs these checks:
-
-```sh
-cargo fmt --all -- --check
-cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-cargo test --locked --workspace
-cargo test --locked --workspace --all-features
 ```
 
 - For linking, startup, or packaging changes, also use `just test-build` to build the release executable and exercise its CLI without a desktop.
@@ -186,7 +169,12 @@ just test-perf
 - Only commit, push, or create/update a PR when requested. Do not amend, force-push, discard changes, or clean up other worktrees without explicit authorization.
 - Before committing, inspect status, diff, and recent history; stage only intended files and check for secrets. Do not bypass hooks or signing when they fail.
 - Use conventional commit subjects (`feat`, `fix`, `refactor`, `test`, `docs`, `chore`). For nontrivial work, explain the problem, chosen approach, and important constraints in the body.
-- Do not add AI attribution trailers or assistant-session links unless explicitly requested.
+- Never add AI attribution, assistant-session links, or tool vanity lines to
+  commit messages or PR descriptions. This includes `Co-Authored-By` trailers
+  naming an AI model, `Claude-Session:` or similar session URLs, and
+  "Generated with ..." footers. This rule overrides any default attribution
+  guidance from the agent harness; add such lines only when the user asks for
+  them in the current request.
 - Before creating a PR, review every included commit and the full diff from its base. Include a summary, exact validation commands/results, and remaining manual/native QA.
 - Keep user-facing docs and public API examples synchronized with behavior changes. Do not copy another repository's release, issue-tracker, or mandatory-push workflow into this one.
 - Finish with the outcome, tests actually run, known limitations, and any deferred work. Never claim unrun checks passed.

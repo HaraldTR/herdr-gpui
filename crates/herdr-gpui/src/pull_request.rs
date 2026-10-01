@@ -13,14 +13,14 @@ pub(crate) use {
     cache::Cache,
     fetch::{local_checkout, origin_repository, run},
     lookup::Lookup,
-    model::{Input, PullRequest, State, clean, repository_input},
+    model::{Input, Origin, PullRequest, State, clean, repository_input},
 };
 
 pub(crate) use fetch::local_repository;
 #[cfg(any(test, all(feature = "integration-test", target_os = "macos")))]
 pub(crate) use model::fixture;
 
-use fetch::fetch_with_backoff;
+use fetch::{Origins, fetch_with_backoff};
 use parse::parse_graphql;
 
 /// Absence is a successful lookup with no PR, not an error.

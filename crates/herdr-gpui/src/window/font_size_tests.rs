@@ -116,8 +116,8 @@ fn the_bound_keystrokes_reach_the_commands(cx: &mut TestAppContext) {
     });
     cx.update(|window, cx| {
         // Actions dispatch along the focus path, as they do for a live window.
-        view.update(cx, |view, _| window.focus(&view.focus));
-        window.draw(cx).clear();
+        view.update(cx, |view, cx| window.focus(&view.focus, cx));
+        window.draw(cx).clear(cx);
     });
     cx.run_until_parked();
     let start = view.read_with(cx, |view, _| view.config.terminal.size);

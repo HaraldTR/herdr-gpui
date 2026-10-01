@@ -48,9 +48,14 @@ changelog-unreleased` is the same text users will read on the release page; the
 raw log is the fallback when `git-cliff` is not installed locally:
 
 ```sh
-just changelog-unreleased
+just changelog-unreleased          # only the commits since the last tag
+just changelog                     # the whole generated changelog
+just changelog-release 20260920.3 out/   # exactly the two files CI publishes
 git log --oneline "$(gh api repos/penso/herdr-gpui/releases/latest --jq .tag_name)"..HEAD
 ```
+
+`just changelog*` needs `git-cliff` locally (`cargo install --locked --version
+2.12.0 git-cliff`); CI installs the same pinned version.
 
 Dispatch is long-running. Run it with `run_in_background` so a slow build does
 not hit a foreground timeout.

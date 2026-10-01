@@ -4,10 +4,11 @@ use std::ops::Range;
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementInputHandler,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, Pixels,
-    Point, ShapedLine, TextRun, UTF16Selection, UnderlineStyle, Window, canvas, div, fill, point,
-    prelude::*, px, rgb, size,
+    Point, ShapedLine, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, canvas, div,
+    fill, point, prelude::*, px, rgb, size,
 };
 
+use crate::actions;
 use crate::config::{Config, FontConfig, Theme};
 use crate::fonts::StyledFont;
 
@@ -376,7 +377,7 @@ impl Render for SearchInput {
             .w_full()
             .px_2()
             .py_1()
-            .rounded(px(5.))
+            .rounded(px(crate::config::corners::CONTROL))
             .border_1()
             .border_color(rgb(self.theme.active))
             .bg(rgb(self.theme.background))
@@ -387,10 +388,22 @@ impl Render for SearchInput {
             .track_focus(&self.focus)
             .cursor(CursorStyle::IBeam)
             .on_key_down(cx.listener(Self::key_down))
+            .on_action(cx.listener(|this, _: &actions::Cut, window, cx| {
+                this.key_down(&actions::edit_key("x"), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &actions::Copy, window, cx| {
+                this.key_down(&actions::edit_key("c"), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &actions::Paste, window, cx| {
+                this.key_down(&actions::edit_key("v"), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &actions::SelectAll, window, cx| {
+                this.key_down(&actions::edit_key("a"), window, cx)
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                    window.focus(&this.focus);
+                    window.focus(&this.focus, cx);
                     cx.stop_propagation();
                     if !this.is_composing() {
                         let offset = this.mouse_index(event.position);
@@ -513,7 +526,8 @@ impl Render for SearchInput {
                                         rgb(input.theme.active),
                                     ));
                                 }
-                                let _ = line.paint(origin, height, window, cx);
+                                let _ =
+                                    line.paint(origin, height, TextAlign::Left, None, window, cx);
                                 if input.focus.is_focused(window) {
                                     window.paint_quad(fill(
                                         Bounds::new(

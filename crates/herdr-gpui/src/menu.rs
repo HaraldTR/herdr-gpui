@@ -5,13 +5,17 @@
 
 mod chrome;
 mod colors;
+mod devices;
 mod git;
 mod github;
 mod page;
 mod pr;
+mod sessions;
 mod settings;
 mod state;
+mod teleport;
 mod workspace;
+mod workspace_close;
 mod worktree_open;
 mod worktree_render;
 mod worktree_source;
@@ -19,23 +23,55 @@ mod worktree_source;
 #[cfg(test)]
 mod font_size_tests;
 #[cfg(test)]
+mod sessions_tests;
+#[cfg(test)]
 pub(crate) mod workspace_tests;
 #[cfg(test)]
 mod worktree_open_tests;
 #[cfg(test)]
 mod worktree_tests;
 
+/// Only builds that show pages, and tests, ask what a menu covers.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) use state::Cover;
 pub(crate) use {
-    colors::accent,
+    colors::{accent, danger, online, teleported, tint},
     page::{Page, WorkspaceAction},
     state::{MenuState, Removal},
     worktree_source::WorktreeSource,
 };
 
-use colors::danger;
 use page::WorkspaceMenuAction;
 use state::Submission;
 use workspace::WorkspaceTarget;
+
+/// Shared trailing action geometry for pickers and workspace context menus.
+fn action_icon(
+    path: &'static str,
+    selector: String,
+    color: gpui::Rgba,
+    hover_color: gpui::Rgba,
+) -> gpui::Div {
+    use gpui::{prelude::*, *};
+    div()
+        .group("menu-action-icon")
+        .size(px(24.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(crate::config::corners::CONTROL))
+        .child(
+            svg()
+                .path(path)
+                .size(px(14.))
+                // GPUI skips SVG painting without an explicit color on the SVG;
+                // the parent's text color is not inherited by SVG painting.
+                .text_color(color)
+                .group_hover("menu-action-icon", move |s| s.text_color(hover_color))
+                .debug_selector(move || selector.clone()),
+        )
+}
 
 /// Breathing room between a popup and the window's edges, so a list that had
 /// to be clamped still shows that it stops short of the frame.

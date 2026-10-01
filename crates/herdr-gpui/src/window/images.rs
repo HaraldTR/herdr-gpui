@@ -1,5 +1,6 @@
-//! Remote images use the daemon's temporary-file bridge, not an agent-specific
-//! attachment API. Reserve FIFO order before background file reads/encoding.
+//! Clipboard and remote images use the daemon's temporary-file bridge, not an
+//! agent-specific attachment API. Reserve FIFO order before background file
+//! reads/encoding.
 
 use super::{
     HerdrWindow,
@@ -26,6 +27,7 @@ pub(crate) struct PendingImage {
     epoch: u64,
     generation: u64,
     boot: String,
+    remote: bool,
     target: InputTarget,
     cancellation: ClipboardImageCancellation,
     preparing: bool,
@@ -84,14 +86,32 @@ impl HerdrWindow {
         cx.notify();
     }
 
-    pub(crate) fn accepts_remote_images(&self) -> bool {
-        matches!(
-            self.endpoints[self.selected_endpoint].connection.target,
-            ConnectTarget::Ssh { .. }
-        ) && self.menu.page.is_none()
+    fn accepts_image_input(&self) -> bool {
+        self.menu.page.is_none()
             && self.live.status.is_connected()
             && self.input_ready()
             && !self.mouse_focus_pending()
+    }
+
+    /// The daemon stages clipboard images beside the pane's processes, so the
+    /// bridge serves local endpoints too: GUI text paste cannot carry an image.
+    /// Only macOS and Linux have a bounded background clipboard reader.
+    pub(crate) fn accepts_clipboard_images(&self) -> bool {
+        cfg!(any(target_os = "macos", target_os = "linux")) && self.accepts_image_input()
+    }
+
+    /// Dropped files and pasted image paths need bridging only when the pane
+    /// runs on another host; a local pane can already read the original path.
+    /// File drops do not read the clipboard, so this has no platform gate.
+    pub(crate) fn accepts_remote_images(&self) -> bool {
+        self.selected_is_remote() && self.accepts_image_input()
+    }
+
+    fn selected_is_remote(&self) -> bool {
+        matches!(
+            self.endpoints[self.selected_endpoint].connection.target,
+            ConnectTarget::Ssh { .. }
+        )
     }
 
     pub(crate) fn focused_input_target(&self) -> Option<InputTarget> {
@@ -110,11 +130,11 @@ impl HerdrWindow {
 
     fn image_target_current(&self, image: &PendingImage) -> bool {
         let endpoint = &self.endpoints[self.selected_endpoint];
-        if !matches!(endpoint.connection.target, ConnectTarget::Ssh { .. })
+        if self.selected_is_remote() != image.remote
             || self.menu.page.is_some()
             || !self.live.status.is_connected()
             || self.pending_navigation.is_some()
-            || self.live.activation.is_some()
+            || self.live.activation_pending()
             || image.epoch != self.selection_epoch
             || image.generation != endpoint.generation
             || image.endpoint != endpoint.id
@@ -183,7 +203,7 @@ impl HerdrWindow {
             }
             return true;
         }
-        if self.accepts_remote_images()
+        if self.accepts_clipboard_images()
             && let Some(image) = item.into_entries().find_map(|entry| match entry {
                 ClipboardEntry::Image(image) => Some(image),
                 _ => None,
@@ -211,7 +231,7 @@ impl HerdrWindow {
         );
     }
 
-    pub(crate) fn paste_remote_clipboard(
+    pub(crate) fn paste_native_clipboard(
         &mut self,
         image_only: bool,
         fallback: Option<ClientPaneInputEvent>,
@@ -220,6 +240,7 @@ impl HerdrWindow {
         let Some(target) = self.focused_input_target() else {
             return;
         };
+        let bridge_paths = self.accepts_remote_images();
         // GPUI's native reader copies and hashes whole images synchronously.
         // Only its in-memory test clipboard is read on the foreground thread.
         let read = super::clipboard::read;
@@ -240,7 +261,7 @@ impl HerdrWindow {
                     return Ok(fallback.map_or(Prepared::Empty, Prepared::Input));
                 };
                 if !image_only && let Some(text) = item.text().filter(|text| !text.is_empty()) {
-                    if let Some(source) = image_source::from_paste(&text) {
+                    if bridge_paths && let Some(source) = image_source::from_paste(&text) {
                         return Prepared::image(source.prepare(), Some(text));
                     }
                     return Ok(Prepared::Input(ClientPaneInputEvent::Paste(text)));
@@ -264,7 +285,9 @@ impl HerdrWindow {
         prepare: impl FnOnce() -> crate::Result<Prepared> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
-        if !self.accepts_remote_images() {
+        // Callers choose clipboard or remote eligibility. Unsupported platforms
+        // still report the client's typed reservation error below.
+        if !self.accepts_image_input() {
             return;
         }
         // Keep a cancelled preparation until it actually exits. Reconnecting or
@@ -396,6 +419,7 @@ impl HerdrWindow {
             epoch: self.selection_epoch,
             generation,
             boot,
+            remote: self.selected_is_remote(),
             target,
             cancellation,
             preparing: true,

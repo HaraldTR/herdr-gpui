@@ -172,11 +172,13 @@ fn connected_endpoint(id: &str) -> (Endpoint, Server) {
             Method::WorkspaceCreate,
             Method::TabCreate,
             Method::PaneSplit,
+            Method::LayoutSetSplitRatio,
             Method::TabFocus,
             Method::PaneFocus,
             Method::WorkspaceFocus,
             Method::PaneFocusDirection,
             Method::PaneZoom,
+            Method::PaneClear,
             Method::PaneClose,
             Method::TabClose,
             Method::CommandInvoke,
@@ -221,6 +223,54 @@ fn connected_endpoint(id: &str) -> (Endpoint, Server) {
         .apply(ClientEvent::Surface(frame));
     endpoint.poll(Instant::now());
     (endpoint, server)
+}
+
+#[gpui::test]
+fn first_focus_claims_geometry_without_a_window_resize(cx: &mut gpui::TestAppContext) {
+    let (endpoint, mut server) = connected_endpoint("resize");
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.read_with(cx, |fixture, _| fixture.0.clone());
+    view.update(cx, |view, _| {
+        view.endpoints = vec![endpoint];
+        view.selected_endpoint = 0;
+        view.reset_selected();
+        view.active = true;
+        view.options.surface_size = ClientSurfaceSize {
+            cols: 150,
+            rows: 50,
+        };
+        // The initial size was queued before the surface became focusable.
+        view.last_queued_options = Some(view.options);
+        view.sent_focus = Some(false);
+        assert!(
+            !view.input_ready(),
+            "the initial surface still has the old size"
+        );
+        view.report_focus();
+        assert!(matches!(
+            server.receive(),
+            ClientMessage::ClientShellFocus { focused: true }
+        ));
+        assert_eq!(view.last_queued_options, Some(view.options));
+        assert!(!view.input_ready(), "focus alone does not enable input");
+        let surface = Arc::make_mut(view.live.surface.as_mut().unwrap());
+        surface.frame.width = 150;
+        surface.frame.height = 50;
+        assert!(view.input_ready(), "the resized surface enables input");
+
+        // Repeated polls must not keep resizing the terminal. A focus-loss
+        // message acts as an ordered sentinel after these no-op calls.
+        view.report_focus();
+        view.resize();
+        view.active = false;
+        view.report_focus();
+        assert!(matches!(
+            server.receive(),
+            ClientMessage::ClientShellFocus { focused: false }
+        ));
+    });
 }
 
 fn prepare_mouse(view: &mut HerdrWindow, endpoint: Endpoint) {
@@ -327,6 +377,77 @@ fn wait_image_finished(view: &gpui::Entity<HerdrWindow>, cx: &mut gpui::VisualTe
     });
 }
 
+/// Navigation leaves its acknowledged activation recorded. Cmd-V must still
+/// paste afterwards, and only a navigation still in flight may drop it.
+#[gpui::test]
+fn text_paste_survives_a_settled_navigation(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (endpoint, mut server) = connected_endpoint("image");
+    let paste = gpui::KeyDownEvent {
+        keystroke: gpui::Keystroke::parse("cmd-v").unwrap(),
+        is_held: false,
+        prefer_character_input: false,
+    };
+    let settled = |view: &HerdrWindow| crate::state::SurfaceActivation {
+        request: "activate-1".into(),
+        boot: view.live.snapshot.as_ref().unwrap().boot_id.clone(),
+        revision: Some(view.live.surface.as_ref().unwrap().projection_revision),
+        failed: false,
+        focus: None,
+        active: true,
+    };
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            prepare_mouse(view, endpoint);
+            view.live.activation = Some(settled(view));
+            assert!(view.live.surface_ready() && !view.live.activation_pending());
+            cx.write_to_clipboard(ClipboardItem::new_string("after navigation".into()));
+            view.key_down(&paste, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        server.receive(),
+        ClientMessage::ClientShellPaneInput {
+            pane_id: "w1:p1".into(),
+            events: vec![ClientPaneInputEvent::Paste("after navigation".into())],
+        }
+    );
+    wait_image_finished(&view, cx);
+    // Linux sends Cmd-V text synchronously from GPUI's clipboard, so there is
+    // no background read for a navigation to overtake.
+    if cfg!(target_os = "linux") {
+        return;
+    }
+
+    // A navigation starting while the clipboard is read cancels that paste.
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string("stale target".into()));
+            view.key_down(&paste, window, cx);
+            view.live.activation.as_mut().unwrap().revision = None;
+            assert!(view.live.activation_pending());
+        });
+    });
+    cx.run_until_parked();
+    wait_image_finished(&view, cx);
+    view.update(cx, |view, cx| {
+        view.live.activation = Some(settled(view));
+        view.send(ClientPaneInputEvent::TextCommit("sentinel".into()), cx);
+    });
+    assert_eq!(
+        server.receive(),
+        ClientMessage::ClientShellPaneInput {
+            pane_id: "w1:p1".into(),
+            events: vec![ClientPaneInputEvent::TextCommit("sentinel".into())],
+        }
+    );
+    view.read_with(cx, |view, _| assert!(view.local_error.is_none()));
+}
+
 #[gpui::test]
 fn connected_image_paste_captures_pane_before_immediate_text_and_enter(
     cx: &mut gpui::TestAppContext,
@@ -339,6 +460,7 @@ fn connected_image_paste_captures_pane_before_immediate_text_and_enter(
     let enter = gpui::KeyDownEvent {
         keystroke: gpui::Keystroke::parse("enter").unwrap(),
         is_held: false,
+        prefer_character_input: false,
     };
     cx.update(|window, cx| {
         view.update(cx, |view, cx| {
@@ -363,7 +485,7 @@ fn connected_image_paste_captures_pane_before_immediate_text_and_enter(
     );
     for event in [
         ClientPaneInputEvent::TextCommit("after image".into()),
-        crate::terminal::key_input(&enter).unwrap(),
+        crate::terminal::key_input(&enter, true).unwrap(),
     ] {
         assert_eq!(
             server.receive(),
@@ -411,9 +533,7 @@ fn connected_image_paste_popup_never_reaches_underlying_pane(cx: &mut gpui::Test
 }
 
 #[gpui::test]
-fn connected_image_paste_local_isolation_and_image_only_preserve_text(
-    cx: &mut gpui::TestAppContext,
-) {
+fn connected_image_paste_image_only_preserves_text(cx: &mut gpui::TestAppContext) {
     let (fixture, cx) = cx.add_window_view(|window, cx| {
         Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
     });
@@ -426,9 +546,6 @@ fn connected_image_paste_local_isolation_and_image_only_preserve_text(
             } else {
                 prepare_mouse(view, endpoint);
                 assert!(!view.accepts_remote_images());
-                for image_only in [false, true] {
-                    assert!(!view.paste_terminal_clipboard(clipboard_image(&[42]), image_only, cx));
-                }
             }
             let text = ClipboardItem::new_string("ordinary text".into());
             assert!(!view.paste_terminal_clipboard(text.clone(), true, cx));
@@ -455,6 +572,49 @@ fn connected_image_paste_local_isolation_and_image_only_preserve_text(
             assert!(view.local_error.is_none());
         });
     }
+}
+
+#[gpui::test]
+fn connected_image_paste_local_bridges_clipboard_image_but_not_paths(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("local image.png");
+    std::fs::write(&path, [1, 2, 3]).unwrap();
+    let text = format!("'{}'", path.display());
+    let (endpoint, mut server) = connected_endpoint("image");
+    view.update(cx, |view, cx| {
+        prepare_mouse(view, endpoint);
+        assert!(view.accepts_clipboard_images());
+        assert!(!view.accepts_remote_images());
+        assert!(view.paste_terminal_clipboard(clipboard_image(&[42]), false, cx));
+        assert_eq!(view.pending_images.len(), 1);
+        // A local pane reads the original file; only remote panes need its bytes.
+        assert!(view.paste_terminal_clipboard(ClipboardItem::new_string(text.clone()), false, cx));
+        assert_eq!(view.pending_images.len(), 1);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        server.receive(),
+        ClientMessage::ClipboardImage {
+            target: ClientClipboardImageTarget::Pane("w1:p1".into()),
+            extension: "png".into(),
+            data: vec![42],
+        }
+    );
+    assert_eq!(
+        server.receive(),
+        ClientMessage::ClientShellPaneInput {
+            pane_id: "w1:p1".into(),
+            events: vec![ClientPaneInputEvent::Paste(text)],
+        }
+    );
+    wait_image_finished(&view, cx);
+    view.read_with(cx, |view, _| assert!(view.local_error.is_none()));
 }
 
 #[gpui::test]
@@ -691,6 +851,7 @@ fn connected_image_paste_key_down_ctrl_v_and_cmd_v(cx: &mut gpui::TestAppContext
                 let event = gpui::KeyDownEvent {
                     keystroke: gpui::Keystroke::parse(key).unwrap(),
                     is_held: false,
+                    prefer_character_input: false,
                 };
                 cx.update(|window, cx| {
                     view.update(cx, |view, cx| {
@@ -707,18 +868,19 @@ fn connected_image_paste_key_down_ctrl_v_and_cmd_v(cx: &mut gpui::TestAppContext
                         cx.write_to_clipboard(item.clone());
                         view.key_down(&event, window, cx);
                         assert_eq!(cx.read_from_clipboard(), Some(item));
-                        // Remote clipboard reads reserve FIFO order even for text-only Ctrl-V.
+                        // Remote clipboard reads reserve FIFO order even for text-only
+                        // Ctrl-V. Local Ctrl-V stays a key for agents that read the
+                        // clipboard themselves; local Cmd-V bridges images.
+                        let native_paste = key == "cmd-v" && (image || !cfg!(target_os = "linux"));
                         assert_eq!(
                             view.pending_images.len(),
-                            usize::from(
-                                remote && (image || key == "ctrl-v" || !cfg!(target_os = "linux"))
-                            )
+                            usize::from(native_paste || (remote && key == "ctrl-v"))
                         );
                         view.send(ClientPaneInputEvent::TextCommit("key sentinel".into()), cx);
                     });
                 });
                 cx.run_until_parked();
-                if remote && image {
+                if image && (remote || key == "cmd-v") {
                     assert_eq!(
                         server.receive(),
                         ClientMessage::ClipboardImage {
@@ -733,7 +895,7 @@ fn connected_image_paste_key_down_ctrl_v_and_cmd_v(cx: &mut gpui::TestAppContext
                         ClientMessage::ClientShellPaneInput {
                             pane_id: "w1:p1".into(),
                             events: vec![if key == "ctrl-v" {
-                                crate::terminal::key_input(&event).unwrap()
+                                crate::terminal::key_input(&event, true).unwrap()
                             } else {
                                 ClientPaneInputEvent::Paste("clipboard text".into())
                             }],
@@ -766,7 +928,7 @@ fn connected_image_paste_native_text_reservations_preserve_fifo(cx: &mut gpui::T
         prepare_remote_image(view, endpoint);
         for text in ["first paste", "second paste"] {
             cx.write_to_clipboard(ClipboardItem::new_string(text.into()));
-            view.paste_remote_clipboard(false, None, cx);
+            view.paste_native_clipboard(false, None, cx);
         }
         assert_eq!(view.pending_images.len(), 2);
         assert!(view.local_error.is_none());
@@ -823,12 +985,12 @@ fn connected_image_paste_native_text_during_blocked_image_and_second_image_busy(
         assert_eq!(view.pending_images.len(), 1);
         for text in ["first paste", "second paste"] {
             cx.write_to_clipboard(ClipboardItem::new_string(text.into()));
-            view.paste_remote_clipboard(false, None, cx);
+            view.paste_native_clipboard(false, None, cx);
         }
         assert_eq!(view.pending_images.len(), 3);
         assert!(view.local_error.is_none());
         cx.write_to_clipboard(clipboard_image(&[99]));
-        view.paste_remote_clipboard(false, None, cx);
+        view.paste_native_clipboard(false, None, cx);
         assert_eq!(view.pending_images.len(), 4);
         view.send(ClientPaneInputEvent::TextCommit("sentinel".into()), cx);
     });
@@ -891,7 +1053,7 @@ fn connected_image_paste_native_preparations_stay_bounded_across_reset(
                     view.live.surface = surface.clone();
                 }
                 cx.write_to_clipboard(ClipboardItem::new_string(format!("paste {index}")));
-                view.paste_remote_clipboard(false, None, cx);
+                view.paste_native_clipboard(false, None, cx);
                 assert_eq!(view.pending_images.len(), index + 1);
             }
             if reset_all {
@@ -903,7 +1065,7 @@ fn connected_image_paste_native_preparations_stay_bounded_across_reset(
             // Even cancelled tasks count until their background work returns.
             view.activation_deadline = None;
             cx.write_to_clipboard(ClipboardItem::new_string("overflow".into()));
-            view.paste_remote_clipboard(false, None, cx);
+            view.paste_native_clipboard(false, None, cx);
             assert_eq!(view.pending_images.len(), 4);
             assert_eq!(
                 view.local_error,
@@ -1978,7 +2140,7 @@ fn toast_navigation_queues_typed_targets_and_fences_input(cx: &mut gpui::TestApp
                 view.selected_endpoint = 1;
                 view.options = ConnectOptions::default();
                 view.reset_selected();
-                window.focus(&view.focus);
+                window.focus(&view.focus, cx);
                 view.marked = "composition".into();
                 assert!(view.input_ready());
                 view.tick_toasts(false, Instant::now());
@@ -2103,15 +2265,15 @@ fn toast_click_uses_origin_and_close_never_navigates(cx: &mut gpui::TestAppConte
     remote.toasts.receive([notice.clone(), notice]);
     cx.simulate_resize(size(px(1000.), px(600.)));
     cx.update(|window, cx| {
-        view.update(cx, |view, _| {
+        view.update(cx, |view, cx| {
             // The same IDs on Local must not win over the notification's origin.
             view.endpoints[0].live.snapshot = remote.live.snapshot.clone();
             view.endpoints[0].detached = true;
             view.endpoints.push(remote);
-            window.focus(&view.focus);
+            window.focus(&view.focus, cx);
             view.marked = "composition".into();
         });
-        window.draw(cx).clear();
+        window.draw(cx).clear(cx);
     });
     let dismiss = cx.debug_bounds("toast-dismiss-ssh:toast-0").unwrap();
     cx.simulate_click(dismiss.center(), Default::default());
@@ -2123,7 +2285,7 @@ fn toast_click_uses_origin_and_close_never_navigates(cx: &mut gpui::TestAppConte
         assert!(view.focus.is_focused(window));
         assert_eq!(view.endpoints[1].toasts.entries.len(), 1);
     });
-    cx.update(|window, cx| window.draw(cx).clear());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
     let card = cx.debug_bounds("toast-ssh:toast-1").unwrap();
     cx.simulate_click(card.center(), Default::default());
     view.update(cx, |view, _| {
@@ -2166,7 +2328,7 @@ fn toast_rendered_clicks_reject_replaced_removed_and_disabled_origins(
                 view.endpoints.truncate(1);
                 view.endpoints.push(remote);
             });
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         assert!(cx.debug_bounds("toast-ssh:toast-0").is_some());
         let (generation, inbox) = view.read_with(cx, |view, _| {
@@ -2805,9 +2967,9 @@ fn qa_play_sound_dispatches_without_daemon_or_pane(cx: &mut gpui::TestAppContext
         }
     });
     cx.update(|window, cx| {
-        view.read(cx).focus.focus(window);
-        window.draw(cx).clear();
-        let menus = crate::menus();
+        view.read(cx).focus.clone().focus(window, cx);
+        window.draw(cx).clear(cx);
+        let menus = crate::menus(Default::default());
         let qa = menus
             .iter()
             .find(|menu| menu.name.as_ref() == "QA")
@@ -3004,6 +3166,7 @@ fn every_focus_changing_command_fences_immediate_input_until_ack_and_surface(
         (Command::NextPane, Method::PaneFocus),
         (Command::PreviousPane, Method::PaneFocus),
         (Command::Zoom, Method::PaneZoom),
+        (Command::ClearPane, Method::PaneClear),
         (Command::ClosePane, Method::PaneClose),
         (Command::CloseTab, Method::TabClose),
         (Command::WorkspacePicker, Method::WorkspaceFocus),
@@ -3052,6 +3215,7 @@ fn every_focus_changing_command_fences_immediate_input_until_ack_and_surface(
                 let key = |key: &str| gpui::KeyDownEvent {
                     keystroke: gpui::Keystroke::parse(key).unwrap(),
                     is_held: false,
+                    prefer_character_input: false,
                 };
                 match command {
                     Command::ClosePane | Command::CloseTab if confirm_close_tab => {
@@ -3358,7 +3522,7 @@ fn retry_backoff_resets_only_after_sixty_seconds_of_healthy_connection() {
     endpoint.online_since = None;
     endpoint.poll(now);
     endpoint.poll(now + Duration::from_secs(59));
-    assert_eq!(endpoint.retry_delay(), Duration::from_secs(120));
+    assert_eq!(endpoint.retry_delay(), Duration::from_secs(30));
     endpoint.poll(now + Duration::from_secs(60));
     assert_eq!(endpoint.attempts, 0);
     assert_eq!(endpoint.retry_delay(), Duration::from_millis(500));
@@ -3369,6 +3533,30 @@ fn retry_backoff_resets_only_after_sixty_seconds_of_healthy_connection() {
         now + Duration::from_secs(61) + Duration::from_millis(500)
     );
     assert!(endpoint.online_since.is_none());
+}
+
+#[test]
+fn retry_backoff_doubles_from_half_a_second_to_thirty_seconds() {
+    let mut endpoint = Endpoint::new(
+        LOCAL.into(),
+        LOCAL.into(),
+        ConnectTarget::Socket("/nonexistent".into()),
+        true,
+    );
+    let delays: Vec<_> = (0..10)
+        .map(|attempts| {
+            endpoint.attempts = attempts;
+            endpoint.retry_delay().as_millis()
+        })
+        .collect();
+    assert_eq!(
+        delays,
+        [
+            500, 1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000, 30000
+        ]
+    );
+    endpoint.attempts = u32::MAX;
+    assert_eq!(endpoint.retry_delay(), Duration::from_secs(30));
 }
 
 #[test]
@@ -3383,7 +3571,7 @@ fn brief_success_preserves_backoff_and_disconnect_restarts_stability_window() {
     endpoint.poll(now + Duration::from_secs(59));
     assert_eq!(endpoint.attempts, 8);
     assert!(endpoint.online_since.is_none());
-    assert_eq!(endpoint.retry_at, now + Duration::from_secs(59 + 120));
+    assert_eq!(endpoint.retry_at, now + Duration::from_secs(59 + 30));
     endpoint.connect(ConnectOptions::default(), false);
     assert_eq!(
         endpoint.attempts, 9,
@@ -3429,5 +3617,346 @@ fn changed_target_and_manual_reconnect_reset_retry_history(cx: &mut gpui::TestAp
             "manual reconnect starts a fresh first attempt"
         );
         assert_eq!(view.endpoints[0].retry_delay(), Duration::from_secs(1));
+    });
+}
+
+fn split_request(server: &mut Server) -> serde_json::Value {
+    let ClientMessage::ClientShellEndpointRequest { request, .. } = server.receive() else {
+        panic!("missing split ratio request");
+    };
+    let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+    assert_eq!(request["method"], "layout.set_split_ratio");
+    request
+}
+
+/// Another host changing redraws the window but leaves the selected host's
+/// window state alone: a split request the window is still waiting on must
+/// not vanish because a different endpoint had news, and the selected host's
+/// own news still arrives.
+#[gpui::test]
+fn another_endpoint_changing_keeps_the_selected_window_state(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (selected, _server) = connected_endpoint("ssh:selected");
+    let (other, _other_server) = connected_endpoint("ssh:other");
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            prepare_mouse(view, selected);
+            view.endpoints.push(other);
+            view.poll_endpoints(cx);
+            view.live.drag_request = Some("gpui-pending".into());
+
+            view.endpoints[2].connection.inbox.lock().unwrap().dirty = true;
+            view.poll_endpoints(cx);
+            assert_eq!(view.live.drag_request.as_deref(), Some("gpui-pending"));
+
+            view.endpoints[1].connection.inbox.lock().unwrap().error = Some("news".into());
+            view.endpoints[1].connection.inbox.lock().unwrap().dirty = true;
+            view.poll_endpoints(cx);
+            assert_eq!(view.live.error.as_deref(), Some("news"));
+        });
+    });
+}
+
+#[gpui::test]
+fn connected_split_drag_sends_coalesced_ratios_and_stops_on_layout_change(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (endpoint, mut server) = connected_endpoint("ssh:split");
+    let down = |view: &mut HerdrWindow, column, cx: &mut Context<HerdrWindow>| {
+        view.split_mouse_down(
+            &MouseDownEvent {
+                position: mouse_position(view, column, 5.5),
+                button: MouseButton::Left,
+                ..Default::default()
+            },
+            cx,
+        )
+    };
+    let drag = |view: &mut HerdrWindow, column, cx: &mut Context<HerdrWindow>| {
+        assert!(view.split_mouse_move(
+            &MouseMoveEvent {
+                position: mouse_position(view, column, 9.5),
+                pressed_button: Some(MouseButton::Left),
+                ..Default::default()
+            },
+            cx
+        ));
+    };
+    let up = |view: &mut HerdrWindow, cx: &mut Context<HerdrWindow>| {
+        assert!(view.split_mouse_up(
+            &MouseUpEvent {
+                position: mouse_position(view, 0., 0.),
+                button: MouseButton::Left,
+                ..Default::default()
+            },
+            cx
+        ));
+    };
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            prepare_mouse(view, endpoint);
+            Arc::make_mut(view.live.surface.as_mut().unwrap()).splits = vec![PaneSurfaceSplit {
+                direction: PaneSurfaceSplitDirection::Horizontal,
+                pos: 40,
+                area: SurfaceRect {
+                    x: 0,
+                    y: 0,
+                    width: 80,
+                    height: 24,
+                },
+                hit_rect: SurfaceRect {
+                    x: 40,
+                    y: 0,
+                    width: 1,
+                    height: 24,
+                },
+                path: vec![true],
+            }];
+            // Projections of later answers must keep presenting this layout.
+            let surface = view.live.surface.clone().unwrap();
+            view.endpoints[1]
+                .connection
+                .inbox
+                .lock()
+                .unwrap()
+                .apply(ClientEvent::Surface(surface));
+            // Beside the border the pane keeps the pointer, even one that
+            // reports mouse input; on it, the border wins.
+            assert_eq!(view.split_cursor_at(mouse_position(view, 39.9, 5.)), None);
+            assert!(!down(view, 39.9, cx));
+            assert_eq!(
+                view.split_cursor_at(mouse_position(view, 40.5, 5.)),
+                Some(gpui::CursorStyle::ResizeLeftRight)
+            );
+
+            // A click on the border is not a resize.
+            assert!(down(view, 40.5, cx));
+            up(view, cx);
+            assert!(view.split_drag.is_none());
+            assert!(view.live.drag_request.is_none());
+
+            // Pressed half a cell into the border, so the grab keeps that offset.
+            assert!(down(view, 40.5, cx));
+            assert!(view.terminal_mouse.is_none());
+            drag(view, 20.5, cx);
+            assert!(view.live.drag_request.is_some());
+            // Later positions wait for that answer, and only the last is kept.
+            drag(view, 60.5, cx);
+            drag(view, 70.5, cx);
+            // The pointer leaving the border keeps the cursor it grabbed.
+            assert_eq!(
+                view.split_cursor_at(mouse_position(view, 5., 5.)),
+                Some(gpui::CursorStyle::ResizeLeftRight)
+            );
+        });
+    });
+    let first = split_request(&mut server);
+    assert_eq!(
+        first["params"],
+        serde_json::json!({"tab_id": "w1:t1", "path": [true], "ratio": 0.25})
+    );
+    server.respond(&first);
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            project_until(view, cx, "split answer", |view| {
+                view.live.drag_request.is_none()
+            });
+            view.flush_split(cx);
+            up(view, cx);
+            // Released with the last ratio still unanswered.
+            assert!(view.split_drag.is_some());
+        });
+    });
+    let last = split_request(&mut server);
+    assert_eq!(last["params"]["ratio"], serde_json::json!(0.875));
+    server.respond(&last);
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            project_until(view, cx, "last split answer", |view| {
+                view.live.drag_request.is_none()
+            });
+            view.flush_split(cx);
+            assert!(view.split_drag.is_none());
+            assert_eq!(view.split_cursor_at(mouse_position(view, 5., 5.)), None);
+
+            // A snapshot ahead of its surface is waited out.
+            assert!(down(view, 40.5, cx));
+            Arc::make_mut(view.live.snapshot.as_mut().unwrap()).revision += 1;
+            drag(view, 30.5, cx);
+            assert!(view.split_drag.is_some());
+            assert!(view.live.drag_request.is_none());
+            Arc::make_mut(view.live.snapshot.as_mut().unwrap()).revision -= 1;
+            // A pane closing under the drag could move another border at the
+            // same path, so the drag ends without sending.
+            Arc::make_mut(view.live.surface.as_mut().unwrap()).panes[1].pane_id = "w1:p3".into();
+            drag(view, 30.5, cx);
+            assert!(view.split_drag.is_none());
+            assert!(view.live.drag_request.is_none());
+            assert!(view.local_error.is_none());
+        });
+    });
+}
+
+/// How the projection moves on while keys are typed between a newer snapshot
+/// and its matching surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Gap {
+    SameTarget,
+    FocusMoves,
+    PopupOpens,
+}
+
+/// Type `x` (IME commit) and Enter (key_down) during a snapshot/surface gap,
+/// then close it and send a sentinel through the same path.
+fn type_across_gap(
+    cx: &mut gpui::TestAppContext,
+    gap: Gap,
+) -> (
+    Server,
+    gpui::Entity<HerdrWindow>,
+    &mut gpui::VisualTestContext,
+) {
+    use gpui::EntityInputHandler;
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (endpoint, server) = connected_endpoint("gap");
+    let enter = gpui::KeyDownEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+        is_held: false,
+        prefer_character_input: false,
+    };
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            prepare_mouse(view, endpoint);
+            let inbox = view.endpoints[1].connection.inbox.clone();
+            let mut next = (**view.live.snapshot.as_ref().unwrap()).clone();
+            next.revision += 1;
+            if gap == Gap::FocusMoves {
+                next.focused_pane_id = Some("w1:p2".into());
+            }
+            let mut frame = (**view.live.surface.as_ref().unwrap()).clone();
+            frame.projection_revision = next.revision;
+            if gap == Gap::PopupOpens {
+                frame.popup = Some(Box::new(ClientShellPopupSurface {
+                    terminal_id: "popup-1".into(),
+                    title: String::new(),
+                    width: None,
+                    height: None,
+                    frame: frame.frame.clone(),
+                    mouse_reporting: false,
+                    sgr_pixel_mouse: false,
+                    pixel_width: 800,
+                    pixel_height: 480,
+                }));
+            }
+            inbox
+                .lock()
+                .unwrap()
+                .apply(ClientEvent::Snapshot(Arc::new(next)));
+            project_until(view, cx, "newer snapshot", |view| !view.input_ready());
+            view.replace_text_in_range(None, "x", window, cx);
+            view.key_down(&enter, window, cx);
+            assert_eq!(view.pending_input.len(), 2);
+            inbox
+                .lock()
+                .unwrap()
+                .apply(ClientEvent::Surface(Arc::new(frame)));
+            project_until(view, cx, "matching surface", HerdrWindow::input_ready);
+            assert_eq!(view.pending_input.len(), 0);
+            view.send(ClientPaneInputEvent::TextCommit("sentinel".into()), cx);
+        });
+    });
+    (server, view, cx)
+}
+
+fn pane_input(pane: &str, event: ClientPaneInputEvent) -> ClientMessage {
+    ClientMessage::ClientShellPaneInput {
+        pane_id: pane.into(),
+        events: vec![event],
+    }
+}
+
+#[gpui::test]
+fn input_typed_during_snapshot_surface_gap_reaches_pane_once_in_order(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (mut server, view, cx) = type_across_gap(cx, Gap::SameTarget);
+    let enter = crate::terminal::key_input(
+        &gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke::parse("enter").unwrap(),
+            is_held: false,
+            prefer_character_input: false,
+        },
+        false,
+    )
+    .unwrap();
+    for expected in [
+        ClientPaneInputEvent::TextCommit("x".into()),
+        enter,
+        ClientPaneInputEvent::TextCommit("sentinel".into()),
+    ] {
+        assert_eq!(server.receive(), pane_input("w1:p1", expected));
+    }
+    view.read_with(cx, |view, _| assert!(view.local_error.is_none()));
+}
+
+#[gpui::test]
+fn input_held_across_gap_is_discarded_when_focus_moves(cx: &mut gpui::TestAppContext) {
+    let (mut server, view, cx) = type_across_gap(cx, Gap::FocusMoves);
+    assert_eq!(
+        server.receive(),
+        pane_input("w1:p2", ClientPaneInputEvent::TextCommit("sentinel".into()))
+    );
+    view.read_with(cx, |view, _| assert!(view.local_error.is_some()));
+}
+
+#[gpui::test]
+fn input_held_across_gap_never_reaches_a_popup_that_opened(cx: &mut gpui::TestAppContext) {
+    let (mut server, view, cx) = type_across_gap(cx, Gap::PopupOpens);
+    assert_eq!(
+        server.receive(),
+        ClientMessage::ClientShellPopupInput {
+            terminal_id: "popup-1".into(),
+            events: vec![ClientPaneInputEvent::TextCommit("sentinel".into())],
+        }
+    );
+    view.read_with(cx, |view, _| assert!(view.local_error.is_some()));
+}
+
+#[gpui::test]
+fn input_held_across_gap_is_bounded_and_dropped_on_reset(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (endpoint, _server) = connected_endpoint("bound");
+    view.update(cx, |view, cx| {
+        prepare_mouse(view, endpoint);
+        view.poll_endpoints(cx);
+        let mut next = (**view.live.snapshot.as_ref().unwrap()).clone();
+        next.revision += 1;
+        view.endpoints[1]
+            .connection
+            .inbox
+            .lock()
+            .unwrap()
+            .apply(ClientEvent::Snapshot(Arc::new(next)));
+        project_until(view, cx, "newer snapshot", |view| !view.input_ready());
+        for _ in 0..300 {
+            view.send(ClientPaneInputEvent::TextCommit("x".into()), cx);
+        }
+        assert_eq!(view.pending_input.len(), 256);
+        assert!(view.local_error.is_some());
+        view.reset_selected();
+        assert_eq!(view.pending_input.len(), 0);
     });
 }

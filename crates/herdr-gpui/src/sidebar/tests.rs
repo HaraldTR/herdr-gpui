@@ -1,8 +1,10 @@
 #![allow(clippy::unwrap_used)]
 
 use super::{
-    STATUS_DOT_UNKNOWN, STATUS_WIDTH,
-    agents::{Indicators, agent_labels, status_indicator, status_style, status_symbol},
+    STATUS_DOT_UNKNOWN, STATUS_WIDTH, agent_name,
+    agents::{
+        Indicators, agent_labels, agent_place, status_indicator, status_style, status_symbol,
+    },
     layout_tests,
     render::header,
     row::first_text,
@@ -11,6 +13,7 @@ use super::{
 };
 use crate::{
     config::{FontConfig, Theme},
+    contrast::Contrast,
     herdr_settings::IndicatorStyle,
 };
 use herdr_client::protocol::{
@@ -27,11 +30,13 @@ fn section_headings_use_the_configured_sidebar_font_size() {
             fallbacks: None,
         };
         for label in ["spaces", "agents"] {
-            let mut heading = header(label, &font, &Theme::default(), &super::layout::Normal);
-            assert_eq!(
-                heading.text_style().as_ref().unwrap().font_size,
-                Some(px(size).into())
+            let mut heading = header(
+                label,
+                &font,
+                &Theme::default(),
+                super::layout::for_mode(Default::default()),
             );
+            assert_eq!(heading.text_style().font_size, Some(px(size).into()));
         }
     }
 }
@@ -148,7 +153,8 @@ fn agent_rows_name_their_place_then_their_agent() {
         snapshot: &'a ClientShellSnapshot,
         host: Option<&'a str>,
     ) -> (Vec<(&'a str, bool)>, &'a str) {
-        agent_labels(&snapshot.agents[0], snapshot, host)
+        let agent = &snapshot.agents[0];
+        agent_labels(agent_name(agent), agent_place(agent, snapshot), host)
     }
     assert_eq!(
         labels(&snapshot, None),
@@ -199,14 +205,14 @@ fn rows_weight_and_dim_their_text_like_upstream() {
     // earns bold only while focused, and hands its branch the accent then.
     for (kind, focused, weight, name, detail) in [
         (
-            RowKind::Agent,
+            RowKind::Agent(crate::icons::AgentIcon::Generic),
             false,
             FontWeight::BOLD,
             theme.subtext(),
             theme.muted,
         ),
         (
-            RowKind::Agent,
+            RowKind::Agent(crate::icons::AgentIcon::Generic),
             true,
             FontWeight::BOLD,
             theme.foreground,
@@ -235,28 +241,44 @@ fn rows_weight_and_dim_their_text_like_upstream() {
     assert!(brightness(theme.subtext()) < brightness(theme.foreground));
 }
 
+const STATUSES: [AgentStatus; 5] = [
+    AgentStatus::Working,
+    AgentStatus::Blocked,
+    AgentStatus::Done,
+    AgentStatus::Idle,
+    AgentStatus::Unknown,
+];
+
 #[test]
-fn unloaded_status_colors_match_upstream_defaults_in_both_appearances() {
-    // The literals are upstream's default palette (Catppuccin Mocha), which
-    // its status dots use whatever terminal colors are loaded.
+fn status_colors_keep_upstream_literals_where_they_already_read() {
+    // Upstream's default palette (Catppuccin Mocha), which its status dots use
+    // whatever terminal colors are loaded.
     for (status, color) in [
         (AgentStatus::Working, 0xf9e2af),
         (AgentStatus::Blocked, 0xf38ba8),
         (AgentStatus::Done, 0x94e2d5),
         (AgentStatus::Idle, 0xa6e3a1),
-        (AgentStatus::Unknown, 0x6c7086),
     ] {
-        for light in [false, true] {
-            let indicators = Indicators::new(None, light);
+        for name in ["Default", "Nord", "Dracula", "Catppuccin Mocha"] {
+            let mut theme = Theme::builtin(name).unwrap();
+            assert_eq!(status_style(status, &theme).2, color, "{name}");
+            theme.palette.fill(0x123456);
+            let indicators = Indicators::new(None, false, &theme);
             assert_eq!(indicators.style, IndicatorStyle::Dots);
             assert_eq!(indicators.color(status), color);
         }
+    }
+    let mocha = Theme::builtin("Catppuccin Mocha").unwrap();
+    let unknown = status_style(AgentStatus::Unknown, &mocha).2;
+    let channels = |color: u32| [16, 8, 0].map(|shift| ((color >> shift) & 255) as i32);
+    for (lifted, upstream) in channels(unknown).into_iter().zip(channels(0x6c7086)) {
+        assert!((0..=16).contains(&(lifted - upstream)), "{unknown:06x}");
     }
 }
 
 #[test]
 fn status_symbols_match_upstream_without_changing_status_colors() {
-    let mut indicators = Indicators::new(None, false);
+    let mut indicators = Indicators::new(None, false, &Theme::default());
     indicators.style = IndicatorStyle::Symbols;
     for (status, symbol) in [
         (AgentStatus::Working, "\u{25d0}"),
@@ -266,7 +288,10 @@ fn status_symbols_match_upstream_without_changing_status_colors() {
         (AgentStatus::Unknown, "\u{b7}"),
     ] {
         assert_eq!(status_symbol(status), symbol);
-        assert_eq!(indicators.color(status), status_style(status).2);
+        assert_eq!(
+            indicators.color(status),
+            status_style(status, &Theme::default()).2
+        );
     }
 }
 
@@ -280,7 +305,7 @@ fn status_slots_are_fixed_for_each_style_and_font_size() {
             fallbacks: None,
         };
         for style in [IndicatorStyle::Dots, IndicatorStyle::Symbols] {
-            let mut indicators = Indicators::new(None, false);
+            let mut indicators = Indicators::new(None, false, &Theme::default());
             indicators.style = style;
             let width = match style {
                 IndicatorStyle::Dots => STATUS_WIDTH,
@@ -297,10 +322,7 @@ fn status_slots_are_fixed_for_each_style_and_font_size() {
                 let mut slot = status_indicator(status, &font, indicators);
                 assert_eq!(slot.style().size.width, Some(px(width).into()));
                 if style == IndicatorStyle::Symbols {
-                    assert_eq!(
-                        slot.text_style().as_ref().unwrap().font_size,
-                        Some(px(size).into())
-                    );
+                    assert_eq!(slot.text_style().font_size, Some(px(size).into()));
                 }
             }
         }
@@ -319,12 +341,21 @@ fn symbol_rows_keep_layout_density_and_expand_child_indent() {
         fallbacks: None,
     };
     let theme = Theme::default();
-    for mode in [LayoutMode::Normal, LayoutMode::Compact] {
+    for mode in [
+        LayoutMode::default(),
+        LayoutMode::Classic {
+            density: crate::config::Density::Compact,
+            style: crate::config::Style::Flat,
+        },
+    ] {
         let layout = super::layout::for_mode(mode);
         for style in [IndicatorStyle::Dots, IndicatorStyle::Symbols] {
-            let mut indicators = Indicators::new(None, false);
+            let mut indicators = Indicators::new(None, false, &theme);
             indicators.style = style;
-            for kind in [RowKind::Workspace, RowKind::Agent] {
+            for kind in [
+                RowKind::Workspace,
+                RowKind::Agent(crate::icons::AgentIcon::Generic),
+            ] {
                 let mut row = row(
                     "density",
                     &[("child", true)],
@@ -333,10 +364,12 @@ fn symbol_rows_keep_layout_density_and_expand_child_indent() {
                     AgentStatus::Working,
                     indicators,
                     false,
+                    super::cell::RowState::default(),
                     RowTree::LastChild,
                     true,
                     160.,
                     RowIcon::None,
+                    None,
                     None,
                     None,
                     layout,
@@ -345,24 +378,52 @@ fn symbol_rows_keep_layout_density_and_expand_child_indent() {
                 assert_eq!(
                     row.style().padding.left,
                     Some(
-                        px(
-                            layout.padding() + layout.child_indent() + indicators.width(&font)
-                                - STATUS_WIDTH
-                        )
+                        px(layout.content_x()
+                            + layout.density.child_indent()
+                            + indicators.width(&font)
+                            - STATUS_WIDTH)
                         .into()
                     )
                 );
-                let lines = if layout.workspace_details() || kind == RowKind::Agent {
+                let lines = if layout.density.child_details() || matches!(kind, RowKind::Agent(_)) {
                     2.
                 } else {
                     1.
                 };
                 assert_eq!(
                     row.style().size.height,
-                    Some(px(super::line_height(&font) * lines + 2. * layout.row_padding()).into())
+                    Some(px(layout.row_height(super::line_height(&font) * lines)).into())
                 );
             }
         }
+    }
+}
+
+#[test]
+fn status_colors_reach_the_contrast_setting_on_every_builtin_theme() {
+    for name in Theme::BUILTIN_NAMES {
+        for contrast in [Contrast::Standard, Contrast::High] {
+            let theme = Theme::builtin(name).unwrap().with_contrast(contrast);
+            for status in STATUSES {
+                let color = status_style(status, &theme).2;
+                for background in [theme.background, theme.surface, theme.active] {
+                    let ratio = crate::contrast::ratio(color, background);
+                    assert!(
+                        ratio >= contrast.mark_ratio(),
+                        "{name} {contrast:?} {status:?} on {background:06x}: {ratio}"
+                    );
+                }
+            }
+        }
+    }
+    // Light chrome darkens the pastels rather than keeping upstream's literals.
+    let latte = Theme::builtin("Catppuccin Latte").unwrap();
+    let mocha = Theme::builtin("Catppuccin Mocha").unwrap();
+    for status in STATUSES {
+        assert_ne!(
+            status_style(status, &latte).2,
+            status_style(status, &mocha).2
+        );
     }
 }
 
@@ -385,16 +446,17 @@ fn status_shapes_match_upstream_dots_and_wire_casing() {
         let agent: ClientShellAgent = serde_json::from_value(value).unwrap();
         assert_eq!(agent.agent_status, status);
         assert_eq!(serde_json::to_value(status).unwrap(), wire);
-        let (diameter, filled, color) = status_style(status);
+        let theme = Theme::default();
+        let (diameter, filled, color) = status_style(status, &theme);
         assert_eq!(
             color,
-            match status {
+            theme.ink(match status {
                 AgentStatus::Working => 0xf9e2af,
                 AgentStatus::Blocked => 0xf38ba8,
                 AgentStatus::Done => 0x94e2d5,
                 AgentStatus::Idle => 0xa6e3a1,
                 AgentStatus::Unknown => 0x6c7086,
-            }
+            })
         );
         assert_eq!(filled, status != AgentStatus::Idle);
         assert_eq!(
@@ -406,4 +468,83 @@ fn status_shapes_match_upstream_dots_and_wire_casing() {
             }
         );
     }
+}
+
+#[test]
+fn cells_hand_their_state_and_data_to_the_layout() {
+    use super::{
+        cell::{AgentRow, Cell, RowContext, RowData, RowLayout, RowState, WorkspaceRow},
+        layout::for_mode,
+        row::{RowIcon, RowTree},
+    };
+    use gpui::{Div, div};
+    use std::cell::RefCell;
+
+    /// Records what each call was given instead of drawing it.
+    #[derive(Default)]
+    struct Recorder(RefCell<Vec<(String, RowState)>>);
+
+    impl RowLayout for Recorder {
+        fn workspace(&self, row: WorkspaceRow<'_>, state: RowState, _: &RowContext<'_>) -> Div {
+            self.0.borrow_mut().push((row.label.to_owned(), state));
+            div()
+        }
+        fn agent(&self, row: AgentRow<'_>, state: RowState, _: &RowContext<'_>) -> Div {
+            self.0.borrow_mut().push((row.key, state));
+            div()
+        }
+    }
+
+    let snapshot = layout_tests::snapshot(1);
+    let (font, theme) = (crate::config::Config::default().sidebar, Theme::default());
+    let cx = RowContext {
+        indicators: Indicators::new(None, false, &theme),
+        font: &font,
+        theme: &theme,
+        look: for_mode(Default::default()),
+        width: 232.,
+        host: None,
+    };
+    let recorder = Recorder::default();
+    let workspace = || {
+        RowData::Workspace(WorkspaceRow {
+            workspace: &snapshot.workspaces[0],
+            label: "herdr",
+            tree: RowTree::None,
+            icon: RowIcon::None,
+            fold: None,
+            grouped: false,
+            badge: None,
+            removing: false,
+        })
+    };
+    let _ = Cell::new(&recorder, workspace(), &cx).row();
+    let _ = Cell::new(&recorder, workspace(), &cx).selected(true).row();
+    let _ = Cell::new(
+        &recorder,
+        RowData::Agent(AgentRow {
+            key: "agent-p0".into(),
+            name: "Claude Code",
+            icon: crate::icons::AgentIcon::Generic,
+            status: AgentStatus::Working,
+            place: None,
+            status_text: None,
+        }),
+        &cx,
+    )
+    .highlighted(true)
+    .row();
+    let state = |selected, highlighted| RowState {
+        selected,
+        highlighted,
+        ..RowState::default()
+    };
+    assert_eq!(
+        recorder.0.into_inner(),
+        vec![
+            ("herdr".into(), state(false, false)),
+            ("herdr".into(), state(true, false)),
+            ("agent-p0".into(), state(false, true)),
+        ]
+    );
 }

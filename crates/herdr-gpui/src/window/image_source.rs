@@ -173,7 +173,10 @@ impl Source {
                     ImageFormat::Gif => "gif",
                     ImageFormat::Webp => "webp",
                     ImageFormat::Bmp => "bmp",
-                    ImageFormat::Tiff | ImageFormat::Svg => return Err(Error::ImageFormat),
+                    ImageFormat::Tiff => "tiff",
+                    ImageFormat::Svg | ImageFormat::Ico | ImageFormat::Pnm => {
+                        return Err(Error::ImageFormat);
+                    }
                 };
                 (extension, image.bytes)
             }
@@ -195,7 +198,10 @@ fn prepare_bytes(
     if bytes.is_empty() {
         return Err(Error::ImageSize);
     }
-    if bytes.len() <= output_limit {
+    // TIFF is not a bridge format: agents may not read it and the daemon names
+    // unknown extensions `.png`. Transcode it even when it already fits.
+    let tiff = extension == "tiff";
+    if !tiff && bytes.len() <= output_limit {
         return Ok(PreparedImage {
             extension,
             bytes,
@@ -223,7 +229,7 @@ fn prepare_bytes(
             }
             decode_limited(decoder, limits)?
         }
-        image::ImageFormat::Jpeg | image::ImageFormat::Bmp => {
+        image::ImageFormat::Jpeg | image::ImageFormat::Bmp | image::ImageFormat::Tiff => {
             let mut reader = ImageReader::with_format(Cursor::new(&bytes), format);
             reader.limits(limits.clone());
             decode_limited(reader.into_decoder().map_err(Error::ImageDecode)?, limits)?
@@ -237,12 +243,32 @@ fn prepare_bytes(
     } else {
         DynamicImage::ImageRgb8(decoded.into_rgb8())
     };
-    let extension = if alpha { "png" } else { "jpg" };
     let mut output = BoundedOutput {
         bytes: Vec::with_capacity(output_limit),
         limit: output_limit,
         exceeded: false,
     };
+    // A converted screenshot keeps lossless pixels when they fit; only a TIFF
+    // that is too large for PNG takes the lossy resize path below.
+    if tiff {
+        match PngEncoder::new(&mut output).write_image(
+            raster.as_bytes(),
+            raster.width(),
+            raster.height(),
+            raster.color().into(),
+        ) {
+            Ok(()) => {
+                return Ok(PreparedImage {
+                    extension: "png",
+                    bytes: output.bytes,
+                    resized: false,
+                });
+            }
+            Err(_) if output.exceeded => {}
+            Err(source) => return Err(Error::ImageEncode(source)),
+        }
+    }
+    let extension = if alpha { "png" } else { "jpg" };
     loop {
         for quality in [90, 80, 65] {
             // JPEG dimensions are 16-bit even when the source format is not.
@@ -546,12 +572,14 @@ mod tests {
             assert_eq!(prepared.bytes.as_ptr(), pointer);
             assert!(!prepared.resized);
         }
-        for format in [ImageFormat::Tiff, ImageFormat::Svg] {
-            assert!(matches!(
-                Source::Clipboard(Image::from_bytes(format, vec![1])).prepare(),
-                Err(Error::ImageFormat)
-            ));
-        }
+        assert!(matches!(
+            Source::Clipboard(Image::from_bytes(ImageFormat::Svg, vec![1])).prepare(),
+            Err(Error::ImageFormat)
+        ));
+        let error = Source::Clipboard(Image::from_bytes(ImageFormat::Tiff, vec![1]))
+            .prepare()
+            .unwrap_err();
+        assert!(matches!(error, Error::ImageDecode(_)));
         assert!(matches!(
             Source::Clipboard(Image::from_bytes(ImageFormat::Png, Vec::new())).prepare(),
             Err(Error::ImageSize)
@@ -580,6 +608,10 @@ mod tests {
     }
 
     fn noisy_png(alpha: bool) -> Vec<u8> {
+        noisy_image(alpha, image::ImageFormat::Png)
+    }
+
+    fn noisy_raster(alpha: bool) -> DynamicImage {
         let mut seed = 1_u32;
         let raster = image::RgbaImage::from_fn(128, 128, |_, _| {
             seed ^= seed << 13;
@@ -590,16 +622,55 @@ mod tests {
             image::Rgba(rgba)
         });
         let raster = DynamicImage::ImageRgba8(raster);
-        let raster = if alpha {
+        if alpha {
             raster
         } else {
             DynamicImage::ImageRgb8(raster.into_rgb8())
-        };
+        }
+    }
+
+    fn noisy_image(alpha: bool, format: image::ImageFormat) -> Vec<u8> {
         let mut bytes = Cursor::new(Vec::new());
-        raster
-            .write_to(&mut bytes, image::ImageFormat::Png)
-            .unwrap();
+        noisy_raster(alpha).write_to(&mut bytes, format).unwrap();
         bytes.into_inner()
+    }
+
+    #[test]
+    fn tiff_clipboard_images_become_lossless_png_even_when_small() {
+        for alpha in [false, true] {
+            let tiff = noisy_image(alpha, image::ImageFormat::Tiff);
+            assert!(tiff.len() < MAX_CLIPBOARD_IMAGE_PAYLOAD);
+            let prepared = Source::Clipboard(Image::from_bytes(ImageFormat::Tiff, tiff))
+                .prepare()
+                .unwrap();
+            assert_eq!(prepared.extension, "png");
+            assert!(!prepared.resized);
+            assert_eq!(
+                image::guess_format(&prepared.bytes).unwrap(),
+                image::ImageFormat::Png
+            );
+            let decoded = image::load_from_memory(&prepared.bytes).unwrap();
+            assert_eq!(decoded.color().has_alpha(), alpha);
+            assert_eq!(decoded.as_bytes(), noisy_raster(alpha).as_bytes());
+        }
+    }
+
+    #[test]
+    fn tiff_too_large_for_png_takes_the_bounded_resize_path() {
+        for alpha in [false, true] {
+            let output_limit = if alpha { 4096 } else { 1024 };
+            let prepared = prepare_bytes(
+                "tiff",
+                noisy_image(alpha, image::ImageFormat::Tiff),
+                output_limit,
+            )
+            .unwrap();
+            assert!(prepared.resized);
+            assert!(prepared.bytes.len() <= output_limit);
+            assert_eq!(prepared.extension, if alpha { "png" } else { "jpg" });
+            let raster = image::load_from_memory(&prepared.bytes).unwrap();
+            assert!(raster.width() < 128 && raster.height() < 128);
+        }
     }
 
     #[test]

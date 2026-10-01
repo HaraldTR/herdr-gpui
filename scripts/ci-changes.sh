@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Keep the required PR gate running while skipping native jobs for non-code edits.
+# Documentation-only images are excluded by name so any new asset is treated
+# as a build input until proven otherwise; keep updater.yml's paths in sync.
 set -euo pipefail
 
 if [[ "$EVENT" == workflow_dispatch ]] ||
@@ -18,7 +20,9 @@ if git diff --quiet "$BASE" "$HEAD_SHA" -- \
   crates assets .cargo scripts .github/workflows \
   Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml .rustfmt.toml \
   clippy.toml .clippy.toml justfile mise.toml cliff.toml \
-  ':(exclude)**/*.md'; then
+  ':(exclude)**/*.md' \
+  ':(exclude)assets/social-preview-*' \
+  ':(exclude)assets/icons/herdr-ui-icon-badge.*'; then
   printf 'code=false\n'
 else
   status=$?

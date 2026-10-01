@@ -1,18 +1,26 @@
-//! Process-local diagnostics only: no files, uploads, environment filters, or stderr.
-//! The ring owns at most 5000 records of 4096 serialized JSON bytes each (plus
-//! bounded collection overhead). Snapshot holders should replace
-//! old snapshots rather than retaining history. Span context includes names, not
-//! fields; arbitrary field Debug implementations must cooperate with fmt errors.
+//! Client logs, stored on disk rather than in memory. Capture never blocks the
+//! emitting thread: each event is serialized to one JSON line of at most 4096
+//! bytes and offered to a bounded queue drained by a dedicated writer thread,
+//! which appends to `<state>/herdr/gpui/logs/herdr-gpui.jsonl` and rotates it to
+//! `herdr-gpui.1.jsonl` beyond 16 MiB. A full queue or failed write drops lines
+//! and counts them. No uploads, environment filters, or stderr. Span context
+//! includes names, not fields; arbitrary field Debug implementations must
+//! cooperate with fmt errors.
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
     cell::Cell,
     collections::VecDeque,
-    fmt::{self, Write},
+    fmt::{self, Write as _},
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Seek, SeekFrom, Write as _},
+    path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, SyncSender},
     },
+    thread,
 };
 use tracing::{
     Event, Level, Subscriber,
@@ -20,10 +28,23 @@ use tracing::{
 };
 use tracing_subscriber::{Layer, layer::Context, prelude::*, registry::LookupSpan};
 
-const CAPACITY: usize = 5000;
 const MAX_BYTES: usize = 4096;
 const TIMESTAMP_FORMAT: &str = "[%Y-%m-%d %H:%M:%S]";
-static STORE: OnceLock<Arc<Store>> = OnceLock::new();
+const FILE_NAME: &str = "herdr-gpui.jsonl";
+const PREVIOUS_FILE_NAME: &str = "herdr-gpui.1.jsonl";
+/// Lines waiting for the writer; beyond this, capture drops rather than blocks.
+const QUEUE: usize = 4096;
+const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+/// The writer issues one write per batch of at most this many bytes.
+const BATCH_BYTES: usize = 256 * 1024;
+/// Newest records a reader keeps; older ones remain only on disk.
+pub(crate) const TAIL_RECORDS: usize = 5000;
+/// A reader opening an existing file starts this far from its end.
+const TAIL_BYTES: u64 = 4 * 1024 * 1024;
+const READ_CHUNK: usize = 64 * 1024;
+/// Longer lines are not ours; skip them without buffering.
+const MAX_LINE: usize = 64 * 1024;
+static SINK: OnceLock<Sink> = OnceLock::new();
 thread_local! { static FORMATTING: Cell<bool> = const { Cell::new(false) }; }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -103,60 +124,232 @@ mod level_json {
 }
 
 /// Install once, before starting workers. An existing global subscriber is an
-/// error, never silently replaced. No tracing-log bridge is installed.
+/// error, never silently replaced. No tracing-log bridge is installed. Without a
+/// state directory or writer thread, every event counts as dropped.
 pub(crate) fn init() -> Result<(), tracing::subscriber::SetGlobalDefaultError> {
-    tracing::subscriber::set_global_default(subscriber(store().clone()))
+    let (lines, queued) = mpsc::sync_channel(QUEUE);
+    let counters = Arc::new(Counters::default());
+    let path = crate::preferences::state_dir()
+        .map(|dir| dir.join("logs").join(FILE_NAME))
+        .and_then(|path| {
+            let writer_path = path.clone();
+            let writer_counters = counters.clone();
+            thread::Builder::new()
+                .name("gpui-log-writer".into())
+                .spawn(move || write_lines(writer_path, queued, &writer_counters))
+                .ok()
+                .map(|_| path)
+        });
+    let _ = SINK.set(Sink {
+        counters: counters.clone(),
+        path,
+    });
+    tracing::subscriber::set_global_default(subscriber(Capture { lines, counters }))
 }
 
-fn store() -> &'static Arc<Store> {
-    STORE.get_or_init(|| Arc::new(Store::default()))
+struct Sink {
+    counters: Arc<Counters>,
+    path: Option<PathBuf>,
 }
 
-/// A change hint, including eviction/contention losses. On snapshot contention,
-/// keep the previous UI snapshot AND generation and retry on a later tick.
+/// The file the writer appends to, when one could be started.
+pub(crate) fn path() -> Option<&'static Path> {
+    SINK.get()?.path.as_deref()
+}
+
+/// A change hint: advances after each written batch and each dropped line.
 pub(crate) fn generation() -> u64 {
-    store().generation.load(Ordering::Acquire)
+    SINK.get()
+        .map_or(0, |sink| sink.counters.generation.load(Ordering::Acquire))
 }
 
-/// Oldest first. None means busy (or poisoned), not an empty log. The dropped
-/// count includes evictions and rejected events, not failed snapshot attempts.
-pub(crate) fn snapshot() -> Option<(u64, Vec<Arc<Record>>, u64)> {
-    store().snapshot()
+/// Lines this process failed to queue or write.
+pub(crate) fn dropped() -> u64 {
+    SINK.get()
+        .map_or(0, |sink| sink.counters.dropped.load(Ordering::Relaxed))
 }
 
 #[derive(Default)]
-struct Store {
-    records: Mutex<VecDeque<Arc<Record>>>,
+struct Counters {
     generation: AtomicU64,
     dropped: AtomicU64,
 }
 
-impl Store {
-    fn lose(&self) {
-        self.dropped.fetch_add(1, Ordering::Relaxed);
+impl Counters {
+    fn lose(&self, lines: u64) {
+        self.dropped.fetch_add(lines, Ordering::Relaxed);
         self.generation.fetch_add(1, Ordering::Release);
     }
+}
 
-    fn push(&self, record: Record) {
-        let Ok(mut records) = self.records.try_lock() else {
-            self.lose();
-            return;
-        };
-        if records.len() == CAPACITY {
-            records.pop_front();
-            self.dropped.fetch_add(1, Ordering::Relaxed);
+fn write_lines(path: PathBuf, queued: Receiver<Vec<u8>>, counters: &Counters) {
+    let mut log = LogFile {
+        path,
+        file: None,
+        limit: MAX_FILE_BYTES,
+    };
+    let mut batch = Vec::new();
+    while let Ok(first) = queued.recv() {
+        batch.extend_from_slice(&first);
+        let mut lines = 1;
+        while batch.len() < BATCH_BYTES
+            && let Ok(line) = queued.try_recv()
+        {
+            batch.extend_from_slice(&line);
+            lines += 1;
         }
-        records.push_back(Arc::new(record));
-        self.generation.fetch_add(1, Ordering::Release);
+        if log.append(&batch).is_err() {
+            counters.lose(lines);
+        } else {
+            counters.generation.fetch_add(1, Ordering::Release);
+        }
+        batch.clear();
+    }
+}
+
+struct LogFile {
+    path: PathBuf,
+    /// The open file and its length; closed after a failure so the next batch reopens it.
+    file: Option<(File, u64)>,
+    limit: u64,
+}
+
+impl LogFile {
+    /// Appends whole lines, rotating first when they would overflow a non-empty file.
+    fn append(&mut self, lines: &[u8]) -> io::Result<()> {
+        let incoming = lines.len() as u64;
+        let (mut file, mut len) = match self.file.take() {
+            Some(open) => open,
+            None => {
+                let file = self.open()?;
+                let len = file.metadata()?.len();
+                (file, len)
+            }
+        };
+        if len > 0 && len.saturating_add(incoming) > self.limit {
+            // Windows cannot rename an open file.
+            drop(file);
+            self.rotate()?;
+            file = self.open()?;
+            len = 0;
+        }
+        file.write_all(lines)?;
+        self.file = Some((file, len + incoming));
+        Ok(())
     }
 
-    fn snapshot(&self) -> Option<(u64, Vec<Arc<Record>>, u64)> {
-        let records = self.records.try_lock().ok()?;
-        // Read the hint before the loss count so a concurrent loss cannot be
-        // hidden by returning a newer hint alongside an older count.
-        let generation = self.generation.load(Ordering::Acquire);
-        let dropped = self.dropped.load(Ordering::Relaxed);
-        Some((generation, records.iter().cloned().collect(), dropped))
+    fn rotate(&self) -> io::Result<()> {
+        fs::rename(&self.path, self.path.with_file_name(PREVIOUS_FILE_NAME))
+    }
+
+    fn open(&self) -> io::Result<File> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        // Logs can name local paths and hosts; keep them private to the user.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        options.open(&self.path)
+    }
+}
+
+/// Incrementally reads the newest records of a log file, keeping at most
+/// [`TAIL_RECORDS`]. Unparseable lines are skipped. A file shorter than the
+/// read position was rotated or truncated and is read again from its start.
+pub(crate) struct Tail {
+    path: PathBuf,
+    offset: Option<u64>,
+    partial: Vec<u8>,
+    /// Skipping to the next newline: a line started before the read position or ran too long.
+    discarding: bool,
+    records: VecDeque<Arc<Record>>,
+}
+
+impl Tail {
+    pub(crate) fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            offset: None,
+            partial: Vec::new(),
+            discarding: false,
+            records: VecDeque::new(),
+        }
+    }
+
+    /// Reads whatever was appended since the last call. A missing file is empty.
+    pub(crate) fn read(&mut self) -> io::Result<()> {
+        let mut file = match File::open(&self.path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let len = file.metadata()?.len();
+        let mut offset = match self.offset {
+            Some(offset) if offset <= len => offset,
+            Some(_) => {
+                self.partial.clear();
+                self.discarding = false;
+                0
+            }
+            None => {
+                let start = len.saturating_sub(TAIL_BYTES);
+                self.discarding = start > 0;
+                start
+            }
+        };
+        file.seek(SeekFrom::Start(offset))?;
+        let mut chunk = vec![0; READ_CHUNK];
+        // Stop at the length observed above; later appends are read next time.
+        while offset < len {
+            let limit =
+                usize::try_from(len - offset).map_or(READ_CHUNK, |rest| rest.min(READ_CHUNK));
+            let read = file.read(&mut chunk[..limit])?;
+            if read == 0 {
+                break;
+            }
+            offset += read as u64;
+            self.consume(&chunk[..read]);
+        }
+        self.offset = Some(offset);
+        Ok(())
+    }
+
+    fn consume(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            let (line, complete, rest) = match bytes.iter().position(|byte| *byte == b'\n') {
+                Some(end) => (&bytes[..end], true, &bytes[end + 1..]),
+                None => (bytes, false, &[][..]),
+            };
+            bytes = rest;
+            if !self.discarding {
+                if self.partial.len() + line.len() > MAX_LINE {
+                    self.partial.clear();
+                    self.discarding = true;
+                } else {
+                    self.partial.extend_from_slice(line);
+                }
+            }
+            if !complete {
+                continue;
+            }
+            if !self.discarding
+                && let Ok(record) = serde_json::from_slice::<Record>(&self.partial)
+            {
+                if self.records.len() == TAIL_RECORDS {
+                    self.records.pop_front();
+                }
+                self.records.push_back(Arc::new(record));
+            }
+            self.partial.clear();
+            self.discarding = false;
+        }
+    }
+
+    /// Oldest first.
+    pub(crate) fn records(&self) -> Vec<Arc<Record>> {
+        self.records.iter().cloned().collect()
     }
 }
 
@@ -171,13 +364,16 @@ fn app_target(target: &str) -> bool {
         })
 }
 
-fn subscriber(store: Arc<Store>) -> impl Subscriber + Send + Sync {
-    tracing_subscriber::registry().with(Capture(store).with_filter(
-        tracing_subscriber::filter::filter_fn(|meta| app_target(meta.target())),
-    ))
+fn subscriber(capture: Capture) -> impl Subscriber + Send + Sync {
+    tracing_subscriber::registry().with(capture.with_filter(tracing_subscriber::filter::filter_fn(
+        |meta| app_target(meta.target()),
+    )))
 }
 
-struct Capture(Arc<Store>);
+struct Capture {
+    lines: SyncSender<Vec<u8>>,
+    counters: Arc<Counters>,
+}
 struct FormattingGuard;
 impl Drop for FormattingGuard {
     fn drop(&mut self) {
@@ -188,7 +384,7 @@ impl Drop for FormattingGuard {
 impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Capture {
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         if FORMATTING.replace(true) {
-            self.0.lose();
+            self.counters.lose(1);
             return;
         }
         let _guard = FormattingGuard;
@@ -220,7 +416,7 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Capture {
             }
         }
         let Ok(base) = serde_json::to_vec(&record) else {
-            self.0.lose();
+            self.counters.lose(1);
             return;
         };
         let mut visitor = Fields {
@@ -229,7 +425,14 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Capture {
             count: 0,
         };
         event.record(&mut visitor);
-        self.0.push(record);
+        let Ok(mut line) = serde_json::to_vec(&record) else {
+            self.counters.lose(1);
+            return;
+        };
+        line.push(b'\n');
+        if self.lines.try_send(line).is_err() {
+            self.counters.lose(1);
+        }
     }
 }
 
@@ -249,7 +452,7 @@ impl Bounded {
     }
 }
 
-impl Write for Bounded {
+impl fmt::Write for Bounded {
     fn write_str(&mut self, value: &str) -> fmt::Result {
         if self.truncated {
             return Err(fmt::Error);
@@ -400,17 +603,57 @@ mod tests {
         }
     }
 
+    fn sink(capacity: usize) -> (Capture, Receiver<Vec<u8>>, Arc<Counters>) {
+        let (lines, queued) = mpsc::sync_channel(capacity);
+        let counters = Arc::new(Counters::default());
+        let capture = Capture {
+            lines,
+            counters: counters.clone(),
+        };
+        (capture, queued, counters)
+    }
+
+    fn queued_records(queued: &Receiver<Vec<u8>>) -> Vec<Record> {
+        queued
+            .try_iter()
+            .map(|line| {
+                assert_eq!(line.last(), Some(&b'\n'));
+                assert_eq!(line.iter().filter(|byte| **byte == b'\n').count(), 1);
+                serde_json::from_slice(&line).unwrap()
+            })
+            .collect()
+    }
+
+    fn counts(counters: &Counters) -> (u64, u64) {
+        (
+            counters.generation.load(Ordering::Acquire),
+            counters.dropped.load(Ordering::Relaxed),
+        )
+    }
+
+    fn line(message: &str) -> Vec<u8> {
+        let mut line = serde_json::to_vec(&Record::fixture(Level::INFO, message)).unwrap();
+        line.push(b'\n');
+        line
+    }
+
+    fn messages(tail: &Tail) -> Vec<String> {
+        tail.records()
+            .iter()
+            .map(|record| record.message.clone())
+            .collect()
+    }
+
     #[test]
     fn public_api_is_available_without_installing_a_global_subscriber() {
         let _init = init;
-        let _ = generation();
-        assert!(snapshot().is_some());
+        let _ = (generation(), dropped(), path());
     }
 
     #[test]
     fn json_schema_preserves_typed_fields_and_roundtrips() {
-        let store = Arc::new(Store::default());
-        tracing::subscriber::with_default(subscriber(store.clone()), || {
+        let (capture, queued, _) = sink(QUEUE);
+        tracing::subscriber::with_default(subscriber(capture), || {
             let span = tracing::info_span!(target: "herdr_gpui", "paint", password = "secret");
             let _entered = span.enter();
             tracing::info!(target: "herdr_gpui::terminal_painter",
@@ -418,8 +661,8 @@ mod tests {
                 text = "quoted \"text\"", debug = ?[1, 2], large = u128::MAX,
                 nonfinite = f64::INFINITY, "Paint complete");
         });
-        let (_, rows, _) = store.snapshot().unwrap();
-        let row = &*rows[0];
+        let rows = queued_records(&queued);
+        let row = &rows[0];
         let encoded = serde_json::to_string(row).unwrap();
         let json: Value = serde_json::from_str(&encoded).unwrap();
         assert_eq!(json["type"], "event");
@@ -443,9 +686,9 @@ mod tests {
 
     #[test]
     fn json_escaping_and_many_fields_share_one_record_budget() {
-        let store = Arc::new(Store::default());
+        let (capture, queued, _) = sink(QUEUE);
         let huge = "\"\\\n\u{1f980}".repeat(100_000);
-        tracing::subscriber::with_default(subscriber(store.clone()), || {
+        tracing::subscriber::with_default(subscriber(capture), || {
             tracing::info!(target: "herdr_client", a = huge.as_str(), b = huge.as_str(), "{}", huge);
             tracing::info!(target: "herdr_client",
                 a01=1,a02=2,a03=3,a04=4,a05=5,a06=6,a07=7,a08=8,a09=9,a10=10,
@@ -453,21 +696,23 @@ mod tests {
                 a21=1,a22=2,a23=3,a24=4,a25=5,a26=6,a27=7,a28=8,a29=9,a30=10,
                 a31=1,a32=2,a33=3,a34=4);
         });
-        let (_, rows, _) = store.snapshot().unwrap();
-        for row in &rows {
-            let encoded = serde_json::to_vec(row.as_ref()).unwrap();
-            assert!(encoded.len() <= MAX_BYTES, "{}", encoded.len());
+        let lines: Vec<_> = queued.try_iter().collect();
+        assert_eq!(lines.len(), 2);
+        for line in &lines {
+            // The budget covers the JSON; the newline is framing.
+            assert!(line.len() <= MAX_BYTES + 1, "{}", line.len());
+            let row: Record = serde_json::from_slice(line).unwrap();
             assert!(row.truncated);
             assert!(row.fields.len() <= 32);
-            assert_eq!(serde_json::from_slice::<Record>(&encoded).unwrap(), **row);
         }
-        assert_eq!(rows[1].fields.len(), 32);
+        let row: Record = serde_json::from_slice(&lines[1]).unwrap();
+        assert_eq!(row.fields.len(), 32);
     }
 
     #[test]
     fn levels_targets_and_span_context() {
-        let store = Arc::new(Store::default());
-        tracing::subscriber::with_default(subscriber(store.clone()), || {
+        let (capture, queued, counters) = sink(QUEUE);
+        tracing::subscriber::with_default(subscriber(capture), || {
             let span =
                 tracing::info_span!(target: "herdr_client", "connection", secret = "not retained");
             let _entered = span.enter();
@@ -479,8 +724,8 @@ mod tests {
             tracing::error!(target: "herdr_gpui_impostor", "excluded");
             tracing::error!(target: "gpui", "excluded");
         });
-        let (generation, records, dropped) = store.snapshot().unwrap();
-        assert_eq!((generation, records.len(), dropped), (5, 5, 0));
+        let records = queued_records(&queued);
+        assert_eq!(counts(&counters), (0, 0));
         assert_eq!(
             records.iter().map(|r| r.level).collect::<Vec<_>>(),
             [
@@ -512,12 +757,12 @@ mod tests {
                 panic!("formatter should stop on budget exhaustion")
             }
         }
-        let store = Arc::new(Store::default());
-        tracing::subscriber::with_default(subscriber(store.clone()), || {
+        let (capture, queued, _) = sink(QUEUE);
+        tracing::subscriber::with_default(subscriber(capture), || {
             tracing::info!(target: "herdr_gpui", value = ?Huge);
         });
-        let (_, records, _) = store.snapshot().unwrap();
-        assert!(serde_json::to_vec(&*records[0]).unwrap().len() <= MAX_BYTES);
+        let records = queued_records(&queued);
+        assert!(serde_json::to_vec(&records[0]).unwrap().len() <= MAX_BYTES);
         assert!(records[0].truncated);
         assert!(!records[0].body().chars().any(char::is_control));
     }
@@ -530,59 +775,185 @@ mod tests {
                 panic!("filtered or reentrant event formatted a field")
             }
         }
-        let store = Arc::new(Store::default());
-        tracing::subscriber::with_default(subscriber(store.clone()), || {
+        let (capture, queued, counters) = sink(QUEUE);
+        tracing::subscriber::with_default(subscriber(capture), || {
             tracing::error!(target: "dependency", value = ?MustNotFormat);
             FORMATTING.set(true);
             let _guard = FormattingGuard;
             tracing::error!(target: "herdr_client", value = ?MustNotFormat);
         });
-        let (generation, records, dropped) = store.snapshot().unwrap();
-        assert_eq!((generation, records.len(), dropped), (1, 0, 1));
+        assert!(queued_records(&queued).is_empty());
+        assert_eq!(counts(&counters), (1, 1));
         assert!(!FORMATTING.get());
     }
 
     #[test]
-    fn eviction_contention_and_snapshot_lifetime() {
-        let store = Store::default();
-        for i in 0..CAPACITY + 2 {
-            store.push(Record::fixture(Level::INFO, i.to_string()));
-        }
-        let (generation, records, dropped) = store.snapshot().unwrap();
-        assert_eq!(
-            (generation, records.len(), dropped),
-            ((CAPACITY + 2) as u64, CAPACITY, 2)
-        );
-        assert_eq!(records[0].message, "2");
-        let lock = store.records.lock().unwrap();
-        assert!(store.snapshot().is_none());
-        store.push(Record::fixture(Level::INFO, "lost"));
-        drop(lock);
-        assert_eq!(store.snapshot().unwrap().2, 3);
-        assert_eq!(records[0].message, "2");
+    fn a_full_queue_or_missing_writer_drops_without_blocking() {
+        let (capture, queued, counters) = sink(1);
+        tracing::subscriber::with_default(subscriber(capture), || {
+            for i in 0..3 {
+                tracing::info!(target: "herdr_gpui", i, "queued");
+            }
+        });
+        assert_eq!(queued_records(&queued).len(), 1);
+        assert_eq!(counts(&counters), (2, 2));
+
+        let (capture, queued, counters) = sink(QUEUE);
+        drop(queued);
+        tracing::subscriber::with_default(subscriber(capture), || {
+            tracing::info!(target: "herdr_gpui", "no writer");
+        });
+        assert_eq!(counts(&counters), (1, 1));
     }
 
     #[test]
-    fn concurrent_writers_and_snapshots_account_for_every_event() {
-        let store = Arc::new(Store::default());
-        std::thread::scope(|scope| {
+    fn concurrent_writers_reach_disk_or_count_as_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs").join(FILE_NAME);
+        let (capture, queued, counters) = sink(QUEUE);
+        let writer = {
+            let path = path.clone();
+            let counters = counters.clone();
+            thread::spawn(move || write_lines(path, queued, &counters))
+        };
+        let dispatch = tracing::Dispatch::new(subscriber(capture));
+        thread::scope(|scope| {
             for _ in 0..8 {
-                let store = store.clone();
+                let dispatch = dispatch.clone();
                 scope.spawn(move || {
-                    tracing::subscriber::with_default(subscriber(store.clone()), || {
+                    tracing::dispatcher::with_default(&dispatch, || {
                         for i in 0..2000 {
                             tracing::trace!(target: "herdr_client", iteration = i, "concurrent");
-                            if i % 100 == 0 {
-                                let _ = store.snapshot();
-                            }
                         }
                     });
                 });
             }
         });
-        let (generation, records, dropped) = store.snapshot().unwrap();
-        assert_eq!(generation, 16000);
-        assert!(records.len() <= CAPACITY);
-        assert_eq!(records.len() as u64 + dropped, 16000);
+        // The writer exits once every sender, owned by the subscriber, is gone.
+        drop(dispatch);
+        writer.join().unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        let written = text.lines().count() as u64;
+        for line in text.lines() {
+            assert_eq!(
+                serde_json::from_str::<Record>(line).unwrap().message,
+                "concurrent"
+            );
+        }
+        assert!(written > 0);
+        assert_eq!(written + counts(&counters).1, 16000);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn log_files_rotate_before_overflowing_and_reopen_after_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let previous = dir.path().join(PREVIOUS_FILE_NAME);
+        let mut log = LogFile {
+            path: path.clone(),
+            file: None,
+            limit: 10,
+        };
+        log.append(b"aaaa\n").unwrap();
+        log.append(b"bbbb\n").unwrap();
+        log.append(b"cccc\n").unwrap();
+        assert_eq!(fs::read(&previous).unwrap(), b"aaaa\nbbbb\n");
+        assert_eq!(fs::read(&path).unwrap(), b"cccc\n");
+        // A single oversized batch still lands, alone, in a fresh file.
+        log.append(b"0123456789abcdef\n").unwrap();
+        assert_eq!(fs::read(&previous).unwrap(), b"cccc\n");
+        assert_eq!(fs::read(&path).unwrap(), b"0123456789abcdef\n");
+
+        // A reopened process measures the existing file before appending.
+        let mut reopened = LogFile {
+            path: path.clone(),
+            file: None,
+            limit: 20,
+        };
+        reopened.append(b"dddd\n").unwrap();
+        assert_eq!(fs::read(&previous).unwrap(), b"0123456789abcdef\n");
+        assert_eq!(fs::read(&path).unwrap(), b"dddd\n");
+
+        let blocked = LogFile {
+            path: dir.path().join("file").join(FILE_NAME),
+            file: None,
+            limit: 20,
+        };
+        fs::write(dir.path().join("file"), b"").unwrap();
+        let mut blocked = blocked;
+        assert!(blocked.append(b"eeee\n").is_err());
+        assert!(blocked.file.is_none());
+        fs::remove_file(dir.path().join("file")).unwrap();
+        blocked.append(b"eeee\n").unwrap();
+        assert_eq!(
+            fs::read(dir.path().join("file").join(FILE_NAME)).unwrap(),
+            b"eeee\n"
+        );
+    }
+
+    #[test]
+    fn tails_read_appended_complete_lines_and_skip_foreign_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let mut tail = Tail::new(&path);
+        tail.read().unwrap();
+        assert!(tail.records().is_empty());
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let second = line("second");
+        file.write_all(&line("first")).unwrap();
+        file.write_all(b"not json\n").unwrap();
+        file.write_all(&vec![b'x'; MAX_LINE * 2]).unwrap();
+        file.write_all(b"\n").unwrap();
+        file.write_all(&second[..10]).unwrap();
+        tail.read().unwrap();
+        assert_eq!(messages(&tail), ["first"]);
+        file.write_all(&second[10..]).unwrap();
+        tail.read().unwrap();
+        assert_eq!(messages(&tail), ["first", "second"]);
+
+        // Rotation leaves a shorter file: read it from the start, keep history.
+        fs::write(&path, line("rotated")).unwrap();
+        tail.read().unwrap();
+        assert_eq!(messages(&tail), ["first", "second", "rotated"]);
+    }
+
+    #[test]
+    fn tails_start_near_the_end_and_keep_a_bounded_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let record = line("filler");
+        let count = TAIL_BYTES as usize / record.len() + 2;
+        let mut text = Vec::with_capacity(count * record.len());
+        for _ in 0..count {
+            text.extend_from_slice(&record);
+        }
+        text.extend_from_slice(&line("newest"));
+        fs::write(&path, &text).unwrap();
+        let mut tail = Tail::new(&path);
+        tail.read().unwrap();
+        let records = tail.records();
+        // Only the last TAIL_BYTES are read, and only the newest records kept.
+        assert!(count > TAIL_RECORDS);
+        assert_eq!(records.len(), TAIL_RECORDS);
+        assert_eq!(records.last().unwrap().message, "newest");
+
+        let mut tail = Tail::new(&path);
+        for _ in 0..TAIL_RECORDS + 3 {
+            tail.consume(&line("more"));
+        }
+        tail.consume(&line("last"));
+        assert_eq!(tail.records().len(), TAIL_RECORDS);
+        assert_eq!(tail.records().last().unwrap().message, "last");
     }
 }

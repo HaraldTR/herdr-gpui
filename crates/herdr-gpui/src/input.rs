@@ -1,4 +1,7 @@
-use super::{HerdrWindow, terminal::input_cursor_bounds};
+use super::{
+    HerdrWindow,
+    terminal::{input_area, input_cursor_bounds},
+};
 use gpui::*;
 use herdr_client::protocol::ClientPaneInputEvent;
 use std::ops::Range;
@@ -104,17 +107,22 @@ impl EntityInputHandler for HerdrWindow {
         &mut self,
         range: Range<usize>,
         _: Bounds<Pixels>,
-        _: &mut Window,
+        window: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         if self.menu.page.is_some() {
             return self.menu.input.as_ref()?.range_bounds(range);
         }
-        Some(input_cursor_bounds(
-            self.live.surface.as_deref(),
-            self.bounds.origin,
-            self.cell_width,
-            self.config.terminal.line_height(),
+        let surface = self.live.surface.as_deref();
+        let cell_height = self.config.terminal.line_height();
+        let cursor = input_cursor_bounds(surface, self.bounds.origin, self.cell_width, cell_height);
+        Some(self.painter.borrow().composition_bounds(
+            &self.marked,
+            range,
+            cursor,
+            input_area(surface, self.bounds, self.cell_width, cell_height),
+            &self.config.terminal.font(),
+            window,
         ))
     }
     fn character_index_for_point(
@@ -129,5 +137,95 @@ impl EntityInputHandler for HerdrWindow {
             return Some(input.to_utf16(index..index).start);
         }
         None
+    }
+}
+
+/// The terminal's platform input handler. A terminal repeats a held key, so
+/// it opts out of macOS press-and-hold, which would otherwise swallow the
+/// repeats and open the accent picker. Menu text fields keep the picker.
+pub(crate) struct TerminalInputHandler {
+    inner: ElementInputHandler<HerdrWindow>,
+    press_and_hold: bool,
+}
+
+impl TerminalInputHandler {
+    pub(crate) fn new(bounds: Bounds<Pixels>, view: Entity<HerdrWindow>, menu_open: bool) -> Self {
+        Self {
+            inner: ElementInputHandler::new(bounds, view),
+            press_and_hold: menu_open,
+        }
+    }
+}
+
+impl InputHandler for TerminalInputHandler {
+    fn selected_text_range(
+        &mut self,
+        ignore_disabled_input: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<UTF16Selection> {
+        self.inner
+            .selected_text_range(ignore_disabled_input, window, cx)
+    }
+    fn marked_text_range(&mut self, window: &mut Window, cx: &mut App) -> Option<Range<usize>> {
+        self.inner.marked_text_range(window, cx)
+    }
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        adjusted_range: &mut Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<String> {
+        self.inner
+            .text_for_range(range_utf16, adjusted_range, window, cx)
+    }
+    fn replace_text_in_range(
+        &mut self,
+        replacement_range: Option<Range<usize>>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.inner
+            .replace_text_in_range(replacement_range, text, window, cx);
+    }
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range: Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.inner.replace_and_mark_text_in_range(
+            range_utf16,
+            new_text,
+            new_selected_range,
+            window,
+            cx,
+        );
+    }
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut App) {
+        self.inner.unmark_text(window, cx);
+    }
+    fn bounds_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Bounds<Pixels>> {
+        self.inner.bounds_for_range(range_utf16, window, cx)
+    }
+    fn character_index_for_point(
+        &mut self,
+        point: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<usize> {
+        self.inner.character_index_for_point(point, window, cx)
+    }
+    fn apple_press_and_hold_enabled(&mut self) -> bool {
+        self.press_and_hold
     }
 }

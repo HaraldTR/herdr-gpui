@@ -73,6 +73,14 @@ pub enum Error {
     GeometryLimit,
     #[error("invalid session name")]
     InvalidSession,
+    #[error("The default session cannot be deleted")]
+    DefaultSession,
+    #[error("Session deletion timed out; refresh the list before trying again")]
+    SessionDeleteTimeout,
+    #[error(
+        "Herdr refused session deletion ({0}); the session may be running, inaccessible, or unsupported by the installed CLI"
+    )]
+    SessionDeleteFailed(std::process::ExitStatus),
     #[error("SSH has no local socket path")]
     NoLocalSocket,
     #[error("invalid SSH target (options, controls, and passwords are forbidden)")]
@@ -135,6 +143,12 @@ pub enum Error {
     SshClosed,
     #[error("SSH startup output exceeds limit")]
     SshOutputLimit,
+    #[error("remote Git directory must be an absolute path")]
+    InvalidGitDir,
+    #[error("remote command failed ({0})")]
+    RemoteCommand(std::process::ExitStatus),
+    #[error("remote command returned unexpected output")]
+    RemoteOutput,
     #[error("SSH file transfer requires a Linux or macOS client")]
     UploadUnsupported,
     #[error("SSH file transfer accepts at most 256 paths")]
@@ -165,6 +179,30 @@ pub enum Error {
         source: Box<Error>,
         cleanup: Box<Error>,
     },
+    #[error("host scripts require a Linux or macOS client")]
+    ScriptUnsupported,
+    #[error("could not start host script")]
+    ScriptSpawn(#[source] io::Error),
+    #[error("host script I/O failed")]
+    ScriptIo(#[source] io::Error),
+    #[error("could not read host script input")]
+    ScriptInput(#[source] io::Error),
+    #[error("could not write host script output")]
+    ScriptOutput(#[source] io::Error),
+    #[error("host script output exceeds limit")]
+    ScriptOutputLimit,
+    #[error("host script cancelled")]
+    ScriptCancelled,
+    #[error("host script made no progress before its deadline")]
+    ScriptTimeout,
+    #[error("host script worker panicked")]
+    ScriptWorker,
+    /// `stderr` is a bounded, control-free tail kept for diagnostics.
+    #[error("host script failed ({status}): {stderr}")]
+    ScriptExit {
+        status: std::process::ExitStatus,
+        stderr: String,
+    },
     #[error("endpoint selection is not a regular file")]
     SelectionNotFile,
     #[error("endpoint selection exceeds storage limit")]
@@ -187,6 +225,8 @@ pub enum Error {
     ProfileId,
     #[error("invalid endpoint label")]
     ProfileLabel,
+    #[error("too many sessions to list")]
+    SessionLimit,
 }
 
 impl Error {
@@ -222,9 +262,10 @@ impl Error {
             } else {
                 io::ErrorKind::InvalidData
             }),
-            Self::InvalidSession | Self::NoLocalSocket | Self::InvalidSshTarget => {
-                io::ErrorKind::InvalidInput
-            }
+            Self::InvalidSession
+            | Self::DefaultSession
+            | Self::NoLocalSocket
+            | Self::InvalidSshTarget => io::ErrorKind::InvalidInput,
             Self::SshUnsupported | Self::ClipboardImageUnsupported => io::ErrorKind::Unsupported,
             Self::ClipboardImageCancelled => io::ErrorKind::Interrupted,
             Self::ClipboardImageWriteTimeout | Self::ClipboardImagePreparationTimeout => {
@@ -233,7 +274,9 @@ impl Error {
             Self::Cancelled | Self::SshCancelled => io::ErrorKind::Interrupted,
             Self::EventReceiverDropped | Self::Disconnected => io::ErrorKind::BrokenPipe,
             Self::SocketClosed | Self::SshClosed => io::ErrorKind::UnexpectedEof,
-            Self::HealthTimeout | Self::SshTimeout => io::ErrorKind::TimedOut,
+            Self::HealthTimeout | Self::SshTimeout | Self::SessionDeleteTimeout => {
+                io::ErrorKind::TimedOut
+            }
             Self::Full | Self::ClipboardImageBusy => io::ErrorKind::WouldBlock,
             _ => io::ErrorKind::InvalidData,
         }

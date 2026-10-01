@@ -8,6 +8,17 @@ use crate::Error;
 use serde::Deserialize;
 use std::path::Path;
 
+/// Where a workspace's checkout lives, which decides how its GitHub
+/// repository is identified.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Origin {
+    /// This machine: local Git verifies the checkout before trusting it.
+    #[default]
+    Local,
+    /// A saved SSH device, named by its SSH target. Its Git runs there.
+    Ssh(String),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Input {
     pub checkout: Option<String>,
@@ -252,9 +263,15 @@ impl From<Option<String>> for Outcome {
 }
 
 impl PullRequest {
-    /// Shared by sidebar and titlebar badges and the workspace menu. Lifecycle
-    /// takes precedence; an open PR is green only when no known blocker remains.
+    /// Shared by sidebar and titlebar badges and the workspace menu, inked to
+    /// read on the chrome they sit on.
     pub fn color(&self, theme: &crate::config::Theme) -> u32 {
+        theme.ink(self.hue(theme))
+    }
+
+    /// Lifecycle takes precedence; an open PR is green only when no known
+    /// blocker remains.
+    fn hue(&self, theme: &crate::config::Theme) -> u32 {
         match self.state {
             State::Merged => return theme.palette[5],
             State::Closed => return theme.palette[1],

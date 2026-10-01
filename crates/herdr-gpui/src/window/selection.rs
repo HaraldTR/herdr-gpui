@@ -6,15 +6,17 @@
 use super::HerdrWindow;
 use crate::terminal::Selection;
 use gpui::{ClipboardItem, Context, Pixels, Point};
-use std::time::{Duration, Instant};
-
-/// How long "copied to clipboard" stays up, matching herdr's own feedback.
-const COPY_FEEDBACK: Duration = Duration::from_secs(2);
 
 impl HerdrWindow {
     /// Starts a selection under the pointer, discarding the previous one. A
-    /// press that lands outside the painted cells only clears.
-    pub(crate) fn begin_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+    /// double click starts on the link or word under it and a triple click on
+    /// its row. A press that lands outside the painted cells only clears.
+    pub(crate) fn begin_selection(
+        &mut self,
+        position: Point<Pixels>,
+        clicks: usize,
+        cx: &mut Context<Self>,
+    ) {
         let cleared = self.selection.take().is_some();
         if let Some(surface) = self.selectable_surface(position) {
             let (x, y) = Self::terminal_offset(self.bounds, position);
@@ -24,6 +26,7 @@ impl HerdrWindow {
                 y,
                 self.cell_width,
                 self.config.terminal.line_height(),
+                clicks,
             );
         }
         if cleared || self.selection.is_some() {
@@ -71,7 +74,7 @@ impl HerdrWindow {
         // The gesture is over either way: nothing stays highlighted behind it.
         self.selection = None;
         if copied && self.config.clipboard_toast.enabled {
-            self.copy_feedback = Some(Instant::now() + COPY_FEEDBACK);
+            self.show_flash(super::Flash::success("copied to clipboard"), cx);
         }
         cx.notify();
         selected
@@ -96,16 +99,6 @@ impl HerdrWindow {
                 false
             }
         }
-    }
-
-    /// Retires the flash once its two seconds are up. `true` when the window
-    /// has to repaint without it.
-    pub(crate) fn tick_copy_feedback(&mut self, now: Instant) -> bool {
-        if self.copy_feedback.is_none_or(|expires| now < expires) {
-            return false;
-        }
-        self.copy_feedback = None;
-        true
     }
 
     /// Whether the selection covers no cell the client can still show, either
@@ -154,6 +147,7 @@ mod tests {
     use gpui::{Modifiers, MouseButton, TestAppContext, point, px};
     use herdr_client::protocol::*;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     fn surface(rows: &[&str], width: u16) -> PaneSurfaceFrame {
         let height = rows.len() as u16;
@@ -224,7 +218,7 @@ mod tests {
         });
         cx.update(|window, cx| {
             window.refresh();
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let (origin, cell) = view.read_with(cx, |view, _| {
             (
@@ -245,10 +239,10 @@ mod tests {
         );
         let expires = view.read_with(cx, |view, _| {
             assert!(view.selection.is_none(), "the release deselects");
-            view.copy_feedback.expect("the release reports the copy")
+            view.flash.clone().expect("the release reports the copy").1
         });
         assert!(cx.update(|_, _| expires) > Instant::now());
-        assert!(cx.debug_bounds("copy-feedback").is_some());
+        assert!(cx.debug_bounds("flash").is_some());
 
         // A drag over two rows keeps the rows apart and drops the padding the
         // terminal added to the row it carried through to the edge.
@@ -262,7 +256,7 @@ mod tests {
 
         // A press with no drag selects nothing, so neither the clipboard nor
         // the flash reports one.
-        view.update(cx, |view, _| view.copy_feedback = None);
+        view.update(cx, |view, _| view.flash = None);
         cx.simulate_click(at(2., 0.), Modifiers::default());
         assert_eq!(
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
@@ -270,7 +264,7 @@ mod tests {
         );
         view.read_with(cx, |view, _| {
             assert!(view.selection.is_none());
-            assert!(view.copy_feedback.is_none());
+            assert!(view.flash.is_none());
         });
 
         // The flash retires on its own once its two seconds are up. Whether it
@@ -280,13 +274,61 @@ mod tests {
         cx.simulate_mouse_move(at(5., 0.), MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_up(at(5., 0.), MouseButton::Left, Modifiers::default());
         view.update(cx, |view, _| {
-            let expires = view.copy_feedback.expect("a copy reports itself");
-            assert!(!view.tick_copy_feedback(expires - Duration::from_nanos(1)));
-            assert!(view.copy_feedback.is_some());
-            assert!(view.tick_copy_feedback(expires));
-            assert!(view.copy_feedback.is_none());
-            assert!(!view.tick_copy_feedback(expires));
+            let (flash, expires) = view.flash.clone().expect("a copy reports itself");
+            assert_eq!(flash, crate::window::Flash::success("copied to clipboard"));
+            assert!(!view.tick_flash(expires - Duration::from_nanos(1)));
+            assert!(view.flash.is_some());
+            assert!(view.tick_flash(expires));
+            assert!(view.flash.is_none());
+            assert!(!view.tick_flash(expires));
         });
+    }
+
+    #[gpui::test]
+    fn chinese_mouse_selection_copies_exact_text_only_on_release(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = fixture_window(window, cx);
+            // Daemon-style wide cells: ordinary blank continuations, skip=false.
+            let mut frame = surface(&["你 好 世 界 ", "A你  B"], 12);
+            let snapshot = view.live.snapshot.as_ref().unwrap();
+            frame.boot_id = snapshot.boot_id.clone();
+            frame.projection_revision = snapshot.revision;
+            view.live.surface = Some(Arc::new(frame));
+            view
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        let (origin, width, height) = view.read_with(cx, |view, _| {
+            (
+                view.bounds.origin,
+                view.cell_width,
+                view.config.terminal.line_height(),
+            )
+        });
+        let at =
+            |column: f32, row: f32| origin + point(px(column * width), px((row + 0.5) * height));
+        for (from, to, row, expected) in [
+            (0.1, 7.9, 0., "你好世界"),
+            (7.9, 0.1, 0., "你好世界"),
+            (0.1, 8.9, 0., "你好世界 "),
+            (0.1, 4.9, 1., "A你 B"),
+        ] {
+            cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("before".into())));
+            cx.simulate_mouse_down(at(from, row), MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_move(at(to, row), MouseButton::Left, Modifiers::default());
+            assert_eq!(
+                cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
+                Some("before".into())
+            );
+            cx.simulate_mouse_up(at(to, row), MouseButton::Left, Modifiers::default());
+            assert_eq!(
+                cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
+                Some(expected.into())
+            );
+            assert!(view.read_with(cx, |view, _| view.selection.is_none()));
+        }
     }
 
     /// A link is a destination for a click and text for a drag: the same
@@ -305,7 +347,7 @@ mod tests {
         });
         cx.update(|window, cx| {
             window.refresh();
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let (origin, width) = view.read_with(cx, |view, _| (view.bounds.origin, view.cell_width));
         let at = |column: f32| origin + point(px(column * width), px(10.));
@@ -346,7 +388,7 @@ mod tests {
         cx.update(|window, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string("kept".into()));
             window.refresh();
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let (origin, width) = view.read_with(cx, |view, _| (view.bounds.origin, view.cell_width));
         let at = |column: f32| origin + point(px(column * width), px(10.));
@@ -398,7 +440,7 @@ mod tests {
         cx.update(|window, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string("kept".into()));
             window.refresh();
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let (origin, width) = view.read_with(cx, |view, _| (view.bounds.origin, view.cell_width));
         let at = |column: f32| origin + point(px(column * width), px(10.));
@@ -433,7 +475,7 @@ mod tests {
         });
         cx.update(|window, cx| {
             window.refresh();
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let (origin, width) = view.read_with(cx, |view, _| (view.bounds.origin, view.cell_width));
         let at = |column: f32| origin + point(px(column * width), px(10.));
@@ -442,7 +484,7 @@ mod tests {
             cx.simulate_mouse_down(at(0.), MouseButton::Left, Modifiers::default());
             cx.simulate_mouse_move(at(10.), MouseButton::Left, Modifiers::default());
             cx.simulate_mouse_up(at(10.), MouseButton::Left, Modifiers::default());
-            view.read_with(cx, |view, _| view.copy_feedback.is_some())
+            view.read_with(cx, |view, _| view.flash.is_some())
         };
 
         view.update(cx, |view, _| view.config.clipboard_toast.enabled = false);
@@ -468,7 +510,7 @@ mod tests {
                 view.config.clipboard_toast.position = position
             });
             assert!(drag(&view, cx));
-            let flash = cx.debug_bounds("copy-feedback").expect("the flash paints");
+            let flash = cx.debug_bounds("flash").expect("the flash paints");
             let top = matches!(position, TopLeft | TopCenter | TopRight);
             assert_eq!(
                 flash.origin.y - bounds.origin.y < bounds.size.height / 2.,
@@ -507,7 +549,7 @@ mod tests {
         });
         cx.update(|window, cx| {
             window.refresh();
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let (origin, cell) = view.read_with(cx, |view, _| {
             (
@@ -520,11 +562,11 @@ mod tests {
         cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("kept".into())));
         view.update(cx, |view, cx| {
             view.menu.page = Some(crate::menu::Page::Menu);
-            view.begin_selection(at(0.), cx);
+            view.begin_selection(at(0.), 1, cx);
             assert!(view.selection.is_none());
             assert!(!view.extend_selection(at(6.), cx));
             assert!(!view.release_selection(cx));
-            assert!(view.copy_feedback.is_none());
+            assert!(view.flash.is_none());
             view.menu.page = None;
         });
         assert_eq!(
@@ -540,6 +582,47 @@ mod tests {
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
             Some("copied".into())
         );
-        view.read_with(cx, |view, _| assert!(view.copy_feedback.is_some()));
+        view.read_with(cx, |view, _| assert!(view.flash.is_some()));
+    }
+
+    /// A double click copies the word under it and a triple click its row,
+    /// through the same release that copies a drag.
+    #[gpui::test]
+    fn double_and_triple_clicks_copy_the_word_and_the_row(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = fixture_window(window, cx);
+            let mut frame = surface(&["cat src/lib.rs now", "next"], 20);
+            let snapshot = view.live.snapshot.as_ref().unwrap();
+            frame.boot_id = snapshot.boot_id.clone();
+            frame.projection_revision = snapshot.revision;
+            view.live.surface = Some(Arc::new(frame));
+            view
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        let (origin, cell) = view.read_with(cx, |view, _| {
+            (
+                view.bounds.origin,
+                (view.cell_width, view.config.terminal.line_height()),
+            )
+        });
+        let position = origin + point(px(6.5 * cell.0), px(0.5 * cell.1));
+        let clipboard = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+        };
+        for (click_count, expected) in [(2, "src/lib.rs"), (3, "cat src/lib.rs now")] {
+            cx.simulate_event(gpui::MouseDownEvent {
+                button: MouseButton::Left,
+                position,
+                modifiers: Modifiers::default(),
+                click_count,
+                first_mouse: false,
+            });
+            cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+            assert_eq!(clipboard(cx), Some(expected.into()));
+            view.read_with(cx, |view, _| assert!(view.selection.is_none()));
+        }
     }
 }

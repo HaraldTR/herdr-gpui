@@ -1,7 +1,7 @@
 //! Bounded, per-checkout PR cache with refresh and error backoff. Entries are
 //! capped in number so a long session cannot grow it without limit.
 
-use super::{Input, Lookup, PullRequest};
+use super::{Input, Lookup, Origin, PullRequest};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -30,6 +30,7 @@ pub(crate) struct Cache {
     pub(super) active: Option<Input>,
     pub(super) scope: Option<(u64, u64, String)>,
     pub(super) token: Option<Arc<secrecy::SecretString>>,
+    pub(super) origin: Origin,
     pub(super) next_scan: Option<Instant>,
     pub(super) paused_until: Option<Instant>,
     pub cursor: usize,
@@ -59,13 +60,21 @@ impl Cache {
         self.active = None;
         self.scope = None;
         self.token = None;
+        self.origin = Origin::Local;
         self.next_scan = None;
         self.paused_until = None;
         self.cursor = 0;
     }
 
-    pub fn scope(&mut self, scope: (u64, u64, String), token: Arc<secrecy::SecretString>) {
+    /// A different device, daemon boot, account, or origin starts over.
+    pub fn scope(
+        &mut self,
+        scope: (u64, u64, String),
+        token: Arc<secrecy::SecretString>,
+        origin: Origin,
+    ) {
         if self.scope.as_ref() != Some(&scope)
+            || self.origin != origin
             || self
                 .token
                 .as_ref()
@@ -74,6 +83,7 @@ impl Cache {
             self.clear();
             self.scope = Some(scope);
             self.token = Some(token);
+            self.origin = origin;
         }
     }
 
@@ -182,7 +192,8 @@ impl Cache {
                     continue;
                 }
                 self.lookup.clear();
-                self.lookup.request(input.clone(), token.clone());
+                self.lookup
+                    .request(input.clone(), self.origin.clone(), token.clone());
                 self.active = Some(input);
                 self.cursor = self.cursor.wrapping_add(1);
                 self.lookup.poll();
@@ -191,6 +202,15 @@ impl Cache {
             }
         }
         changed
+    }
+
+    /// Whether a lookup for `input` is in flight or queued to dispatch, so the
+    /// chrome can say it is waiting on GitHub. A paused account is not loading.
+    pub fn loading(&self, input: &Input, now: Instant) -> bool {
+        self.active.as_ref() == Some(input)
+            || (self.token.is_some()
+                && self.paused_until.is_none_or(|until| now >= until)
+                && self.queue.contains(input))
     }
 
     /// Pure cache read for chrome painted every frame: never schedules work and

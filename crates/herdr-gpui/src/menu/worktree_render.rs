@@ -47,7 +47,7 @@ impl HerdrWindow {
                     .gap(px(5.))
                     .px(px(10.))
                     .py(px(5.))
-                    .rounded(px(4.))
+                    .rounded(px(crate::config::corners::CONTROL))
                     .border_1()
                     .border_color(if inert {
                         transparent_black()
@@ -139,6 +139,7 @@ impl HerdrWindow {
                 kind.empty_label(),
             ),
         };
+        let message = self.menu.error.as_ref().or(message);
         let status = if let Some(pending) = &source.pending {
             // Dismissing only closes the panel; the daemon keeps queued work,
             // as the branch tab's own waiting note says.
@@ -203,7 +204,7 @@ impl HerdrWindow {
                             range.map(|row| this.render_worktree_row(row, cx)).collect()
                         }),
                     )
-                    .track_scroll(source.scroll.clone())
+                    .track_scroll(&source.scroll)
                     .flex_1()
                     .min_h_0(),
                 )
@@ -220,7 +221,16 @@ impl HerdrWindow {
                     .border_t_1()
                     .border_color(rgb(theme.active))
                     .text_color(rgb(theme.muted))
-                    .child(status),
+                    .when(message.is_some(), |status| {
+                        status.text_color(super::danger(theme))
+                    })
+                    .child(
+                        div()
+                            .when(message.is_some(), |text| {
+                                text.debug_selector(|| "dialog-error".into())
+                            })
+                            .child(status),
+                    ),
             )
     }
 

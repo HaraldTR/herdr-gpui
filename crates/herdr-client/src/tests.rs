@@ -190,7 +190,7 @@ fn test_client_mode(
     remote: bool,
 ) -> (Client, Stream, thread::JoinHandle<Result<()>>) {
     let (stream, server) = Stream::pair().unwrap();
-    let (commands, rx) = bounded(COMMAND_CAPACITY);
+    let (commands, rx) = queue::channel(COMMAND_CAPACITY).unwrap();
     let (tx, events) = bounded(EVENT_CAPACITY);
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = stop.clone();
@@ -630,7 +630,7 @@ fn malformed_handshake_and_patch_fail_closed() {
 
 #[test]
 fn bounded_command_queue_and_outbound_limit_are_explicit() {
-    let (commands, _rx) = bounded(1);
+    let (commands, _rx) = queue::channel(1).unwrap();
     let handle = ClientHandle {
         inner: Arc::new(HandleInner {
             commands,

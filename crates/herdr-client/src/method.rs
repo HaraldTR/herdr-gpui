@@ -14,21 +14,26 @@ pub enum Method {
     CommandInvoke,
     IntegrationList,
     IntegrationInstall,
+    LayoutSetSplitRatio,
+    PaneClear,
     PaneClose,
     PaneFocus,
     PaneFocusDirection,
     PaneRename,
+    PaneScroll,
     PaneSplit,
     PaneZoom,
     ServerReloadConfig,
     TabClose,
     TabCreate,
     TabFocus,
+    TabMove,
     TabRename,
     WorkspaceClose,
     WorkspaceCreate,
     WorkspaceFocus,
     WorkspaceGet,
+    WorkspaceMoveBlock,
     WorkspaceRename,
     WorktreeCreate,
     WorktreeList,
@@ -43,21 +48,26 @@ impl Method {
             Self::CommandInvoke => "command.invoke",
             Self::IntegrationList => "integration.list",
             Self::IntegrationInstall => "integration.install",
+            Self::LayoutSetSplitRatio => "layout.set_split_ratio",
+            Self::PaneClear => "pane.clear",
             Self::PaneClose => "pane.close",
             Self::PaneFocus => "pane.focus",
             Self::PaneFocusDirection => "pane.focus_direction",
             Self::PaneRename => "pane.rename",
+            Self::PaneScroll => "pane.scroll",
             Self::PaneSplit => "pane.split",
             Self::PaneZoom => "pane.zoom",
             Self::ServerReloadConfig => "server.reload_config",
             Self::TabClose => "tab.close",
             Self::TabCreate => "tab.create",
             Self::TabFocus => "tab.focus",
+            Self::TabMove => "tab.move",
             Self::TabRename => "tab.rename",
             Self::WorkspaceClose => "workspace.close",
             Self::WorkspaceCreate => "workspace.create",
             Self::WorkspaceFocus => "workspace.focus",
             Self::WorkspaceGet => "workspace.get",
+            Self::WorkspaceMoveBlock => "workspace.move_block",
             Self::WorkspaceRename => "workspace.rename",
             Self::WorktreeCreate => "worktree.create",
             Self::WorktreeList => "worktree.list",
@@ -104,5 +114,21 @@ mod tests {
         assert_eq!(Method::PaneRename.to_string(), "pane.rename");
         assert!(Method::PaneRename.advertised_in(&["pane.rename".into()]));
         assert!(!Method::PaneRename.advertised_in(&["tab.rename".into()]));
+    }
+
+    #[test]
+    fn pane_clear_is_only_advertised_by_newer_daemons() {
+        assert_eq!(Method::PaneClear.as_str(), "pane.clear");
+        assert!(Method::PaneClear.advertised_in(&["pane.close".into(), "pane.clear".into()]));
+        // Advertisement is an exact match: a method sharing the prefix is not clearing.
+        assert!(!Method::PaneClear.advertised_in(&["pane.clear_agent_authority".into()]));
+    }
+
+    #[test]
+    fn split_ratio_wire_name() {
+        assert_eq!(
+            Method::LayoutSetSplitRatio.as_str(),
+            "layout.set_split_ratio"
+        );
     }
 }

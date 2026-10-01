@@ -177,6 +177,7 @@ class ReleaseTests(unittest.TestCase):
         app = self.work / "Herdr.app"
         self.assertEqual({str(p.relative_to(app)) for p in app.rglob("*") if p.is_file()}, {
             "Contents/MacOS/Herdr", "Contents/Info.plist", "Contents/Resources/Herdr.icns",
+            "Contents/Resources/Assets.car",
             "Contents/Resources/LICENSE-APACHE", "Contents/Resources/NOTICE.md",
             "Contents/Resources/LICENSE", "Contents/Resources/NOTICE", "Contents/Resources/LICENSE-octicons",
             "Contents/Resources/THIRD-PARTY-NOTICES.txt",
@@ -184,6 +185,7 @@ class ReleaseTests(unittest.TestCase):
         })
         self.assertEqual((app / "Contents/Resources/THIRD-PARTY-NOTICES.txt").read_bytes(), self.notices.read_bytes())
         self.assertEqual((app / "Contents/Resources/Herdr.icns").read_bytes(), (ROOT / "assets/icons/Herdr.icns").read_bytes())
+        self.assertEqual((app / "Contents/Resources/Assets.car").read_bytes(), (ROOT / "assets/icons/Herdr.car").read_bytes())
         for source in ("LICENSE", "NOTICE", "assets/icons/LICENSE-octicons", "crates/herdr-protocol/NOTICE.md", "crates/herdr-gpui/SOUND-NOTICE.md"):
             self.assertEqual((app / "Contents/Resources" / Path(source).name).read_bytes(), (ROOT / source).read_bytes())
         self.run_script("package-macos.sh", "20260920.3", arm, intel, self.work, self.notices, success=False)
@@ -201,7 +203,7 @@ class ReleaseTests(unittest.TestCase):
             destination = fixture / path
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / path, destination)
-        for name in ["Herdr-worktree.icns", "herdr-square-worktree-1024.png"]:
+        for name in ["Herdr-worktree.icns", "Herdr-worktree.car", "herdr-square-worktree-1024.png"]:
             (fixture / "assets/icons" / name).write_bytes(b"red fixture " + name.encode())
         self.scripts = fixture / "scripts/release"
         arm, intel = self.work / "arm64", self.work / "x86_64"
@@ -212,6 +214,7 @@ class ReleaseTests(unittest.TestCase):
         intel.write_bytes(build_identity(True))
         self.run_script("package-macos.sh", "20260920.3", arm, intel, self.work, self.notices)
         self.assertEqual((self.work / "Herdr.app/Contents/Resources/Herdr.icns").read_bytes(), (fixture / "assets/icons/Herdr-worktree.icns").read_bytes())
+        self.assertEqual((self.work / "Herdr.app/Contents/Resources/Assets.car").read_bytes(), (fixture / "assets/icons/Herdr-worktree.car").read_bytes())
         result = self.run_script("package-linux.sh", "20260920.3", "aarch64-unknown-linux-gnu", arm, self.work, self.notices)
         with tarfile.open(result.stdout.strip()) as archive:
             self.assertEqual(archive.extractfile("Herdr-20260920.3-aarch64-unknown-linux-gnu/share/pixmaps/herdr-gpui.png").read(), (fixture / "assets/icons/herdr-square-worktree-1024.png").read_bytes())

@@ -1,6 +1,9 @@
 use crate::{
     HerdrWindow,
-    config::{Config, Features},
+    config::{Config, FONT_SIZE_RANGE, Features, FontFace},
+    contrast::Contrast,
+    font_picker::{FontTarget, shared_family},
+    search_input::SearchInput,
 };
 use gpui::{prelude::*, *};
 use std::env;
@@ -21,8 +24,89 @@ pub(crate) fn feature_rows(features: &Features) -> [(&'static str, &'static str,
     )]
 }
 
+pub(crate) struct FontSizeEditor {
+    face: FontFace,
+    pub(crate) input: Entity<SearchInput>,
+    _blur: Subscription,
+}
+
+fn parse_font_size(text: &str) -> Option<f32> {
+    let text = text.trim();
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let value = text.parse::<u8>().ok()?;
+    FONT_SIZE_RANGE
+        .contains(&f32::from(value))
+        .then_some(f32::from(value))
+}
+
 impl HerdrWindow {
-    pub(crate) fn render_general_preferences(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn begin_font_size_edit(
+        &mut self,
+        face: FontFace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = cx.new(SearchInput::new);
+        input.update(cx, |input, cx| {
+            input.set_text_selected(&format!("{}", face.size(&self.config)), cx);
+            input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
+        });
+        let focus = input.read(cx).focus.clone();
+        let blur = cx.on_blur(&focus, window, |this, _, cx| {
+            this.finish_font_size_edit(true, cx);
+        });
+        self.menu.font_size_editor = Some(FontSizeEditor {
+            face,
+            input: input.clone(),
+            _blur: blur,
+        });
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    pub(super) fn finish_font_size_edit(&mut self, save: bool, cx: &mut Context<Self>) {
+        let Some(editor) = self.menu.font_size_editor.take() else {
+            return;
+        };
+        if save
+            && !editor.input.read(cx).is_composing()
+            && let Some(size) = parse_font_size(editor.input.read(cx).text())
+        {
+            self.set_font_size(editor.face, size, cx);
+        }
+        cx.notify();
+    }
+
+    /// Write one setting off the UI thread, then reload so the window shows
+    /// what the file now says rather than what was clicked.
+    fn save_preference(
+        &mut self,
+        save: impl FnOnce() -> crate::Result<()> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if self.native_settings_save_in_flight() || self.theme_save_in_flight() {
+            return;
+        }
+        let text_system = cx.text_system().clone();
+        self.load_gui_config_with(
+            move || {
+                save()?;
+                let mut config = Config::load()?;
+                config.resolve_font_fallbacks(|| text_system.all_font_names());
+                let theme = if config.theme == "Follow Herdr" {
+                    Default::default()
+                } else {
+                    config.theme()?
+                };
+                Ok((config, theme))
+            },
+            cx,
+        );
+    }
+
+    pub(crate) fn render_native_preferences(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = &self.theme;
         let font = &self.config.ui;
         let accent = crate::menu::accent(theme);
@@ -54,6 +138,26 @@ impl HerdrWindow {
                 )
                 .child(div().flex_1().min_w_0().text_right().child(value))
         };
+        // A row that flips a setting when clicked, with a switch showing its state.
+        let toggle = |id: &'static str, label: &'static str, on: bool| {
+            row(id, label, if on { "On" } else { "Off" }.into())
+                .id(id)
+                .items_center()
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(theme.active)))
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .w(px(30.))
+                        .h(px(18.))
+                        .p(px(2.))
+                        .rounded_full()
+                        .bg(rgb(if on { theme.foreground } else { theme.muted }))
+                        .when(on, |track| track.justify_end())
+                        .child(div().size(px(14.)).rounded_full().bg(rgb(theme.background))),
+                )
+        };
         let note = |text: &'static str| {
             div()
                 .min_w_0()
@@ -68,7 +172,7 @@ impl HerdrWindow {
                 .min_w_0()
                 .px(px(8.))
                 .py(px(6.))
-                .rounded(px(4.))
+                .rounded(px(crate::config::corners::CONTROL))
                 .border_1()
                 .border_color(rgb(theme.active))
                 .bg(rgb(theme.background))
@@ -85,14 +189,51 @@ impl HerdrWindow {
             .min_w_0()
             .overflow_y_scroll()
             .track_scroll(&self.menu.preferences_scroll)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    if this.menu.font_size_editor.is_some() {
+                        this.finish_font_size_edit(true, cx);
+                        window.focus(&this.menu.focus, cx);
+                    }
+                }),
+            )
             .px(px(16.))
-            .py(px(8.))
-            .child(section("GENERAL"))
+            .py(px(8.));
+        if self.settings.tab == crate::settings_panel::Tab::General {
+            body = body.child(section("GENERAL"))
             .child(row(
                 "preferences-show-agents",
                 "Show agents",
                 self.config.show_agents.to_string(),
             ))
+            .child(
+                toggle(
+                    "preferences-show-usage",
+                    "Show usage",
+                    self.config.usage.show,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    let show = !this.config.usage.show;
+                    this.save_preference(move || Config::save_usage_visibility(show), cx);
+                })),
+            )
+            .child(
+                toggle(
+                    "preferences-high-contrast",
+                    "High contrast",
+                    self.config.contrast == Contrast::High,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    let contrast = match this.config.contrast {
+                        Contrast::Standard => Contrast::High,
+                        Contrast::High => Contrast::Standard,
+                    };
+                    this.save_preference(move || Config::save_contrast(contrast), cx);
+                })),
+            )
             .child(row(
                 "preferences-confirm-close-tab",
                 "Confirm tab close",
@@ -101,27 +242,208 @@ impl HerdrWindow {
             .child(row(
                 "preferences-layout",
                 "Layout",
-                match self.config.layout.mode {
-                    crate::config::LayoutMode::Normal => "normal",
-                    crate::config::LayoutMode::Compact => "compact",
-                }
-                .into(),
+                self.config.layout.mode.to_string(),
             ))
             .child(row(
                 "preferences-sidebar-gap",
                 "Sidebar gap",
                 format!("{} px", self.config.layout.sidebar_gap),
             ))
-            .child(note(
-                "Edit [layout] mode (normal or compact) and sidebar_gap (0-64 logical pixels) in the local override file below; saved changes reload automatically.",
-            ))
-            .child(section("FEATURES"));
+            .child(note("Edit [layout] mode and sidebar_gap (0-64 logical pixels) in the local override file below; saved changes reload automatically."));
+        }
+        if self.settings.tab == crate::settings_panel::Tab::Font {
+            body = body.child(section("FONTS"));
+            body = body.child(
+                div()
+                    .debug_selector(|| "preferences-font-all".into())
+                    .flex()
+                    .items_center()
+                    .min_w_0()
+                    .gap(px(12.))
+                    .py(px(7.))
+                    .border_b_1()
+                    .border_color(rgb(theme.active))
+                    .child(
+                        div()
+                            .w(relative(0.3))
+                            .flex_none()
+                            .text_color(rgb(theme.muted))
+                            .child("All fonts"),
+                    )
+                    .child(
+                        div()
+                            .id("preferences-font-all-choose")
+                            .debug_selector(|| "preferences-font-all-choose".into())
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_right()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(theme.active)))
+                            .child(format!(
+                                "{} ▾",
+                                shared_family(&self.config).unwrap_or("Mixed")
+                            ))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.open_font_picker(FontTarget::All, window, cx);
+                            })),
+                    ),
+            );
+            for (face, id, label, value) in [
+                (
+                    FontFace::Sidebar,
+                    "preferences-font-sidebar",
+                    "Sidebar",
+                    &self.config.sidebar,
+                ),
+                (
+                    FontFace::Tabs,
+                    "preferences-font-tabs",
+                    "Tabs",
+                    &self.config.tabs,
+                ),
+                (
+                    FontFace::Terminal,
+                    "preferences-font-terminal",
+                    "Terminal",
+                    &self.config.terminal,
+                ),
+                (FontFace::Ui, "preferences-font-ui", "UI", &self.config.ui),
+            ] {
+                let control =
+                    |suffix: &'static str, symbol: &'static str, direction: f32, enabled: bool| {
+                        div()
+                            .id(format!("{id}-{suffix}"))
+                            .debug_selector(move || format!("{id}-{suffix}"))
+                            .px(px(8.))
+                            .py(px(3.))
+                            .rounded(px(crate::config::corners::CONTROL))
+                            .border_1()
+                            .border_color(rgb(theme.active))
+                            .bg(rgb(theme.background))
+                            .when(enabled, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(theme.active)))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.change_font_size(face, direction, cx);
+                                    }))
+                            })
+                            .when(!enabled, |button| button.text_color(rgb(theme.muted)))
+                            .child(symbol)
+                    };
+                body = body.child(
+                    div()
+                        .debug_selector(move || id.into())
+                        .flex()
+                        .items_center()
+                        .min_w_0()
+                        .gap(px(12.))
+                        .py(px(7.))
+                        .border_b_1()
+                        .border_color(rgb(theme.active))
+                        .child(
+                            div()
+                                .w(relative(0.3))
+                                .flex_none()
+                                .min_w_0()
+                                .text_color(rgb(theme.muted))
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .id(format!("{id}-choose"))
+                                .debug_selector(move || format!("{id}-choose"))
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_right()
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(theme.active)))
+                                .child(format!("{} ▾", value.family))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.open_font_picker(FontTarget::Face(face), window, cx);
+                                })),
+                        )
+                        .child(control(
+                            "decrease",
+                            "−",
+                            -1.,
+                            value.size > *FONT_SIZE_RANGE.start(),
+                        ))
+                        .child(
+                            if let Some(editor) = &self.menu.font_size_editor
+                                && editor.face == face
+                            {
+                                div()
+                                    .w(px(55.))
+                                    .flex_none()
+                                    .child(editor.input.clone())
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .id(format!("{id}-size"))
+                                    .debug_selector(move || format!("{id}-size"))
+                                    .flex_none()
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(theme.active)))
+                                    .child(format!("{} px", value.size))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.begin_font_size_edit(face, window, cx);
+                                    }))
+                                    .into_any_element()
+                            },
+                        )
+                        .child(control(
+                            "increase",
+                            "+",
+                            1.,
+                            value.size < *FONT_SIZE_RANGE.end(),
+                        )),
+                );
+            }
+            return body.child(note(
+                "Font families and sizes save to local GUI overrides and reload in every window. Click a size to type 8–48; Enter or leaving the field saves, Escape cancels. Sizes are logical pixels.",
+            ));
+        }
+        body = body.child(section("FEATURES"));
         for (id, label, enabled) in feature_rows(&self.config.features) {
             body = body.child(row(id, label, if enabled { "On" } else { "Off" }.into()));
         }
         body = body
             .child(note(
                 "Optional behaviors, off by default. Turn one on in the [features] table of the local GUI config file; saved changes reload automatically.",
+            ))
+            .child(section("AGENTS"));
+        let installed = crate::agent_skill::AgentSkill::choice(cx)
+            == Some(crate::agent_skill::Choice::Installed);
+        body = body
+            .child(row(
+                "preferences-browser-skill",
+                "Browser skill",
+                if installed { "Installed, kept up to date" } else { "Not installed" }.into(),
+            ))
+            .child(div().py(px(10.)).child(if installed {
+                button("preferences-remove-browser-skill", "Remove browser skill").on_click(
+                    cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.remove_browser_skill(cx);
+                    }),
+                )
+            } else {
+                button("preferences-install-browser-skill", "Install browser skill").on_click(
+                    cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.install_browser_skill(window, cx);
+                    }),
+                )
+            }))
+            .child(note(
+                "Teaches Claude Code and other agents to show you pages in browser tabs and read the notes you send. Lives in ~/.claude/skills and ~/.agents/skills. Remove deletes only the copies this app wrote.",
             ))
             .child(section("CONFIGURATION"))
             .child(note("Theme, indicators, sound, and toasts share this computer's Herdr configuration, not a remote daemon's settings."))
@@ -152,7 +474,7 @@ impl HerdrWindow {
                     .w_full()
                     .min_w_0()
                     .p(px(10.))
-                    .rounded(px(4.))
+                    .rounded(px(crate::config::corners::CONTROL))
                     .border_1()
                     .border_color(rgb(theme.active))
                     .bg(rgb(theme.background))
@@ -258,16 +580,9 @@ pub struct Preferences {
 
 impl Preferences {
     pub fn new(socket: &Path) -> Self {
-        let root = env::var_os("XDG_STATE_HOME")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| {
-                env::var_os("HOME")
-                    .filter(|value| !value.is_empty())
-                    .map(|home| PathBuf::from(home).join(".local/state"))
-            });
         Self::start(
-            root.map(|root| endpoint_path(&root, socket))
+            state_dir()
+                .map(|dir| endpoint_path(&dir, socket))
                 .ok_or(crate::Error::MissingStateRoot),
         )
     }
@@ -357,14 +672,26 @@ impl Drop for Preferences {
     }
 }
 
-fn endpoint_path(root: &Path, socket: &Path) -> PathBuf {
+/// The GPUI client's own state directory, shared by preferences and logs.
+pub(crate) fn state_dir() -> Option<PathBuf> {
+    env::var_os("XDG_STATE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join(".local/state"))
+        })
+        .map(|root| root.join("herdr/gpui"))
+}
+
+fn endpoint_path(dir: &Path, socket: &Path) -> PathBuf {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in socket.as_os_str().as_encoded_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    root.join("herdr/gpui")
-        .join(format!("local-{hash:016x}.json"))
+    dir.join(format!("local-{hash:016x}.json"))
 }
 
 fn read_chrome(path: &Path) -> crate::Result<Chrome> {
@@ -453,6 +780,25 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[core::prelude::v1::test]
+    fn font_size_input_accepts_only_whole_values_in_range() {
+        for (input, expected) in [
+            ("8", Some(8.)),
+            ("48", Some(48.)),
+            (" 24 ", Some(24.)),
+            ("7", None),
+            ("49", None),
+            ("14.5", None),
+            ("-8", None),
+            ("+12", None),
+            ("12px", None),
+            ("", None),
+            ("999999", None),
+        ] {
+            assert_eq!(parse_font_size(input), expected, "{input:?}");
+        }
+    }
 
     struct TestDirectory(PathBuf);
 
@@ -725,7 +1071,7 @@ mod tests {
 
     #[core::prelude::v1::test]
     fn endpoint_paths_use_stable_fnv1a() {
-        let root = Path::new("/state");
+        let root = Path::new("/state/herdr/gpui");
         assert_eq!(
             endpoint_path(root, Path::new("hello")),
             Path::new("/state/herdr/gpui/local-a430d84680aabd0b.json")

@@ -94,7 +94,7 @@ impl HerdrWindow {
     pub(super) fn render_app_update(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let font = &self.config.ui;
         let theme = &self.theme;
-        let accent = rgb(theme.foreground).blend(rgba((theme.palette[4] << 8) | 0x70));
+        let accent = crate::menu::accent(theme);
         let state = self.update_preview.as_ref().unwrap_or(self.updater.state());
         let (message, action) = match state {
             State::Disabled(reason) => (format!("In-app updates unavailable: {reason}"), None),
@@ -207,7 +207,7 @@ impl HerdrWindow {
                             .px_2()
                             .py_1()
                             .cursor_pointer()
-                            .rounded(px(4.))
+                            .rounded(px(crate::config::corners::CONTROL))
                             .text_color(rgb(theme.muted))
                             .hover(|s| s.bg(rgb(theme.active)).text_color(rgb(theme.foreground)))
                             .child("Close")
@@ -254,7 +254,7 @@ impl HerdrWindow {
                             div()
                                 .debug_selector(|| "app-update-preview".into())
                                 .p(px(12.))
-                                .rounded(px(4.))
+                                .rounded(px(crate::config::corners::CONTROL))
                                 .bg(rgb(theme.background))
                                 .child(div().font_weight(FontWeight::SEMIBOLD).child("QA preview"))
                                 .child(div().pt(px(4.)).text_color(rgb(theme.muted)).child(
@@ -275,7 +275,7 @@ impl HerdrWindow {
                     .debug_selector(|| "app-update-releases".into())
                     .px(px(12.))
                     .py(px(8.))
-                    .rounded(px(4.))
+                    .rounded(px(crate::config::corners::CONTROL))
                     .cursor_pointer()
                     .text_color(rgb(theme.muted))
                     .hover(|s| s.bg(rgb(theme.active)).text_color(rgb(theme.foreground)))
@@ -301,7 +301,7 @@ impl HerdrWindow {
                     .debug_selector(|| "app-update-action".into())
                     .px(px(12.))
                     .py(px(8.))
-                    .rounded(px(4.))
+                    .rounded(px(crate::config::corners::CONTROL))
                     .bg(rgb(self.theme.active))
                     .cursor_pointer()
                     .child(label)

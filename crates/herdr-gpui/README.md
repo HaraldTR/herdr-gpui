@@ -1,17 +1,28 @@
 # Herdr Native Shell
 
-A GPUI 0.2.2 client for a Local daemon and saved SSH hosts, with macOS support,
-experimental Linux x86_64/ARM64 builds, and an experimental Windows build with
+A GPUI 0.3.6 (`gpui-pre`) client for a Local daemon and saved SSH hosts, with macOS
+support, experimental Linux x86_64/ARM64 builds, and an experimental Windows build with
 headless CI coverage. See [Windows](#windows) for what is unavailable there.
 It starts an installed local `herdr server` when absent; explicit socket and
 development targets remain attach-only. It does not link or install Herdr, stop
 daemons, spawn a local PTY, or emulate a terminal. Herdr's remote bridge may start
 the named remote session. SSH requires an installed POSIX Herdr, noninteractive authentication,
-and an already trusted host key.
+and an already trusted host key. For hosts that need MFA or a password, configure
+`ControlMaster auto` with a `ControlPath` in `~/.ssh/config` and authenticate once
+with `ssh HOST` in a terminal: the app reuses that master connection while it lives,
+but never creates or keeps one itself. Set `ForwardAgent yes` only for trusted hosts;
+Herdr servers that support it then keep remote panes' `SSH_AUTH_SOCK` working
+across reconnects. A failed host is retried with backoff capped at 30 seconds.
 Runtime dependencies include GPUI, `herdr-client`, `serde_json` for API parameters,
 `ureq` for background GitHub owner avatar downloads, and `serde`/`config` (aliased
 as `config_loader`, TOML-only) for GUI configuration. `toml` preserves strict
 field types during deserialization; `toml_edit` preserves comments on settings saves.
+
+Solid light/heavy box-drawing characters and block elements (including fractional
+blocks and quadrants) are drawn on the terminal cell grid, with device-pixel-aligned
+edges. Borders and block-art logos remain joined across rows and columns regardless
+of font line spacing. Dashed, double, rounded and diagonal lines, shading characters,
+and graphemes with combining marks continue to use font rendering.
 
 ```sh
 cargo run -p herdr-gpui
@@ -26,8 +37,20 @@ rules. `--socket` must name the binary **client** socket, not the JSON API socke
 in the single-row status bar and host rows. Endpoints reconnect independently with
 bounded backoff; Terminal > Reconnect retries the selected endpoint immediately,
 without input replay. Detach pauses retries for that endpoint until Reconnect.
-The status dot pulses amber during local daemon startup, is green when connected,
-and red otherwise.
+The status dot pulses amber during local daemon startup and is red when disconnected.
+Healthy connections leave the status bar quiet; connection indicators live in the
+device picker. Startup, disconnection, and operation errors remain in the status bar.
+
+Normal launches restore the main windows left open at quit, including each
+window's size and screen position, using the current launch's connection options.
+Closing an individual window removes it from the saved set; closing the final
+main window retains its geometry for next time. Additional windows cascade from
+the last open main window. Fullscreen windows restore to their normal rectangle.
+Each window reopens on the display it was on; if that display is disconnected,
+it opens on the primary display, resized and moved to fit. Logs windows
+are not restored. Geometry is stored in `window-state.json` under
+`$XDG_STATE_HOME/herdr/gpui`, or `~/.local/state/herdr/gpui` by default. Native
+test modes skip this state. Up to 64 main windows are restored.
 
 The Rust GitHub updater verifies signed archive manifests and presents a shared
 GPUI panel through **app updates** in the sidebar menu or **Herdr > Check for
@@ -80,7 +103,7 @@ hosts remain visible. Host and repository collapse state is endpoint-scoped, and
 Agents aggregates all connected endpoints with host labels. The catalog is read
 through `herdr-client` every two seconds; changes to targets, sessions, enablement,
 and ordering are reflected without restarting. Catalog errors preserve the last
-valid list. The GUI never edits saved hosts or installs remote software.
+valid list. Saved-host edits and remote provisioning are delegated to Herdr's CLI.
 An explicit `--socket` is isolated: it never loads or connects saved hosts, or
 reads/writes saved selection. Other launches read `client/endpoint-selection.json`
 once, under the same release/dev state root as the catalog. Local remains usable
@@ -93,8 +116,109 @@ catalog selection (normally Local), matching upstream. Live removal/disable
 returns to Local and cancels pending restoration; re-enabling does not steal focus.
 Automatic activation failure returns to Local without overwriting the saved
 preference or repeatedly attempting the same handoff. Write failures are shown
-in the status bar and do not undo the UI choice. Host editing remains in
-`herdr machine`.
+in the status bar and do not undo the UI choice. Rename, remove, enable, and
+disable remain available through `herdr machine`.
+
+The fixed bottom-left device picker offers **All Devices**, **Local**, saved SSH
+devices, and **Add Device…**. All Devices shows Spaces and Agents across hosts
+without changing the active terminal. Choosing a device filters both lists and
+switches the terminal through the existing surface handoff. While filtered,
+navigation to another device follows that device; removal or disable falls back
+to Local. The filter is window-local and starts at All Devices. The adjacent gear
+opens the existing Settings page (also available with `Cmd-,`). Beside it, the
+sessions icon lists this machine's sessions and each saved device's own, grouped
+under the device, with the device this window is on leading (also available with
+`Cmd-Shift-S`). A device's list is asked for over SSH, at most once every 30
+seconds while the popup is open; until it answers, and if it never does, the
+device still offers the session it was saved with. Choosing a session attaches
+this window to it on that device.
+
+The current session has an accent highlight; status dots and delete icons stay
+aligned across rows. The **Add session…** row has no status dot.
+Session and worktree context-menu actions share right-aligned 14-pixel icons
+in 24-pixel slots. Trash buttons have a separate high-contrast hover background,
+including on highlighted session rows.
+
+Each section offers **Add session…**, opening a centered modal. Enter a name and choose **Create and connect**
+to start a named headless server locally, or attach through the saved device's
+SSH bridge (which starts its named server if absent). This never opens a nested
+interactive Herdr TUI. Names use 1–64 ASCII letters, digits, dots, underscores or
+hyphens, excluding `.` and `..`. Names already in the cached list are refused;
+if another client creates that name meanwhile, Herdr connects to it rather than
+overwriting it. Startup failures appear in the connection status.
+
+Choose a row's **trash icon**, or select it with the arrow keys and press Delete /
+Backspace, then confirm **Delete permanently** in the centered approval modal.
+Confirmation stops the named session, terminates its running processes, and
+deletes its saved state. Matching endpoints in this window move to `default`
+before the operation, including when deleting the currently displayed session.
+Cancel does not stop or switch anything. Herdr cannot delete `default`.
+The picker stays visible beneath the confirmation modal. After successful
+deletion, the row fades over 260 ms without moving or resizing the picker;
+it is removed after the fade finishes. Progress stays inside the row rather
+than adding a header. Failed deletions keep the row and show the error.
+A remote session still
+referenced by a saved device profile must have that profile removed or
+reconfigured first, so a later launch cannot silently recreate it.
+
+Deletion runs `herdr session stop --json -- NAME` followed by
+`herdr session delete --json -- NAME`, locally or over noninteractive SSH.
+Local stopping has a 20-second deadline and deletion a 15-second deadline; the
+whole SSH operation has a 45-second deadline. There are no automatic retries.
+An already-stopped session can still be deleted: the delete command rechecks
+running state and refuses any daemon that remains live or restarted meanwhile.
+The picker refreshes after success or
+failure, including timeouts whose result is uncertain. File, process and SSH
+work runs off the UI thread, with one deletion outstanding per window.
+Local add/delete is unavailable with explicit sockets or development catalogs;
+saved-device management is unavailable on Windows or for disabled devices.
+Remote hosts need an installed Herdr supporting the session commands and
+noninteractive SSH authentication. The GUI does not install or update it.
+
+**Add Device…** accepts an SSH target, label, and optional remote session (default:
+`default`). Herdr's `machine add` saves a new profile every time and takes no
+lock, so the dialog keeps a host from being saved twice itself. A host counts as
+already saved when a profile with the same session reaches the same user, host
+name, and port as `ssh -G` resolves them, so an SSH alias, `user@address`, and
+`ssh://` spellings of one machine all match. The host is claimed for this app
+before anything else, so a second add from any window is refused while the
+first runs. The catalog file is read again right before `machine add` runs and
+right after: if another client saved the same host in between, the profile added
+second is removed, so exactly one remains. A terminal setup keeps its claim for
+15 minutes, because the GUI cannot see when its `machine add` finishes; another
+client adding the host during that window can still create a duplicate.
+
+Right-click a saved SSH device's header in the Spaces list to **Rename** it or
+choose **Remove device…** to forget it. Renaming runs `herdr machine rename`;
+an empty name falls back to the SSH target, as when adding. Removal runs the installed `herdr machine remove`, which
+edits only the local catalog: the host's own Herdr keeps running. When the
+device has its own GitHub sign-in, the confirmation also offers to delete it,
+since its account panel goes away with the device. Local has no such menu.
+
+The label is optional: an empty one names the device after its SSH target as
+typed, such as `user@host` or an address. Once the device is saved, the dialog
+closes by itself.
+
+**Add device** first checks the host over non-interactive SSH, using
+the same executable search and compatibility rules as the connection bridge, and
+never installs or starts anything while checking:
+
+- Herdr running, or installed but stopped: the installed `herdr machine add`
+  runs without a terminal and saves the device. It starts a stopped server
+  itself. Any approval it would need fails instead of waiting for input.
+- Herdr missing: the dialog asks "Herdr was not detected on the host. Should we
+  install it?" An outdated Herdr asks to update it instead.
+- SSH needs a prompt (unknown host key, password, passphrase), the check failed,
+  or saving without a terminal failed: the dialog offers to continue in a
+  terminal.
+
+Accepting creates a new workspace on this device's Herdr and types
+`herdr machine add` into its shell. Herdr handles SSH prompts, approval to
+install/update remote software, server startup, and saving the machine only after
+successful setup; complete any prompts in that workspace. The saved device
+appears automatically on the next catalog refresh. No credentials are collected
+by the GUI. Explicit-socket and development-catalog windows do not offer setup,
+and saved SSH devices remain unsupported on Windows.
 
 Switching revokes the old host's focus before releasing its surface, then resizes
 and activates the selected host. Input waits for the activation acknowledgement
@@ -167,7 +291,9 @@ edits and unsafe paths, and run off the UI thread. Symlinked config files and
 user-controlled symlink ancestors are refused rather than replaced. Save success
 is separate from the local daemon reload request, which is reported as queued,
 not acknowledged. Opening Preferences, its Reload button, and the daemon's reload
-signal reread the local file; there is no filesystem watcher. On Windows shared
+signal reread the local file. Debounced disk polling also reloads saved changes,
+deferring reloads during active settings saves and font/theme picker operations.
+On Windows shared
 settings are readable, but shared-file writes are unsupported; native settings
 remain editable through the Windows-capable local override writer.
 
@@ -199,7 +325,9 @@ the in-app menu, the command palette, or `cmd-=` / `cmd--` / `cmd-0`. Adjustment
 are clamped to the same 8..48 range, apply to the terminal only, and are never
 written to disk, so a reload or a restart returns to the configured size.
 
-Set top-level `confirm_close_tab = false` to close tabs without confirmation
+A tab asks before closing only while one of its agents is working or blocked
+on a prompt; tabs whose agents are idle or done, or that have none, close at
+once. Set top-level `confirm_close_tab = false` to never ask for tabs
 (including their running processes), and `show_agents = false` to hide the Agents
 section and give Spaces the full sidebar height. Both default to `true`. Pane
 closures still ask for confirmation. Saved edits apply automatically.
@@ -226,21 +354,94 @@ already waiting in a connection inbox from the disabled period are discarded too
 Failed reloads preserve current settings. QA
 previews remain available regardless of delivery settings.
 
-Enable a TUI-like compact sidebar with a top-level setting in `config-gpui.local.toml`
-(before any table headers):
+The sidebar button at the left of the titlebar hides or shows the sidebar.
+It stays available when the sidebar is hidden; the existing View menu command and shortcut still work.
+In **Settings > Appearance**, click **Show usage** to turn the bottom quota display on or off.
+The choice is saved to `config-gpui.local.toml` and follows the existing `[usage] show` setting.
+
+The app's own colored marks and labels (status dots and words, pull request
+badges, diff counts, usage warnings, online dots, toasts) keep a minimum
+contrast against the sidebar, menus, and selected rows. Each color keeps its
+hue and moves only its lightness, and only as far as it has to, so a theme
+that already reads well is drawn as authored: on dark themes the status dots
+keep upstream's colors, while light themes such as Catppuccin Latte get darker
+versions of the same hues. **Settings > Appearance > High contrast**, or
+top-level `contrast = "high"`, raises that minimum from 3:1 (the WCAG level for
+graphics) to 4.5:1 (the level for text), lifts dim labels to it too, and makes
+selected rows stand further off the surface. Terminal output is never
+adjusted; programs keep the colors they asked for.
+
+Choose the sidebar layout from **View > Layout**, which lists every layout,
+checks the one in use, switches at once, and saves the choice to
+`config-gpui.local.toml`. The same setting can be written by hand as a
+top-level line there (before any table headers):
 
 ```toml
 layout = "compact"
 ```
 
-The default is `layout = "normal"`. Compact mode hides workspace branch lines and PR change
-counts, removes row padding above and below labels, and tightens horizontal and
-heading spacing in both Spaces and Agents. PR numbers, status indicators, tree
-guides, and agent-name lines remain visible; font sizes and terminal spacing are
-unchanged. Saved edits apply automatically; there is no UI toggle yet.
+Three densities of Herdr's own rows are available:
+
+- `normal` (managed default): TUI-like spacing, with branch lines beneath root workspaces,
+  single-line worktree children, and two-line agents. Modest horizontal and heading
+  spacing keeps the sidebar readable without padding every row.
+- `compact`: the tightest spacing, hiding all workspace branch lines.
+- `comfortable`: the previous Normal layout, with roomier padding, branch lines
+  on all workspace rows, and PR addition/deletion counts.
+
+Add `-rounded` to any density (`normal-rounded`, `compact-rounded`,
+`comfortable-rounded`) for inset rows with rounded corners, a bordered selection,
+and title-case section headings. Rounded rows are a little taller, and worktree
+children keep their indent without tree guides, which would break across the
+gaps between rows.
+
+Normal and Compact show PR numbers without change counts. Status indicators and
+agent-name lines remain visible in every density, and flat ones keep tree guides;
+font sizes and terminal spacing are unchanged. Saved edits apply automatically.
+
+When the daemon's `[ui.sidebar.agents]` rows name the `state_text` token, the
+GUI shows the same status word beside each agent, in the activity dot's color,
+in every layout. An agent with its own `rows_by_agent` entry follows that entry
+instead, as the terminal client does. Rows without the token keep the dot
+alone, so an unconfigured pair of clients renders alike.
+Status dots and words follow the contrast setting described above.
+
+Three more layouts draw rows with a design of their own, each with fixed
+spacing:
+
+- `superset`: one line per row. An icon slot carries the pull request's state
+  or the repository owner, with the activity status as a dot on its corner; the
+  PR's change counts sit on the right, and the focused row is filled with a
+  stripe down its leading edge. Agents show where they run after their name.
+- `orca`: inset cards with a status column, the name and a `primary` mark on a
+  repository's own checkout, then a meta line with the host, the branch when it
+  differs from the name, and the pull request. Agents are single compact lines.
+- `minimal`: one line per row with only the status dot and the name, for narrow
+  sidebars or long lists.
+
+New installs start with `comfortable-rounded`: the first launch writes it into
+the new `config-gpui.local.toml`. Existing override files and migrated personal
+configs are left alone, so current users keep the managed `normal` default.
+Remove that line to follow the managed default.
+
+In code, each layout maps to a `RowLayout` in `src/sidebar/layouts/` and the
+spacing around it. Render hands the layout typed row data and a shared
+per-frame `RowContext`, and marks each row with `Cell::selected`,
+`Cell::highlighted`, and `Cell::lift`, which says which row a workspace drag
+carries so each layout draws its own lifted card. Layouts are assembled from
+the shared pieces in `layouts/parts.rs`: a `Line` gives fixed pieces (icons,
+status, fold) their size, lets labels shrink to a share of the row, and hands
+the rest to the name, so the whole `minimal` layout is under a hundred lines.
+
+Agent names have small theme-tinted icons for OpenCode, Claude Code, Codex
+(OpenAI), Gemini, Cursor, and GitHub Copilot, selected from the daemon's agent identity. Other
+or missing identities use a generic terminal icon, regardless of custom names.
+Icons sit immediately before the name, including orphan agents whose name is
+on the first line, and reserve space before long names are truncated.
 
 To customize spacing too, use a `[layout]` table **instead of** the top-level
-string. Existing spacing-only tables remain supported and use normal mode:
+string, replacing it (including the one a new install writes): TOML rejects a
+file with both. Existing spacing-only tables remain supported and use normal mode:
 
 ```toml
 [layout]
@@ -248,15 +449,16 @@ mode = "compact"
 sidebar_gap = 8
 ```
 
-`sidebar_gap` (finite 0..64 logical pixels,
-default `8`) is blank space between the sidebar and the terminal beside it, so
-the first column does not sit against the divider; `0` restores the flush edge.
+`sidebar_gap` (finite 0..64 logical pixels, default `0`) is optional blank space between the sidebar and the terminal beside it.
+The default keeps the first column flush with the divider; an explicit value such as `8` adds a gutter.
 The terminal keeps the remaining width, so the daemon is resized to the columns
 it actually has, and the gap is ignored while the sidebar is hidden.
+Any space smaller than one character cell at the right or bottom edge takes the adjacent terminal cells' background colors, without stretching text or changing input coordinates.
 
 The `[clipboard_toast]` table controls the `copied to clipboard` flash shown
-after a terminal selection is copied. It is the one GUI setting that starts from
-the daemon's own config: `[ui.toast.clipboard]` in `config.toml` (resolved like
+after a terminal selection is copied. Like the keymap (see the daemon `[keys]`
+under keyboard shortcuts), it starts from the daemon's own config:
+`[ui.toast.clipboard]` in `config.toml` (resolved like
 the sound settings below) answers it first, so setting it there covers both
 clients, and each key here overrides that answer on its own.
 
@@ -400,10 +602,11 @@ Build identity and icon selection are described in the
 
 The reference is Zed's `crates/platform_title_bar/src/platform_title_bar.rs` and
 window options in `crates/zed/src/zed.rs`, not a build dependency. Double-click calls
-`Window::titlebar_double_click()` to honor the OS preference. Unlike newer Zed,
-registry GPUI 0.2.2 has no macOS `start_window_move` implementation and ignores
-`WindowControlArea::Drag`. We leave `is_movable` unchanged and rely on native AppKit
-dragging, rather than adding ineffective custom drag handlers or platform patches.
+`Window::titlebar_double_click()` to honor the OS preference. We leave `is_movable`
+unchanged and rely on native AppKit dragging, with no custom drag handlers or platform
+patches. That choice predates GPUI 0.3.6: 0.2.2 had no macOS `start_window_move`
+implementation and ignored `WindowControlArea::Drag`, while 0.3.6 implements
+`start_window_move`.
 
 Headless tests check the actual root header/center/account-slot bounds at wide,
 minimum, and narrow sizes, including mock fullscreen entry/exit, and that the
@@ -427,14 +630,22 @@ the highlight, and shows the `copied to clipboard` flash described under
 [Configuration](#configuration). Selection is client-local: it reads the surface
 the client already has, sends nothing to the daemon, and asks it for nothing.
 
+A program that copies with OSC 52 — many editors and agent CLIs do, especially
+when they own the mouse — is honored too: the daemon forwards the bytes to this
+client, which writes them to the same system clipboard and shows the same flash.
+Only bounded UTF-8 text is written; malformed, non-text, or oversized writes are
+dropped without replacing what was already on the clipboard.
+
 A selection stays inside the pane it started in, and a drag that leaves the pane
 or the window selects up to its edge rather than into its neighbor. A selection
 inside a popup takes the popup's own cells, never the panes it covers. Because
 each end anchors on the half of a cell the pointer sat in, a single character is
 selectable, while a press that never crosses a midpoint selects nothing.
 
-Copied rows are separated by newlines. Wide graphemes copy once rather than
-twice, concealed cells copy as blanks so hidden content does not reach the
+Copied rows are separated by newlines. Wide graphemes copy once, without spaces
+from their continuation cells; actual selected spaces are preserved. A partial
+wide grapheme copies only when its leading cell is selected.
+Concealed cells copy as blanks so hidden content does not reach the
 clipboard, and trailing blanks are dropped only from rows selected through to the
 pane's right edge, where a terminal pads short lines. A copy is bounded, and one
 too large to copy reports in the status bar instead.
@@ -442,6 +653,9 @@ too large to copy reports in the status bar instead.
 The highlight is cleared by the release that copies it, and by a reconnect,
 detach, or endpoint switch. Cmd-V still sends semantic paste; there is no copy
 keystroke, because the release has already copied and nothing stays selected.
+For the same reason, the native **Edit** menu enables only **Paste** while a
+terminal has focus. In dialogs and search fields, **Cut**, **Copy**, **Paste**,
+and **Select All** do the same as Cmd-X, Cmd-C, Cmd-V, and Cmd-A.
 
 ## File Drops
 
@@ -488,7 +702,92 @@ bridge files, they are not owned or deleted by Herdr on disconnect. Network loss
 can prevent cleanup, and kernel-blocked local filesystem operations cannot be
 forcibly interrupted. A copy stalls out after 30 seconds without progress.
 
-## Remote Images
+## Teleport
+
+Right-click a linked worktree and choose Teleport... to move it to another
+connected host: its branch and commits, staged, unstaged and untracked changes,
+tabs and splits, the programs running in them, and agent sessions. It is offered
+on Linux and macOS clients when the worktree's host is the local session or a
+saved SSH host; custom socket endpoints are not scripted.
+
+1. **Choose a host.** Every other enabled host is listed at once, connected or
+   not; nothing is probed until one is chosen. The review then finds where the
+   worktree goes there: the checkout it once left (see below), else the
+   repository if it is open, matched by normalized Git remote (`origin` first,
+   then any remote) or, only when this repository has no remotes, by name.
+   Otherwise Teleport sets it up: a checkout of the same repository at the same
+   place under the home directory (`~/code/app`) is opened as a space; failing
+   that, the repository is cloned there from `origin` without prompting, or,
+   when that host cannot reach `origin`, copied from this machine with its
+   branches and tags and `origin` restored. A different repository already at
+   that place is left alone and the copy goes to `<place>-teleport`.
+2. **Review.** The dialog lists the branch, unpushed commits, changed and
+   untracked files, and what each pane becomes. The destination's branch must be
+   absent or an ancestor of this one, and must not be checked out there.
+3. **Teleport.** Closing the dialog does not stop a move in progress; its result
+   arrives as a flash, and success switches to the new workspace on the
+   destination, waiting for that host to connect and list it if need be.
+
+Commits travel as a Git bundle holding only what the destination lacks. The
+uncommitted work travels as two temporary commits, built through a temporary
+index so the source checkout, index and branch are not modified. The branch is
+set to the source's commit, fast-forwarding a branch already there but never
+overwriting one that diverged. The destination's `herdr worktree create` checks
+it out under the same name, then the staged index and working tree are restored exactly, binary files
+included. Ignored files such as `.env` and build output stay behind, and so do
+submodule contents.
+
+When `origin` is on GitHub and the destination cannot reach it by itself (no
+SSH key there, or an unknown host key), the review says so and the move lends
+it this machine's `gh auth token`. The token travels over the script's stdin
+and is stored in the repository's Git directory, `.git/herdr/github-token` (mode
+600), so no working tree or commit ever holds it. A repository-local credential
+helper answers `https://github.com` from that file, `git@github.com:` URLs are
+rewritten to HTTPS for that repository, and `.envrc` gains an `export GH_TOKEN`
+that reads the file, for `gh` under direnv; it is excluded locally, and a
+repository that tracks its own `.envrc` is left untouched. Replace the file to
+rotate the token. If `gh` is not signed in here, the review warns that pull
+and push will not work there.
+
+Tabs, split directions and ratios, and custom tab and workspace labels are
+rebuilt. Each pane starts in the same directory relative to the checkout.
+Running commands start again with their arguments, with paths under the
+checkout moved to the new checkout. Environment variables, shell history,
+background jobs and unsaved editor buffers do not carry over.
+
+Agent sessions move in each agent's own format, so the full history resumes:
+
+| Agent | Moved as | Resumed with |
+| --- | --- | --- |
+| Claude Code | transcript into the new cwd's `~/.claude/projects` directory | `claude --resume <id>` |
+| Codex | rollout under `~/.codex/sessions` | `codex resume <id>` |
+| opencode | `opencode export`, then `opencode import` | `opencode --session <id>` |
+| pi, omp | session file into the new cwd's session directory | `pi --session <file>` |
+
+The checkout path is rewritten inside each moved session. Model and permission
+flags from the original command line are kept. Initial prompts are dropped. An
+agent the destination lacks, or one with no reported session, is asked first to
+write a handoff note to `.herdr/teleport/handoff-N.md`. The note travels with the
+changes, even where `.herdr` is ignored. The same agent, or else the first
+installed of Claude Code, Codex, opencode and pi, then starts with that note.
+Anything nothing can continue is listed as skipped.
+
+Once the destination worktree, changes and tabs exist, the source workspace's
+programs stop: its tabs are replaced by one idle `teleported` shell tab, and the
+workspace and checkout stay. Herdr has no moved or disabled state, so this
+client remembers the move (`teleported.json` in its state directory) and marks
+the row with a teleport icon. Its menu offers Go to teleported copy and Clear
+teleported mark instead of Teleport. The copy on the destination offers
+Teleport back, which opens Teleport already aimed at the host the work came
+from. Teleporting the work back picks that checkout as the destination: its current state, committed or not, is saved to
+`refs/herdr-teleport/backup/...` first, then it takes the returning branch and
+changes, its tabs are rebuilt, and the mark is cleared.
+Everything runs as noninteractive scripts calling Git and the `herdr` CLI on
+each host. Remote hosts use the terminal's SSH trust and authentication policy,
+and the UI thread never blocks. The GUI connection's API does not expose layouts,
+process details or agent sessions, which is why Teleport uses the CLI.
+
+## Images
 
 On a selected SSH endpoint, drop one PNG, JPEG, GIF, WebP, or BMP image onto a pane
 or popup to send it through Herdr's existing image bridge. Clipboard images use
@@ -497,7 +796,12 @@ image-paste shortcut). Ctrl-V retains its normal terminal meaning when the
 clipboard has no image. A pasted absolute image-file path is also recognized,
 including the quoted/backslash-escaped paths used by terminal file drops.
 
-The remote daemon writes a temporary file and pastes its remote path into the
+Local endpoints on macOS and Linux use the same bridge for Cmd-V clipboard
+images, because a GUI text paste cannot carry image data. Local drops and pasted
+paths stay ordinary path pastes, and local Ctrl-V is sent to the terminal
+unchanged so agents can read the shared clipboard themselves.
+
+The daemon writes a temporary file and pastes its path into the
 target terminal. OpenCode or another agent can recognize that path as an image;
 the GUI never presses Enter or claims that the agent accepted an attachment.
 Files are connection-owned and Herdr removes them when the client disconnects.
@@ -517,8 +821,10 @@ rejected instead of silently losing animation. Invalid, too-large-to-process,
 and unsupported images show an `Image discarded` notification with the reason;
 no fallback local path is pasted for resize failures. Unreadable, empty, or
 nonregular image-file candidates retain the TUI's original path-paste fallback.
-TIFF, HEIC, and SVG are not image-bridge formats but can be dropped as ordinary
-files using SSH file copy.
+Clipboard images published only as TIFF (for example by Preview) are converted
+to lossless PNG in the background, and use the same resize path when that PNG
+is too large. Dropped TIFF, HEIC, and SVG files are not image-bridge formats but
+can be dropped as ordinary files using SSH file copy.
 
 Switching endpoints, reconnecting, or invalidating the target cancels pending
 work. Cancelling an image already partially written closes that client connection
@@ -536,10 +842,44 @@ chunks and a three-second deadline between reads, but an OS-blocked network/FUSE
 filesystem operation cannot be forcibly interrupted. Such a read stays isolated
 from the UI and holds its bounded preparation slot until it returns.
 
-Local terminals retain text/path paste behavior, as in Herdr's remote-only image
-bridge. Windows SSH and image uploads remain unsupported. Native clipboard/drop
+Windows SSH and image uploads, including local clipboard images, remain
+unsupported. Native clipboard/drop
 and real SSH behavior require explicit desktop/host verification in addition to
 the mock-peer and headless tests.
+
+### Native Clipboard Regression Test (macOS)
+
+With an active desktop, Xcode command-line tools (`/usr/bin/python3`), and an
+explicitly selected installed daemon:
+
+```sh
+just test-gui /opt/homebrew/bin/herdr
+# Only the daemon-backed native test:
+HERDR_TEST_BINARY=/opt/homebrew/bin/herdr cargo test --locked -p herdr-gpui \
+  --features integration-test --test live_gui native_gui_live \
+  -- --ignored --nocapture --test-threads=1
+```
+
+The parent process preserves every OS clipboard item/type as opaque in-memory
+data, then restores it after the GUI exits, including failure/timeout cleanup.
+Do not copy new content while this test owns the clipboard. No clipboard backup
+is logged or written to disk; only synthetic fixtures reach the test GUI.
+
+The test launches a private daemon and the real application (not GPUI's headless
+test platform). It publishes UTF-8 plain text, Unicode, multiline text, PNG-only,
+and TIFF-only pasteboards, and sends an AppKit Cmd-V key equivalent to the exact
+fixture window. A raw-mode process in the daemon's terminal checks the exact
+bracketed-paste bytes followed immediately by typing and Enter. Image checks
+verify the pasted path, unchanged PNG bytes, and lossless TIFF-to-PNG pixels.
+Local image-file paths remain literal; remote paths must be staged by the daemon.
+
+The same matrix exercises the real SSH connection worker and remote paste policy
+through a sandbox-only `ssh` substitute that relays to the isolated daemon socket.
+It never invokes OpenSSH, contacts a network host, or discovers a personal daemon.
+This covers the process/wire/remote-routing path, not SSH authentication or a
+different remote operating system. AppKit injection verifies native key routing,
+not hardware keyboard delivery or global shortcut interception. Headless clipboard
+tests remain useful for cancellation and ordering, but do not exercise NSPasteboard.
 
 ## Terminal Links
 
@@ -555,6 +895,186 @@ never left the half-cell it pressed in.
 Plain URL detection is limited to one row within one pane; links that wrap or
 reach the right edge need explicit terminal hyperlink metadata. Other URI schemes
 and local file paths are not activated.
+
+Set `open_links_in = "browser-tab"` to open links in a [browser tab](#browser-tabs)
+instead. Alt-click (Option-click on macOS) opens a link in the other target.
+
+## Editor Groups
+
+The split button at the right end of the tab strip (or **Split Editor**,
+`Cmd-\`) splits the view into side-by-side groups, as an editor does: keep an
+agent's terminal in one group and its page in another. Split as often as you
+like; each split opens a group to the right of the one it came from, showing
+the same tab. Splitting opens nothing new.
+
+- Every group lists the same tabs. Groups show different Herdr tabs live
+  side by side: each group showing a terminal has its own client connection
+  to the daemon, which keeps a focused tab per client. The group in use holds
+  the window's connection and gets the keyboard; the others only display
+  their tab, report themselves unfocused so notifications, sounds, and the
+  title follow the group in use, and focus their own tab again when an agent
+  or the CLI moves every client. Pressing a group swaps its connection in.
+- A tab is live in one group at a time: the daemon sizes a tab for a single
+  client, and a page is placed once. A terminal tab picked in two groups is
+  live in the one used last, and the other paints the same picture of it, as
+  an editor shows one file twice; a group of another width shows it clipped
+  or padded. Pressing that group brings the live tab there. A page shown in
+  another group is stood in for with **Show Here**.
+- The group in use has the keyboard, and its chosen tab carries the accent.
+  **+** opens a Herdr tab in that group; New Browser Tab and Close Tab act
+  there too. Close Tab in an empty group closes the group.
+- Drag a divider to resize the groups beside it. Groups are the window's own,
+  per workspace. A group's own connection closes with the group, or when the
+  window leaves the workspace or host; returning reconnects it.
+- Each workspace's groups, their tabs and widths, and the group in use are
+  saved in `$XDG_STATE_HOME/herdr/gpui/editor-groups.json` and come back
+  after a restart; the group in use returns to its own tab. Closing a
+  workspace in Herdr forgets its groups, and a damaged file starts every
+  workspace unsplit. With several windows on one workspace, the last change
+  is what is saved.
+- Closing in a group only takes tabs out of that group's strip, as an
+  editor's groups do: they stay open in Herdr, in the browser, and in every
+  other group. Split, a tab's close button does this; **…** offers **Close**,
+  **Close Others**, and **Close All**, which closes the group. A group left
+  with no tabs closes, and a tab closed in every group stays in the group in
+  use. Unsplit, a tab's close button closes it in Herdr, through its
+  confirmation, as before; nothing in **…** ever closes a Herdr tab.
+- **…** also offers **New Browser Tab** and **Split Right**.
+- A split's new group opens from the right, sliding in at its own width
+  while the group it came from gives up the room; a closed group folds away
+  to the right as its neighbour takes the room back.
+- A tab that opens grows into its strip, and one that closes, in Herdr or
+  in a group, shrinks out where it stood. The tabs a strip already has when
+  the window first draws it appear at once.
+
+## Browser Tabs
+
+A browser tab shows a web page in place of the terminal, next to the
+workspace's Herdr tabs. Herdr panes are always terminals, so browser tabs
+belong to this app alone: the daemon, the TUI, and other clients never see
+them. Every window lists the same tabs for a workspace, and each window has its
+own page for each one. Tabs are saved in
+`$XDG_STATE_HOME/herdr/gpui/browser-tabs.json` (default `~/.local/state/`) and
+come back after a restart; closing a workspace in Herdr removes its tabs.
+
+- Open one with **New Browser Tab** in the command palette, from a clicked link
+  (see [Terminal Links](#terminal-links)), or from an agent (below).
+- The toolbar has back, forward, reload, the address field, and a button that
+  opens the page in the system browser. The address field accepts bare hosts:
+  `localhost:3000` becomes `http://localhost:3000/`.
+- Close Tab and Close Pane close the browser tab being shown, without asking.
+  Clicking a Herdr tab, or switching Herdr tabs in the workspace, shows its
+  terminal again.
+- Only `http` and `https` pages open, plus local files an agent shows (below).
+  Pages cannot navigate to other schemes
+  (so `file:` and applications' custom URL schemes stay closed), downloads are
+  refused, and a page's new windows open as new browser tabs. The only
+  messages a page can send the app are annotation picks, which fill a draft
+  note and nothing else, and the app runs only its own scripts in pages. On
+  Windows, a frame inside a page that links to an application's URL scheme
+  gets WebView2's own confirmation prompt rather than being refused outright.
+- Pages are native web views (WebKit on macOS, WebView2 on Windows) layered
+  above the window, so a page steps aside for a menu or popover that would
+  fall over it, and for a dialog, which dims the whole window. A page the menu
+  does not reach keeps showing. On macOS a page that steps aside leaves a
+  picture of itself, taken as the menu opens; on Windows its place is empty
+  until the menu closes. Toasts that fall over a page are hidden behind it.
+- Linux has no embedded pages yet: browser tab requests open the system
+  browser, and local files and annotations are unavailable.
+
+### Annotating A Page
+
+**Annotate** in a browser tab's toolbar lets you pin notes to a page and send
+them to the agent that opened it, so it can change the page.
+
+- Hover to outline an element and click to pick it, or select text. For
+  anything else, draw a region: turn on **Region** in the notes panel and
+  drag, or Shift-drag at any time. Links do not follow while annotating.
+  **Note on page** writes a note about the whole page. Escape drops the
+  current pick; a second Escape stops annotating.
+- On macOS each pick also takes a screenshot of that part of the page, as it
+  looks on screen and without the annotation overlay, shown in the note. It
+  comes from WebKit's own snapshot, the one place the app calls WebKit
+  directly (`browser/snapshot.rs`). Screenshots are saved when you send, as
+  private files in `$XDG_STATE_HOME/herdr/gpui/annotations/`, removed after a
+  week, and the prompt names each file. Windows notes have no screenshots.
+- Notes are written in the panel beside the page, not in the page, so the
+  page never sees them. Queued notes are numbered on the page. Up to 20 wait
+  per tab. The panel slides open and closed; a new note grows into it, and
+  its number pops onto the page unless the system asks for reduced motion.
+- **Send to agent** turns them into one prompt: the page, then for each note
+  the element's selector path, text, and a short HTML snippet (for a region:
+  its position, the container and elements it covers, and their text), its
+  screenshot, and your note.
+  Page text is cleaned of control characters and marked as quoted data.
+  **Copy** puts the same prompt on the clipboard instead.
+- The prompt goes to the agent one way only. An agent waiting in
+  `browser feedback --wait` receives it there. Otherwise it is typed into the
+  agent's pane and submitted once Herdr reports the agent idle (or still
+  working after two minutes). It is never typed into a pane where Herdr sees no
+  running agent, since Enter there would run it in a shell, nor into an agent
+  that is asking you a question; those notes wait for `browser feedback`, as
+  do notes for a pane this window does not show.
+- Tabs you open yourself have no agent to send to; **Copy** is offered
+  instead.
+
+### Local Pages
+
+`herdr-gpui browser open ./mockup.html` shows a local file. The app serves it,
+with the other files in its folder, through a private `herdr-preview:` scheme,
+since pages cannot open `file:` addresses:
+
+- Only that folder is served, never a file a link leads out of it, and never a
+  hidden file or folder. A folder holding your home directory is refused.
+- Web pages cannot load the folder's files: requests carrying another origin
+  are refused.
+- Files are read off the UI thread and are never cached, so
+  `herdr-gpui browser reload` shows an edited file. Showing the same file
+  again from the same pane reuses its tab.
+
+### Letting Agents Open Pages
+
+Agents running in the app's panes can open a page for you:
+
+```sh
+herdr-gpui browser open http://localhost:3000   # macOS: /Applications/Herdr.app/Contents/MacOS/Herdr
+herdr-gpui browser open design/mockup.html
+herdr-gpui browser open --no-focus https://example.com/docs
+herdr-gpui browser reload                       # reload the pages this pane opened
+herdr-gpui browser feedback --wait 600          # wait for the notes you send it
+herdr-gpui browser --help
+```
+
+The tab joins the caller's own workspace, which Herdr names in the pane's
+`HERDR_WORKSPACE_ID`, and remembers the caller's `HERDR_PANE_ID` so notes on
+the page go back to it. The command talks to the running app over a socket at
+`$XDG_STATE_HOME/herdr/gpui/control.sock`, readable only by you, and exits with
+3 when the app is not running. Only processes on this machine can reach it:
+agents on saved SSH hosts cannot open browser tabs.
+
+Agents only use what they know about, so the app offers, once, to install a
+`herdr-gpui-browser` skill that teaches them these commands. It goes into
+`~/.claude/skills/` and `~/.agents/skills/`, for whichever of `~/.claude` and
+`~/.agents` exists, and names this app's executable. After you agree, each
+start refreshes it off the UI thread, so it follows the app when it moves or
+updates. Only files carrying the app's managed-skill marker are rewritten or
+removed; a skill of the same name you wrote yourself is left alone.
+
+- The offer appears in the first window after it connects. **Not now**, or
+  closing it, is remembered in `$XDG_STATE_HOME/herdr/gpui/agent-skill.json`
+  and it is not asked again.
+- Preferences > Agents installs or removes it at any time; so does the
+  palette's **Install Browser Skill for Agents**.
+- Only release builds offer or refresh the skill. A development build never
+  points your agents at itself unless you install from it explicitly.
+
+`herdr-gpui browser skill` prints the same text, for example to install it
+elsewhere:
+
+```sh
+mkdir -p ~/.claude/skills/herdr-gpui-browser
+herdr-gpui browser skill > ~/.claude/skills/herdr-gpui-browser/SKILL.md
+```
 
 ## macOS Dock Badge
 
@@ -580,6 +1100,19 @@ macOS menu bar. The preview shows at least `2` and stays on until you choose **Q
 or quit. Disabling the preview restores daemon-driven behavior, so real agent
 attention can keep the badge visible. This QA setting is not saved.
 
+## Logs
+
+The client's own logs are written to
+`$XDG_STATE_HOME/herdr/gpui/logs/herdr-gpui.jsonl` (falling back to
+`~/.local/state`), one JSON record per line, readable only by you on Unix. Past
+16 MiB the file is rotated to `herdr-gpui.1.jsonl`, replacing the previous one,
+so at most two files are kept. Logs are not held in memory: **Window > Logs**
+reads the newest 5,000 records of the file while it is open, including earlier
+runs, and filters, copies, or exports them. Nothing is uploaded. Logging never
+waits on the disk; lines that cannot be queued or written are counted as dropped
+in the window's status bar. Without `XDG_STATE_HOME` or `HOME` (as on a default
+Windows setup) nothing is saved and the window says so.
+
 ## Supported
 
 - Workspace/worktree sidebar with main-checkout parents, indented linked
@@ -603,6 +1136,13 @@ attention can keep the badge visible. This QA setting is not saved.
 - In-app sidebar menu for settings, keybinds, config reload, update information,
   and detach/reconnect. Tabbed Preferences combines shared Herdr settings,
   daemon agent integrations, editable native fonts, and general configuration.
+  A searchable installed-font picker can set all four families
+  together or each independently (including Platform default), while sizes have
+  −/+ controls and editable whole-number fields (8–48; Enter or leave to save,
+  Escape to cancel). Size changes appear immediately; repeated clicks stay enabled
+  while a background writer coalesces the latest size for each font. Save failures
+  appear in the Preferences footer and restore the previous size. Both families
+  and sizes save to the local GUI overrides file and reload in all windows.
 - A searchable theme picker previews the available names from built-ins and
   Herdr/Ghostty theme folders. Selecting a theme applies and saves it while
   preserving other GUI config settings and comments.
@@ -618,16 +1158,25 @@ attention can keep the badge visible. This QA setting is not saved.
   anywhere but into that menu closes it again; the flag is off by default, so
   spaces normally open their menu only on right-click, and a menu opened by
   right-click stays until it is dismissed. Close requires
-  confirmation and terminates terminals, not checkout files or branches. New
+  confirmation and terminates terminals, not checkout files or branches. Before
+  enabling Close, the dialog checks every affected local checkout for uncommitted
+  files (including staged, untracked, and submodule changes) and commits absent
+  from all local remote-tracking refs. It does not fetch. If either is present,
+  type `close` to consent explicitly. Unverifiable status, including remote
+  endpoints and missing Git metadata, also requires this consent. Cancel keeps
+  the workspaces open. New
   worktree proposes the branch name the daemon would generate, previews the
   checkout path derived from it, rejects invalid Git branch names before submission,
-  reports the daemon's own failures in the dialog rather than the connection status, and selects
+  reports failures in the active dialog tab rather than the connection status, and selects
   and reveals the created checkout once the daemon reports it. Rename and branch
   dialogs support Unicode/IME, grapheme
   editing, Shift-arrow selection, Home/End, and Cmd-A/C/X/V. Escape/outside click
   cancels; dialog input never reaches terminals or native creation actions.
   Context menus and dialogs anchor to the pointer and clamp to the viewport.
   Rename trims surrounding whitespace and rejects blank labels inline.
+  The PR tab supports fork pull requests: it fetches GitHub's PR head ref from
+  the repository's origin and creates a local `pr/<number>` branch. Existing
+  local branches are preserved; repository trust is not granted.
 - Open worktree... asynchronously lists the clicked parent's existing checkouts
   through `worktree.list`, including already-open and detached checkouts but
   excluding bare/prunable entries. Use Up/Down and Enter, the Open button, or
@@ -659,8 +1208,8 @@ attention can keep the badge visible. This QA setting is not saved.
   is the last selectable menu action: click it or use arrows and Enter to open the
    validated URL. Cache-only menu opening shows prefetched results immediately,
    or loading for an initial miss; no separate Open/Refresh controls or O/R shortcuts.
-   One background Git/native HTTPS GraphQL worker refreshes eligible Local workspace
-   metadata every 90 seconds, with a 128-entry LRU cache, 128 queued jobs, and
+   One background Git/native HTTPS GraphQL worker refreshes the selected device's
+   eligible workspace metadata every 90 seconds, with a 128-entry LRU cache, 128 queued jobs, and
    alternating open/focused priority and round-robin scheduling. Failed refreshes
    retain successful data. Ordinary failures back off five minutes; auth/rate-limit
    errors pause the account for an hour by default, honoring numeric retry/reset
@@ -668,12 +1217,34 @@ attention can keep the badge visible. This QA setting is not saved.
    Discovery uses the daemon repository key and exact branch to resolve a unique
    Git worktree, followed by common-directory/current-branch checks and an explicit
    GitHub repository/head query. It never occupies the deletion dialog response slot.
+   PR heads use the branch's configured upstream remote owner/repository and merge
+   branch, so renamed local branches can identify fork PRs. Without an upstream,
+   lookup uses the local branch name and requires the origin owner as before.
+   Unsupported upstreams fail closed rather than matching an unrelated fork.
   On macOS, all socket modes (including explicit/inherited sockets) require a
   same-user kernel peer at the standard configured session socket, with owned,
   non-group/world-writable socket and parent. Executable upgrades/removal do not
-  invalidate this local endpoint trust. SSH and sockets elsewhere remain blocked;
-  a same-user proxy deliberately replacing the trusted socket is not detectable.
-  Reconnect rechecks the endpoint. See
+  invalidate this local endpoint trust. Sockets elsewhere remain blocked; a
+  same-user proxy deliberately replacing the trusted socket is not detectable.
+  Reconnect rechecks the endpoint.
+  On a saved SSH device, the checkout lives on that host, so local Git cannot
+  verify it. The worker instead reads the repository's `remote.origin.url` over
+  the same noninteractive SSH options as the bridge (`BatchMode=yes`, strict host
+  keys, no master connection), keeping stdout bounded and discarding stderr.
+  Each resolved origin repository is reused for ten minutes. Upstream configuration
+  is read over SSH on each lookup using the daemon-reported local branch. Sidebar PR badges
+  show only on the selected device's rows, because the cache holds that device's
+  lookups and the same path and branch may exist on another host.
+- Each saved SSH device can have its own GitHub account, for hosts whose
+  repositories another account owns. Select the device, open the GitHub panel,
+  and choose **Use another account** to run the same device sign-in for that
+  device only. It is stored with the main account's mechanism (the app's Keychain
+  or Secret Service entry under a per-device account name, or its own private
+  `github-credentials-<device-id>` file) and renewed the same way. Pull requests on
+  that device then use it; a device without one uses the main account. Signing
+  out in that panel removes only the device's credential. `GH_TOKEN` /
+  `GITHUB_TOKEN` apply only to the main account. Removing a device keeps its
+  saved credential until you sign out of it, so re-adding the device finds it. See
   [PR lookup scope and limits](../../README.md) for authentication and remote limits.
    The same worktree-registry path supports both current and older daemons without
     `workspace.get`. No Git or HTTP requests run from menu-open or render paths.
@@ -700,12 +1271,18 @@ attention can keep the badge visible. This QA setting is not saved.
   Signed macOS release builds keep tokens in this app's Keychain entry; unsigned
   development and worktree builds use the private file store instead, so a new
   code identity per rebuild cannot trigger a Keychain prompt on every launch.
-  `GH_TOKEN` / `GITHUB_TOKEN` override either. Access tokens and retained device/user codes use redacted, zeroizing
+  Linux builds keep tokens in the desktop keyring through the freedesktop Secret
+  Service (GNOME Keyring, KWallet, KeePassXC), under service
+  `dev.herdr.gpui.github`; the desktop may ask to unlock it. With no Secret
+  Service running, restore finds nothing saved and saving a sign-in says so.
+  `GH_TOKEN` / `GITHUB_TOKEN` override any of them. Access tokens and retained device/user codes use redacted, zeroizing
   `secrecy` types; HTTP headers are sensitive and application-owned raw OAuth
   buffers are wiped. The user code is intentionally exposed for rendering.
   Library/OS/rendering copies are not guaranteed to be erased. Linux supports an
   explicit `allow_plaintext_credentials = true` opt-in with a prominent warning,
-  separate private credential file and atomic no-follow Unix writes; macOS
+  separate private credential file and atomic no-follow Unix writes, which
+  replaces the Secret Service for desktops without one; a token saved in one store
+  is not moved to the other, so changing the opt-in means signing in again; macOS
   development builds use that same store, enabled by default and warned about in
   the profile panel. Signed macOS release builds still use Keychain. Windows has
   neither store: the opt-in does not select the file there, saving a token
@@ -716,10 +1293,15 @@ attention can keep the badge visible. This QA setting is not saved.
   Disabling plaintext stops its session use but keeps the file; explicit sign-out
   still removes the saved file regardless of opt-in, or reports a safe error.
    Device-flow refresh tokens are saved alongside access tokens in the same
-   store. When restoring a session after restart or update, a rejected access
-   token is renewed automatically and the rotated pair is saved before loading
-   the profile again. Network and Keychain errors do not delete credentials;
-   environment tokens are never renewed or replaced by saved credentials.
+   store, including their access-token expiry when GitHub supplies it. Connected
+   sessions are checked in the background every five minutes and renewed within
+   ten minutes of expiry, without restarting the app. Older saved pairs without
+   expiry metadata renew when GitHub rejects the access token. The rotated pair
+   is saved before loading the profile again. Temporary network and keyring
+   failures keep an active session visible and retry on the next check. They do
+   not delete credentials; environment tokens are never renewed or replaced by
+   saved credentials. Successful sign-in closes the GitHub panel and returns
+   focus to the terminal. Reopen the account panel to use the red Sign out action.
    Older versions saved only access tokens, so an expired legacy token needs
    one more sign-in to obtain a refresh token. Revoked or expired refresh tokens
    also require sign-in. No CLI authentication is used. See
@@ -743,8 +1325,8 @@ attention can keep the badge visible. This QA setting is not saved.
 - Right-click any tab without focusing it to open Rename.
   Actions retain the clicked tab/workspace and reject stale connections or targets.
   Rename selects the current label in a native IME-aware field, with inline errors;
-  Close uses the existing cancel-by-default confirmation unless
-  `confirm_close_tab = false`. Escape or an outside left/right click dismisses
+  Close uses the existing cancel-by-default confirmation when an agent in the
+  tab is working or blocked, unless `confirm_close_tab = false`. Escape or an outside left/right click dismisses
   the menu without sending terminal input.
 - Click workspace, tab, agent, or a visible split pane to focus through the API.
 - Right-click a visible pane, including an inactive split, for Rename, Split
@@ -756,12 +1338,19 @@ attention can keep the badge visible. This QA setting is not saved.
   always asks for confirmation with Cancel selected. Popups and stale retained
   terminal frames block pane context actions. Escape or an outside left/right
   click dismisses the menu without forwarding input to the terminal.
-- Native File/Terminal menus and creation buttons: **+ New Workspace** in the
+- Native File/Edit/Terminal menus and creation buttons: **+ New Workspace** in the
   sidebar and a persistent 18px SVG **+** in a 44px-wide button beside the horizontally
   scrolling tab strip. Each tab has a 16px SVG close cross in a 24px hit target;
   it uses the same configurable confirmation without focusing an inactive tab.
   Both icons use the current theme's foreground tint.
-- Cmd-N creates and focuses a workspace; Cmd-T creates and focuses a tab.
+- Cmd-T creates and focuses a tab; Cmd-Shift-N creates and focuses
+  a workspace. Cmd-N opens the New worktree dialog for the focused workspace
+  (for a linked worktree, its repository's main checkout). The dialog opens on
+  its Name field: left empty, the daemon picks the workspace name; anything
+  typed is sent as the new workspace's label. When there is none,
+  because the workspace is not a Git repository, the main checkout is not open,
+  nothing is focused, or the window is disconnected, a two-second flash in the
+  clipboard toast's position says why.
   Cmd-D splits the focused pane vertically (new pane on the right);
   Cmd-Shift-D splits horizontally (new pane below). Cmd-Shift-] / Cmd-Shift-[
   cycles next/previous tab within the current workspace, wrapping at the ends.
@@ -772,19 +1361,53 @@ attention can keep the badge visible. This QA setting is not saved.
 - Cmd-1 through Cmd-9 focuses the corresponding numbered tab in the current
   workspace. Cmd-Alt-Left/Right/Up/Down focuses a pane in that direction;
   Cmd-Alt-] / Cmd-Alt-[ cycles next/previous pane within the current tab.
-  Cmd-Shift-Enter toggles focused pane zoom.
+  Cmd-Shift-Enter toggles focused pane zoom. Cmd-K clears the focused pane's
+  screen and scrollback through the daemon's `pane.clear`, without sending input
+  to the running program; daemons that do not advertise it (Herdr 0.9.1 and
+  older) leave it out of the palette and report why instead.
 - Cmd-W closes the focused pane and Cmd-Shift-W closes the focused tab only after
-  a confirmation dialog (tab confirmation can be disabled with
-  `confirm_close_tab = false`). **Cancel is selected by default**: Enter alone cancels;
+  a confirmation dialog (a tab asks only while an agent in it is working or
+  blocked, and never with `confirm_close_tab = false`). **Cancel is selected by default**: Enter alone cancels;
   Tab then Enter selects and confirms Close. Closing can terminate running
   processes, unlike quitting the GUI, which only detaches.
 - Cmd-Shift-P opens the command palette with native actions and configured daemon
   command entries, including native Themes and Reconnect actions without dedicated
-  shortcuts. Cmd-P opens the workspace picker instead.
+  shortcuts. Cmd-P opens **Go To** instead: every workspace on every connected
+  host, each followed by one row per agent or terminal pane with its status,
+  tab, and directory. Choosing a row on another host switches to it first.
+- Every native shortcut can be rebound in `config-gpui.local.toml` under
+  `[keybindings]`, keyed by command name (`new_tab`, `new_workspace`,
+  `split_right`, `focus_tab_1`, `quit`, ...). A value is one keystroke or a list;
+  an empty string or list unbinds the command. A keystroke assigned there moves
+  away from its default command, keystrokes need a cmd, ctrl, alt, or fn
+  modifier, and unknown names, unparseable keys, or one key on two configured
+  commands reject the config. Saved changes rebind the keymap and menu bar live.
+- The daemon's own `[keys]` table in `config.toml` (resolved like
+  `[ui.toast.clipboard]` above) applies in the GUI too, Herdr's defaults
+  included, so a TUI habit such as `prefix+v` or `alt+1..9` works in both
+  clients. The prefix (`ctrl+b` unless `prefix` says otherwise) arms the
+  window, shown by a keycap in the status bar; the next keystroke runs its
+  chord or, when nothing is bound to it, is dropped, as in the TUI. Typing the
+  prefix twice sends it to the terminal, and Escape cancels. Chords work from
+  a menu's or dialog's text field too: the chord closes it and runs. Daemon actions
+  with a GUI command are `new_workspace`, `new_worktree`, `workspace_picker`
+  and `goto` (both Go To), `settings`, `help` (the shortcut reference),
+  `open_notification_target`, `new_tab`, `next_tab`, `previous_tab`,
+  `switch_tab`, `close_tab`, `split_vertical` (Split Right),
+  `split_horizontal` (Split Down), `focus_pane_*`, `cycle_pane_next`,
+  `cycle_pane_previous`, `zoom`, `close_pane`, `clear_pane`, and
+  `toggle_sidebar`; the rest stay TUI-only. Daemon keys add to the catalog
+  defaults and take a keystroke from its default command. A command named in
+  `[keybindings]` keeps exactly the keystrokes listed there, daemon chords
+  included, and a keystroke listed there outranks the daemon's, even the
+  prefix. Herdr validates its own file, so a daemon entry the GUI cannot
+  express (a `hyper` modifier, a direct key without cmd, ctrl, alt, or fn) is
+  skipped rather than rejected. Saving either file rebinds live.
 - Cmd-B toggles sidebar visibility locally without changing daemon state.
   Cmd-, opens Settings; Cmd-/ opens the grouped native shortcut reference.
   Native shortcut labels and keycaps come from the shared `controls::COMMANDS`
-  catalog, with Cmd-V semantic paste shown separately. Search filters by action,
+  catalog, overridden by the config's `[keybindings]` table, with Cmd-V semantic
+  paste shown separately. Search filters by action,
   section, or key combination. Preferences, keybinds, theme/palette pickers, and
   close confirmations use themed centered modals and configured UI fonts;
   modal input does not reach the terminal.
@@ -979,6 +1602,14 @@ rejection, Unicode composition, and headless right-click/input routing.
 sizes, but does not validate OS IME candidate-window delivery or live daemon
 worktree creation/close.
 They do not replace an interactive smoke test against a live daemon.
+
+Selection regressions cover unflagged CJK continuation cells, real spaces,
+partial wide characters, emoji/combining text, popup/pane boundaries, and headless
+mouse-to-clipboard routing. On macOS, `just test-gui /absolute/path/to/herdr`
+also prints CJK text through the isolated daemon, drags forward/backward using
+exact-window native mouse events, checks the OS clipboard, and pastes through
+Cmd-V to verify the UTF-8 bytes returned by the shell. This opt-in test requires
+an active desktop; normal CI compiles it but does not run the native scenario.
 
 Notification policy tests use explicit times for evidence grace, delay changes,
 cross-host arrival order, queue bounds, replacement, promotion lifetimes, and

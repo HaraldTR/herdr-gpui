@@ -9,8 +9,9 @@ use crate::{
     method::Method,
     options::{ConnectOptions, validate_options},
     protocol::*,
+    queue::CommandSender,
 };
-use crossbeam_channel::{Receiver, Sender, TrySendError};
+use crossbeam_channel::Receiver;
 use serde_json::{Value, json};
 use std::sync::{
     Arc,
@@ -26,7 +27,7 @@ pub struct ClientHandle {
     pub(crate) inner: Arc<HandleInner>,
 }
 pub(crate) struct HandleInner {
-    pub(crate) commands: Sender<Command>,
+    pub(crate) commands: CommandSender,
     pub(crate) stop: Arc<AtomicBool>,
     pub(crate) next_request: AtomicU64,
     pub(crate) image_busy: Arc<AtomicBool>,
@@ -122,6 +123,7 @@ impl ClientHandle {
     pub fn disconnect(&self) {
         tracing::debug!("disconnect requested");
         self.inner.stop.store(true, Ordering::Release);
+        self.inner.commands.wake();
     }
     pub fn is_disconnected(&self) -> bool {
         self.inner.stop.load(Ordering::Acquire)
@@ -149,13 +151,7 @@ impl ClientHandle {
     }
 
     fn queue(&self, command: Command) -> Result<()> {
-        self.inner.commands.try_send(command).map_err(|e| match e {
-            TrySendError::Full(_) => {
-                tracing::warn!(category = "command_queue", "client backpressure");
-                SendError::Full
-            }
-            TrySendError::Disconnected(_) => SendError::Disconnected,
-        })
+        self.inner.commands.try_send(command)
     }
     pub fn send_input(
         &self,

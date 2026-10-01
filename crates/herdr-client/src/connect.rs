@@ -8,6 +8,7 @@ use crate::{
     handle::{Client, ClientHandle, HandleInner},
     limits::{COMMAND_CAPACITY, EVENT_CAPACITY},
     options::{ConnectOptions, validate_options},
+    queue,
     session::run_connection,
     ssh,
     transport::Stream,
@@ -57,7 +58,7 @@ pub fn connect_with_connector(
         catalog::validate_target(target)?;
         session_socket(std::path::Path::new(""), session)?;
     }
-    let (commands, rx) = bounded(COMMAND_CAPACITY);
+    let (commands, rx) = queue::channel(COMMAND_CAPACITY)?;
     let (tx, events) = bounded(EVENT_CAPACITY);
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = stop.clone();

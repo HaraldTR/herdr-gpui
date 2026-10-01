@@ -5,9 +5,9 @@ use super::{
     credentials,
     device::TokenResponse,
     http::{LIMIT, authorization, graphql, pr_cooldown, response},
-    log::{header, kind, public_sso},
+    log::{header, kind, public_sso, token_kind},
     store,
-    store::{KEYCHAIN, credential_bytes, resolve_token},
+    store::{KEYRING, credential_bytes, resolve_token},
     token::Credential,
 };
 use crate::{Error, Result};
@@ -73,47 +73,76 @@ fn copy_feedback_is_scoped_to_live_flow_and_expires() {
 }
 
 #[test]
-fn only_a_signed_release_build_uses_the_keychain() {
-    // A signed release build keeps the Keychain whatever the config says.
-    assert_eq!(Store::choose(false, true, false), Store::Keychain);
-    assert_eq!(Store::choose(true, true, false), Store::Keychain);
-    // An unsigned development build gets a new code identity on every rebuild,
-    // so it uses the private file instead of re-prompting for Keychain access.
+fn keyring_is_used_by_signed_macos_releases_and_linux() {
+    assert_eq!(Store::choose(false, true, false), Store::Keyring);
+    // The plaintext opt-in wins over a keyring where it is honoured at all, so
+    // a Linux desktop without a Secret Service still has a way to save.
+    assert_eq!(Store::choose(true, true, false), Store::File);
+    // An unsigned macOS development build gets a new code identity on every
+    // rebuild, so it uses the private file instead of re-prompting for Keychain.
     assert_eq!(Store::choose(false, false, true), Store::File);
     assert_eq!(Store::choose(true, false, true), Store::File);
     // Everywhere else unencrypted storage stays an explicit opt-in.
     assert_eq!(Store::choose(false, false, false), Store::Environment);
     assert_eq!(Store::choose(true, false, false), Store::File);
+    assert_eq!(
+        KEYRING,
+        cfg!(target_os = "linux") || (cfg!(target_os = "macos") && crate::RELEASE_BUILD)
+    );
     let mut config = crate::config::Config::default();
     #[cfg(target_os = "macos")]
-    if !crate::RELEASE_BUILD {
-        assert_eq!(Store::select(&config), Store::File);
-    }
-    config.github.allow_plaintext_credentials = true;
     assert_eq!(
         Store::select(&config),
-        Store::choose(store::FILE, KEYCHAIN, false)
+        if crate::RELEASE_BUILD {
+            Store::Keyring
+        } else {
+            Store::File
+        }
     );
+    #[cfg(target_os = "linux")]
+    assert_eq!(Store::select(&config), Store::Keyring);
+    config.github.allow_plaintext_credentials = true;
+    // macOS picks its store from the build alone and ignores the opt-in.
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+        Store::select(&config),
+        Store::choose(false, KEYRING, store::FILE_DEFAULT)
+    );
+    #[cfg(target_os = "linux")]
+    assert_eq!(Store::select(&config), Store::File);
     // Platforms without POSIX ownership and mode bits cannot keep the file
     // private, so opting in must not select it there.
     assert_eq!(store::FILE, cfg!(unix));
     if !store::FILE {
         assert_eq!(Store::select(&config), Store::Environment);
         assert!(matches!(
-            credentials::store(std::path::Path::new("."), Some(&"token".into()), true),
+            credentials::store(
+                std::path::Path::new("."),
+                c"github-credentials",
+                Some(&"token".into()),
+                true
+            ),
             Err(Error::CredentialUnsupported)
         ));
-        assert!(credentials::store(std::path::Path::new("."), None, false).is_ok());
+        assert!(
+            credentials::store(
+                std::path::Path::new("."),
+                c"github-credentials",
+                None,
+                false
+            )
+            .is_ok()
+        );
     }
 }
 #[test]
 fn credential_notes_state_where_tokens_are_kept() {
     assert!(Store::Environment.note(false).is_none());
     assert!(Store::Environment.note(true).is_none());
-    assert!(matches!(Store::Keychain.note(false), Some(Note::Info(_))));
+    assert!(matches!(Store::Keyring.note(false), Some(Note::Info(_))));
     assert!(
-        Store::Keychain.note(true).is_none(),
-        "a connected account already proved Keychain access"
+        Store::Keyring.note(true).is_none(),
+        "a connected account already proved keyring access"
     );
     for connected in [false, true] {
         let Some(Note::Warning(text)) = Store::File.note(connected) else {
@@ -148,6 +177,96 @@ fn load_fixture_profile(auth: &mut Auth, store: Store, profile: Option<Profile>)
 }
 
 #[test]
+fn live_session_renews_off_thread_without_restart_and_preserves_token_identity() {
+    let mut auth = Auth::connected_fixture();
+    auth.store = Store::File;
+    let now = Instant::now();
+    auth.next_session_check = Some(now + Duration::from_secs(1));
+    assert!(!auth.poll_at(now, |_| panic!(), |_, _| panic!("not due")));
+    let old = auth.profile.as_ref().unwrap().token.clone();
+    assert!(auth.poll_at(
+        now + Duration::from_secs(1),
+        |_| panic!(),
+        |token, store| {
+            assert!(token.is_none(), "resolve the latest saved credential");
+            assert_eq!(store, Store::File);
+            assert_eq!(thread::current().name(), Some("herdr-github-profile"));
+            let loaded =
+                Credential::new("expired-access".into(), Some("refresh".into()), "client")?
+                    .profile_with(
+                        |token| {
+                            if token.expose_secret() == "expired-access" {
+                                return Err(Error::GitHubAuthentication);
+                            }
+                            let mut profile = Auth::connected_fixture().profile.unwrap();
+                            profile.token = token;
+                            Ok(profile)
+                        },
+                        |_| {
+                            Credential::new(
+                                "rotated-access".into(),
+                                Some("rotated-refresh".into()),
+                                "client",
+                            )
+                        },
+                        |_| Ok(()),
+                    )?;
+            Ok(Some(loaded))
+        },
+    ));
+    assert!(auth.connected(), "renewal must not flash the signed-out UI");
+    let result = auth
+        .profile_incoming
+        .take()
+        .unwrap()
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    let (tx, rx) = mpsc::sync_channel(1);
+    tx.send(result).ok().unwrap();
+    auth.profile_incoming = Some(rx);
+    assert!(auth.poll_at(now, |_| panic!(), |_, _| panic!("one worker only")));
+    let rotated = auth.profile.as_ref().unwrap().token.clone();
+    assert!(!Arc::ptr_eq(&old, &rotated));
+    assert_eq!(rotated.expose_secret(), "rotated-access");
+    assert!(!auth.poll_at(now, |_| panic!(), |_, _| panic!("bounded check interval")));
+
+    let mut same = Auth::connected_fixture().profile.unwrap();
+    same.token = Arc::new("rotated-access".into());
+    let (tx, rx) = mpsc::sync_channel(1);
+    tx.send(Ok(Some(same))).ok().unwrap();
+    auth.profile_incoming = Some(rx);
+    auth.poll_at(now, |_| panic!(), |_, _| panic!());
+    assert!(Arc::ptr_eq(&rotated, &auth.profile.as_ref().unwrap().token));
+}
+
+#[test]
+fn live_session_transient_failures_preserve_account_and_retry_but_rejection_disconnects() {
+    for error in [
+        Error::GitHubStatus(503),
+        Error::GitHubRateLimit,
+        Error::GitHubForbidden,
+        Error::CredentialPolicy,
+    ] {
+        let mut auth = Auth::connected_fixture();
+        let now = Instant::now();
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send(Err(error)).ok().unwrap();
+        auth.profile_incoming = Some(rx);
+        auth.poll_at(now, |_| panic!(), |_, _| panic!());
+        assert!(auth.connected());
+        assert!(auth.failed);
+        assert!(auth.next_session_check.unwrap() > now);
+        assert!(!auth.poll_at(now, |_| panic!(), |_, _| panic!("no tight retry")));
+    }
+    let mut auth = Auth::connected_fixture();
+    let (tx, rx) = mpsc::sync_channel(1);
+    tx.send(Err(Error::GitHubAuthentication)).ok().unwrap();
+    auth.profile_incoming = Some(rx);
+    auth.poll_at(Instant::now(), |_| panic!(), |_, _| panic!());
+    assert!(!auth.connected());
+}
+
+#[test]
 fn enabling_plaintext_reloads_saved_token_but_explicit_signout_stays_suppressed() {
     let mut auth = Auth::default();
     // Drive the backend directly: which one a configuration selects depends on
@@ -178,7 +297,7 @@ fn enabling_plaintext_reloads_saved_token_but_explicit_signout_stays_suppressed(
         .unwrap();
     deliver(&mut auth, reply);
     auth.poll_with(|_| panic!("already removed"), |_, _| panic!("signed out"));
-    for store in [Store::Environment, Store::File, Store::Keychain] {
+    for store in [Store::Environment, Store::File, Store::Keyring] {
         assert!(!auth.initialize_with(store));
         assert_eq!(auth.store(), store);
         assert!(auth.signed_out);
@@ -697,6 +816,7 @@ fn bounded_http_parsing_and_safe_errors() {
     assert!(response::<Value>("test", reply(200, vec![b' '; LIMIT as usize + 1])).is_err());
     assert!(
         graphql(
+            "test",
             &"fixture".into(),
             "",
             Value::Null,
@@ -854,4 +974,18 @@ fn accepted_token_uses_store_off_thread_and_reports_failure() {
     auth.poll();
     assert_eq!(auth.message.as_deref(), Some("mock Keychain locked"));
     assert!(!auth.busy());
+}
+
+#[test]
+fn token_kind_names_the_credential_without_exposing_it() {
+    for (token, expected) in [
+        ("ghu_fixture", "github_app_user"),
+        ("ghs_fixture", "github_app_installation"),
+        ("gho_fixture", "oauth_app"),
+        ("ghp_fixture", "classic_pat"),
+        ("github_pat_fixture", "fine_grained_pat"),
+        ("fixture", "unknown"),
+    ] {
+        assert_eq!(token_kind(&SecretString::from(token)), expected);
+    }
 }

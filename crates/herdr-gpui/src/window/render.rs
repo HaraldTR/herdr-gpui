@@ -4,10 +4,15 @@
 
 use super::HerdrWindow;
 use crate::{
-    APP_VERSION, CheckForUpdates, PlaySound, RunCommand, ShowHerdrNotDetected, ShowUpdatePreview,
-    TAB_HEIGHT, TAB_WIDTH, actions::ShowToastPreview, config::ClipboardToastPosition,
-    controls::Command, fonts::StyledFont, navigation::NavigationTarget, state::ConnectionStatus,
-    terminal::*, worktree_banner,
+    APP_VERSION, CheckForUpdates, Minimize, PlaySound, RunCommand, ShowHerdrNotDetected,
+    ShowUpdatePreview,
+    actions::ShowToastPreview,
+    browser::{Pick, Shown, Slot},
+    config::ClipboardToastPosition,
+    fonts::StyledFont,
+    state::ConnectionStatus,
+    terminal::*,
+    worktree_banner,
 };
 use gpui::{prelude::*, *};
 use herdr_client::ConnectOptions;
@@ -15,8 +20,10 @@ use std::time::Duration;
 
 impl Render for HerdrWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.restore_menu_focus(window);
+        self.restore_menu_focus(window, cx);
         let font = self.config.terminal.font();
+        // Parked groups paint with the same face as the window's terminal.
+        let parked_font = font.clone();
         let cell_height = self.config.terminal.line_height();
         self.painter.borrow_mut().set_appearance(
             self.config.terminal.size,
@@ -24,123 +31,39 @@ impl Render for HerdrWindow {
             self.theme.clone(),
         );
         self.cell_width = self.painter.borrow_mut().cell_width(&font, window, cx);
-        let sidebar = self.render_sidebar(window, cx);
-        let mut tabs = div()
-            .id("tabs")
-            .flex()
-            .flex_none()
-            .h(px((self.config.tabs.size * 1.6 + 4.).max(TAB_HEIGHT)))
-            .text_font(&self.config.tabs)
-            .text_size(px(self.config.tabs.size))
-            .overflow_x_scroll()
-            .bg(rgb(self.theme.surface))
-            .text_color(rgb(self.theme.foreground))
-            .items_center();
-        if let Some(snapshot) = &self.live.snapshot {
-            for tab in snapshot
-                .tabs
-                .iter()
-                .filter(|t| Some(&t.workspace_id) == snapshot.focused_workspace_id.as_ref())
-            {
-                let id = tab.tab_id.clone();
-                let context_id = id.clone();
-                let close_id = id.clone();
-                // Selected tabs carry the theme's accent, so the choice reads as
-                // primary rather than as the hover tint used elsewhere; the rest
-                // recede into the strip, as they do in the reference UI.
-                let (background, text) = if tab.focused {
-                    let background = self.theme.primary_wash();
-                    (background, self.theme.text_on(background))
-                } else {
-                    (self.theme.surface, self.theme.muted)
-                };
-                tabs = tabs.child(
-                    div()
-                        .id(SharedString::from(format!("tab-{id}")))
-                        .debug_selector({
-                            let id = id.clone();
-                            move || format!("tab-{id}")
-                        })
-                        .pl(px(12.))
-                        // The close button hugs the tab's inner right edge, well
-                        // clear of the label it would otherwise crowd.
-                        .pr(px(3.))
-                        .py(px(2.))
-                        // Even cells divided by a single rule, as in the reference UI.
-                        .min_w(px(TAB_WIDTH))
-                        .border_r_1()
-                        .border_color(rgb(self.theme.active))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .cursor_pointer()
-                        .bg(rgb(background))
-                        .text_color(rgb(text))
-                        .child(tab.label.clone())
-                        .child(
-                            div()
-                                .id("close-tab")
-                                .debug_selector({
-                                    let id = id.clone();
-                                    move || format!("close-tab-{id}")
-                                })
-                                .size(px(18.))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(3.))
-                                .hover(move |s| s.bg(rgba((text << 8) | 0x24)))
-                                .child(
-                                    svg()
-                                        .path("icons/close.svg")
-                                        .debug_selector({
-                                            let id = id.clone();
-                                            move || format!("close-tab-icon-{id}")
-                                        })
-                                        .size(px(12.))
-                                        .text_color(rgb(text)),
-                                )
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation();
-                                })
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.open_tab_close(&close_id, window, cx);
-                                })),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                cx.stop_propagation();
-                                this.open_tab_menu(&context_id, event.position, window, cx);
-                            }),
-                        )
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.navigate(NavigationTarget::Tab(&id), cx);
-                            window.focus(&this.focus);
-                        })),
-                );
-            }
-        }
+        // Registers the window for surface-only redraws; see `redraw_terminal`.
+        self.surface_signal.read(cx);
+        let sidebar = self.sidebar_visible.then(|| {
+            crate::sidebar::cached_view(
+                &self.sidebar_view,
+                self.sidebar_width,
+                f32::from(window.viewport_size().width),
+            )
+        });
         // Paints the frame on screen, which during a focus change is the one
         // presented before it: the terminal area never blanks between two
         // projections. What the client knows to be current stays in `live`.
         let surface = self.presentation.frame(&self.live);
+        // A group picking the tab another shows paints this same frame.
+        let window_frame = surface.clone();
         let entity = cx.entity();
         let paint_entity = entity.clone();
         let focus = self.focus.clone();
+        let menu_open = self.menu.page.is_some();
         let cell_width = self.cell_width;
         let painter = self.painter.clone();
         // The highlight is grid coordinates, so it paints with the frame that
         // owns the cells rather than being recomputed from the pointer here.
         let selection = self.selection.clone();
-        self.hovered_terminal_link = self.terminal_link_at(window.mouse_position()).is_some()
-            && (window.modifiers().shift
-                || self
-                    .terminal_mouse_at(window.mouse_position())
-                    .is_none_or(|hit| !hit.mouse_reporting));
+        // The IME composition paints inline at the input cursor; a menu's
+        // text field shows its own.
+        // It anchors to the live surface, as the IME's candidate window does,
+        // so a retained frame never separates the text from the window.
+        let marked = (!menu_open && !self.marked.is_empty())
+            .then(|| (self.marked.clone(), self.live.surface.clone()));
+        self.hovered_terminal_link =
+            self.terminal_link_hovered(window.mouse_position(), window.modifiers());
+        self.split_cursor = self.split_cursor_at(window.mouse_position());
         // Pad the terminal itself: the canvas bounds that painting, hit testing,
         // and IME placement all read then already exclude the gap.
         let sidebar_gap = if self.sidebar_visible {
@@ -148,25 +71,64 @@ impl Render for HerdrWindow {
         } else {
             0.
         };
+        // Only the first group meets the sidebar, so only it takes the gap.
+        self.ensure_layout();
+        self.forget_gone_strips();
+        let slots = self.group_slots();
+        let shown: Vec<Shown> = slots
+            .iter()
+            .map(|slot| self.group_shown(slot.id, cx))
+            .collect();
+        let slot_gap = |slot: Slot| if slot.index == 0 { sidebar_gap } else { 0. };
+        // The window's own terminal, with its input, goes to the group holding
+        // its connection; other terminal groups paint parked connections.
+        let primary = self.primary_group();
+        let terminal_slot = slots
+            .iter()
+            .zip(&shown)
+            .find(|(slot, shown)| {
+                **shown == Shown::Terminal && primary.is_none_or(|group| group == slot.id)
+            })
+            .map(|(slot, _)| *slot);
+        let terminal_gap = terminal_slot.map_or(sidebar_gap, slot_gap);
         let terminal = div()
             .id("terminal")
             .debug_selector(|| "terminal".into())
-            .pl(px(sidebar_gap))
+            .pl(px(terminal_gap))
             .when(self.hovered_terminal_link, |terminal| {
                 terminal.cursor_pointer()
             })
+            .when_some(self.split_cursor, |terminal, cursor| {
+                terminal.cursor(cursor)
+            })
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                this.terminal_mouse_hover(event, cx);
-                let hovered = this.terminal_link_at(event.position).is_some()
-                    && (event.modifiers.shift
-                        || this
-                            .terminal_mouse_at(event.position)
-                            .is_none_or(|hit| !hit.mouse_reporting));
+                let split_cursor = this.split_cursor_at(event.position);
+                if split_cursor != this.split_cursor {
+                    this.split_cursor = split_cursor;
+                    cx.notify();
+                }
+                // A border is not the application's to hover.
+                if split_cursor.is_none() {
+                    this.terminal_mouse_hover(event, cx);
+                }
+                let hovered = this.terminal_link_hovered(event.position, event.modifiers);
                 if hovered != this.hovered_terminal_link {
                     this.hovered_terminal_link = hovered;
                     cx.notify();
                 }
             }))
+            // Holding the link modifier over a link in a mouse-reporting
+            // application changes what a click does, so the pointer follows.
+            .on_modifiers_changed(
+                cx.listener(|this, event: &ModifiersChangedEvent, window, cx| {
+                    let hovered =
+                        this.terminal_link_hovered(window.mouse_position(), event.modifiers);
+                    if hovered != this.hovered_terminal_link {
+                        this.hovered_terminal_link = hovered;
+                        cx.notify();
+                    }
+                }),
+            )
             .on_click(cx.listener(Self::open_terminal_link))
             .relative()
             .flex_1()
@@ -176,6 +138,9 @@ impl Render for HerdrWindow {
             .bg(rgb(self.theme.background))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
+            // A selection is copied when it is released, so the terminal has
+            // nothing for Cut, Copy, or Select All to act on.
+            .on_action(cx.listener(|this, _: &crate::actions::Paste, _, cx| this.paste(cx)))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_drop(cx.listener(Self::drop_terminal_files))
             .on_mouse_down(
@@ -192,12 +157,16 @@ impl Render for HerdrWindow {
                     }
                     cx.stop_propagation();
                     this.open_pane_menu_at(event.position, window, cx);
+                    this.menu.opening_right_click = this.menu.page == Some(crate::menu::Page::Pane);
                 }),
             )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    if this.terminal_mouse_down(event, window, cx) {
+                    if this.scrollbar_mouse_down(event, cx)
+                        || this.split_mouse_down(event, cx)
+                        || this.terminal_mouse_down(event, window, cx)
+                    {
                         return;
                     }
                     this.pressed_terminal_link = this
@@ -209,12 +178,12 @@ impl Render for HerdrWindow {
                     // A press on a link may still turn into a drag across it,
                     // so the selection starts either way; the click that opens
                     // the link is the one that never left its half-cell.
-                    this.begin_selection(event.position, cx);
+                    this.begin_selection(event.position, event.click_count, cx);
                     if this.pressed_terminal_link.is_some() {
                         cx.stop_propagation();
                         return;
                     }
-                    window.focus(&this.focus);
+                    window.focus(&this.focus, cx);
                     if this.input_ready()
                         && let Some(surface) = &this.live.surface
                     {
@@ -257,7 +226,10 @@ impl Render for HerdrWindow {
                         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
                                 entity.update(cx, |this, cx| {
-                                    if this.terminal_mouse_move(event, cx) {
+                                    if this.scrollbar_mouse_move(event, cx)
+                                        || this.split_mouse_move(event, cx)
+                                        || this.terminal_mouse_move(event, cx)
+                                    {
                                         cx.stop_propagation();
                                         return;
                                     }
@@ -290,7 +262,9 @@ impl Render for HerdrWindow {
                                     ) {
                                         this.menu.opening_right_click = false;
                                     }
-                                    if this.terminal_mouse_up(event, cx)
+                                    if this.scrollbar_mouse_up(event, cx)
+                                        || this.split_mouse_up(event, cx)
+                                        || this.terminal_mouse_up(event, cx)
                                         || (event.button == MouseButton::Left
                                             && !cx.has_active_drag()
                                             && this.release_selection(cx))
@@ -302,7 +276,11 @@ impl Render for HerdrWindow {
                         });
                         window.handle_input(
                             &focus,
-                            ElementInputHandler::new(bounds, paint_entity.clone()),
+                            crate::input::TerminalInputHandler::new(
+                                bounds,
+                                paint_entity.clone(),
+                                menu_open,
+                            ),
                             cx,
                         );
                         if let Some(surface) = &surface {
@@ -325,9 +303,11 @@ impl Render for HerdrWindow {
                             painter.borrow_mut().paint_frame(
                                 &surface.frame,
                                 bounds.origin,
+                                Some(bounds.size),
                                 cell_width,
                                 &font,
                                 &panes,
+                                &surface.panes,
                                 window,
                                 cx,
                             );
@@ -345,13 +325,26 @@ impl Render for HerdrWindow {
                                 painter.borrow_mut().paint_frame(
                                     &popup.frame,
                                     bounds.origin + offset,
+                                    None,
                                     cell_width,
                                     &font,
                                     &rows,
+                                    &[],
                                     window,
                                     cx,
                                 );
                             }
+                        }
+                        if let Some((marked, live)) = &marked {
+                            let live = live.as_deref();
+                            painter.borrow().paint_composition(
+                                marked,
+                                input_cursor_bounds(live, bounds.origin, cell_width, cell_height)
+                                    .origin,
+                                input_area(live, bounds, cell_width, cell_height),
+                                &font,
+                                window,
+                            );
                         }
                     },
                 )
@@ -359,7 +352,7 @@ impl Render for HerdrWindow {
             )
             // Direct feedback for the user's own gesture, not a daemon notice:
             // it sits over the cells it copied and needs no dismissing.
-            .when(self.copy_feedback.is_some(), |terminal| {
+            .when_some(self.flash.as_ref(), |terminal, (flash, _)| {
                 use ClipboardToastPosition::*;
                 let position = self.config.clipboard_toast.position;
                 terminal.child(
@@ -377,23 +370,23 @@ impl Render for HerdrWindow {
                         // The pane's own padding is not part of the terminal:
                         // the flash spans the cells, so centering centers on
                         // them and a corner is the corner of the grid.
-                        .left(px(sidebar_gap))
+                        .left(px(terminal_gap))
                         .right_0()
                         .px(px(12.))
                         .flex()
                         .overflow_hidden()
                         .child(
                             div()
-                                .debug_selector(|| "copy-feedback".into())
+                                .debug_selector(|| "flash".into())
                                 .min_w_0()
                                 .flex()
                                 .items_center()
                                 .gap(px(8.))
                                 .px(px(12.))
                                 .py(px(6.))
-                                .rounded(px(6.))
+                                .rounded(px(crate::config::corners::CONTROL))
                                 .border_1()
-                                .border_color(rgb(self.theme.palette[2]))
+                                .border_color(rgb(flash.accent(&self.theme)))
                                 .bg(rgb(self.theme.surface))
                                 .text_color(rgb(self.theme.foreground))
                                 .child(
@@ -401,16 +394,80 @@ impl Render for HerdrWindow {
                                         .size(px(6.))
                                         .flex_none()
                                         .rounded_full()
-                                        .bg(rgb(self.theme.palette[2])),
+                                        .bg(rgb(flash.accent(&self.theme))),
                                 )
-                                .child(div().truncate().child("copied to clipboard")),
+                                .child(div().truncate().child(flash.text.clone())),
                         ),
                 )
             });
-        let status = self.live.status_text(self.local_error.as_deref());
+        // A focus handle belongs to one element: the terminal when drawn,
+        // otherwise the group in use.
+        let keyboard = terminal_slot
+            .is_none()
+            .then(|| self.active_group())
+            .flatten();
+        let mut terminal = Some(terminal);
+        let mut groups = Vec::with_capacity(slots.len());
+        for (slot, shown) in slots.into_iter().zip(shown) {
+            let gap = slot_gap(slot);
+            let owns_keyboard = keyboard == Some(slot.id);
+            let tab = match &shown {
+                Shown::Page(id) => cx
+                    .try_global::<crate::browser::Store>()
+                    .and_then(|store| store.get(*id))
+                    .cloned(),
+                _ => None,
+            };
+            let body = match (&shown, tab) {
+                (Shown::Terminal, _) if terminal_slot == Some(slot) => terminal
+                    .take()
+                    .map(IntoElement::into_any_element)
+                    .unwrap_or_else(|| div().into_any_element()),
+                (Shown::Terminal, _) if self.shows_parked_terminal(slot.id, cx) => {
+                    self.render_parked_terminal(slot, gap, parked_font.clone(), cell_height, cx)
+                }
+                (Shown::Page(_), Some(tab)) => {
+                    self.render_browser(slot, &tab, gap, owns_keyboard, cx)
+                }
+                (Shown::Elsewhere(Pick::Herdr(tab)), _) => {
+                    match self.live_frame_of(tab, window_frame.clone()) {
+                        Some(frame) => self.render_terminal_mirror(
+                            slot,
+                            gap,
+                            Some(frame),
+                            parked_font.clone(),
+                            cell_height,
+                            cx,
+                        ),
+                        None => self.render_stand_in(slot, &shown, gap, owns_keyboard, cx),
+                    }
+                }
+                _ => self.render_stand_in(slot, &shown, gap, owns_keyboard, cx),
+            };
+            groups.push(self.render_group(slot, body, window, cx));
+        }
+        let content = self.render_groups(groups, cx);
+        // Not `||`: asking forgets group motion that has finished.
+        if self.groups_moving() | self.tabs_growing() | self.annotations_moving() {
+            window.request_animation_frame();
+        }
+        // A menu just opened, or a covered page's picture is on its way.
+        if self.present_browser(cx) {
+            window.request_animation_frame();
+        }
+        let status = (!matches!(self.live.status, ConnectionStatus::Connected)
+            || self.local_error.is_some()
+            || self.live.error.is_some())
+        .then(|| self.live.status_text(self.local_error.as_deref()));
         div()
+            .on_action(cx.listener(|this, action: &crate::actions::SetLayout, _, cx| {
+                this.set_layout(action.mode, cx);
+            }))
             .on_action(cx.listener(|this, action: &RunCommand, window, cx| {
                 this.command(action.command, window, cx);
+            }))
+            .on_action(cx.listener(|_, _: &Minimize, window, _| {
+                window.minimize_window();
             }))
             .on_action(cx.listener(|this, _: &ShowHerdrNotDetected, window, cx| {
                 this.show_install_modal(window, cx);
@@ -462,54 +519,16 @@ impl Render for HerdrWindow {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .when(self.sidebar_visible, |row| row.child(sidebar))
+                    .children(sidebar)
                     .child(
                         div()
                             .flex()
                             .flex_col()
-                            .flex_1()
-                            .min_w_0()
+                             .flex_1()
+                             .min_w_0()
+                             .min_h_0()
+                            .child(content)
                             .child(
-                                div()
-                                    .flex()
-                                    .flex_none()
-                                    .bg(rgb(self.theme.surface))
-                                    .text_color(rgb(self.theme.foreground))
-                                    // Tabs size to their content and shrink when the
-                                    // row is full, so the button sits after the last
-                                    // tab instead of at the far right of the window.
-                                    .child(tabs.flex_shrink().min_w_0())
-                                    .child(
-                                        div()
-                                            .id("new-tab")
-                                            .debug_selector(|| "new-tab".into())
-                                            .w(px(34.))
-                                            .min_h(px(TAB_HEIGHT))
-                                            .border_r_1()
-                                            .border_color(rgb(self.theme.active))
-                                            .flex_none()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .cursor_pointer()
-                                            .hover(|s| s.bg(rgb(self.theme.active)))
-                                            .child(
-                                                svg()
-                                                    .path("icons/plus.svg")
-                                                    .debug_selector(|| "new-tab-icon".into())
-                                                    .size(px(14.))
-                                                    // Quiet like the unselected tabs beside it.
-                                                    .text_color(rgb(self.theme.muted)),
-                                            )
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.command(Command::Tab, window, cx)
-                                            })),
-                                    ),
-                            )
-                            .child(terminal),
-                    ),
-            )
-            .child(
                 div()
                     .id("connection-status")
                     .debug_selector(|| "connection-status".into())
@@ -522,13 +541,28 @@ impl Render for HerdrWindow {
                     .px_3()
                     .bg(rgb(self.theme.surface))
                     .text_color(rgb(self.theme.foreground))
-                    .child(
+                    .children(self.render_usage(cx))
+                    .when_some(
+                        self.prefix_armed
+                            .then(|| self.config.keybindings.prefix_label())
+                            .flatten(),
+                        |bar, prefix| bar.child(
+                            div()
+                                .debug_selector(|| "prefix-armed".into())
+                                .flex_none()
+                                .px(px(6.))
+                                .rounded(px(crate::config::corners::SMALL))
+                                .bg(rgb(self.theme.active))
+                                .child(prefix),
+                        ),
+                    )
+                    .when(!self.live.status.is_connected(), |bar| bar.child(
                         if matches!(self.live.status, ConnectionStatus::StartingDaemon) {
                             div()
                                 .size(px(8.))
                                 .flex_none()
                                 .rounded_full()
-                                .bg(rgb(self.theme.palette[3]))
+                                .bg(rgb(self.theme.ink(self.theme.palette[3])))
                                 .with_animation(
                                     "daemon-starting-loader",
                                     Animation::new(Duration::from_secs(1)).repeat(),
@@ -544,63 +578,74 @@ impl Render for HerdrWindow {
                                 .size(px(6.))
                                 .flex_none()
                                 .rounded_full()
-                                .bg(rgb(if self.live.status.is_connected() {
-                                    self.theme.palette[2]
-                                } else {
-                                    self.theme.palette[1]
-                                }))
+                                .bg(rgb(self.theme.ink(self.theme.palette[1])))
                                 .into_any_element()
                         },
-                    )
+                    ))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .overflow_hidden()
                             .whitespace_nowrap()
-                            .child(status),
+                            .when_some(status, |row, status| row.child(
+                                div().debug_selector(|| "connection-message".into()).child(status)
+                            )),
                     )
-                    .when(!self.marked.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .min_w_0()
-                                .max_w(px(160.))
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .child(format!("Composing: {}", self.marked)),
-                        )
-                    })
                     .child(
                         div()
-                            .id("status-theme")
-                            .debug_selector(|| "status-theme".into())
-                            .flex_none()
+                                    .id("status-theme")
+                                    .debug_selector(|| "status-theme".into())
+                                    .flex_shrink_1()
+                                    .min_w(px(33.))
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
                             .px_2()
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(self.theme.active)))
-                            .child("Theme")
+                            .child(
+                                svg()
+                                    .path("icons/theme.svg")
+                                    .size(px(12.))
+                                    .flex_none()
+                                    .text_color(rgb(self.theme.foreground)),
+                            )
+                                    .child(div().min_w_0().truncate().child("Theme"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_theme_picker(window, cx);
                             })),
                     )
                     .child(
                         div()
-                            .id("status-keybinds")
-                            .debug_selector(|| "status-keybinds".into())
-                            .flex_none()
+                                    .id("status-keybinds")
+                                    .debug_selector(|| "status-keybinds".into())
+                                    .flex_shrink_1()
+                                    .min_w(px(33.))
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
                             .px_2()
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(self.theme.active)))
-                            .child("? Keybinds")
+                            .child(
+                                svg()
+                                    .path("icons/keyboard.svg")
+                                    .size(px(12.))
+                                    .flex_none()
+                                    .text_color(rgb(self.theme.foreground)),
+                            )
+                                    .child(div().min_w_0().truncate().child("Shortcuts"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_keybinds(window, cx);
                             })),
                     )
                     .child(
                         div()
-                            .id("report-issue")
-                            .debug_selector(|| "report-issue".into())
-                            .flex_none()
+                                    .id("report-issue")
+                                    .debug_selector(|| "report-issue".into())
+                                    .flex_shrink_1()
+                                    .min_w(px(33.))
                             .flex()
                             .items_center()
                             .gap(px(5.))
@@ -624,7 +669,7 @@ impl Render for HerdrWindow {
                                             .bg(rgb(self.theme.foreground)),
                                     ),
                             )
-                            .child("Report issue")
+                                    .child(div().min_w_0().truncate().child("Report issue"))
                             .on_click(|_, _, cx| {
                                 cx.open_url(&format!(
                                     "https://github.com/penso/herdr-gpui/issues/new?template=bug_report.yml&version={}",
@@ -656,6 +701,8 @@ impl Render for HerdrWindow {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_app_update(false, window, cx);
                             })),
+                    ),
+                            ),
                     ),
             )
             .children(self.render_toasts(window, cx))

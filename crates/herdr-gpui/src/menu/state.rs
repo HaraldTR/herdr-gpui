@@ -9,8 +9,42 @@ use crate::dialog_input::DialogInput;
 use gpui::{App, Entity, FocusHandle, Pixels, Point, ScrollHandle, Subscription};
 use herdr_client::protocol::ClientShellSnapshot;
 
+/// What an open menu covers, as its last frame laid it out: the window's
+/// native pages above GPUI would hide it, so the ones it covers step aside.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) enum Cover {
+    /// Not laid out yet.
+    #[default]
+    Unknown,
+    /// A dialog dims the whole window.
+    All,
+    /// A popover or menu covers only its own panel.
+    Panel(gpui::Bounds<Pixels>),
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
+impl Cover {
+    /// Whether a page drawn at `page` would hide this menu. Before the menu
+    /// is laid out nothing is, so pages keep showing for that one frame.
+    pub(crate) fn covers(self, page: Option<gpui::Bounds<Pixels>>) -> bool {
+        match self {
+            Self::Unknown => false,
+            Self::All => true,
+            Self::Panel(panel) => page.is_some_and(|page| page.intersects(&panel)),
+        }
+    }
+}
+
 pub(crate) struct MenuState {
     pub page: Option<Page>,
+    /// Written by the menu's layout, read when presenting pages.
+    pub(crate) cover: std::rc::Rc<std::cell::Cell<Cover>>,
+    pub(super) device_setup: Option<super::devices::Setup>,
+    pub(super) session_edit: Option<super::sessions::Edit>,
+    pub(super) devices_scroll: ScrollHandle,
+    /// The sessions list scrolls its own way; the two popups never share one.
+    pub(crate) sessions_scroll: ScrollHandle,
+    pub(crate) usage_scroll: ScrollHandle,
     // Selection epoch and connection generation fence captured modal actions.
     pub(super) endpoint_target: (u64, u64),
     pub anchor: Point<Pixels>,
@@ -24,6 +58,7 @@ pub(crate) struct MenuState {
     pub input: Option<DialogInput>,
     pub(super) error: Option<String>,
     pub(super) deletion: Option<Deletion>,
+    pub(super) close_check: Option<super::workspace_close::CloseCheck>,
     /// The correlated `worktree.create` or `worktree.open` request, so the dialog
     /// can report the daemon's answer and follow the returned workspace.
     pub(super) creation: Option<String>,
@@ -32,10 +67,14 @@ pub(crate) struct MenuState {
     pub(crate) keybinds_search: Option<Entity<crate::search_input::SearchInput>>,
     pub(super) _keybinds_subscription: Option<Subscription>,
     pub(crate) preferences_scroll: ScrollHandle,
+    pub(crate) font_size_editor: Option<crate::preferences::FontSizeEditor>,
     pub(crate) themes: Option<crate::theme_picker::ThemePicker>,
+    pub(crate) fonts: Option<crate::font_picker::FontPicker>,
     pub(crate) palette: Option<crate::palette::Palette>,
     pub(crate) close: Option<crate::close_modal::CloseConfirmation>,
     pub(crate) tab: Option<crate::tab_menu::TabMenu>,
+    pub(crate) group: Option<crate::group_menu::GroupMenu>,
+    pub(crate) host: Option<super::devices::HostMenu>,
     pub(crate) pane: Option<crate::pane_menu::PaneMenu>,
     /// The new worktree dialog's tabs and the GitHub listing behind them.
     pub(crate) worktree: Option<super::WorktreeSource>,
@@ -46,6 +85,13 @@ pub(crate) struct MenuState {
         Option<std::sync::Weak<std::sync::Mutex<crate::state::LiveState>>>,
     pub(super) pr_snapshot: Option<std::sync::Weak<ClientShellSnapshot>>,
     pub(crate) github: crate::github::Auth,
+    /// Saved SSH devices' own accounts, keyed by endpoint ID. A device without
+    /// one signed in looks up pull requests with `github`.
+    pub(crate) github_hosts: std::collections::HashMap<String, crate::github::Auth>,
+    /// Saved devices whose removal is running, by endpoint ID. Kept after
+    /// success until the catalog drops the device, so its header pulses
+    /// until it disappears; the confirmation closes as soon as it starts.
+    pub(crate) removing_devices: std::collections::HashSet<String>,
     pub(super) github_selected: Option<github::Action>,
     pub(super) github_scroll: ScrollHandle,
     pub(super) pr_connection: Option<std::sync::Weak<std::sync::Mutex<crate::state::LiveState>>>,
@@ -68,8 +114,8 @@ impl Deletion {
 /// A queued `worktree.remove`. The dialog closes as soon as the request is
 /// queued, because the daemon's own snapshot drops the workspace once the
 /// removal lands; holding the popover open adds nothing. What still needs a
-/// home is a refusal, which becomes the window's local error, and a dirty
-/// checkout, which arms the next dialog with force.
+/// home is sidebar progress and a refusal, which becomes the window's local
+/// error. A dirty checkout arms the next dialog with force.
 pub(crate) struct Removal {
     /// Same fence as the menu target: a response from a replaced connection is
     /// not this removal's.
@@ -80,6 +126,15 @@ pub(crate) struct Removal {
     pub(super) pending: Option<String>,
     /// Set once the daemon refused the checkout as dirty.
     pub(super) force: bool,
+}
+
+impl Removal {
+    pub(crate) fn pending_for(&self, endpoint: (u64, u64), boot_id: &str, workspace: &str) -> bool {
+        self.pending.is_some()
+            && self.endpoint == endpoint
+            && self.boot_id == boot_id
+            && self.workspace == workspace
+    }
 }
 
 /// What a submitted dialog did, which decides whether it stays open.
@@ -156,6 +211,12 @@ impl MenuState {
     pub fn new(cx: &App) -> Self {
         Self {
             page: None,
+            cover: Default::default(),
+            device_setup: None,
+            session_edit: None,
+            devices_scroll: ScrollHandle::new(),
+            sessions_scroll: ScrollHandle::new(),
+            usage_scroll: ScrollHandle::new(),
             endpoint_target: (0, 0),
             anchor: Point::default(),
             opening_right_click: false,
@@ -167,13 +228,16 @@ impl MenuState {
             input: None,
             error: None,
             deletion: None,
+            close_check: None,
             creation: None,
             worktree_open: None,
             keybinds_scroll: ScrollHandle::new(),
             keybinds_search: None,
             _keybinds_subscription: None,
             preferences_scroll: ScrollHandle::new(),
+            font_size_editor: None,
             themes: None,
+            fonts: None,
             palette: None,
             close: None,
             pr: Default::default(),
@@ -181,18 +245,30 @@ impl MenuState {
             pr_cache_connection: None,
             pr_snapshot: None,
             github: Default::default(),
+            github_hosts: Default::default(),
+            removing_devices: Default::default(),
             github_selected: None,
             github_scroll: ScrollHandle::new(),
             pr_connection: None,
             tab: None,
+            group: None,
+            host: None,
             pane: None,
             worktree: None,
         }
     }
 
     pub fn reset(&mut self) {
+        self.cover.set(Cover::Unknown);
+        self.device_setup = None;
+        self.session_edit = None;
+        self.devices_scroll.set_offset(Point::default());
+        self.sessions_scroll.set_offset(Point::default());
+        self.usage_scroll.set_offset(Point::default());
         self.opening_right_click = false;
         self.tab = None;
+        self.group = None;
+        self.host = None;
         self.pane = None;
         self.github_selected = None;
         self.github_scroll.set_offset(Point::default());
@@ -200,6 +276,8 @@ impl MenuState {
             self.github.cancel();
         }
         self.page = None;
+        self.fonts = None;
+        self.font_size_editor = None;
         self.selected = None;
         self.workspace_selected = None;
         self.git_selected = None;
@@ -207,11 +285,32 @@ impl MenuState {
         self.input = None;
         self.error = None;
         self.deletion = None;
+        self.close_check = None;
         self.creation = None;
         self.worktree_open = None;
         self.close = None;
         self.worktree = None;
         self.pr.clear();
         self.pr_connection = None;
+    }
+}
+
+#[cfg(test)]
+mod cover_tests {
+    use super::Cover;
+    use gpui::{Bounds, point, px, size};
+
+    #[test]
+    fn only_pages_under_a_menu_step_aside() {
+        let at = |x: f32, width: f32| Bounds::new(point(px(x), px(0.)), size(px(width), px(400.)));
+        // A sessions popover on the left, a page on the right.
+        let popover = Cover::Panel(at(40., 300.));
+        assert!(!popover.covers(Some(at(900., 700.))));
+        assert!(popover.covers(Some(at(200., 700.))));
+        // A dimmed dialog covers every page; an unlaid menu none yet.
+        assert!(Cover::All.covers(Some(at(900., 700.))));
+        assert!(!Cover::Unknown.covers(Some(at(0., 1900.))));
+        // A page not drawn yet is under nothing.
+        assert!(!popover.covers(None));
     }
 }

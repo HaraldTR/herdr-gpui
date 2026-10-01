@@ -612,6 +612,7 @@ fn create_pull_request(
     )?;
     let mut cooldown = None;
     let repository = crate::github::graphql(
+        "create_pr_repository",
         token,
         REPOSITORY_QUERY,
         serde_json::json!({"owner": owner, "repo": repo}),
@@ -633,6 +634,7 @@ fn create_pull_request(
         return Err(Error::GitPullRequestBase);
     }
     let created = crate::github::graphql(
+        "create_pr",
         token,
         CREATE_MUTATION,
         serde_json::json!({
@@ -689,10 +691,99 @@ fn git(
     }
 }
 
+/// Fresh close-time probe, including metadata-only and submodule changes that
+/// line counts cannot represent. Remote-tracking refs are the local evidence of
+/// a push; this read-only check never contacts a remote.
+pub(super) fn close_status(
+    input: &Input,
+    deadline: Instant,
+    cancelled: &impl Fn() -> bool,
+) -> crate::Result<(bool, bool)> {
+    let checkout = local_checkout(input, deadline, cancelled)?;
+    let dirty = !git(
+        &checkout,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=normal",
+            "--ignore-submodules=none",
+        ],
+        "check uncommitted files",
+        deadline,
+        cancelled,
+    )?
+    .is_empty();
+    let unpushed = !git(
+        &checkout,
+        &["rev-list", "--max-count=1", "HEAD", "--not", "--remotes"],
+        "check unpushed commits",
+        deadline,
+        cancelled,
+    )?
+    .is_empty();
+    Ok((dirty, unpushed))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    #[test]
+    fn close_probe_detects_untracked_staged_unstaged_and_unpublished_work() {
+        let directory = tempfile::tempdir().unwrap();
+        let hooks = tempfile::tempdir().unwrap();
+        let checkout = directory.path().to_str().unwrap();
+        let command = |args: &[&str]| {
+            let result = Command::new("git")
+                .args([
+                    "-C",
+                    checkout,
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                ])
+                .arg(format!("core.hooksPath={}", hooks.path().display()))
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        };
+        command(&["init", "-b", "test"]);
+        std::fs::write(directory.path().join("tracked"), "original\n").unwrap();
+        command(&["add", "tracked"]);
+        command(&["commit", "-m", "initial"]);
+        let input = Input {
+            repo_key: directory.path().join(".git").to_str().unwrap().to_owned(),
+            branch: "test".into(),
+            checkout: Some(checkout.into()),
+        };
+        let probe =
+            || close_status(&input, Instant::now() + Duration::from_secs(15), &|| false).unwrap();
+        assert_eq!(probe(), (false, true)); // No upstream or remote refs.
+        command(&["update-ref", "refs/remotes/origin/test", "HEAD"]);
+        assert_eq!(probe(), (false, false));
+        std::fs::write(directory.path().join("new"), "new\n").unwrap();
+        assert_eq!(probe(), (true, false));
+        command(&["add", "new"]);
+        assert_eq!(probe(), (true, false));
+        command(&["commit", "-m", "unpublished"]);
+        assert_eq!(probe(), (false, true));
+        std::fs::write(directory.path().join("tracked"), "modified\n").unwrap();
+        assert_eq!(probe(), (true, true));
+        assert!(matches!(
+            close_status(&input, Instant::now() + Duration::from_secs(15), &|| true),
+            Err(Error::PrCancelled)
+        ));
+    }
 
     struct Peer {
         git: Git,

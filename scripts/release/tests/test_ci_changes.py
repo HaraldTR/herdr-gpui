@@ -40,13 +40,16 @@ class CiChanges(unittest.TestCase):
 
     def test_documentation_and_setup_skip_native_jobs(self):
         for path in ("setup.sh", "README.md", "crates/herdr-gpui/README.md",
-                     "scripts/release/README.md"):
+                     "scripts/release/README.md", "assets/social-preview-dark.png",
+                     "assets/social-preview-light.svg", "assets/icons/herdr-ui-icon-badge.png",
+                     "assets/icons/herdr-ui-icon-badge.svg"):
             self.commit_path(path)
             self.assertEqual(self.detect(), "code=false", path)
 
     def test_build_inputs_trigger_native_jobs(self):
         for path in ("crates/herdr-gpui/src/main.rs", "Cargo.lock", "Cargo.toml",
-                     "assets/icon.png", ".cargo/config.toml", "rust-toolchain.toml",
+                     "assets/icon.png", "assets/icons/herdr-ui-icon-clean.png",
+                     ".cargo/config.toml", "rust-toolchain.toml",
                      "scripts/release/build.sh", ".github/workflows/ci.yml"):
             self.base = self.git("rev-parse", "HEAD").strip()
             self.commit_path(path)

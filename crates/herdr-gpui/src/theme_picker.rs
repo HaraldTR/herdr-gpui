@@ -49,6 +49,7 @@ impl HerdrWindow {
         }
         // A pending reload must not replace this newer interactive appearance.
         self.config_load = None;
+        self.flush_font_sizes(cx);
         self.menu.page = Some(Page::Themes);
         let mut picker = if let Some(picker) = self.menu.themes.take() {
             picker.search.update(cx, |input, cx| input.clear(cx));
@@ -110,7 +111,7 @@ impl HerdrWindow {
             .unwrap_or(0);
         picker.search.update(cx, |input, cx| {
             input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
-            window.focus(&input.focus);
+            window.focus(&input.focus, cx);
         });
         self.menu.themes = Some(picker);
         self.discover_picker_themes(cx);
@@ -225,6 +226,7 @@ impl HerdrWindow {
                 .desired
                 .as_deref()
                 .and_then(|name| Theme::builtin(name.trim()))
+                .map(|theme| theme.with_contrast(self.config.contrast))
             {
                 self.theme = theme;
                 picker.loaded = picker.desired.clone();
@@ -436,7 +438,7 @@ impl HerdrWindow {
                                     .px_2()
                                     .py_1()
                                     .cursor_pointer()
-                                    .rounded(px(4.))
+                                    .rounded(px(crate::config::corners::CONTROL))
                                     .hover(|s| s.bg(rgb(theme.active)))
                                     .child("Close")
                                     .on_click(cx.listener(|this, _, window, cx| {
@@ -521,7 +523,7 @@ impl HerdrWindow {
                                 .collect()
                         }),
                     )
-                    .track_scroll(picker.scroll.clone())
+                    .track_scroll(&picker.scroll)
                     .flex_1()
                     .min_h_0(),
                 )
@@ -580,7 +582,7 @@ mod tests {
                     token
                 })
             });
-            cx.update(|window, cx| window.draw(cx).clear());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
             cx.simulate_keystrokes("escape");
             let close = cx.debug_bounds("theme-close").unwrap();
             cx.simulate_click(close.center(), Modifiers::default());
@@ -673,7 +675,7 @@ mod tests {
         cx.run_until_parked();
         for width in [800., 360.] {
             cx.simulate_resize(size(px(width), px(600.)));
-            cx.update(|window, cx| window.draw(cx).clear());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
             let row = cx.debug_bounds("theme-row-1").unwrap();
             let status = cx.debug_bounds("theme-status").unwrap();
             // Selection paints as a row: the fill spans the list, not the label.
@@ -698,7 +700,7 @@ mod tests {
                         picker.saving = saving;
                         cx.notify();
                     });
-                    window.draw(cx).clear();
+                    window.draw(cx).clear(cx);
                 });
                 assert_eq!(cx.debug_bounds("theme-row-1").unwrap(), row);
                 assert_eq!(cx.debug_bounds("theme-status").unwrap(), status);
@@ -790,7 +792,7 @@ mod tests {
                 picker.names = vec!["Default".into(), "Nord".into(), "Dracula".into()];
                 picker.filter("");
             });
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let row = cx.debug_bounds("theme-row-1").unwrap();
         cx.simulate_mouse_move(row.center(), None, Modifiers::default());
@@ -836,7 +838,7 @@ mod tests {
                 })
             });
             if dismiss == 2 {
-                cx.update(|window, cx| window.draw(cx).clear());
+                cx.update(|window, cx| window.draw(cx).clear(cx));
                 cx.simulate_mouse_down(
                     point(px(5.), px(5.)),
                     MouseButton::Left,
@@ -977,6 +979,7 @@ mod tests {
                     &KeyDownEvent {
                         keystroke: Keystroke::parse("enter").unwrap(),
                         is_held: false,
+                        prefer_character_input: false,
                     },
                     window,
                     cx,

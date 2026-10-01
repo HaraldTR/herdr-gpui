@@ -2,11 +2,15 @@
 //! menu a resting pointer opens.
 
 mod agents;
+mod cell;
 mod hover;
 mod layout;
+mod layouts;
 mod metrics;
 mod render;
+mod reorder;
 mod row;
+mod view;
 mod workspaces;
 
 #[cfg(test)]
@@ -19,19 +23,26 @@ pub(crate) mod layout_tests;
 pub(crate) mod native_tests;
 
 pub(crate) use {
+    agents::{Indicators, agent_name, status_indicator},
     hover::{HoverMenu, HoverRest},
-    metrics::{ARROW_RESERVE, HOST_ARROW_WIDTH, HOST_GAP, ICON_RESERVE, LABEL_GAP},
+    metrics::{ARROW_RESERVE, HOST_ARROW_WIDTH, HOST_GAP, ICON_RESERVE, LABEL_GAP, STATUS_WIDTH},
+    reorder::WorkspaceDrag,
     row::{compact, github_mark, label_text},
+    view::SidebarView,
     workspaces::workspace_label,
 };
 
 #[cfg(any(test, feature = "integration-test"))]
 pub(crate) use metrics::LABEL_WIDTH;
 
-use agents::{agents_sort, sorted_agents, status_indicator};
+pub(crate) use view::cached as cached_view;
+
+use agents::{agents_sort, sorted_agents};
 use metrics::*;
 use row::{RowBadge, first_text};
 use workspaces::visible_workspace_entries;
+
+pub(crate) const DEVICE_FOOTER_HEIGHT: f32 = 40.;
 
 #[derive(Clone, Copy)]
 pub(crate) enum SidebarDrag {

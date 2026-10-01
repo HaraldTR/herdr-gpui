@@ -11,9 +11,10 @@ use crate::{
     method::Method,
     options::ConnectOptions,
     protocol::{endpoint::*, *},
+    queue::CommandReceiver,
     transport::Stream,
 };
-use crossbeam_channel::{Receiver, Sender, TryRecvError};
+use crossbeam_channel::{Sender, TryRecvError};
 use serde_json::Value;
 use std::{
     io::Write,
@@ -137,7 +138,7 @@ pub(crate) fn run_connection(
     options: ConnectOptions,
     surface_active: bool,
     remote: bool,
-    commands: Receiver<Command>,
+    commands: CommandReceiver,
     tx: &Sender<ClientEvent>,
     stop: &AtomicBool,
 ) -> Result<()> {
@@ -276,6 +277,16 @@ pub(crate) fn run_connection(
                     started: Instant::now(),
                 });
             }
+        }
+        // Commands left behind by the batch bound must not wait out a poll;
+        // ones fenced by a request, an image, or a partial frame do.
+        let timeout = if queued.is_none() && reader.started.is_none() && !commands.is_empty() {
+            Duration::ZERO
+        } else {
+            POLL
+        };
+        if !commands.wait(&stream, timeout)? {
+            continue;
         }
         let Some(message) = reader.poll_batch(&mut stream)? else {
             continue;

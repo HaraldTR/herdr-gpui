@@ -8,7 +8,10 @@ version_check "$1"
 [[ -f $5 && -s $5 ]] || fail 'Nonempty third-party notices file required'
 out=$(cd -- "$4" && pwd)/Herdr.app
 new_output "$out"
-icon=$(python3 "$release_root/scripts/release/build-icon.py" icns "$2" "$3")
+icons=$(python3 "$release_root/scripts/release/build-icon.py" macos "$2" "$3")
+icns=${icons%$'\n'*}
+catalog=${icons##*$'\n'}
+[[ -f $icns && -f $catalog ]] || fail 'Could not select the macOS icons'
 [[ $(lipo -archs "$2") == arm64 ]] || fail 'First binary must be arm64 only'
 [[ $(lipo -archs "$3") == x86_64 ]] || fail 'Second binary must be x86_64 only'
 tmp=$(mktemp -d "${out%/*}/.herdr-assembly.XXXXXX")
@@ -31,7 +34,8 @@ plutil -replace CFBundleShortVersionString -string "$1" "$app/Contents/Info.plis
 plutil -replace CFBundleVersion -string "$1" "$app/Contents/Info.plist"
 plutil -insert LSMinimumSystemVersion -string 15.0 "$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist"
-cp "$icon" "$app/Contents/Resources/Herdr.icns"
+cp "$icns" "$app/Contents/Resources/Herdr.icns"
+cp "$catalog" "$app/Contents/Resources/Assets.car"
 cp "$release_root/crates/herdr-protocol/LICENSE-APACHE" "$app/Contents/Resources/"
 cp "$release_root/crates/herdr-protocol/NOTICE.md" "$app/Contents/Resources/"
 cp "$release_root/LICENSE" "$release_root/NOTICE" "$release_root/assets/icons/LICENSE-octicons" "$app/Contents/Resources/"

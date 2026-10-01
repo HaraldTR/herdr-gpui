@@ -5,7 +5,7 @@
 #[cfg(any(test, feature = "integration-test"))]
 use super::VERIFY_URL;
 use super::{
-    Device, Profile, Reply, Result, SETUP_MESSAGE, Store, http::oauth, log, profile, save,
+    Account, Device, Profile, Reply, Result, SETUP_MESSAGE, Store, http::oauth, log, profile, save,
     token_reply,
 };
 use crate::Error;
@@ -25,6 +25,8 @@ pub(super) struct Flow {
     pub(super) next: Instant,
 }
 
+const SESSION_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
 #[derive(Default)]
 pub(crate) struct Auth {
     pub(super) flow: Option<Flow>,
@@ -36,7 +38,9 @@ pub(crate) struct Auth {
     pub(super) signed_out: bool,
     pub(super) reload_pending: bool,
     pub(super) store: Store,
+    pub(super) account: Account,
     pub(super) profile_incoming: Option<mpsc::Receiver<Result<Option<Profile>>>>,
+    pub(super) next_session_check: Option<Instant>,
     pub profile: Option<Profile>,
     pub message: Option<String>,
     pub failed: bool,
@@ -44,6 +48,21 @@ pub(crate) struct Auth {
 }
 
 impl Auth {
+    /// A saved host's own sign-in. It starts empty; `initialize` loads it.
+    pub(crate) fn for_account(account: Account) -> Self {
+        Self {
+            account,
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn complete_profile_fixture(&mut self, result: Result<Option<Profile>>) {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let _ = tx.send(result);
+        self.profile_incoming = Some(rx);
+    }
+
     #[cfg(any(test, feature = "integration-test"))]
     pub(crate) fn connected_fixture() -> Self {
         Self {
@@ -74,12 +93,14 @@ impl Auth {
             return false;
         }
         self.profile = None;
+        self.next_session_check = None;
         self.flow = None;
         self.cancelled = true;
         self.reload_pending = true;
         self.failed = false;
-        self.message =
-            Some("Checking GitHub account under the updated credential policy...".into());
+        // A host's first load is routine; the main account keeps its notice.
+        self.message = (self.account == Account::Main)
+            .then(|| "Checking GitHub account under the updated credential policy...".into());
         // Drain old workers before reloading, so rapid policy changes stay bounded.
         // Neither a late profile nor an accepted write can restore the old session.
         true
@@ -263,6 +284,7 @@ impl Auth {
         self.failed = false;
         self.initialized = true;
         self.signed_out = true;
+        self.next_session_check = None;
         self.reload_pending = false;
         self.profile = None;
         self.flow = None;
@@ -277,7 +299,8 @@ impl Auth {
     }
     pub fn poll(&mut self) -> bool {
         let store = self.store;
-        self.poll_with_store(move |token| save(token, store))
+        let account = self.account.clone();
+        self.poll_with_store(move |token| save(token, store, &account))
     }
     /// Credential backend chosen for this build and configuration.
     pub(crate) fn store(&self) -> Store {
@@ -287,13 +310,23 @@ impl Auth {
         &mut self,
         persist: impl FnOnce(Option<&SecretString>) -> Result<()> + Send + 'static,
     ) -> bool {
-        self.poll_with(persist, |token, store| match token {
+        let account = self.account.clone();
+        self.poll_with(persist, move |token, store| match token {
             Some(token) => profile(token).map(Some),
-            None => super::store::load_profile(store),
+            None => super::store::load_profile(store, &account),
         })
     }
     pub(super) fn poll_with(
         &mut self,
+        persist: impl FnOnce(Option<&SecretString>) -> Result<()> + Send + 'static,
+        load: impl FnOnce(Option<Arc<SecretString>>, Store) -> Result<Option<Profile>> + Send + 'static,
+    ) -> bool {
+        self.poll_at(Instant::now(), persist, load)
+    }
+
+    pub(super) fn poll_at(
+        &mut self,
+        now: Instant,
         persist: impl FnOnce(Option<&SecretString>) -> Result<()> + Send + 'static,
         load: impl FnOnce(Option<Arc<SecretString>>, Store) -> Result<Option<Profile>> + Send + 'static,
     ) -> bool {
@@ -309,6 +342,18 @@ impl Auth {
         if self.reload_pending && !self.busy() && self.profile_incoming.is_none() {
             self.reload_pending = false;
             self.cancelled = false;
+            self.load_profile_with(None, load);
+            return true;
+        }
+        if self.connected()
+            && !self.signed_out
+            && !self.busy()
+            && self.profile_incoming.is_none()
+            && self.next_session_check.is_some_and(|next| now >= next)
+        {
+            // Resolve the store again under its transaction lock: another window
+            // may already have rotated the single-use refresh token or signed out.
+            self.next_session_check = Some(now + SESSION_CHECK_INTERVAL);
             self.load_profile_with(None, load);
             return true;
         }
@@ -335,8 +380,15 @@ impl Auth {
             if let Some(result) = result {
                 self.profile_incoming = None;
                 if !self.reload_pending && !self.signed_out {
+                    self.next_session_check = Some(now + SESSION_CHECK_INTERVAL);
                     match result {
-                        Ok(profile) => {
+                        Ok(mut profile) => {
+                            if let (Some(old), Some(new)) = (&self.profile, &mut profile)
+                                && old.token.expose_secret() == new.token.expose_secret()
+                            {
+                                // PR caches use token identity to fence workers.
+                                new.token = old.token.clone();
+                            }
                             self.profile = profile;
                             self.failed = false;
                             self.message = None;
@@ -344,7 +396,15 @@ impl Auth {
                         Err(error) => {
                             log::failure("profile", &error);
                             self.credential_cleanup = true;
-                            self.profile = None;
+                            if matches!(
+                                error,
+                                Error::GitHubAuthentication
+                                    | Error::GitHubExpired
+                                    | Error::GitHubDenied
+                                    | Error::GitHubAuthorization
+                            ) {
+                                self.profile = None;
+                            }
                             self.failed = true;
                             self.message = Some(error.to_string());
                         }
@@ -430,7 +490,10 @@ impl Auth {
                         Ok(Reply::SignedOut) => {
                             self.credential_cleanup = false;
                             self.committing = false;
-                            self.message = Some("Signed out for this app session. Saved credential removed. Environment tokens are suppressed until app restart; GitHub grants are not revoked.".into());
+                            self.message = Some(match self.account {
+                                Account::Main => "Signed out for this app session. Saved credential removed. Environment tokens are suppressed until app restart; GitHub grants are not revoked.",
+                                Account::Host(_) => "Signed out of this device's account. Saved credential removed; GitHub grants are not revoked. Pull requests here use your main account.",
+                            }.into());
                         }
                         Ok(Reply::Authenticated(token)) => {
                             self.committing = false;

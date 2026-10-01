@@ -30,15 +30,18 @@ def identity(path):
 
 
 def main():
-    if len(sys.argv) < 3 or sys.argv[1] not in ("linux", "icns"):
-        raise ValueError("Usage: python3 build-icon.py linux|icns BINARY [BINARY ...]")
+    if len(sys.argv) < 3 or sys.argv[1] not in ("linux", "macos"):
+        raise ValueError("Usage: python3 build-icon.py linux|macos BINARY [BINARY ...]")
     identities = {identity(path) for path in sys.argv[2:]}
     if len(identities) != 1:
         raise ValueError("Input binaries have different build identities")
     worktree, _, _ = identities.pop()
     icons = Path(__file__).resolve().parents[2] / "assets/icons"
-    if sys.argv[1] == "icns":
-        print(icons / ("Herdr-worktree.icns" if worktree == b"1" else "Herdr.icns"))
+    # macOS: the flattened .icns for CFBundleIconFile, then the Icon Composer
+    # asset catalog for CFBundleIconName, which macOS 26 and later prefer.
+    if sys.argv[1] == "macos":
+        name = "Herdr-worktree" if worktree == b"1" else "Herdr"
+        print(icons / f"{name}.icns", icons / f"{name}.car", sep="\n")
     # Linux: the source, then its path under the install prefix. Icon themes
     # only search the sizes their index lists, which stop at 512x512, so a
     # release installs the vector artwork as the scalable icon. The worktree

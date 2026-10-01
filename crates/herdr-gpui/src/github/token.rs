@@ -17,6 +17,8 @@ pub(super) struct Credential {
     pub(super) access_token: SecretString,
     pub(super) refresh_token: Option<SecretString>,
     client_id: String,
+    #[serde(default)]
+    expires_at: Option<u64>,
 }
 
 impl Credential {
@@ -30,6 +32,7 @@ impl Credential {
             access_token,
             refresh_token,
             client_id: client_id.into(),
+            expires_at: None,
         };
         credential.validate()?;
         Ok(credential)
@@ -51,6 +54,24 @@ impl Credential {
             return Err(Error::GitHubToken);
         }
         Ok(())
+    }
+
+    pub(super) fn with_expiry(mut self, seconds: Option<u64>, now: std::time::SystemTime) -> Self {
+        self.expires_at = seconds.and_then(|seconds| {
+            now.duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_secs()
+                .checked_add(seconds)
+        });
+        self
+    }
+
+    fn renewal_due(&self, now: std::time::SystemTime) -> bool {
+        self.refresh_token.is_some()
+            && self.expires_at.is_some_and(|expires| {
+                now.duration_since(std::time::UNIX_EPOCH)
+                    .is_ok_and(|now| expires <= now.as_secs().saturating_add(10 * 60))
+            })
     }
 
     pub(super) fn decode(value: &SecretString) -> Result<Self> {
@@ -79,6 +100,8 @@ impl Credential {
             access_token: &'a str,
             refresh_token: Option<&'a str>,
             client_id: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            expires_at: Option<u64>,
         }
         let mut bytes = Zeroizing::new(Vec::with_capacity(LIMIT));
         serde_json::to_writer(
@@ -88,6 +111,7 @@ impl Credential {
                 access_token: self.access_token.expose_secret(),
                 refresh_token: self.refresh_token.as_ref().map(ExposeSecret::expose_secret),
                 client_id: &self.client_id,
+                expires_at: self.expires_at,
             },
         )
         .map_err(Error::github_json)?;
@@ -116,14 +140,19 @@ impl Credential {
         }
     }
 
-    /// Only a rejected saved access token triggers rotation. Network failures,
-    /// rate limits and environment credentials never rotate or erase the store.
+    /// Renew shortly before expiry, or on rejection for older saved records
+    /// without expiry metadata. Persist rotations before using the new token.
     pub(super) fn profile_with(
         self,
         mut profile: impl FnMut(Arc<SecretString>) -> Result<Profile>,
         refresh: impl FnOnce(&Self) -> Result<Self>,
         persist: impl FnOnce(&SecretString) -> Result<()>,
     ) -> Result<Profile> {
+        if self.renewal_due(std::time::SystemTime::now()) {
+            let renewed = refresh(&self)?;
+            persist(&renewed.encode()?)?;
+            return profile(Arc::new(renewed.access_token));
+        }
         match profile(Arc::new(self.access_token.expose_secret().into())) {
             Err(Error::GitHubAuthentication) if self.refresh_token.is_some() => {
                 let renewed = refresh(&self)?;
@@ -161,6 +190,59 @@ mod tests {
             token,
             avatar_updates: None,
         })
+    }
+
+    #[test]
+    fn expiry_survives_storage_and_renews_before_the_first_profile_request() {
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let value = credential().with_expiry(Some(3600), now);
+        let restored = Credential::decode(&value.encode().unwrap()).unwrap();
+        assert!(!restored.renewal_due(now + Duration::from_secs(2999)));
+        assert!(restored.renewal_due(now + Duration::from_secs(3000)));
+        assert!(restored.renewal_due(now + Duration::from_secs(3601)));
+
+        let persisted = std::cell::Cell::new(false);
+        let loaded = restored
+            .profile_with(
+                |token| {
+                    assert!(persisted.get(), "persist before any authenticated request");
+                    assert_eq!(token.expose_secret(), "new-access");
+                    profile(token)
+                },
+                |_| Ok(renewed()),
+                |_| {
+                    persisted.set(true);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(loaded.token.expose_secret(), "new-access");
+    }
+
+    #[test]
+    fn oauth_expiry_is_preserved_and_missing_or_overflowing_expiry_is_safe() {
+        let reply: TokenResponse = serde_json::from_str(
+            r#"{"access_token":"access","refresh_token":"refresh","token_type":"bearer","expires_in":28800}"#,
+        )
+        .unwrap();
+        let Reply::Token(value) = token_reply(reply, "client").unwrap() else {
+            panic!("expected credential");
+        };
+        assert!(value.expires_at.is_some());
+        assert_eq!(
+            Credential::decode(&value.encode().unwrap())
+                .unwrap()
+                .expires_at,
+            value.expires_at
+        );
+        assert!(!value.renewal_due(std::time::SystemTime::now()));
+        assert!(!credential().renewal_due(std::time::SystemTime::now()));
+        assert!(
+            credential()
+                .with_expiry(Some(u64::MAX), std::time::SystemTime::now())
+                .expires_at
+                .is_none()
+        );
     }
 
     #[test]

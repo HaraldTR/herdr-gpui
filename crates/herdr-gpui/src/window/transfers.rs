@@ -294,7 +294,7 @@ impl HerdrWindow {
                     .max(px(0.))
                     .min(px(340.)))
                 .occlude()
-                .rounded(px(6.))
+                .rounded(px(crate::config::corners::PANEL))
                 .border_1()
                 .border_color(rgb(accent))
                 .bg(rgb(self.theme.surface))
@@ -315,7 +315,7 @@ impl HerdrWindow {
                         .debug_selector(|| "file-transfer-track".into())
                         .w_full()
                         .h(px(6.))
-                        .rounded(px(3.))
+                        .rounded(px(crate::config::corners::CONTROL))
                         .overflow_hidden()
                         .bg(rgb(self.theme.active))
                         .child(
@@ -347,7 +347,7 @@ impl HerdrWindow {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{FileTransfer, HerdrWindow, transfer_progress};
@@ -435,13 +435,28 @@ mod tests {
         }
     }
 
-    struct Peer {
-        client: Client,
+    /// A daemon peer that has sent its welcome and snapshot fixtures.
+    pub(crate) struct Peer {
+        pub(crate) client: Client,
         stream: Stream,
     }
 
     impl Peer {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
+            Self::advertising(&[])
+        }
+
+        /// A peer whose welcome also advertises `methods`, so requests the
+        /// fixture's welcome lacks reach the wire instead of being refused.
+        pub(crate) fn advertising(methods: &[&str]) -> Self {
+            let mut welcome: serde_json::Value = serde_json::from_str(include_str!(
+                "../../../herdr-protocol/tests/fixtures/endpoint-welcome-v1.json"
+            ))
+            .unwrap();
+            if let Some(advertised) = welcome["methods"].as_array_mut() {
+                advertised.extend(methods.iter().map(|method| serde_json::json!(method)));
+            }
+            let welcome = welcome.to_string();
             let (stream, mut server) = Stream::pair().unwrap();
             server
                 .set_read_timeout(Some(Duration::from_secs(3)))
@@ -461,10 +476,7 @@ mod tests {
                 ClientMessage::EndpointControl { .. }
             ));
             for (kind, data) in [
-                (
-                    ENDPOINT_WELCOME_KIND,
-                    include_str!("../../../herdr-protocol/tests/fixtures/endpoint-welcome-v1.json"),
-                ),
+                (ENDPOINT_WELCOME_KIND, welcome.as_str()),
                 (
                     ENDPOINT_SNAPSHOT_KIND,
                     include_str!(
@@ -502,7 +514,7 @@ mod tests {
             }
         }
 
-        fn receive(&mut self) -> ClientMessage {
+        pub(crate) fn receive(&mut self) -> ClientMessage {
             read_message(&mut self.stream, MAX_FRAME_SIZE).unwrap()
         }
 
@@ -653,7 +665,7 @@ mod tests {
         });
         cx.update(|window, cx| {
             window.refresh();
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let track = cx.debug_bounds("file-transfer-track").unwrap();
         let progress = cx.debug_bounds("file-transfer-progress").unwrap();

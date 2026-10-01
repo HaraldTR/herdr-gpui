@@ -1,5 +1,6 @@
 mod links;
 mod selection;
+pub(crate) mod splits;
 pub(crate) use links::link_at;
 pub(crate) use selection::Selection;
 
@@ -11,7 +12,7 @@ use gpui::{
 use herdr_client::protocol::{
     CellData, ClientKeyCode, ClientKeyKind, ClientMouseGeometry, ClientMouseKind,
     ClientMousePosition, ClientPaneInputEvent, ClientSurfaceSize, CursorState, FrameData,
-    PaneSurfaceFrame, SurfaceRect,
+    PaneSurfaceFrame, PaneSurfacePane, SurfaceRect,
 };
 
 #[cfg(test)]
@@ -71,6 +72,28 @@ pub(crate) fn input_cursor_bounds(
         }
     }
     Bounds::new(origin, size(px(cell_width), px(cell_height)))
+}
+
+/// Where input lands: the popup when one is open, otherwise the whole grid.
+/// An IME composition and its candidate window stay inside this area.
+pub(crate) fn input_area(
+    surface: Option<&PaneSurfaceFrame>,
+    grid: Bounds<Pixels>,
+    cell_width: f32,
+    cell_height: f32,
+) -> Bounds<Pixels> {
+    let Some((frame, popup)) =
+        surface.and_then(|surface| Some((&surface.frame, surface.popup.as_ref()?)))
+    else {
+        return grid;
+    };
+    Bounds::new(
+        grid.origin + popup_origin(frame, &popup.frame, cell_width, cell_height),
+        size(
+            px(f32::from(popup.frame.width) * cell_width),
+            px(f32::from(popup.frame.height) * cell_height),
+        ),
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -332,8 +355,10 @@ pub fn viewport(width: f32, height: f32, cell_width: f32, cell_height: f32) -> C
 
 // Printable text belongs to EntityInputHandler, not key-down: this preserves
 // keyboard layouts, dead keys and IME commits without double-sending characters.
-pub fn key_input(event: &KeyDownEvent) -> Option<ClientPaneInputEvent> {
-    key_code(&event.keystroke).map(|code| ClientPaneInputEvent::Key {
+// `alt_keys` claims Alt-modified characters as shortcuts instead; without it
+// macOS Option-P commits `π` and the shortcut never reaches the pane.
+pub fn key_input(event: &KeyDownEvent, alt_keys: bool) -> Option<ClientPaneInputEvent> {
+    key_code(&event.keystroke, alt_keys).map(|code| ClientPaneInputEvent::Key {
         code,
         modifiers: u8::from(event.keystroke.modifiers.shift)
             | (u8::from(event.keystroke.modifiers.control) << 1)
@@ -352,7 +377,7 @@ pub fn key_input(event: &KeyDownEvent) -> Option<ClientPaneInputEvent> {
     })
 }
 
-fn key_code(key: &Keystroke) -> Option<ClientKeyCode> {
+fn key_code(key: &Keystroke, alt_keys: bool) -> Option<ClientKeyCode> {
     use ClientKeyCode::*;
     if key.modifiers.platform {
         return None;
@@ -380,8 +405,83 @@ fn key_code(key: &Keystroke) -> Option<ClientKeyCode> {
         }
         "space" if key.modifiers.control => Char(' '),
         name if key.modifiers.control && name.chars().count() == 1 => Char(name.chars().next()?),
+        "space" if key.modifiers.alt && alt_keys => Char(' '),
+        // GPUI reports Shift-letter as the lowercase key plus Shift; a shifted
+        // symbol arrives as the symbol itself. Herdr expects the typed letter.
+        name if key.modifiers.alt && alt_keys && name.chars().count() == 1 => {
+            let ch = name.chars().next()?;
+            Char(if key.modifiers.shift {
+                ch.to_ascii_uppercase()
+            } else {
+                ch
+            })
+        }
         _ => return None,
     })
+}
+
+const MIN_THUMB: f32 = 24.;
+
+/// A pane's scrollbar in grid pixels. The daemon draws it as cells, which
+/// move the thumb a whole row per many lines; this places it to the pixel.
+/// Painting and dragging share it so the thumb is where it is grabbed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Scrollbar {
+    pub track: Bounds<Pixels>,
+    pub thumb: Bounds<Pixels>,
+    max: u64,
+}
+
+impl Scrollbar {
+    pub(crate) fn new(pane: &PaneSurfacePane, cell_width: f32, cell_height: f32) -> Option<Self> {
+        let (rect, scroll) = (pane.scrollbar_rect?, pane.scroll?);
+        if scroll.max_offset_from_bottom == 0 || rect.height == 0 {
+            return None;
+        }
+        let track = Bounds::new(
+            point(
+                px(f32::from(rect.x) * cell_width),
+                px(f32::from(rect.y) * cell_height),
+            ),
+            size(
+                px(f32::from(rect.width) * cell_width),
+                px(f32::from(rect.height) * cell_height),
+            ),
+        );
+        let height = f32::from(track.size.height);
+        let max = scroll.max_offset_from_bottom as f32;
+        let visible = scroll.viewport_rows as f32;
+        let thumb = (height * visible / (max + visible))
+            .max(MIN_THUMB)
+            .min(height);
+        let offset = scroll.offset_from_bottom.min(scroll.max_offset_from_bottom) as f32;
+        let top = (height - thumb) * (1. - offset / max);
+        Some(Self {
+            track,
+            thumb: Bounds::new(
+                track.origin + point(px(0.), px(top)),
+                size(track.size.width, px(thumb)),
+            ),
+            max: scroll.max_offset_from_bottom,
+        })
+    }
+
+    /// The offset from the bottom that puts the thumb's top at `top`.
+    pub(crate) fn offset_at(&self, top: f32) -> u64 {
+        let travel = f32::from(self.track.size.height - self.thumb.size.height);
+        if travel <= 0. {
+            return 0;
+        }
+        let fraction = ((top - f32::from(self.track.top())) / travel).clamp(0., 1.);
+        ((1. - fraction) * self.max as f32).round() as u64
+    }
+}
+
+pub(crate) fn in_rect(rect: SurfaceRect, x: u16, y: u16) -> bool {
+    x >= rect.x
+        && y >= rect.y
+        && u32::from(x) < u32::from(rect.x) + u32::from(rect.width)
+        && u32::from(y) < u32::from(rect.y) + u32::from(rect.height)
 }
 
 #[cfg(test)]
@@ -691,7 +791,15 @@ mod tests {
             input_cursor_bounds(Some(&surface), origin, 8.5, 30.5).origin,
             origin + point(px(255.), px(213.5))
         );
+        let grid = Bounds::new(origin, size(px(680.), px(480.)));
+        // A composition in a popup stays inside the popup, not the grid.
+        assert_eq!(
+            input_area(Some(&surface), grid, 8.5, CELL_HEIGHT),
+            Bounds::new(origin + point(px(255.), px(140.)), size(px(170.), px(200.)))
+        );
         surface.popup = None;
+        assert_eq!(input_area(Some(&surface), grid, 8.5, CELL_HEIGHT), grid);
+        assert_eq!(input_area(None, grid, 8.5, CELL_HEIGHT), grid);
         assert_eq!(
             input_cursor_bounds(Some(&surface), origin, 8.5, CELL_HEIGHT).origin,
             origin + point(px(595.), px(400.))
@@ -856,12 +964,126 @@ mod tests {
     #[test]
     fn special_keys_and_text_are_separate() {
         let key = |s| Keystroke::parse(s).unwrap();
-        assert_eq!(key_code(&key("ctrl-c")), Some(ClientKeyCode::Char('c')));
-        assert_eq!(key_code(&key("shift-tab")), Some(ClientKeyCode::BackTab));
-        assert_eq!(key_code(&key("alt-left")), Some(ClientKeyCode::Left));
-        assert_eq!(key_code(&key("f12")), Some(ClientKeyCode::F(12)));
-        assert_eq!(key_code(&key("a")), None);
-        assert_eq!(key_code(&key("alt-e")), None);
-        assert_eq!(key_code(&key("cmd-q")), None);
+        for alt_keys in [false, true] {
+            let code = |s| key_code(&key(s), alt_keys);
+            assert_eq!(code("ctrl-c"), Some(ClientKeyCode::Char('c')));
+            assert_eq!(code("shift-tab"), Some(ClientKeyCode::BackTab));
+            assert_eq!(code("alt-left"), Some(ClientKeyCode::Left));
+            assert_eq!(code("f12"), Some(ClientKeyCode::F(12)));
+            assert_eq!(code("a"), None);
+            assert_eq!(code("shift-a"), None);
+            assert_eq!(code("cmd-q"), None);
+            assert_eq!(code("cmd-alt-p"), None);
+        }
+        assert_eq!(key_code(&key("alt-e"), false), None);
+        assert_eq!(key_code(&key("alt-space"), false), None);
+    }
+
+    #[test]
+    fn alt_characters_reach_the_pane_as_shortcuts() {
+        let alt = |s| {
+            key_input(
+                &KeyDownEvent {
+                    keystroke: Keystroke::parse(s).unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                },
+                true,
+            )
+        };
+        for (keystroke, ch, modifiers) in [
+            ("alt-p", 'p', 4),
+            ("alt-shift-p", 'P', 5),
+            ("alt-1", '1', 4),
+            ("alt-.", '.', 4),
+            ("alt-space", ' ', 4),
+            ("ctrl-alt-p", 'p', 6),
+        ] {
+            let Some(ClientPaneInputEvent::Key {
+                code,
+                modifiers: sent,
+                ..
+            }) = alt(keystroke)
+            else {
+                panic!("{keystroke} should be a key");
+            };
+            assert_eq!(
+                (code, sent),
+                (ClientKeyCode::Char(ch), modifiers),
+                "{keystroke}"
+            );
+        }
+    }
+
+    #[test]
+    fn option_as_alt_follows_the_layout_only_on_macos() {
+        use crate::config::OptionAsAlt;
+        let us = "com.apple.keylayout.US";
+        let german = "com.apple.keylayout.German";
+        let macos = cfg!(target_os = "macos");
+        assert!(OptionAsAlt::Auto.sends_alt(us));
+        assert!(OptionAsAlt::Auto.sends_alt("com.apple.keylayout.ABC"));
+        assert_eq!(OptionAsAlt::Auto.sends_alt(german), !macos);
+        assert!(OptionAsAlt::Always.sends_alt(german));
+        assert_eq!(OptionAsAlt::Never.sends_alt(us), !macos);
+    }
+
+    #[test]
+    fn scrollbar_thumb_tracks_offset_to_the_pixel_and_round_trips() {
+        use herdr_client::protocol::PaneSurfaceScrollMetrics;
+        let rect = SurfaceRect {
+            x: 79,
+            y: 0,
+            width: 1,
+            height: 24,
+        };
+        let pane = |offset, max| PaneSurfacePane {
+            pane_id: "p".into(),
+            content_revision: 1,
+            rect: SurfaceRect {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 24,
+            },
+            inner_rect: SurfaceRect {
+                x: 0,
+                y: 0,
+                width: 79,
+                height: 24,
+            },
+            scrollbar_rect: Some(rect),
+            scroll: Some(PaneSurfaceScrollMetrics {
+                offset_from_bottom: offset,
+                max_offset_from_bottom: max,
+                viewport_rows: 24,
+            }),
+            focused: true,
+            mouse_reporting: false,
+            sgr_pixel_mouse: false,
+            alternate_screen_active: false,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        assert!(Scrollbar::new(&pane(0, 0), 8., 20.).is_none());
+        let bottom = Scrollbar::new(&pane(0, 1978), 8., 20.).unwrap();
+        let top = Scrollbar::new(&pane(1978, 1978), 8., 20.).unwrap();
+        let one = Scrollbar::new(&pane(1, 1978), 8., 20.).unwrap();
+        assert_eq!(
+            bottom.track,
+            Bounds::new(point(px(632.), px(0.)), size(px(8.), px(480.)))
+        );
+        assert_eq!(bottom.thumb.size.height, px(MIN_THUMB));
+        assert_eq!(bottom.thumb.bottom(), bottom.track.bottom());
+        assert_eq!(top.thumb.top(), top.track.top());
+        // One line moves the thumb a fraction of a pixel, not a whole cell.
+        let step = f32::from(bottom.thumb.top() - one.thumb.top());
+        assert!(step > 0. && step < 1., "{step}");
+        for offset in [0, 1, 500, 1977, 1978] {
+            let bar = Scrollbar::new(&pane(offset, 1978), 8., 20.).unwrap();
+            assert_eq!(bar.offset_at(f32::from(bar.thumb.top())), offset);
+        }
+        assert_eq!(bottom.offset_at(-100.), 1978);
+        assert_eq!(bottom.offset_at(1000.), 0);
     }
 }

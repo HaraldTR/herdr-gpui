@@ -1,17 +1,41 @@
+mod glyphs;
+mod graphics;
+
+use self::glyphs::GlyphCache;
+use self::graphics::Graphic;
 use crate::config::Theme;
 use crate::terminal::*;
 use gpui::*;
-use herdr_client::protocol::{CellData, FrameData};
-use std::collections::HashMap;
+use herdr_client::protocol::{CellData, FrameData, PaneSurfacePane, SurfaceRect};
 use std::time::{Duration, Instant};
+use unicode_width::UnicodeWidthStr;
 
-const CACHE_LIMIT: usize = 4096;
 /// The selection tints the cells it covers instead of replacing their colors:
 /// a terminal's own background is meaningful, and the glyphs above it stay
 /// readable on every theme.
 const SELECTION_ALPHA: u32 = 0x59;
 const REPORT_INTERVAL: Duration = Duration::from_secs(5);
 const SLOW_PAINT: Duration = Duration::from_millis(16);
+const SCROLLBAR_INSET: f32 = 1.;
+const SCROLLBAR_ALPHA: u32 = 0xc0;
+
+fn background_extent(
+    grid: Size<Pixels>,
+    available: Size<Pixels>,
+    cell: Size<Pixels>,
+) -> Size<Pixels> {
+    let extend = |grid, available, cell| {
+        if available > grid && available - grid < cell {
+            available
+        } else {
+            grid
+        }
+    };
+    size(
+        extend(grid.width, available.width, cell.width),
+        extend(grid.height, available.height, cell.height),
+    )
+}
 
 #[derive(Default)]
 struct PaintTiming {
@@ -71,8 +95,7 @@ pub(crate) struct TerminalPainter {
     config: Option<Font>,
     // Resolved foreground includes reverse, dim and hidden; only bold/italic
     // affect shaping. Decorations remain at exact cell-grid coordinates.
-    lines: HashMap<(u32, u16), HashMap<String, ShapedLine>>,
-    entries: usize,
+    glyphs: GlyphCache,
     cell_width: Option<f32>,
     diagnostics: PaintDiagnostics,
     #[cfg(feature = "integration-test")]
@@ -86,8 +109,7 @@ impl Default for TerminalPainter {
             cell_height: CELL_HEIGHT,
             theme: Theme::default(),
             config: None,
-            lines: HashMap::new(),
-            entries: 0,
+            glyphs: GlyphCache::default(),
             cell_width: None,
             diagnostics: PaintDiagnostics::new(Instant::now()),
             #[cfg(feature = "integration-test")]
@@ -105,19 +127,73 @@ fn decoration_offsets(cell: &CellData, cell_height: f32) -> impl Iterator<Item =
     .filter_map(|(modifier, y)| (cell.modifier & modifier != 0).then_some(y))
 }
 
-fn style(cell: &CellData, theme: &Theme) -> (u32, u16) {
-    (cell_colors(cell, theme).0, cell.modifier & (BOLD | ITALIC))
+/// `ShapedLine::paint` without its per-call layer, whose BoundsTree insert
+/// would otherwise run once per cell. Glyph placement matches GPUI's.
+fn paint_glyphs(
+    line: &ShapedLine,
+    origin: Point<Pixels>,
+    line_height: Pixels,
+    color: Rgba,
+    window: &mut Window,
+) -> Result<()> {
+    let baseline = origin
+        + point(
+            px(0.),
+            (line_height - line.ascent - line.descent) / 2. + line.ascent,
+        );
+    for run in &line.runs {
+        for glyph in &run.glyphs {
+            let position = baseline + point(glyph.position.x, px(0.));
+            if glyph.is_emoji {
+                window.paint_emoji(position, run.font_id, glyph.id, line.font_size)?;
+            } else {
+                window.paint_glyph(
+                    position,
+                    run.font_id,
+                    glyph.id,
+                    line.font_size,
+                    color.into(),
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn background_spans<'a>(
     row: &'a [CellData],
     theme: &'a Theme,
 ) -> impl Iterator<Item = (usize, usize, u32)> + 'a {
+    // A wide glyph's continuation cell shows the glyph's background, as a host
+    // terminal does: Herdr's ANSI renderer never draws that cell, so its own
+    // background is not meant to be seen. Like that renderer, a halfwidth
+    // katakana with a (semi-)voiced mark counts as two columns.
+    let wide = |symbol: &str| {
+        let mut chars = symbol.chars();
+        symbol.width() > 1
+            || matches!(
+                (chars.next(), chars.next(), chars.next()),
+                (
+                    Some('\u{ff66}'..='\u{ff9d}'),
+                    Some('\u{ff9e}' | '\u{ff9f}'),
+                    None
+                )
+            )
+    };
+    let bg = move |x: usize| {
+        let x = if x > 0 && wide(&row[x - 1].symbol) {
+            x - 1
+        } else {
+            x
+        };
+        cell_colors(&row[x], theme).1
+    };
     let mut start = 0;
     std::iter::from_fn(move || {
-        let color = cell_colors(row.get(start)?, theme).1;
+        row.get(start)?;
+        let color = bg(start);
         let mut end = start + 1;
-        while end < row.len() && cell_colors(&row[end], theme).1 == color {
+        while end < row.len() && bg(end) == color {
             end += 1;
         }
         let span = (start, end, color);
@@ -126,14 +202,32 @@ fn background_spans<'a>(
     })
 }
 
+/// Where an IME composition sits: at the input cursor, shifted left only as
+/// far as it takes to end inside the grid. Text wider than the grid loses its
+/// start rather than its end, where the IME is editing.
+fn composition_origin(cursor: Point<Pixels>, width: Pixels, grid: Bounds<Pixels>) -> Point<Pixels> {
+    point(cursor.x.min(grid.right() - width), cursor.y)
+}
+
+/// The byte index of a UTF-16 offset, as the platform input handler counts.
+fn byte_index(text: &str, utf16: usize) -> usize {
+    let mut units = 0;
+    text.char_indices()
+        .find(|(_, c)| {
+            let found = units >= utf16;
+            units += c.len_utf16();
+            found
+        })
+        .map_or(text.len(), |(index, _)| index)
+}
+
 impl TerminalPainter {
     pub fn set_appearance(&mut self, font_size: f32, cell_height: f32, theme: Theme) {
         if self.font_size != font_size || self.cell_height != cell_height || self.theme != theme {
             self.font_size = font_size;
             self.cell_height = cell_height;
             self.theme = theme;
-            self.lines.clear();
-            self.entries = 0;
+            self.glyphs.clear();
             self.cell_width = None;
         }
     }
@@ -141,8 +235,7 @@ impl TerminalPainter {
     #[cfg(feature = "integration-test")]
     pub fn reset_cache(&mut self) {
         self.config = None;
-        self.lines.clear();
-        self.entries = 0;
+        self.glyphs.clear();
         self.cell_width = None;
     }
 
@@ -151,40 +244,45 @@ impl TerminalPainter {
         let Some(base) = &self.config else {
             anyhow::bail!("missing font config");
         };
-        for ((color, flags), lines) in &self.lines {
-            let mut font = base.clone();
-            if flags & BOLD != 0 {
-                font.weight = FontWeight::BOLD;
-            }
-            if flags & ITALIC != 0 {
-                font.style = FontStyle::Italic;
-            }
-            for (symbol, cached) in lines {
-                let fresh = window.text_system().shape_line(
-                    symbol.clone().into(),
-                    px(self.font_size),
-                    &[TextRun {
-                        len: symbol.len(),
-                        font: font.clone(),
-                        color: rgb(*color).into(),
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    }],
-                    None,
-                );
-                // Includes native glyph IDs/positions, font IDs, metrics and colors.
-                if format!("{fresh:?}") != format!("{cached:?}") {
-                    anyhow::bail!("cached glyph/style mismatch: {symbol:?}");
-                }
+        for (style, symbol, cached) in self.glyphs.iter() {
+            let fresh = self.shape(base, style, &symbol, window);
+            // Includes native glyph IDs/positions, font IDs and metrics.
+            if format!("{fresh:?}") != format!("{cached:?}") {
+                anyhow::bail!("cached glyph/style mismatch: {symbol:?}");
             }
         }
-        Ok(self.entries)
+        Ok(self.glyphs.len())
     }
+
+    /// Glyphs for one cell symbol. Color is left to `paint_glyphs`, so one
+    /// shape serves every color the symbol is drawn in.
+    fn shape(&self, font: &Font, style: usize, symbol: &str, window: &Window) -> ShapedLine {
+        let mut font = font.clone();
+        let modifier = glyphs::style_modifier(style);
+        if modifier & BOLD != 0 {
+            font.weight = FontWeight::BOLD;
+        }
+        if modifier & ITALIC != 0 {
+            font.style = FontStyle::Italic;
+        }
+        window.text_system().shape_line(
+            SharedString::from(symbol.to_owned()),
+            px(self.font_size),
+            &[TextRun {
+                len: symbol.len(),
+                font,
+                color: Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            None,
+        )
+    }
+
     fn configure(&mut self, font: &Font) {
         if self.config.as_ref() != Some(font) {
-            self.lines.clear();
-            self.entries = 0;
+            self.glyphs.clear();
             self.cell_width = None;
             self.config = Some(font.clone());
         }
@@ -231,9 +329,11 @@ impl TerminalPainter {
         &mut self,
         frame: &FrameData,
         origin: Point<Pixels>,
+        available: Option<Size<Pixels>>,
         cell_width: f32,
         font: &Font,
         selection: &[(u16, std::ops::Range<u16>)],
+        panes: &[PaneSurfacePane],
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -249,168 +349,239 @@ impl TerminalPainter {
         let cached = cached && !self.uncached;
         #[cfg(feature = "integration-test")]
         let mut counts = crate::performance::Counts::default();
-        // Backgrounds precede all glyphs, including wide graphemes' skip cells.
-        for (y, row) in frame.cells.chunks(usize::from(frame.width)).enumerate() {
-            let mut paint = |start: usize, end: usize, color| {
+        let grid = Bounds::new(
+            origin,
+            size(
+                px(f32::from(frame.width) * cell_width),
+                px(f32::from(frame.height) * self.cell_height),
+            ),
+        );
+        // Only fill a sub-cell remainder. Retained frames during resize and
+        // mirrored groups must not stretch across whole missing rows/columns.
+        // Popups have no remainder; their background stays inside their grid.
+        let background = available.map_or(grid.size, |available| {
+            background_extent(
+                grid.size,
+                available,
+                size(px(cell_width), px(self.cell_height)),
+            )
+        });
+        // The daemon's cell scrollbar is replaced by the pixel thumb painted below.
+        let bars: Vec<SurfaceRect> = panes.iter().filter_map(|p| p.scrollbar_rect).collect();
+        let in_bar = |index: usize| {
+            let width = usize::from(frame.width);
+            bars.iter()
+                .any(|r| in_rect(*r, (index % width) as u16, (index / width) as u16))
+        };
+        // A layer gives all its primitives one draw order, skipping GPUI's
+        // per-primitive BoundsTree insert that dominates large grids. Within a
+        // layer quads draw before glyphs, so decorations and the cursor take a
+        // second layer above the text.
+        window.paint_layer(Bounds::new(origin, background), |window| {
+            // Backgrounds precede all glyphs, including wide graphemes' skip cells.
+            for (y, row) in frame.cells.chunks(usize::from(frame.width)).enumerate() {
+                let mut paint = |start: usize, end: usize, color| {
+                    let right = if end == usize::from(frame.width) {
+                        background.width
+                    } else {
+                        px(end as f32 * cell_width)
+                    };
+                    let bottom = if y + 1 == usize::from(frame.height) {
+                        background.height
+                    } else {
+                        px((y + 1) as f32 * self.cell_height)
+                    };
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            origin
+                                + point(
+                                    px(start as f32 * cell_width),
+                                    px(y as f32 * self.cell_height),
+                                ),
+                            size(
+                                right - px(start as f32 * cell_width),
+                                bottom - px(y as f32 * self.cell_height),
+                            ),
+                        ),
+                        rgb(color),
+                    ));
+                    #[cfg(feature = "integration-test")]
+                    {
+                        counts.quads += 1;
+                    }
+                };
+                if cached {
+                    for (start, end, color) in background_spans(row, &self.theme) {
+                        paint(start, end, color);
+                    }
+                } else {
+                    for (x, cell) in row.iter().enumerate() {
+                        paint(x, x + 1, cell_colors(cell, &self.theme).1);
+                    }
+                }
+            }
+            // Between the backgrounds and the glyphs, so the tint reads as chosen
+            // without hiding either.
+            for (row, columns) in selection {
+                let (start, end) = (columns.start.min(frame.width), columns.end.min(frame.width));
+                if *row >= frame.height || start >= end {
+                    continue;
+                }
                 window.paint_quad(fill(
                     Bounds::new(
                         origin
                             + point(
-                                px(start as f32 * cell_width),
-                                px(y as f32 * self.cell_height),
+                                px(f32::from(start) * cell_width),
+                                px(f32::from(*row) * self.cell_height),
                             ),
-                        size(px((end - start) as f32 * cell_width), px(self.cell_height)),
+                        size(
+                            px(f32::from(end - start) * cell_width),
+                            px(self.cell_height),
+                        ),
                     ),
-                    rgb(color),
+                    rgba((self.theme.primary() << 8) | SELECTION_ALPHA),
                 ));
                 #[cfg(feature = "integration-test")]
                 {
                     counts.quads += 1;
                 }
-            };
-            if cached {
-                for (start, end, color) in background_spans(row, &self.theme) {
-                    paint(start, end, color);
-                }
-            } else {
-                for (x, cell) in row.iter().enumerate() {
-                    paint(x, x + 1, cell_colors(cell, &self.theme).1);
-                }
             }
-        }
-        // Between the backgrounds and the glyphs, so the tint reads as chosen
-        // without hiding either.
-        for (row, columns) in selection {
-            let (start, end) = (columns.start.min(frame.width), columns.end.min(frame.width));
-            if *row >= frame.height || start >= end {
-                continue;
-            }
-            window.paint_quad(fill(
-                Bounds::new(
-                    origin
-                        + point(
-                            px(f32::from(start) * cell_width),
-                            px(f32::from(*row) * self.cell_height),
-                        ),
-                    size(
-                        px(f32::from(end - start) * cell_width),
-                        px(self.cell_height),
-                    ),
-                ),
-                rgba((self.theme.primary() << 8) | SELECTION_ALPHA),
-            ));
-            #[cfg(feature = "integration-test")]
-            {
-                counts.quads += 1;
-            }
-        }
-        for (index, cell) in frame.cells.iter().enumerate() {
-            if cell.skip || cell.symbol.is_empty() || cell.symbol == " " {
-                continue;
-            }
-            let key = style(cell, &self.theme);
-            let mut overflow = HashMap::new();
-            let lines = if self.entries < CACHE_LIMIT || self.lines.contains_key(&key) {
-                self.lines.entry(key).or_default()
-            } else {
-                &mut overflow
-            };
-            let existing = cached.then(|| lines.get(cell.symbol.as_str())).flatten();
-            let newly_shaped;
-            let shaped = if let Some(line) = existing {
-                line
-            } else {
-                let mut font = font.clone();
-                if key.1 & BOLD != 0 {
-                    font.weight = FontWeight::BOLD;
+            for (index, cell) in frame.cells.iter().enumerate() {
+                if cell.skip
+                    || cell.symbol.is_empty()
+                    || cell.symbol == " "
+                    || in_bar(index)
+                    || Graphic::from_symbol(&cell.symbol).is_some()
+                {
+                    continue;
                 }
-                if key.1 & ITALIC != 0 {
-                    font.style = FontStyle::Italic;
-                }
+                let style = glyphs::style(cell.modifier);
+                let newly_shaped;
+                let shaped = match cached
+                    .then(|| self.glyphs.get(style, &cell.symbol))
+                    .flatten()
+                {
+                    Some(line) => line,
+                    None => {
+                        #[cfg(feature = "integration-test")]
+                        {
+                            counts.shapes += 1;
+                        }
+                        let line = self.shape(font, style, &cell.symbol, window);
+                        if cached && self.glyphs.has_room() {
+                            self.glyphs.insert(style, &cell.symbol, line)
+                        } else {
+                            newly_shaped = line;
+                            &newly_shaped
+                        }
+                    }
+                };
+                let position = origin
+                    + point(
+                        px((index % usize::from(frame.width)) as f32 * cell_width),
+                        px((index / usize::from(frame.width)) as f32 * self.cell_height),
+                    );
+                let color = rgb(cell_colors(cell, &self.theme).0);
+                let result = paint_glyphs(shaped, position, px(self.cell_height), color, window);
+                paint_errors += u64::from(result.is_err());
                 #[cfg(feature = "integration-test")]
                 {
-                    counts.shapes += 1;
+                    counts.glyphs += shaped.runs.iter().map(|r| r.glyphs.len()).sum::<usize>();
+                    counts.paint_errors += usize::from(result.is_err());
                 }
-                newly_shaped = window.text_system().shape_line(
-                    cell.symbol.clone().into(),
-                    px(self.font_size),
-                    &[TextRun {
-                        len: cell.symbol.len(),
-                        font,
-                        color: rgb(key.0).into(),
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    }],
-                    None,
-                );
-                if cached && self.entries < CACHE_LIMIT {
-                    self.entries += 1;
-                    lines.entry(cell.symbol.clone()).or_insert(newly_shaped)
-                } else {
-                    &newly_shaped
-                }
-            };
-            let position = origin
-                + point(
-                    px((index % usize::from(frame.width)) as f32 * cell_width),
-                    px((index / usize::from(frame.width)) as f32 * self.cell_height),
-                );
-            let result = shaped.paint(position, px(self.cell_height), window, cx);
-            paint_errors += u64::from(result.is_err());
-            #[cfg(feature = "integration-test")]
-            {
-                counts.glyphs += shaped.runs.iter().map(|r| r.glyphs.len()).sum::<usize>();
-                counts.paint_errors += usize::from(result.is_err());
             }
-        }
-        // Decorations cover the grid, including spaces and wide-glyph continuation cells.
-        for (index, cell) in frame.cells.iter().enumerate() {
-            let position = origin
-                + point(
-                    px((index % usize::from(frame.width)) as f32 * cell_width),
-                    px((index / usize::from(frame.width)) as f32 * self.cell_height),
-                );
-            for y in decoration_offsets(cell, self.cell_height) {
-                window.paint_quad(fill(
-                    Bounds::new(
-                        position + point(px(0.), px(y)),
-                        size(px(cell_width), px(1.)),
+        });
+        window.paint_layer(grid, |window| {
+            // Box and block graphics are quads, so they share this layer to stay
+            // above the backgrounds. Decorations cover the grid, including spaces
+            // and wide-glyph continuation cells.
+            for (index, cell) in frame.cells.iter().enumerate() {
+                if in_bar(index) {
+                    continue;
+                }
+                let position = origin
+                    + point(
+                        px((index % usize::from(frame.width)) as f32 * cell_width),
+                        px((index / usize::from(frame.width)) as f32 * self.cell_height),
+                    );
+                if let Some(graphic) = (!cell.skip)
+                    .then(|| Graphic::from_symbol(&cell.symbol))
+                    .flatten()
+                {
+                    let color = rgb(cell_colors(cell, &self.theme).0);
+                    graphic.rectangles(
+                        Bounds::new(position, size(px(cell_width), px(self.cell_height))),
+                        window.scale_factor(),
+                        |bounds| {
+                            window.paint_quad(fill(bounds, color));
+                            #[cfg(feature = "integration-test")]
+                            {
+                                counts.quads += 1;
+                            }
+                        },
+                    );
+                }
+                for y in decoration_offsets(cell, self.cell_height) {
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            position + point(px(0.), px(y)),
+                            size(px(cell_width), px(1.)),
+                        ),
+                        rgb(cell_colors(cell, &self.theme).0),
+                    ));
+                    #[cfg(feature = "integration-test")]
+                    {
+                        counts.decorations += 1;
+                    }
+                }
+            }
+            if let Some(cursor) = frame
+                .cursor
+                .as_ref()
+                .filter(|c| c.visible && c.x < frame.width && c.y < frame.height)
+            {
+                let position = origin + cursor_offset(cursor, cell_width, self.cell_height);
+                let (offset, dimensions) = match cursor.shape {
+                    3 | 4 => (
+                        point(px(0.), px(self.cell_height - 2.)),
+                        size(px(cell_width), px(2.)),
                     ),
-                    rgb(cell_colors(cell, &self.theme).0),
+                    5 | 6 => (point(px(0.), px(0.)), size(px(2.), px(self.cell_height))),
+                    _ => (
+                        point(px(0.), px(0.)),
+                        size(px(cell_width), px(self.cell_height)),
+                    ),
+                };
+                window.paint_quad(fill(
+                    Bounds::new(position + offset, dimensions),
+                    rgba((self.theme.cursor << 8) | 0x80),
                 ));
                 #[cfg(feature = "integration-test")]
                 {
                     counts.decorations += 1;
                 }
             }
-        }
-        if let Some(cursor) = frame
-            .cursor
-            .as_ref()
-            .filter(|c| c.visible && c.x < frame.width && c.y < frame.height)
-        {
-            let position = origin + cursor_offset(cursor, cell_width, self.cell_height);
-            let (offset, dimensions) = match cursor.shape {
-                3 | 4 => (
-                    point(px(0.), px(self.cell_height - 2.)),
-                    size(px(cell_width), px(2.)),
-                ),
-                5 | 6 => (point(px(0.), px(0.)), size(px(2.), px(self.cell_height))),
-                _ => (
-                    point(px(0.), px(0.)),
-                    size(px(cell_width), px(self.cell_height)),
-                ),
-            };
-            window.paint_quad(fill(
-                Bounds::new(position + offset, dimensions),
-                rgba((self.theme.cursor << 8) | 0x80),
-            ));
-            #[cfg(feature = "integration-test")]
+            for bar in panes
+                .iter()
+                .filter_map(|pane| Scrollbar::new(pane, cell_width, self.cell_height))
             {
-                counts.decorations += 1;
+                let width = (f32::from(bar.track.size.width) - 2. * SCROLLBAR_INSET).clamp(2., 6.);
+                window.paint_quad(
+                    fill(
+                        Bounds::new(
+                            origin
+                                + point(
+                                    bar.track.right() - px(width + SCROLLBAR_INSET),
+                                    bar.thumb.top(),
+                                ),
+                            size(px(width), bar.thumb.size.height),
+                        ),
+                        rgba((self.theme.muted << 8) | SCROLLBAR_ALPHA),
+                    )
+                    .corner_radii(px(width / 2.)),
+                );
             }
-        }
+        });
         #[cfg(feature = "integration-test")]
         {
             let total = cx.default_global::<crate::performance::Counts>();
@@ -421,6 +592,8 @@ impl TerminalPainter {
             total.paint_errors += counts.paint_errors;
             total.paints += 1;
         }
+        #[cfg(not(feature = "integration-test"))]
+        let _ = cx;
         let now = Instant::now();
         if let Some(timing) = self.diagnostics.record(now, now.duration_since(started)) {
             let mean_ms = timing.total.as_secs_f64() * 1000. / timing.count as f64;
@@ -447,12 +620,168 @@ impl TerminalPainter {
             tracing::warn!(category = "glyph_paint", count, "Terminal paint failed");
         }
     }
+
+    /// Paints an uncommitted IME composition over the cells at the input
+    /// cursor. It is shaped as one line rather than per cell, so it can span
+    /// wide glyphs, and it bypasses the glyph cache since it changes with
+    /// every keystroke. Nothing reaches the pane until the IME commits.
+    pub fn paint_composition(
+        &self,
+        text: &str,
+        cursor: Point<Pixels>,
+        grid: Bounds<Pixels>,
+        font: &Font,
+        window: &mut Window,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let line = self.shape(font, 0, text, window);
+        let origin = composition_origin(cursor, line.width, grid);
+        let bounds = Bounds::new(origin, size(line.width, px(self.cell_height)));
+        let color = rgb(self.theme.foreground);
+        // A layer of its own, painted after the frame, keeps it above the
+        // cells and the cursor it covers. It clips to the input area, so text
+        // wider than a popup never paints over the pane beneath it.
+        window.with_content_mask(Some(ContentMask { bounds: grid }), |window| {
+            window.paint_layer(bounds, |window| {
+                window.paint_quad(fill(bounds, rgb(self.theme.background)));
+                window.paint_quad(fill(
+                    Bounds::new(
+                        origin + point(px(0.), px(self.cell_height - 2.)),
+                        size(line.width, px(1.)),
+                    ),
+                    color,
+                ));
+                if paint_glyphs(&line, origin, px(self.cell_height), color, window).is_err() {
+                    tracing::warn!(category = "glyph_paint", "IME composition paint failed");
+                }
+            });
+        });
+    }
+
+    /// The bounds of `range` (UTF-16) within a composition painted by
+    /// `paint_composition`, so the IME can place its candidate window under
+    /// the clause being converted.
+    pub fn composition_bounds(
+        &self,
+        text: &str,
+        range: std::ops::Range<usize>,
+        cursor: Bounds<Pixels>,
+        grid: Bounds<Pixels>,
+        font: &Font,
+        window: &Window,
+    ) -> Bounds<Pixels> {
+        if text.is_empty() {
+            return cursor;
+        }
+        let line = self.shape(font, 0, text, window);
+        let origin = composition_origin(cursor.origin, line.width, grid);
+        let start = line.x_for_index(byte_index(text, range.start));
+        let end = line.x_for_index(byte_index(text, range.end));
+        let width = (end - start).max(cursor.size.width);
+        // A caret after the text, or a clause scrolled off the left, still
+        // anchors the candidate window inside the grid.
+        let x = (origin.x + start)
+            .min(grid.right() - width)
+            .max(grid.left());
+        Bounds::new(point(x, origin.y), size(width, cursor.size.height))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[gpui::test]
+    fn edge_backgrounds_reach_the_canvas_without_stretching_popups(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| Empty);
+        for extend in [false, true] {
+            cx.draw(Point::default(), size(px(100.), px(100.)), |_, _| {
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, window, cx| {
+                        let frame = FrameData {
+                            width: 2,
+                            height: 2,
+                            cells: [0x123456, 0x654321, 0xabcdef, 0xfedcba]
+                                .into_iter()
+                                .map(|bg| CellData {
+                                    bg: 0x02000000 | bg,
+                                    ..cell(" ")
+                                })
+                                .collect(),
+                            cursor: None,
+                            hyperlinks: vec![],
+                            graphics: vec![],
+                        };
+                        let mut painter = TerminalPainter::default();
+                        painter.set_appearance(14., 20., Theme::default());
+                        painter.paint_frame(
+                            &frame,
+                            point(px(17.), px(23.)),
+                            extend.then(|| size(px(23.), px(47.))),
+                            10.,
+                            &font("Menlo"),
+                            &[],
+                            &[],
+                            window,
+                            cx,
+                        );
+                    },
+                )
+                .size_full()
+            });
+            cx.update(|window, _| {
+                let quads = window.painted_quads();
+                assert_eq!(quads.len(), 4);
+                for (x, y, width, height, color) in [
+                    (17., 23., 10., 20., 0x123456),
+                    (27., 23., if extend { 13. } else { 10. }, 20., 0x654321),
+                    (17., 43., 10., if extend { 27. } else { 20. }, 0xabcdef),
+                    (
+                        27.,
+                        43.,
+                        if extend { 13. } else { 10. },
+                        if extend { 27. } else { 20. },
+                        0xfedcba,
+                    ),
+                ] {
+                    let bounds = Bounds::new(point(px(x), px(y)), size(px(width), px(height)))
+                        .scale(window.scale_factor());
+                    assert!(
+                        quads
+                            .iter()
+                            .any(|quad| quad.bounds == bounds
+                                && quad.background == rgb(color).into())
+                    );
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn backgrounds_fill_only_fractional_cell_remainders() {
+        let cell = size(px(10.), px(20.));
+        let available = size(px(103.), px(67.));
+        let viewport = viewport(103., 67., 10., 20.);
+        let grid = size(
+            px(f32::from(viewport.cols) * 10.),
+            px(f32::from(viewport.rows) * 20.),
+        );
+        assert_eq!(grid, size(px(100.), px(60.)));
+        assert_eq!(background_extent(grid, available, cell), available);
+        for (available, expected) in [
+            (size(px(100.), px(60.)), grid),
+            (size(px(99.), px(59.)), grid),
+            (size(px(110.), px(80.)), grid),
+            (size(px(111.), px(67.)), size(px(100.), px(67.))),
+            (size(px(103.), px(81.)), size(px(103.), px(60.))),
+        ] {
+            assert_eq!(background_extent(grid, available, cell), expected);
+        }
+    }
 
     #[test]
     #[allow(clippy::unwrap_used)]
@@ -586,13 +915,15 @@ mod tests {
                         painter.paint_frame(
                             &frame,
                             bounds.origin,
+                            None,
                             8.5,
                             &font("Menlo"),
+                            &[],
                             &[],
                             window,
                             cx,
                         );
-                        assert_eq!(painter.entries, 0);
+                        assert_eq!(painter.glyphs.len(), 0);
                         assert_eq!(
                             cx.default_global::<crate::performance::Counts>()
                                 .decorations
@@ -634,22 +965,126 @@ mod tests {
     }
 
     #[test]
-    fn cache_style_includes_resolved_color_and_font_but_not_grid_decorations() {
+    fn wide_continuation_cells_take_the_glyph_background() {
         let theme = Theme::default();
-        let base = cell("e\u{301}");
-        let mut changed = base.clone();
-        changed.modifier = 8 | 256;
-        changed.hyperlink = Some(1);
-        assert_eq!(style(&base, &theme), style(&changed, &theme));
-        for modifier in [1, 4, 2, 64, 128] {
-            changed.modifier = modifier;
-            assert_ne!(style(&base, &theme), style(&changed, &theme));
+        // The daemon sends continuation cells with a background of their own.
+        let mut row = vec![cell("\u{3053}"), cell(""), cell("x"), cell("")];
+        row[0].bg = 0x02373737;
+        row[1].bg = 0x02000000;
+        row[3].bg = 0x02000000;
+        assert_eq!(
+            background_spans(&row, &theme).collect::<Vec<_>>(),
+            vec![(0, 2, 0x373737), (2, 3, BACKGROUND), (3, 4, 0)]
+        );
+        // Halfwidth katakana with a voiced or semi-voiced mark is two columns
+        // wide in Herdr although its Unicode width is one.
+        for kana in ["\u{ff76}\u{ff9e}", "\u{ff8a}\u{ff9f}"] {
+            let mut row = vec![cell(kana), cell(""), cell("\u{ff76}"), cell("")];
+            row[0].bg = 0x02373737;
+            row[1].bg = 0x02000000;
+            row[3].bg = 0x02000000;
+            assert_eq!(
+                background_spans(&row, &theme).collect::<Vec<_>>(),
+                vec![(0, 2, 0x373737), (2, 3, BACKGROUND), (3, 4, 0)],
+                "{kana}"
+            );
         }
-        changed.modifier = 0;
-        changed.bg = 0x02abcdef;
-        assert_eq!(style(&base, &theme), style(&changed, &theme));
-        changed.fg = 0x02123456;
-        assert_ne!(style(&base, &theme), style(&changed, &theme));
+    }
+
+    #[test]
+    fn cache_style_is_the_font_face_alone() {
+        // Color, dim, reverse, hidden and grid decorations are painted, not shaped.
+        for modifier in [0, 2, 8, 64, 128, 256, 2 | 64 | 128 | 256] {
+            assert_eq!(glyphs::style(modifier), 0, "{modifier}");
+        }
+        let styles = [BOLD, ITALIC, BOLD | ITALIC].map(glyphs::style);
+        assert_eq!(styles, [1, 2, 3]);
+        for style in 0..4 {
+            assert_eq!(glyphs::style(glyphs::style_modifier(style)), style);
+        }
+    }
+
+    #[cfg(feature = "integration-test")]
+    #[gpui::test]
+    fn terminal_graphics_bypass_fonts_but_keep_decorations_and_skip_cells(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| Empty);
+        cx.draw(Point::default(), size(px(800.), px(600.)), |_, _| {
+            canvas(
+                |_, _, _| (),
+                |bounds, _, window, cx| {
+                    let mut frame = FrameData {
+                        width: 5,
+                        height: 1,
+                        cells: vec![
+                            CellData {
+                                modifier: UNDERLINE | STRIKETHROUGH,
+                                ..cell("▏")
+                            },
+                            CellData {
+                                modifier: REVERSED,
+                                ..cell("█")
+                            },
+                            CellData {
+                                modifier: DIM,
+                                ..cell("▀")
+                            },
+                            CellData {
+                                modifier: HIDDEN,
+                                ..cell("┼")
+                            },
+                            CellData {
+                                skip: true,
+                                ..cell("█")
+                            },
+                        ],
+                        cursor: None,
+                        hyperlinks: vec![],
+                        graphics: vec![],
+                    };
+                    let mut painter = TerminalPainter::default();
+                    for family in ["Menlo", "Courier"] {
+                        painter.set_appearance(21.35, 30.5, Theme::default());
+                        let before = *cx.default_global::<crate::performance::Counts>();
+                        painter.paint_frame(
+                            &frame,
+                            bounds.origin,
+                            None,
+                            12.81,
+                            &font(family),
+                            &[],
+                            &[],
+                            window,
+                            cx,
+                        );
+                        let after = cx.default_global::<crate::performance::Counts>();
+                        assert_eq!(painter.glyphs.len(), 0);
+                        assert_eq!(after.shapes, before.shapes);
+                        assert_eq!(after.glyphs, before.glyphs);
+                        assert_eq!(after.decorations - before.decorations, 2);
+                        let backgrounds = background_spans(&frame.cells, &painter.theme).count();
+                        assert_eq!(after.quads - before.quads, backgrounds + 7);
+                    }
+                    frame.cells[0] = cell("a");
+                    painter.paint_frame(
+                        &frame,
+                        bounds.origin,
+                        None,
+                        12.81,
+                        &font("Menlo"),
+                        &[],
+                        &[],
+                        window,
+                        cx,
+                    );
+                    assert_eq!(
+                        painter.glyphs.len(),
+                        1,
+                        "ordinary text still uses the glyph cache"
+                    );
+                },
+            )
+            .size_full()
+        });
     }
 
     #[gpui::test]
@@ -683,8 +1118,10 @@ mod tests {
                         painter.borrow_mut().paint_frame(
                             &frame,
                             bounds.origin,
+                            None,
                             cell_width,
                             &font,
+                            &[],
                             &[],
                             window,
                             cx,
@@ -695,13 +1132,13 @@ mod tests {
             });
         };
         draw(frame.clone(), font("Menlo"));
-        assert_eq!(painter.borrow().entries, 3);
+        assert_eq!(painter.borrow().glyphs.len(), 3);
         let original_width = painter.borrow().cell_width.unwrap_or_default();
         painter
             .borrow_mut()
             .set_appearance(FONT_SIZE, CELL_HEIGHT, Theme::default());
         assert_eq!(
-            painter.borrow().entries,
+            painter.borrow().glyphs.len(),
             3,
             "unchanged appearance retains glyphs"
         );
@@ -715,31 +1152,36 @@ mod tests {
             painter
                 .borrow_mut()
                 .set_appearance(font_size, cell_height, theme.clone());
-            assert_eq!(painter.borrow().entries, 0);
-            assert!(painter.borrow().lines.is_empty());
+            assert_eq!(painter.borrow().glyphs.len(), 0);
             assert!(painter.borrow().cell_width.is_none());
             draw(frame.clone(), font("Menlo"));
-            assert_eq!(painter.borrow().entries, 3);
+            assert_eq!(painter.borrow().glyphs.len(), 3);
             assert!(painter.borrow().cell_width.unwrap_or_default() > original_width * 1.5);
             let painter = painter.borrow();
-            for lines in painter.lines.values() {
-                for line in lines.values() {
-                    assert_eq!(line.font_size, px(font_size));
-                }
+            for (_, _, line) in painter.glyphs.iter() {
+                assert_eq!(line.font_size, px(font_size));
             }
         }
         painter
             .borrow_mut()
             .set_appearance(FONT_SIZE, CELL_HEIGHT, Theme::default());
         draw(frame.clone(), font("Menlo"));
-        assert_eq!(painter.borrow().entries, 3);
+        assert_eq!(painter.borrow().glyphs.len(), 3);
         let mut changed = frame.clone();
         changed.cells[0].fg = 0x02123456;
         changed.cells[1].modifier = 1 | 4;
         draw(changed, font("Menlo"));
-        assert_eq!(painter.borrow().entries, 5);
+        assert_eq!(
+            painter.borrow().glyphs.len(),
+            4,
+            "a new color reuses the glyph; only bold italic shapes again"
+        );
         draw(frame.clone(), font("Courier"));
-        assert_eq!(painter.borrow().entries, 3, "new font discards old glyphs");
+        assert_eq!(
+            painter.borrow().glyphs.len(),
+            3,
+            "new font discards old glyphs"
+        );
         // A changed icon cascade reshapes every cell: the same family can now
         // resolve Private Use Area glyphs a text face does not carry.
         let with_fallbacks = |families: &[&str]| {
@@ -754,19 +1196,19 @@ mod tests {
         assert_ne!(cascaded, font("Courier"));
         draw(frame.clone(), cascaded.clone());
         assert_eq!(
-            painter.borrow().entries,
+            painter.borrow().glyphs.len(),
             3,
             "an added cascade discards old glyphs"
         );
         assert_eq!(painter.borrow().config.as_ref(), Some(&cascaded));
         draw(frame.clone(), with_fallbacks(&["Hack Nerd Font Mono"]));
         assert_eq!(
-            painter.borrow().entries,
+            painter.borrow().glyphs.len(),
             3,
             "a reordered cascade discards old glyphs"
         );
         draw(frame, font("Courier"));
-        let many = FrameData {
+        let colors = FrameData {
             width: 100,
             height: 50,
             cells: (0..5000)
@@ -779,9 +1221,110 @@ mod tests {
             hyperlinks: vec![],
             graphics: vec![],
         };
-        draw(many, font("Menlo"));
-        assert_eq!(painter.borrow().entries, CACHE_LIMIT);
-        assert_eq!(painter.borrow().lines.len(), CACHE_LIMIT);
+        draw(colors, font("Menlo"));
+        assert_eq!(
+            painter.borrow().glyphs.len(),
+            1,
+            "truecolor output shares one glyph"
+        );
+        let symbols = FrameData {
+            width: 100,
+            height: 50,
+            cells: (0..5000)
+                .filter_map(|i| char::from_u32(0x4e00 + i))
+                .map(|symbol| cell(&symbol.to_string()))
+                .collect(),
+            cursor: None,
+            hyperlinks: vec![],
+            graphics: vec![],
+        };
+        draw(symbols, font("Menlo"));
+        assert_eq!(painter.borrow().glyphs.len(), glyphs::CACHE_LIMIT);
+        assert_eq!(painter.borrow().glyphs.iter().count(), glyphs::CACHE_LIMIT);
+    }
+
+    #[test]
+    fn composition_stays_at_the_cursor_inside_the_grid() {
+        let grid = Bounds::new(point(px(10.), px(20.)), size(px(100.), px(40.)));
+        let cursor = point(px(30.), px(40.));
+        assert_eq!(composition_origin(cursor, px(50.), grid), cursor);
+        assert_eq!(
+            composition_origin(point(px(90.), px(40.)), px(50.), grid),
+            point(px(60.), px(40.)),
+            "shifted left just enough to end at the grid's edge"
+        );
+        assert_eq!(
+            composition_origin(cursor, px(200.), grid),
+            point(px(-90.), px(40.)),
+            "wider than the grid, it keeps its end, where the IME edits"
+        );
+    }
+
+    #[test]
+    fn composition_ranges_count_utf16_units() {
+        let text = "a\u{304b}\u{1f600}b";
+        assert_eq!(
+            [0, 1, 2, 3, 4, 5, 6].map(|utf16| byte_index(text, utf16)),
+            [0, 1, 4, 8, 8, 9, 9]
+        );
+        assert_eq!(byte_index("", 1), 0);
+    }
+
+    #[gpui::test]
+    fn composition_bounds_follow_the_converted_clause(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| Empty);
+        cx.draw(Point::default(), size(px(800.), px(600.)), |_, _| {
+            canvas(
+                |_, _, _| (),
+                |bounds, _, window, cx| {
+                    let mut painter = TerminalPainter::default();
+                    let font = font("Menlo");
+                    let cell_width = painter.cell_width(&font, window, cx);
+                    let cursor = Bounds::new(
+                        bounds.origin + point(px(cell_width * 4.), px(CELL_HEIGHT)),
+                        size(px(cell_width), px(CELL_HEIGHT)),
+                    );
+                    // Romaji mid-composition: the headless text system gives
+                    // CJK glyphs next to no advance, which would hide the
+                    // right-edge geometry. UTF-16 mapping is tested separately.
+                    let text = "kan";
+                    let bounds_of = |range, cursor| {
+                        painter.composition_bounds(text, range, cursor, bounds, &font, window)
+                    };
+                    assert_eq!(
+                        painter.composition_bounds("", 0..0, cursor, bounds, &font, window),
+                        cursor,
+                        "without a composition the IME anchors at the cursor"
+                    );
+                    let first = bounds_of(0..1, cursor);
+                    let second = bounds_of(1..2, cursor);
+                    let caret = bounds_of(3..3, cursor);
+                    assert_eq!(first.origin, cursor.origin);
+                    assert_eq!(second.origin.y, cursor.origin.y);
+                    assert!(second.origin.x > first.origin.x);
+                    assert!(caret.origin.x > second.origin.x);
+                    assert_eq!(caret.size, cursor.size);
+                    // At the right edge the text, and so every clause, shifts left.
+                    let edge = Bounds::new(
+                        point(bounds.right() - px(cell_width), cursor.origin.y),
+                        cursor.size,
+                    );
+                    let end = bounds_of(3..3, edge);
+                    assert_eq!(end.right(), bounds.right(), "the caret stays inside");
+                    assert_eq!(end.size, cursor.size);
+                    assert!(bounds_of(0..1, edge).origin.x < edge.origin.x);
+                    // Wider than the grid, the start scrolls off the left while
+                    // every clause still anchors inside the grid.
+                    let long = "k".repeat(200);
+                    let long_bounds = |range| {
+                        painter.composition_bounds(&long, range, cursor, bounds, &font, window)
+                    };
+                    assert_eq!(long_bounds(0..1).origin.x, bounds.left());
+                    assert_eq!(long_bounds(200..200).right(), bounds.right());
+                },
+            )
+            .size_full()
+        });
     }
 
     #[test]
@@ -805,7 +1348,7 @@ mod tests {
             background_spans(&row, &theme).collect::<Vec<_>>(),
             vec![(0, 2, theme.background)]
         );
-        assert_eq!(style(&row[0], &theme).0, theme.foreground);
-        assert_eq!(style(&row[1], &theme).0, theme.palette[1]);
+        assert_eq!(cell_colors(&row[0], &theme).0, theme.foreground);
+        assert_eq!(cell_colors(&row[1], &theme).0, theme.palette[1]);
     }
 }

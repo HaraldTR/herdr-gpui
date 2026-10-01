@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/icons/herdr-ui-icon-clean.png" alt="Herdr ram on a simple ivory tile" width="160" height="160">
+  <img src="assets/icons/herdr-ui-icon-badge.png" alt="Herdr ram on a simple ivory tile with a red notification badge showing 1" width="176" height="176">
 </p>
 
 <h1 align="center">Herdr GPUI</h1>
@@ -87,8 +87,9 @@ ARM64 Linux. Like the packages, it never updates itself.
 ### From source
 
 Install Rust/rustup and, on macOS, the Xcode command-line tools. The repository
-pins Rust 1.96.1 and GPUI 0.2.2; the Rust version is declared in `rust-toolchain.toml`
-and mirrored in `mise.toml`, so `mise install` also provisions it.
+pins Rust 1.96.1 and GPUI 0.3.6 (the `gpui-pre` snapshot crate); the Rust version
+is declared in `rust-toolchain.toml` and mirrored in `mise.toml`, so `mise install`
+also provisions it.
 
 ```sh
 git clone https://github.com/penso/herdr-gpui.git
@@ -101,8 +102,9 @@ just run
 Without `just`: `cargo run --locked --release -p herdr-gpui --features qa-menu`.
 
 Install the Herdr daemon separately. The app starts an already-installed local
-`herdr server` when the target session is absent, but never installs, stops, or
-upgrades a daemon; removing the GUI leaves daemon sessions and shared Herdr
+`herdr server` when the target session is absent, but never installs or upgrades
+a daemon. Explicitly confirming session deletion stops that named session first;
+closing or removing the GUI leaves daemon sessions and shared Herdr
 configuration intact.
 
 ### Linux Builds
@@ -160,6 +162,12 @@ The daemon owns the terminals and all session state. The GUI attaches to the
 binary **client** socket, renders the surfaces it is sent, and sends semantic
 input back. Closing or detaching the GUI leaves the daemon and its terminals
 running.
+
+[Browser tabs](crates/herdr-gpui/README.md#browser-tabs) are the exception:
+Herdr has no browser panes, so web pages shown beside a workspace's terminals
+belong to the GUI alone. Agents in your panes open them with
+`herdr-gpui browser open URL`, which reaches the running app over a local
+socket of its own.
 
 ## Audio Test
 

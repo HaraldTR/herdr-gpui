@@ -100,12 +100,15 @@ mod tests {
     /// left out, one no worktree has is offered.
     #[test]
     fn a_real_repository_lists_its_branches_without_a_checkout() {
-        let Ok(temporary) = tempfile::tempdir() else {
-            return;
-        };
+        let temporary = tempfile::tempdir().unwrap();
         let repo = temporary.path().join("repo");
         let git = |args: &[&str]| {
-            Command::new("git")
+            let output = Command::new("git")
+                .env(
+                    "GIT_CONFIG_GLOBAL",
+                    if cfg!(windows) { "NUL" } else { "/dev/null" },
+                )
+                .env("GIT_CONFIG_NOSYSTEM", "1")
                 .args([
                     "-c",
                     "core.fsmonitor=false",
@@ -116,20 +119,20 @@ mod tests {
                 .arg(&repo)
                 .args(args)
                 .output()
-                .is_ok_and(|output| output.status.success())
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         };
-        if std::fs::create_dir_all(&repo).is_err()
-            || !git(&["init", "--initial-branch=main"])
-            || !git(&["commit", "--allow-empty", "--message=start"])
-            || !git(&["branch", "idle"])
-            || !git(&["branch", "busy"])
-        {
-            return;
-        }
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&["init", "--initial-branch=main"]);
+        git(&["commit", "--allow-empty", "--message=start"]);
+        git(&["branch", "idle"]);
+        git(&["branch", "busy"]);
         let busy = temporary.path().join("busy");
-        if !git(&["worktree", "add", &busy.to_string_lossy(), "busy"]) {
-            return;
-        }
+        git(&["worktree", "add", &busy.to_string_lossy(), "busy"]);
         let input = Input {
             checkout: None,
             repo_key: repo.join(".git").to_string_lossy().into_owned(),

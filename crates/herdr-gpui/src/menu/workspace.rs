@@ -145,6 +145,51 @@ impl WorkspaceTarget {
     }
 }
 
+/// Why the new worktree shortcut found no workspace to branch from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum NewWorktreeUnavailable {
+    Disconnected,
+    NoWorkspace,
+    NotGit,
+    MainCheckoutClosed,
+}
+
+impl NewWorktreeUnavailable {
+    pub(super) fn message(self) -> &'static str {
+        match self {
+            Self::Disconnected => "Not connected, so no worktree can be created",
+            Self::NoWorkspace => "No workspace is focused to create a worktree from",
+            Self::NotGit => "This workspace is not a Git repository",
+            Self::MainCheckoutClosed => "Open this repository's main checkout to create a worktree",
+        }
+    }
+}
+
+/// The workspace a new worktree for the focused one is created from.
+fn new_worktree_source(snapshot: &ClientShellSnapshot) -> Result<String, NewWorktreeUnavailable> {
+    let focused = snapshot
+        .workspaces
+        .iter()
+        .find(|w| Some(&w.workspace_id) == snapshot.focused_workspace_id.as_ref())
+        .ok_or(NewWorktreeUnavailable::NoWorkspace)?;
+    let source = match &focused.worktree {
+        Some(tree) if tree.is_linked_worktree => snapshot
+            .workspaces
+            .iter()
+            .find(|w| {
+                w.worktree
+                    .as_ref()
+                    .is_some_and(|other| other.key == tree.key && !other.is_linked_worktree)
+            })
+            .ok_or(NewWorktreeUnavailable::MainCheckoutClosed)?,
+        _ => focused,
+    };
+    if !WorkspaceTarget::new(snapshot, source).can_create() {
+        return Err(NewWorktreeUnavailable::NotGit);
+    }
+    Ok(source.workspace_id.clone())
+}
+
 fn close_members(snapshot: &ClientShellSnapshot, workspace: &ClientShellWorkspace) -> Vec<String> {
     let mut members: Vec<_> = snapshot
         .workspaces
@@ -165,6 +210,16 @@ fn close_members(snapshot: &ClientShellSnapshot, workspace: &ClientShellWorkspac
 }
 
 impl HerdrWindow {
+    /// The selected endpoint's workspace a workspace menu is open for. A
+    /// hover menu can target a row that is not focused, so the row marks
+    /// itself while the pointer is over the menu instead.
+    pub(crate) fn workspace_menu_target(&self) -> Option<&str> {
+        if self.menu.page != Some(Page::Workspace) {
+            return None;
+        }
+        self.menu.target.as_ref().map(|target| target.id.as_str())
+    }
+
     pub(crate) fn open_workspace_menu(
         &mut self,
         id: &str,
@@ -193,8 +248,31 @@ impl HerdrWindow {
         self.menu.page = Some(Page::Workspace);
         self.refresh_workspace_pr();
         self.marked.clear();
-        window.focus(&self.menu.focus);
+        window.focus(&self.menu.focus, cx);
         cx.notify();
+    }
+
+    /// Opens the new worktree dialog for the focused workspace, as its menu's
+    /// "New worktree" row would. A linked checkout offers no such row, so its
+    /// repository's main checkout seeds the worktree instead.
+    /// When there is none, a flash says why rather than the shortcut doing
+    /// nothing visible.
+    pub(crate) fn open_new_worktree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let source = match &self.live.snapshot {
+            Some(snapshot) if self.live.status.is_connected() => new_worktree_source(snapshot),
+            _ => Err(NewWorktreeUnavailable::Disconnected),
+        };
+        let id = match source {
+            Ok(id) => id,
+            Err(reason) => {
+                self.show_flash(crate::window::Flash::warning(reason.message()), cx);
+                return;
+            }
+        };
+        self.open_workspace_menu(&id, Point::default(), window, cx);
+        if self.menu.page == Some(Page::Workspace) {
+            self.open_workspace_dialog(WorkspaceAction::NewWorktree, window, cx);
+        }
     }
 
     pub(super) fn workspace_items(&self) -> Vec<(WorkspaceMenuAction, &'static str)> {
@@ -215,6 +293,18 @@ impl HerdrWindow {
                 Dialog(WorkspaceAction::DeleteWorktree),
                 "Delete worktree checkout",
             ));
+        }
+        if self.teleport_mark().is_some() {
+            items.push((WorkspaceMenuAction::GoToTeleported, "Go to teleported copy"));
+            items.push((
+                WorkspaceMenuAction::ClearTeleported,
+                "Clear teleported mark",
+            ));
+        } else if self.can_teleport() {
+            if self.teleport_origin().is_some() {
+                items.push((WorkspaceMenuAction::TeleportBack, "Teleport back"));
+            }
+            items.push((WorkspaceMenuAction::Teleport, "Teleport..."));
         }
         // Only a workspace that heads a group of checkouts can fold anything.
         if let Some(key) = target.group_key() {
@@ -295,6 +385,16 @@ impl HerdrWindow {
             cx.notify();
             return;
         }
+        if action == WorkspaceAction::Close
+            && let Some(snapshot) = &self.live.snapshot
+        {
+            self.menu.close_check = Some(super::workspace_close::CloseCheck::start(
+                snapshot,
+                target,
+                self.selected_endpoint == 0 && self.live.local_daemon_peer,
+                cx,
+            ));
+        }
         if action == WorkspaceAction::DeleteWorktree {
             let result = self.endpoints[self.selected_endpoint]
                 .connection
@@ -323,7 +423,7 @@ impl HerdrWindow {
             .into_iter()
             .map(|(action, _)| action)
             .collect();
-        if self.menu.github.connected() && self.menu.pr.value.is_some() {
+        if self.pr_profile().is_some() && self.menu.pr.value.is_some() {
             actions.push(WorkspaceMenuAction::PullRequest);
         }
         actions
@@ -341,6 +441,10 @@ impl HerdrWindow {
                 self.toggle_selected_group(cx)
             }
             WorkspaceMenuAction::PullRequest => self.open_workspace_pr(cx),
+            WorkspaceMenuAction::Teleport => self.open_teleport(window, cx),
+            WorkspaceMenuAction::GoToTeleported => self.go_to_teleported(window, cx),
+            WorkspaceMenuAction::TeleportBack => self.teleport_back(window, cx),
+            WorkspaceMenuAction::ClearTeleported => self.clear_teleport_mark(window, cx),
         }
     }
 
@@ -433,6 +537,18 @@ impl HerdrWindow {
     /// and to a removal whose dialog has already closed.
     pub(crate) fn update_workspace_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.update_pending_removal(cx);
+        if let Some(check) = &mut self.menu.close_check
+            && check.poll()
+        {
+            if check
+                .report
+                .as_ref()
+                .is_some_and(|report| report.needs_consent())
+            {
+                self.menu.input = Some(DialogInput::new(String::new()));
+            }
+            cx.notify();
+        }
         if self.menu.worktree_open.is_some() && !self.worktree_open_current() {
             self.dismiss_menu(window, cx);
             return;
@@ -580,9 +696,15 @@ impl HerdrWindow {
             .input
             .as_ref()
             .is_some_and(|input| input.marked.is_some())
+            || self
+                .menu
+                .worktree
+                .as_ref()
+                .is_some_and(|source| source.name.read(cx).is_composing())
         {
             return;
         }
+        let name = self.worktree_name(cx);
         let result = (|| {
             if !self.menu_target_current() {
                 return Err(crate::Error::StaleConnection);
@@ -616,6 +738,27 @@ impl HerdrWindow {
                     .unwrap_or("")
             };
             let (method, mut params) = target.request(snapshot, action, text)?;
+            // The daemon names the workspace as it creates it, so no rename follows.
+            if action == WorkspaceAction::NewWorktree
+                && let Some(name) = name
+            {
+                params["label"] = name.into();
+            }
+            if action == WorkspaceAction::Close {
+                let Some(check) = &self.menu.close_check else {
+                    return Ok(Submission::Awaiting {
+                        focus_changed: false,
+                    });
+                };
+                if !check.current(snapshot, target) {
+                    return Err(crate::Error::WorkspaceGroupChanged);
+                }
+                if !check.ready(text) {
+                    return Ok(Submission::Awaiting {
+                        focus_changed: false,
+                    });
+                }
+            }
             if action == WorkspaceAction::DeleteWorktree {
                 let deletion = self
                     .menu
@@ -728,6 +871,15 @@ impl HerdrWindow {
                         && !picker.filtered.is_empty()
                         && !picker.search.read(cx).is_composing()
                 }))
+            && (action != WorkspaceAction::Close
+                || self.menu.close_check.as_ref().is_some_and(|check| {
+                    check.ready(
+                        self.menu
+                            .input
+                            .as_ref()
+                            .map_or("", |input| input.text.as_str()),
+                    )
+                }))
             && !creating;
         let destructive = matches!(
             action,
@@ -751,21 +903,43 @@ impl HerdrWindow {
                 "Closes {} workspace(s) and terminates their running terminals. Checkout files and branches are not deleted.",
                 target.close_members.len()
             ))),
-            WorkspaceAction::NewWorktree => body
-                .child(div().text_color(rgb(theme.muted)).child(
-                    "Branch for the new checkout. Base: HEAD. Repository trust is not granted.",
-                ))
-                .child(self.render_dialog_input(cx))
-                .child("This creates the checkout folder:")
+            WorkspaceAction::NewWorktree => {
+                // Captions share a column so both fields start at the same edge.
+                let row = |caption: &'static str, field: AnyElement| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(font.size * 4.5))
+                                .text_color(rgb(theme.muted))
+                                .child(caption),
+                        )
+                        .child(div().flex_1().min_w_0().child(field))
+                };
+                body.children(self.menu.worktree.as_ref().map(|source| {
+                    row(
+                        "Name",
+                        div()
+                            .debug_selector(|| "worktree-name".into())
+                            .child(source.name.clone())
+                            .into_any_element(),
+                    )
+                }))
+                .child(row("Branch", self.render_dialog_input(cx).into_any_element()))
+                .child("Creates this folder from HEAD, without granting repository trust:")
                 .child(
                     div()
                         .debug_selector(|| "dialog-checkout".into())
-                        .rounded(px(4.))
+                        .rounded(px(crate::config::corners::CONTROL))
                         .bg(rgb(theme.active))
                         .px(px(10.))
                         .py(px(6.))
                         .child(self.checkout_preview()),
-                ),
+                )
+            }
             WorkspaceAction::DeleteWorktree => body
                 .child(if force {
                     "This force removes the checkout folder:"
@@ -775,7 +949,7 @@ impl HerdrWindow {
                 .child(
                     div()
                         .debug_selector(|| "dialog-path".into())
-                        .rounded(px(4.))
+                        .rounded(px(crate::config::corners::CONTROL))
                         .bg(rgb(theme.active))
                         .px(px(10.))
                         .py(px(6.))
@@ -792,6 +966,22 @@ impl HerdrWindow {
                     "The branch is not deleted. The Herdr workspace will close."
                 })),
         };
+        if action == WorkspaceAction::Close {
+            body = body.child(div().debug_selector(|| "close-git-status".into()).text_color(danger).child(
+                match self.menu.close_check.as_ref().and_then(|check| check.report.as_ref()) {
+                    None => "Checking for uncommitted files and unpushed commits...".to_owned(),
+                    Some(report) => {
+                        let mut warnings = Vec::new();
+                        if report.dirty { warnings.push("Uncommitted files are present."); }
+                        if report.unpushed { warnings.push("Unpushed commits are present."); }
+                        if report.unknown { warnings.push("Git status could not be verified for every checkout."); }
+                        if report.needs_consent() { warnings.push("Type close to consent to closing anyway, or Cancel to keep working."); }
+                        else { warnings.push("No uncommitted files or unpushed commits found (using local remote-tracking refs)."); }
+                        warnings.join(" ")
+                    }
+                }
+            ));
+        }
         if self.menu.input.is_some() && action != WorkspaceAction::NewWorktree {
             body = body.child(self.render_dialog_input(cx));
         }
@@ -799,7 +989,7 @@ impl HerdrWindow {
             body = body.child(
                 div()
                     .debug_selector(|| "dialog-error".into())
-                    .rounded(px(4.))
+                    .rounded(px(crate::config::corners::CONTROL))
                     .bg(rgb(theme.active))
                     .px(px(10.))
                     .py(px(6.))
@@ -822,7 +1012,7 @@ impl HerdrWindow {
                 .debug_selector(move || id.into())
                 .px(px(12.))
                 .py(px(6.))
-                .rounded(px(4.))
+                .rounded(px(crate::config::corners::CONTROL))
                 .border_1()
                 .cursor_pointer()
         };
@@ -889,7 +1079,7 @@ impl HerdrWindow {
                                 .flex_none()
                                 .px_2()
                                 .py_1()
-                                .rounded(px(4.))
+                                .rounded(px(crate::config::corners::CONTROL))
                                 .cursor_pointer()
                                 .text_color(rgb(theme.muted))
                                 .hover(|button| {

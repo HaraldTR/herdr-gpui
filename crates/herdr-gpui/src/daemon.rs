@@ -58,7 +58,7 @@ pub fn connect(
 /// name the extension itself.
 const NAME: &str = if cfg!(windows) { "herdr.exe" } else { "herdr" };
 
-fn executable() -> PathBuf {
+pub(crate) fn executable() -> PathBuf {
     // Finder launches have a minimal PATH, which often omits Homebrew and Cargo.
     let path = env::var_os("PATH").unwrap_or_default();
     let candidates = env::split_paths(&path)

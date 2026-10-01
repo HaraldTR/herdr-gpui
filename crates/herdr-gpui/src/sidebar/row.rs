@@ -5,8 +5,12 @@
 #[cfg(any(test, feature = "integration-test"))]
 use super::layout_tests;
 use super::{
-    ARROW_RESERVE, ICON_RESERVE, STATUS_WIDTH, agents::Indicators, glyph_width,
-    layout::SidebarLayout, line_height, segment_budgets, status_indicator,
+    ARROW_RESERVE, ICON_RESERVE, STATUS_WIDTH,
+    agents::Indicators,
+    cell::RowState,
+    glyph_width,
+    layout::{SidebarDensity, SidebarLook},
+    line_height, segment_budgets, status_indicator,
 };
 use crate::config::{FontConfig, Theme};
 use gpui::{prelude::*, *};
@@ -20,6 +24,23 @@ pub(super) enum RowIcon {
     None,
     Mark,
     Avatar(Arc<Image>),
+}
+
+impl RowIcon {
+    /// The icon filling its parent, or nothing for rows without one. An
+    /// avatar still loading or failing to decode shows the mark instead.
+    pub(super) fn element(self, color: u32) -> AnyElement {
+        match self {
+            Self::None => Empty.into_any_element(),
+            Self::Mark => github_mark(color).size_full().into_any_element(),
+            Self::Avatar(image) => img(image)
+                .size_full()
+                .rounded_full()
+                .with_fallback(move || github_mark(color).size_full().into_any_element())
+                .with_loading(move || github_mark(color).size_full().into_any_element())
+                .into_any_element(),
+        }
+    }
 }
 
 /// The mark paints as vector rather than a rasterized image, so it stays sharp
@@ -36,12 +57,12 @@ pub(crate) fn github_mark(color: u32) -> Svg {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum RowKind {
     Workspace,
-    Agent,
+    Agent(crate::icons::AgentIcon),
 }
 
 /// Name color, name weight, and detail color for a row.
 pub(super) fn row_text(kind: RowKind, focused: bool, theme: &Theme) -> (u32, FontWeight, u32) {
-    let weight = if focused || kind == RowKind::Agent {
+    let weight = if focused || matches!(kind, RowKind::Agent(_)) {
         FontWeight::BOLD
     } else {
         FontWeight::NORMAL
@@ -57,6 +78,16 @@ pub(super) fn row_text(kind: RowKind, focused: bool, theme: &Theme) -> (u32, Fon
         theme.muted
     };
     (name, weight, detail)
+}
+
+/// Where a row stands while a workspace is dragged: rows the lifted card
+/// passes over stop answering hover, so only the drop line marks a place.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum RowLift {
+    #[default]
+    Resting,
+    Passed,
+    Lifted,
 }
 
 /// Where a row sits in its worktree group, which decides whether the gutter
@@ -109,35 +140,38 @@ pub(super) fn tree_lines(
 /// What a row shows on its right edge: the cached pull request, and whether
 /// the checkout has work that is not committed yet.
 pub(super) struct RowBadge {
-    pr: Option<PrBadge>,
-    dirty: bool,
+    pub(super) pr: Option<PrBadge>,
+    pub(super) dirty: bool,
+    /// The work moved to another host; this checkout stays behind.
+    pub(super) teleported: bool,
 }
 
 impl RowBadge {
     /// Nothing to draw is nothing to reserve, so a row with neither keeps its
     /// full label width.
-    pub(super) fn new(pr: Option<PrBadge>, dirty: bool) -> Option<Self> {
-        (pr.is_some() || dirty).then_some(Self { pr, dirty })
+    pub(super) fn new(pr: Option<PrBadge>, dirty: bool, teleported: bool) -> Option<Self> {
+        (pr.is_some() || dirty || teleported).then_some(Self {
+            pr,
+            dirty,
+            teleported,
+        })
     }
 
-    pub(super) fn width(&self, font: &FontConfig, layout: &dyn SidebarLayout) -> f32 {
+    pub(super) fn width(&self, font: &FontConfig, layout: &dyn SidebarDensity) -> f32 {
         let pr = self.pr.as_ref().map_or(0., |pr| pr.width(font, layout));
-        // The dot sits on the number's line, a glyph of space ahead of it.
-        pr + if self.dirty {
-            2. * glyph_width(font)
-        } else {
-            0.
-        }
+        // Reserve the icon and the gap before the PR number, even at small fonts.
+        let mark = line_height(font).min(18.) + glyph_width(font);
+        pr + mark * f32::from(u8::from(self.dirty) + u8::from(self.teleported))
     }
 }
 
 /// Cached pull request state for a worktree row: the number carries the
 /// lifecycle/readiness color, the counts sit under it.
 pub(super) struct PrBadge {
-    number: String,
-    color: u32,
-    additions: String,
-    deletions: String,
+    pub(super) number: String,
+    pub(super) color: u32,
+    pub(super) additions: String,
+    pub(super) deletions: String,
 }
 
 impl PrBadge {
@@ -153,9 +187,9 @@ impl PrBadge {
     /// Reserved width. Sidebar labels are monospace by default and digits are
     /// near-uniform elsewhere, so an em-fraction per glyph bounds both lines;
     /// a wider face truncates the counts rather than eating the label.
-    pub(super) fn width(&self, font: &FontConfig, layout: &dyn SidebarLayout) -> f32 {
+    pub(super) fn width(&self, font: &FontConfig, layout: &dyn SidebarDensity) -> f32 {
         let mut glyphs = self.number.chars().count();
-        if layout.workspace_details() {
+        if layout.pr_counts() {
             glyphs =
                 glyphs.max(self.additions.chars().count() + self.deletions.chars().count() + 1);
         }
@@ -235,6 +269,26 @@ pub(super) fn name_line(
     line
 }
 
+/// The pulsing dot shown while something this row names is being removed,
+/// shared by worktree rows and device headers so both read the same way.
+pub(super) fn removing_dot(selector: &'static str, theme: &Theme) -> Div {
+    div()
+        .debug_selector(move || selector.into())
+        .size(px(STATUS_WIDTH))
+        .flex_none()
+        .child(
+            div()
+                .size_full()
+                .rounded_full()
+                .bg(rgb(theme.primary()))
+                .with_animation(
+                    SharedString::from(format!("{selector}-pulse")),
+                    Animation::new(std::time::Duration::from_secs(1)).repeat(),
+                    |dot, delta| dot.opacity(0.3 + 0.7 * (delta * std::f32::consts::PI).sin()),
+                ),
+        )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn row(
     // Rows are probed by key, not by label: an agent names its workspace, which
@@ -245,21 +299,37 @@ pub(super) fn row(
     kind: RowKind,
     status: AgentStatus,
     indicators: Indicators,
-    focused: bool,
+    removing: bool,
+    state: RowState,
     tree: RowTree,
     reserve_arrow: bool,
     width: f32,
     workspace_icon: RowIcon,
     arrow: Option<Stateful<Div>>,
     badge: Option<RowBadge>,
-    layout: &dyn SidebarLayout,
+    // The status word the daemon's `state_text` token asks to show, when its
+    // sidebar config names it. Painted at the row's trailing edge in the dot's
+    // color so a status reads at a glance, not only by hue.
+    status_text: Option<&'static str>,
+    look: SidebarLook,
     appearance: (&FontConfig, &Theme),
 ) -> Div {
     let (font, theme) = appearance;
+    let focused = state.selected;
+    let layout = look.density;
     let padding = layout.padding();
+    let content_x = look.content_x();
     let gap = layout.gap();
-    let vertical_padding = layout.row_padding();
-    let show_detail = layout.workspace_details() || kind == RowKind::Agent;
+    let vertical_padding = look.row_padding();
+    // Content starts below the highlight's edge, which sits half the row
+    // spacing in from the row's own.
+    let content_top = vertical_padding + look.spacing() / 2.;
+    let show_detail = matches!(kind, RowKind::Agent(_))
+        || if tree == RowTree::None {
+            layout.workspace_details()
+        } else {
+            layout.child_details()
+        };
     let (name_color, weight, detail_color) = row_text(kind, focused, theme);
     let icon_reserve = match workspace_icon {
         RowIcon::None => 0.,
@@ -276,7 +346,7 @@ pub(super) fn row(
     let arrow_reserve = if reserve_arrow { ARROW_RESERVE } else { 0. };
     let arrow_absent = arrow.is_none();
     let available =
-        (width - 1. - 2. * padding - status_width - gap - indent - arrow_reserve).max(0.);
+        (look.content_width(width) - status_width - gap - indent - arrow_reserve).max(0.);
     // Narrow sidebars and large fonts can leave less room than a badge needs.
     // Clip its column within the row rather than painting over the terminal.
     let badge_width = badge.as_ref().map_or(0., |badge| {
@@ -287,37 +357,63 @@ pub(super) fn row(
     } else {
         0.
     };
-    let label_width = (available - pr_reserve).max(0.);
+    // The status word keeps its own trailing column, so the label yields to it
+    // the same way it yields to a badge, and like the badge it is clipped to
+    // the room left rather than painting past the row.
+    let status_width = status_text.map_or(0., |text| {
+        (text.chars().count() as f32 * glyph_width(font))
+            .ceil()
+            .min((available - pr_reserve - gap).max(0.))
+    });
+    let status_reserve = if status_text.is_some() {
+        status_width + gap
+    } else {
+        0.
+    };
+    let status_color = indicators.color(status);
+    let label_width = (available - pr_reserve - status_reserve).max(0.);
+    let agent_icon = match kind {
+        RowKind::Agent(icon) => Some(icon),
+        RowKind::Workspace => None,
+    };
+    // An orphan's name is on the first line; normal rows name the agent below
+    // its location. Reserve the same fixed icon + gap on whichever line owns it.
+    let agent_first = agent_icon.filter(|_| detail.is_empty());
+    let agent_detail = agent_icon.filter(|_| !detail.is_empty());
+    let agent_size = line_height(font).min(12.);
+    let agent_reserve = agent_size + 4.;
+    let name_reserve = icon_reserve + agent_first.map_or(0., |_| agent_reserve);
     div()
         .debug_selector(|| format!("row-{key}"))
-        .h(px(
-            line_height(font) * if show_detail { 2. } else { 1. } + 2. * vertical_padding
-        ))
+        .h(px(look.row_height(
+            line_height(font) * if show_detail { 2. } else { 1. },
+        )))
         .w_full()
         .min_w_0()
         .flex_none()
         .relative()
-        .pl(px(padding + indent))
-        .pr(px(padding))
+        .pl(px(content_x + indent))
+        .pr(px(content_x))
         .flex()
         .items_start()
         .gap(px(gap))
-        .py(px(vertical_padding))
+        .py(px(content_top))
         .cursor_pointer()
-        .when(focused, |s| s.bg(rgb(theme.active)))
-        .hover(|s| s.bg(rgb(theme.active)))
+        .map(|row| look.mark(row, key, state, theme))
         // Tree lines run in the indent the row already reserves, so a child is
         // tied to its parent without box-drawing glyphs in the label.
-        .when(tree != RowTree::None, |row| {
+        .when(tree != RowTree::None && look.style.tree_lines(), |row| {
             let (color, font) = (theme.muted, font.clone());
-            let gutter = layout.tree_gutter() + extra_status_width;
+            let gutter = look.tree_gutter() + extra_status_width;
             row.child(
                 div()
                     .debug_selector(|| format!("tree-{key}"))
                     .absolute()
                     // Between the parent's label column and this row's own dot.
                     .left(px(gutter))
-                    .w(px(padding + indent - gutter))
+                    .w(px(padding + indent
+                        - layout.tree_gutter()
+                        - extra_status_width))
                     .top_0()
                     .bottom_0()
                     .child(
@@ -328,7 +424,7 @@ pub(super) fn row(
                                     bounds,
                                     tree,
                                     &font,
-                                    vertical_padding,
+                                    content_top,
                                     window.scale_factor(),
                                 ) {
                                     window.paint_quad(fill(line, rgb(color)));
@@ -339,7 +435,17 @@ pub(super) fn row(
                     ),
             )
         })
-        .child(status_indicator(status, font, indicators))
+        .child(if removing {
+            div()
+                .w(px(indicators.width(font)))
+                .mt(px((line_height(font) - STATUS_WIDTH) / 2.))
+                .flex_none()
+                .flex()
+                .justify_center()
+                .child(removing_dot("worktree-removing", theme))
+        } else {
+            status_indicator(status, font, indicators)
+        })
         .child(
             div()
                 .flex()
@@ -355,6 +461,9 @@ pub(super) fn row(
                         .relative()
                         .w(px(label_width))
                         .h(px(line_height(font)))
+                        .when_some(agent_first, |line, icon| {
+                            line.child(agent_mark(key, icon, agent_size, name_color, font))
+                        })
                         .when(!matches!(workspace_icon, RowIcon::None), |title| {
                             title.child(
                                 div()
@@ -365,43 +474,61 @@ pub(super) fn row(
                                     .size(px(12.))
                                     .flex_none()
                                     .overflow_hidden()
-                                    .child(match workspace_icon {
-                                        RowIcon::Avatar(image) => img(image)
-                                            .size_full()
-                                            .rounded_full()
-                                            .with_fallback(move || {
-                                                github_mark(muted).size_full().into_any_element()
-                                            })
-                                            .with_loading(move || {
-                                                github_mark(muted).size_full().into_any_element()
-                                            })
-                                            .into_any_element(),
-                                        _ => github_mark(muted).size_full().into_any_element(),
-                                    }),
+                                    .child(workspace_icon.element(muted)),
                             )
                         })
                         .child(
                             name_line(
                                 name,
                                 (name_color, weight, theme.muted),
-                                (label_width - icon_reserve).max(0.),
+                                (label_width - name_reserve).max(0.),
                                 font,
                             )
                             .debug_selector(|| format!("name-{key}"))
-                            .ml(px(icon_reserve)),
+                            .ml(px(name_reserve.min(label_width))),
                         ),
                 )
                 .when(show_detail, |column| {
                     column.child(
                         div()
-                            .debug_selector(|| format!("detail-{key}"))
+                            .relative()
                             .w(px(label_width))
-                            .truncate()
-                            .text_color(rgb(detail_color))
-                            .child(label_text(detail)),
+                            .h(px(line_height(font)))
+                            .when_some(agent_detail, |line, icon| {
+                                line.child(agent_mark(key, icon, agent_size, detail_color, font))
+                            })
+                            .child(
+                                div()
+                                    .debug_selector(|| format!("detail-{key}"))
+                                    .ml(px(if agent_detail.is_some() {
+                                        agent_reserve.min(label_width)
+                                    } else {
+                                        0.
+                                    }))
+                                    .w(px((label_width
+                                        - agent_detail.map_or(0., |_| agent_reserve))
+                                    .max(0.)))
+                                    .truncate()
+                                    .text_color(rgb(detail_color))
+                                    .child(label_text(detail)),
+                            ),
                     )
                 }),
         )
+        .when_some(status_text, |row, text| {
+            row.child(
+                div()
+                    .debug_selector(|| format!("status-{key}"))
+                    .w(px(status_width))
+                    .flex_none()
+                    .h(px(line_height(font)))
+                    .flex()
+                    .items_center()
+                    .overflow_hidden()
+                    .text_color(rgb(status_color))
+                    .child(div().w(px(status_width)).truncate().child(label_text(text))),
+            )
+        })
         // The collapse column comes first so the badge can hug the row's edge;
         // a reserved-but-empty column keeps every badge on the same right edge.
         .when_some(arrow, |row, arrow| row.child(arrow))
@@ -409,7 +536,11 @@ pub(super) fn row(
             row.child(div().w(px(ARROW_RESERVE - gap)).flex_none())
         })
         .when_some(badge, |row, badge| {
-            let RowBadge { pr, dirty } = badge;
+            let RowBadge {
+                pr,
+                dirty,
+                teleported,
+            } = badge;
             row.child(
                 div()
                     .debug_selector(|| format!("pr-{key}"))
@@ -430,13 +561,24 @@ pub(super) fn row(
                             // Uncommitted work, marked the way the titlebar
                             // button marks it: the counts beside it are the
                             // pull request's, not the working tree's.
+                            .when(teleported, |line| {
+                                line.child(
+                                    crate::icons::teleported(
+                                        theme,
+                                        (line_height(font) * 0.75).round().min(15.),
+                                    )
+                                    .debug_selector(|| format!("teleported-{key}")),
+                                )
+                            })
                             .when(dirty, |line| {
                                 line.child(
-                                    div()
-                                        .debug_selector(|| format!("dirty-{key}"))
-                                        .flex_none()
-                                        .text_color(rgb(theme.foreground))
-                                        .child(label_text("\u{2022}")),
+                                    // Well under the line height, so marks on
+                                    // neighbouring rows keep a visible gap.
+                                    crate::icons::uncommitted(
+                                        theme,
+                                        (line_height(font) * 0.75).round().min(15.),
+                                    )
+                                    .debug_selector(|| format!("dirty-{key}")),
                                 )
                             })
                             .when_some(pr.as_ref(), |line, badge| {
@@ -449,37 +591,50 @@ pub(super) fn row(
                                 )
                             }),
                     )
-                    .when_some(
-                        pr.filter(|_| layout.workspace_details()),
-                        |column, badge| {
-                            column.child(
-                                div()
-                                    .flex()
-                                    .flex_none()
-                                    .overflow_hidden()
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_color(rgb(theme.palette[2]))
-                                            .child(label_text(&badge.additions)),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_color(rgb(theme.muted))
-                                            .child(label_text("/")),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_color(rgb(theme.palette[1]))
-                                            .child(label_text(&badge.deletions)),
-                                    ),
-                            )
-                        },
-                    ),
+                    .when_some(pr.filter(|_| layout.pr_counts()), |column, badge| {
+                        column.child(
+                            div()
+                                .flex()
+                                .flex_none()
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(rgb(theme.ink(theme.palette[2])))
+                                        .child(label_text(&badge.additions)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(rgb(theme.muted))
+                                        .child(label_text("/")),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(rgb(theme.ink(theme.palette[1])))
+                                        .child(label_text(&badge.deletions)),
+                                ),
+                        )
+                    }),
             )
         })
+}
+
+fn agent_mark(
+    key: &str,
+    icon: crate::icons::AgentIcon,
+    size: f32,
+    color: u32,
+    font: &FontConfig,
+) -> Div {
+    div()
+        .debug_selector(|| format!("agent-icon-{key}"))
+        .absolute()
+        .left_0()
+        .top(px((line_height(font) - size) / 2.))
+        .size(px(size))
+        .child(svg().path(icon.path()).size_full().text_color(rgb(color)))
 }
 
 #[cfg(not(any(test, feature = "integration-test")))]

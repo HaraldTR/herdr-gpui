@@ -43,6 +43,10 @@ pub struct LiveState {
         herdr_client::protocol::SemanticNotification,
     )>,
     pub(crate) reload_sound: bool,
+    /// Decoded OSC 52 clipboard writes from the daemon, in arrival order. The
+    /// UI thread drains them to the pasteboard; the queue is bounded like
+    /// sounds, since a pane may write faster than the window repaints.
+    pub(crate) clipboard_writes: std::collections::VecDeque<String>,
     pub(crate) sound_cancel: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) sound_connection_cancel: Arc<std::sync::atomic::AtomicBool>,
     pub snapshot: Option<Arc<ClientShellSnapshot>>,
@@ -53,6 +57,11 @@ pub struct LiveState {
     /// Same-user peer at the owned standard socket, not executable attestation.
     pub(crate) local_daemon_peer: bool,
     pub(crate) supports_workspace_get: bool,
+    /// `pane.clear` arrived after Herdr 0.9.1; older daemons reject it.
+    pub(crate) supports_pane_clear: bool,
+    /// `tab.move` reorders a workspace's tabs; daemons that do not offer it
+    /// to clients keep their tabs where they are.
+    pub(crate) supports_tab_move: bool,
     pub dirty: bool,
     pub(crate) dialog_response: Option<(String, Option<DialogResponse>)>,
     pub(crate) notifications: std::collections::VecDeque<crate::notifications::Notice>,
@@ -64,6 +73,10 @@ pub struct LiveState {
     // worktree operation whose dialog has already closed.
     pub tab_rename: Option<RenameResult>,
     pub pane_rename: Option<RenameResult>,
+    /// The one scrollbar or split drag request in flight; the next waits for
+    /// it so a slow link coalesces to the latest position instead of queueing
+    /// a backlog.
+    pub drag_request: Option<String>,
 }
 
 #[derive(Clone)]
@@ -88,6 +101,7 @@ impl Default for LiveState {
             settings_reload: false,
             sound_events: Default::default(),
             reload_sound: false,
+            clipboard_writes: Default::default(),
             sound_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sound_connection_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             snapshot: None,
@@ -97,6 +111,8 @@ impl Default for LiveState {
             missing_installation: false,
             local_daemon_peer: false,
             supports_workspace_get: false,
+            supports_pane_clear: false,
+            supports_tab_move: false,
             dirty: true,
             dialog_response: None,
             notifications: Default::default(),
@@ -106,11 +122,91 @@ impl Default for LiveState {
             supports_surface: false,
             tab_rename: None,
             pane_rename: None,
+            drag_request: None,
         }
     }
 }
 
 impl LiveState {
+    /// Whether `next` repaints only the terminal: everything else the window
+    /// draws from, the sidebar above all, reads as it did in `self`. Every
+    /// field is named so a new one must decide whether it can change quietly.
+    pub(crate) fn only_surface_changed(&self, next: &Self) -> bool {
+        let Self {
+            sound_events,
+            reload_sound,
+            settings_reload,
+            clipboard_writes,
+            sound_cancel,
+            sound_connection_cancel,
+            snapshot,
+            surface: _,
+            status,
+            error,
+            missing_installation,
+            local_daemon_peer,
+            supports_workspace_get,
+            supports_pane_clear,
+            supports_tab_move,
+            dirty: _,
+            dialog_response,
+            notifications,
+            notifications_lost,
+            outer_focused,
+            activation,
+            supports_surface,
+            tab_rename,
+            pane_rename,
+            drag_request,
+        } = next;
+        let same_arc = |a: &Option<Arc<_>>, b: &Option<Arc<_>>| match (a, b) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        let pending_rename = |a: &Option<RenameResult>, b: &Option<RenameResult>| match (a, b) {
+            (Some(a), Some(b)) => {
+                a.request == b.request && a.result.is_none() && b.result.is_none()
+            }
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        sound_events.is_empty()
+            && !reload_sound
+            && !settings_reload
+            && clipboard_writes.is_empty()
+            && Arc::ptr_eq(sound_cancel, &self.sound_cancel)
+            && Arc::ptr_eq(sound_connection_cancel, &self.sound_connection_cancel)
+            && same_arc(snapshot, &self.snapshot)
+            && *status == self.status
+            && *error == self.error
+            && *missing_installation == self.missing_installation
+            && *local_daemon_peer == self.local_daemon_peer
+            && *supports_workspace_get == self.supports_workspace_get
+            && *supports_pane_clear == self.supports_pane_clear
+            && *supports_tab_move == self.supports_tab_move
+            && match (dialog_response, &self.dialog_response) {
+                (Some((a, None)), Some((b, None))) => a == b,
+                (a, b) => a.is_none() && b.is_none(),
+            }
+            && notifications.is_empty()
+            && !notifications_lost
+            && *outer_focused == self.outer_focused
+            && match (activation, &self.activation) {
+                (Some(a), Some(b)) => {
+                    a.request == b.request
+                        && a.boot == b.boot
+                        && a.revision == b.revision
+                        && a.failed == b.failed
+                        && a.focus == b.focus
+                        && a.active == b.active
+                }
+                (a, b) => a.is_none() && b.is_none(),
+            }
+            && *supports_surface == self.supports_surface
+            && pending_rename(tab_rename, &self.tab_rename)
+            && pending_rename(pane_rename, &self.pane_rename)
+            && *drag_request == self.drag_request
+    }
+
     fn has_operation_result(&self, request_id: &str) -> bool {
         self.dialog_response
             .as_ref()
@@ -119,6 +215,18 @@ impl LiveState {
                 .into_iter()
                 .flatten()
                 .any(|rename| rename.request == request_id)
+    }
+
+    /// Whether a navigation barrier is unacknowledged, failed, or still waiting
+    /// for its focus. An acknowledged activation stays recorded afterwards, so
+    /// its presence alone does not mean navigation is in flight.
+    pub fn activation_pending(&self) -> bool {
+        self.activation.as_ref().is_some_and(|activation| {
+            activation.failed
+                || !activation.active
+                || activation.revision.is_none()
+                || activation.focus.is_some()
+        })
     }
 
     pub fn surface_ready(&self) -> bool {
@@ -176,6 +284,8 @@ impl LiveState {
             ClientEvent::Connected(welcome) => {
                 self.settings_reload = false;
                 self.supports_workspace_get = Method::WorkspaceGet.advertised_in(&welcome.methods);
+                self.supports_pane_clear = Method::PaneClear.advertised_in(&welcome.methods);
+                self.supports_tab_move = Method::TabMove.advertised_in(&welcome.methods);
                 self.supports_surface = Method::ClientShellSurfaceSet
                     .advertised_in(&welcome.methods)
                     && ["surface_interest", "presentation_effects_fence"]
@@ -232,6 +342,9 @@ impl LiveState {
                 self.surface = None;
             }
             ClientEvent::CommandRejected { request_id, reason } => {
+                if request_id.is_some() && request_id == self.drag_request {
+                    self.drag_request = None;
+                }
                 if !request_id
                     .as_deref()
                     .is_some_and(|id| self.has_operation_result(id))
@@ -262,6 +375,9 @@ impl LiveState {
                 request_id,
                 response,
             } => {
+                if self.drag_request.as_ref() == Some(&request_id) {
+                    self.drag_request = None;
+                }
                 for rename in [&mut self.tab_rename, &mut self.pane_rename]
                     .into_iter()
                     .flatten()
@@ -333,6 +449,18 @@ impl LiveState {
             ClientEvent::Message(ServerMessage::ReloadSoundConfig) => {
                 self.reload_sound = true;
                 self.settings_reload = true;
+            }
+            ClientEvent::Message(ServerMessage::Clipboard { data }) => {
+                // OSC 52 bytes from a pane, base64-encoded by the daemon. Only
+                // bounded UTF-8 text is written; anything else is dropped.
+                if let Some(text) = crate::osc52::decode(&data) {
+                    while self.clipboard_writes.len() >= crate::osc52::MAX_PENDING {
+                        self.clipboard_writes.pop_front();
+                    }
+                    self.clipboard_writes.push_back(text);
+                } else {
+                    tracing::debug!("dropped an invalid or oversized clipboard payload");
+                }
             }
             _ => return,
         }
@@ -435,6 +563,35 @@ mod tests {
             });
             assert_eq!(state.status_text(None), format!("Connected: {expected}"));
         }
+    }
+
+    #[test]
+    fn drag_request_clears_only_on_its_own_answer() {
+        let mut state = LiveState {
+            drag_request: Some("scroll".into()),
+            ..LiveState::default()
+        };
+        state.apply(ClientEvent::Response {
+            request_id: "other".into(),
+            response: serde_json::json!({"result": {}}),
+        });
+        state.apply(ClientEvent::CommandRejected {
+            request_id: None,
+            reason: herdr_client::Error::Disconnected,
+        });
+        assert_eq!(state.drag_request.as_deref(), Some("scroll"));
+        state.apply(ClientEvent::Response {
+            request_id: "scroll".into(),
+            response: serde_json::json!({"result": {}}),
+        });
+        assert_eq!(state.drag_request, None);
+
+        state.drag_request = Some("scroll".into());
+        state.apply(ClientEvent::CommandRejected {
+            request_id: Some("scroll".into()),
+            reason: herdr_client::Error::CommandBoot,
+        });
+        assert_eq!(state.drag_request, None);
     }
 
     #[test]
@@ -940,5 +1097,82 @@ mod tests {
         assert!(state.snapshot.is_none() && state.surface.is_none());
         assert!(!state.status.is_connected());
         assert_eq!(state.error.as_deref(), Some("closed"));
+    }
+
+    #[test]
+    fn only_a_new_surface_spares_the_chrome() {
+        let snapshot = snapshot();
+        let mut old = LiveState::default();
+        old.apply(ClientEvent::Snapshot(snapshot.clone()));
+        old.apply(ClientEvent::Surface(surface(&snapshot)));
+        // The mailbox hands the window clones: shared snapshot, new surface.
+        let mut next = old.clone();
+        next.apply(ClientEvent::Surface(Arc::new(PaneSurfaceFrame {
+            surface_revision: 2,
+            ..(*surface(&snapshot)).clone()
+        })));
+        assert!(old.only_surface_changed(&next));
+        assert!(old.only_surface_changed(&old.clone()));
+
+        type Change = (&'static str, fn(&mut LiveState));
+        let changes: [Change; 10] = [
+            ("snapshot", |s| {
+                s.snapshot = s.snapshot.as_deref().cloned().map(Arc::new);
+            }),
+            ("status", |s| s.status = ConnectionStatus::Disconnected),
+            ("error", |s| s.error = Some("lost".into())),
+            ("notification lost", |s| s.notifications_lost = true),
+            ("sound", |s| s.reload_sound = true),
+            ("clipboard write", |s| {
+                s.clipboard_writes.push_back("x".into())
+            }),
+            ("dialog answer", |s| {
+                s.dialog_response = Some(("remove".into(), Some(Ok(serde_json::Value::Null))));
+            }),
+            ("rename answer", |s| {
+                s.pane_rename = Some(RenameResult {
+                    request: "rename".into(),
+                    result: Some(Ok(())),
+                });
+            }),
+            ("drag answer", |s| s.drag_request = Some("scroll".into())),
+            ("outer focus", |s| s.outer_focused = Some(true)),
+        ];
+        for (what, change) in changes {
+            let mut changed = next.clone();
+            change(&mut changed);
+            assert!(!old.only_surface_changed(&changed), "{what}");
+        }
+    }
+
+    #[test]
+    fn daemon_clipboard_payloads_are_decoded_bounded_and_dropped_when_invalid() {
+        let mut state = LiveState::default();
+        state.apply(ClientEvent::Message(ServerMessage::Clipboard {
+            data: "aGVsbG8=".into(),
+        }));
+        state.apply(ClientEvent::Message(ServerMessage::Clipboard {
+            data: "not base64!".into(),
+        }));
+        assert_eq!(
+            state
+                .clipboard_writes
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["hello"]
+        );
+        // A pane that spams OSC 52 cannot grow the mailbox without bound, and
+        // only the newest writes survive: the seeded "hello" is evicted first.
+        for index in 0..crate::osc52::MAX_PENDING * 2 {
+            state.apply(ClientEvent::Message(ServerMessage::Clipboard {
+                data: "eA==".into(),
+            }));
+            assert_eq!(
+                state.clipboard_writes.len(),
+                (index + 2).min(crate::osc52::MAX_PENDING)
+            );
+        }
+        assert!(state.clipboard_writes.iter().all(|text| text == "x"));
     }
 }

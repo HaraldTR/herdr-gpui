@@ -3,53 +3,72 @@
 
 mod about;
 mod actions;
+mod agent_skill;
 mod app;
 #[cfg(any(target_os = "macos", test))]
 mod app_badge;
 mod app_icon;
 mod avatars;
+mod browser;
 mod cli;
 mod close_modal;
 mod config;
 mod connection;
 mod constants;
+mod contrast;
+mod control;
 mod controls;
 mod daemon;
 mod diagnostics;
 mod dialog_input;
 mod endpoint;
 mod error;
+mod font_picker;
+mod font_sizes;
 mod fonts;
 mod git;
 mod github;
+mod group_menu;
+mod group_terminals;
 mod herdr_settings;
 mod icons;
 mod input;
 mod integrations;
+mod keymap;
 mod log_window;
 mod menu;
 mod menus;
+#[cfg(feature = "mockup")]
+mod mockup;
+mod motion;
 mod navigation;
 mod notifications;
+mod osc52;
 mod palette;
 mod pane_menu;
 mod preferences;
 mod presentation;
 mod pull_request;
+mod reorder;
 mod repo_items;
 mod search_input;
+mod sessions;
 mod settings_panel;
 mod sidebar;
 mod sound;
 mod state;
+mod state_file;
 mod tab_menu;
+mod teleport;
 mod terminal;
 mod terminal_painter;
 mod theme_picker;
 mod titlebar;
 mod update_panel;
 mod updater;
+mod usage;
 mod window;
+mod window_state;
 mod worktree;
 mod worktree_banner;
 
@@ -57,13 +76,15 @@ mod worktree_banner;
 mod performance;
 #[cfg(feature = "integration-test")]
 mod smoke;
+#[cfg(all(test, unix))]
+mod test_executable;
 
 pub use error::{Error, Result};
 
 pub(crate) use {
     actions::{
-        CheckForUpdates, PlaySound, Quit, RunCommand, ShowHerdrNotDetected, ShowLogs,
-        ShowUpdatePreview, bind_keys,
+        CheckForUpdates, Hide, HideOthers, Minimize, PlaySound, Quit, RunCommand, ShowAll,
+        ShowHerdrNotDetected, ShowLogs, ShowUpdatePreview, bind_keys,
     },
     app::open_additional_window,
     constants::{APP_VERSION, RELEASE_BUILD, TAB_HEIGHT, TAB_WIDTH, WINDOW_TITLE},

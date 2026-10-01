@@ -150,7 +150,7 @@ mod unix {
 
     #[test]
     fn reservation_validation_busy_drop_and_queue_bounds() {
-        let (commands, rx) = bounded(1);
+        let (commands, rx) = queue::channel(1).unwrap();
         let handle = ClientHandle {
             inner: Arc::new(HandleInner {
                 commands,
@@ -223,7 +223,7 @@ mod unix {
     #[test]
     fn input_reservations_share_queue_bound_without_claiming_or_releasing_image_lease() {
         use std::sync::atomic::Ordering;
-        let (commands, rx) = bounded(COMMAND_CAPACITY);
+        let (commands, rx) = queue::channel(COMMAND_CAPACITY).unwrap();
         let handle = ClientHandle {
             inner: Arc::new(HandleInner {
                 commands,
@@ -374,7 +374,7 @@ mod unix {
     #[test]
     fn finished_tracks_slot_drop_not_publication_or_cancellation() {
         for mode in 0..4 {
-            let (commands, rx) = bounded(1);
+            let (commands, rx) = queue::channel(1).unwrap();
             let handle = ClientHandle {
                 inner: Arc::new(HandleInner {
                     commands,

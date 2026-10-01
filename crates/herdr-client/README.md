@@ -3,7 +3,7 @@
 Local and SSH client for Herdr's stable generation 1 endpoint. Local connections
 work on Unix and on Windows; SSH endpoints are Unix-only. This crate
 does not link Herdr, GPUI, ratatui, crossterm, Tokio, or a PTY implementation.
-The workspace centralizes `gpui = "=0.2.2"` for the forthcoming GUI member.
+The workspace centralizes the pinned GPUI dependency (`gpui-pre` 0.3.6) for the GUI member.
 
 ```rust,no_run
 use herdr_client::{connect, ClientEvent, ConnectOptions, ConnectTarget};
@@ -45,8 +45,23 @@ ConnectTarget::Ssh { target: String, session: String }
 ConnectTarget::socket_path(&self) -> Result<PathBuf>
 Stream  // std::os::unix::net::UnixStream, or a named-pipe wrapper on Windows
 session_socket(config_dir: &Path, name: &str) -> Result<PathBuf>
+list_local_sessions(development: bool) -> Result<Vec<LocalSession>>
+list_remote_sessions(target: &str) -> Result<Vec<RemoteSession>>
+delete_local_session(executable: &Path, name: &str) -> Result<()>
+delete_remote_session(target: &str, name: &str) -> Result<()>
 ConnectOptions { surface_size: ClientSurfaceSize, cell_width_px: u32, cell_height_px: u32 }
 ```
+
+Session listing and deletion are blocking worker-only functions. Deletion
+requires explicit user confirmation: it delegates stopping the named session
+and deleting its saved state to the installed CLI. `default` is refused before
+spawning. The client never removes session directories itself. It validates
+names, bounds local stopping to 20 seconds and deletion to 15 seconds (45 seconds
+for the complete SSH operation), discards remote diagnostics, and kills/reaps
+only its CLI or SSH child on failure. A
+timeout is an uncertain result: refresh rather than replay. SSH functions are
+unavailable on Windows. Creating a session is the connection/startup layer's
+responsibility, not an interactive `session attach` command.
 
 `ClientHandle` is cloneable. Its exact methods are:
 
@@ -76,6 +91,10 @@ methods return a unique ID. The worker rejects stale boot IDs, requests before
 the first snapshot and unadvertised methods via
 `CommandRejected`. Navigation uses the real `pane.focus`, `tab.focus`, and
 `workspace.focus` API methods, not synthetic terminal keys.
+
+`remote_config_value` reads a single Git configuration key on a saved SSH host
+with the same bounded, noninteractive process policy as `remote_origin_url`.
+Both are blocking helpers for background workers; absent or empty keys return `None`.
 
 All fallible client APIs return the crate-root `Error`, derived with `thiserror`.
 I/O, protocol, and JSON failures retain their concrete sources; callers can match

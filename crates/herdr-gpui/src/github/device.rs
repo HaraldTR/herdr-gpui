@@ -130,6 +130,7 @@ pub(super) fn profile(token: Arc<SecretString>) -> Result<Profile> {
 pub(super) struct TokenResponse {
     pub(super) access_token: Option<SecretString>,
     pub(super) refresh_token: Option<SecretString>,
+    expires_in: Option<u64>,
     pub(super) token_type: Option<String>,
     pub(super) error: Option<String>,
     /// Logged, never displayed: GitHub's own wording is the only place an
@@ -177,11 +178,10 @@ pub(super) fn token_reply(value: TokenResponse, client: &str) -> Result<Reply> {
                 );
                 return Err(Error::GitHubTokenType);
             }
-            Ok(Reply::Token(Credential::new(
-                token,
-                value.refresh_token,
-                client,
-            )?))
+            Ok(Reply::Token(
+                Credential::new(token, value.refresh_token, client)?
+                    .with_expiry(value.expires_in, std::time::SystemTime::now()),
+            ))
         }
     }
 }

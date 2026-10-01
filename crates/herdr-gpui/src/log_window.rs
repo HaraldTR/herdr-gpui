@@ -18,6 +18,18 @@ const LEVELS: [Level; 5] = [
 
 actions!(log_window, [Close, FocusSearch, FocusLevel]);
 
+/// The console's own keys, scoped to its window. They are bound with the app
+/// keymap so a config reload, which replaces every binding, keeps them.
+pub(crate) fn key_bindings() -> [KeyBinding; 5] {
+    [
+        KeyBinding::new("cmd-w", Close, Some("LogWindow")),
+        KeyBinding::new("cmd-f", FocusSearch, Some("LogWindow")),
+        KeyBinding::new("cmd-l", FocusLevel, Some("LogWindow")),
+        KeyBinding::new("tab", FocusLevel, Some("LogWindow")),
+        KeyBinding::new("shift-tab", FocusSearch, Some("LogWindow")),
+    ]
+}
+
 #[derive(Default)]
 struct LogWindowHandle(Option<WindowHandle<LogWindow>>);
 impl Global for LogWindowHandle {}
@@ -39,7 +51,7 @@ pub(super) fn set_appearance(config: &Config, theme: &Theme, cx: &mut App) {
 
 fn palette_color(theme: &Theme, index: usize) -> Rgba {
     // Terminal ANSI colors can have very low contrast against UI backgrounds.
-    rgb(theme.foreground).blend(rgba((theme.palette[index] << 8) | 0x70))
+    crate::menu::tint(theme, index)
 }
 
 fn severity_color(theme: &Theme, level: Level) -> Rgba {
@@ -73,7 +85,7 @@ fn open_deferred(cx: &mut App) {
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(620.), px(360.))),
-            titlebar: Some(crate::titlebar::options("Herdr GPUI Logs")),
+            titlebar: Some(crate::titlebar::options("Logs")),
             ..Default::default()
         },
         |window, cx| cx.new(|cx| LogWindow::new(window, cx)),
@@ -147,13 +159,13 @@ fn export_text(rows: &[Arc<Record>], dropped: u64) -> serde_json::Result<String>
 impl LogWindow {
     fn open_levels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.level_menu = LEVELS.iter().position(|level| *level == self.minimum);
-        window.focus(&self.menu_focus);
+        window.focus(&self.menu_focus, cx);
         cx.notify();
     }
 
     fn close_levels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.level_menu = None;
-        window.focus(&self.level_focus);
+        window.focus(&self.level_focus, cx);
         cx.notify();
     }
 
@@ -178,19 +190,12 @@ impl LogWindow {
     }
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.bind_keys([
-            KeyBinding::new("cmd-w", Close, Some("LogWindow")),
-            KeyBinding::new("cmd-f", FocusSearch, Some("LogWindow")),
-            KeyBinding::new("cmd-l", FocusLevel, Some("LogWindow")),
-            KeyBinding::new("tab", FocusLevel, Some("LogWindow")),
-            KeyBinding::new("shift-tab", FocusSearch, Some("LogWindow")),
-        ]);
         let search = cx.new(SearchInput::new);
         let appearance = cx.default_global::<Appearance>().clone();
         search.update(cx, |input, cx| {
             input.set_appearance(appearance.config.ui.clone(), appearance.theme.clone(), cx);
             input.set_placeholder("Search, namespace:herdr_gpui target:terminal_painter", cx);
-            window.focus(&input.focus);
+            window.focus(&input.focus, cx);
         });
         let appearance_subscription = cx.observe_global::<Appearance>(|this, cx| {
             let font = &cx.global::<Appearance>().config.terminal;
@@ -217,6 +222,8 @@ impl LogWindow {
             cx.notify();
         });
         let poll = cx.spawn(async move |this, cx| {
+            // The reader lives in this task; a background read borrows it by value.
+            let mut tail = diagnostics::path().map(diagnostics::Tail::new);
             loop {
                 let request = this.update(cx, |this, cx| {
                     (this.generation.is_none()
@@ -226,55 +233,72 @@ impl LogWindow {
                             this.search.read(cx).text().to_owned(),
                             this.minimum,
                             this.following,
-                            (!this.following).then(|| {
-                                (
-                                    diagnostics::generation(),
-                                    this.retained.clone(),
-                                    this.dropped,
-                                )
-                            }),
+                            (!this.following).then(|| (this.retained.clone(), this.dropped)),
                         )
                     })
                 });
                 let Ok(request) = request else { break };
                 if let Some((query, minimum, following, frozen)) = request {
                     let filter_query = query.clone();
-                    let snapshot = cx
+                    // Read the hint first so a write racing the read triggers another one.
+                    let generation = diagnostics::generation();
+                    let (returned, snapshot) = cx
                         .background_executor()
                         .spawn(async move {
-                            frozen.or_else(diagnostics::snapshot).map(
-                                |(generation, retained, dropped)| {
-                                    (
-                                        generation,
-                                        filtered(retained.clone(), &filter_query, minimum),
-                                        retained,
-                                        dropped,
-                                    )
-                                },
-                            )
+                            let snapshot = match frozen {
+                                Some((retained, dropped)) => Ok((retained, dropped)),
+                                None => tail.as_mut().map_or(Ok(()), diagnostics::Tail::read).map(
+                                    |()| {
+                                        (
+                                            tail.as_ref()
+                                                .map_or_else(Vec::new, diagnostics::Tail::records),
+                                            diagnostics::dropped(),
+                                        )
+                                    },
+                                ),
+                            }
+                            .map(|(retained, dropped)| {
+                                (
+                                    filtered(retained.clone(), &filter_query, minimum),
+                                    retained,
+                                    dropped,
+                                )
+                            });
+                            (tail, snapshot)
                         })
                         .await;
-                    if let Some((generation, rows, retained, dropped)) = snapshot
-                        && this
-                            .update(cx, |this, cx| {
-                                if this.search.read(cx).text() != query
-                                    || this.minimum != minimum
-                                    || this.following != following
-                                {
-                                    return;
+                    tail = returned;
+                    if this
+                        .update(cx, |this, cx| {
+                            if this.search.read(cx).text() != query
+                                || this.minimum != minimum
+                                || this.following != following
+                            {
+                                return;
+                            }
+                            this.generation = Some(generation);
+                            match snapshot {
+                                Ok((rows, retained, dropped)) => {
+                                    if rows.len() != this.rows.len()
+                                        || !rows
+                                            .iter()
+                                            .zip(&this.rows)
+                                            .all(|(a, b)| Arc::ptr_eq(a, b))
+                                    {
+                                        this.scroll.reset(rows.len());
+                                    }
+                                    this.rows = rows;
+                                    this.retained = retained;
+                                    this.dropped = dropped;
                                 }
-                                this.generation = Some(generation);
-                                if rows.len() != this.rows.len()
-                                    || !rows.iter().zip(&this.rows).all(|(a, b)| Arc::ptr_eq(a, b))
-                                {
-                                    this.scroll.reset(rows.len());
+                                // Not logged: a failing read would log on every change.
+                                Err(error) => {
+                                    this.status = format!("Unable to read logs: {}", error.kind())
                                 }
-                                this.rows = rows;
-                                this.retained = retained;
-                                this.dropped = dropped;
-                                cx.notify();
-                            })
-                            .is_err()
+                            }
+                            cx.notify();
+                        })
+                        .is_err()
                     {
                         break;
                     }
@@ -300,7 +324,10 @@ impl LogWindow {
             following: true,
             scroll: ListState::new(0, ListAlignment::Top, px(100.)),
             selected: None,
-            status: "Local only. Review logs before sharing.".into(),
+            status: match diagnostics::path() {
+                Some(path) => format!("Saved to {}. Review before sharing.", path.display()),
+                None => "Not saved: no state directory. Review before sharing.".into(),
+            },
             exporting: false,
             _search: subscription,
             _poll: poll,
@@ -387,7 +414,7 @@ fn button(id: &'static str, label: impl Into<SharedString>, theme: &Theme) -> St
         .debug_selector(move || id.into())
         .px_2()
         .py_1()
-        .rounded_sm()
+        .rounded(px(crate::config::corners::CONTROL))
         .bg(rgb(theme.surface))
         .cursor_pointer()
         .hover(move |style| style.bg(rgb(active)))
@@ -457,12 +484,12 @@ impl Render for LogWindow {
             .on_action(cx.listener(|_, _: &Close, window, _| window.remove_window()))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 this.level_menu = None;
-                window.focus(&this.search.read(cx).focus);
+                window.focus(&this.search.read(cx).focus.clone(), cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &FocusLevel, window, cx| {
                 this.level_menu = None;
-                window.focus(&this.level_focus);
+                window.focus(&this.level_focus, cx);
                 cx.notify();
             }))
             .size_full()
@@ -475,7 +502,7 @@ impl Render for LogWindow {
             .line_height(px(config.ui.line_height()))
             .map(|root| {
                 #[cfg(target_os = "macos")]
-                let root = root.child(crate::titlebar::render(theme.surface));
+                let root = root.child(crate::titlebar::render(theme.surface, None));
                 root
             })
             .child(
@@ -488,7 +515,7 @@ impl Render for LogWindow {
                     .child(
                         div()
                             .text_size(px(config.ui.size + 4.))
-                            .child("GPUI / Diagnostics"),
+                            .child("Logs"),
                     )
                     .child(self.search.clone())
                     .child(
@@ -670,7 +697,7 @@ impl Render for LogWindow {
                     .border_color(rgb(theme.active))
                     .truncate()
                     .child(format!(
-                        "{} shown | {} evicted/dropped | {} | {}",
+                        "{} shown | {} dropped | {} | {}",
                         self.rows.len(),
                         self.dropped,
                         if self.following { "LIVE" } else { "PAUSED" },
@@ -708,8 +735,8 @@ mod tests {
                 "Menlo"
             }
         );
-        let options = crate::titlebar::options("Herdr GPUI Logs");
-        assert_eq!(options.title.unwrap().as_ref(), "Herdr GPUI Logs");
+        let options = crate::titlebar::options("Logs");
+        assert_eq!(options.title.unwrap().as_ref(), "Logs");
         assert_eq!(options.appears_transparent, cfg!(target_os = "macos"));
         assert_eq!(
             options.traffic_light_position,
@@ -799,7 +826,7 @@ mod tests {
                 cx.run_until_parked();
                 cx.update(|window, cx| {
                     window.refresh();
-                    window.draw(cx).clear();
+                    window.draw(cx).clear(cx);
                 });
                 let search = cx.debug_bounds("theme-search").unwrap();
                 #[cfg(target_os = "macos")]
@@ -847,7 +874,7 @@ mod tests {
         });
         cx.simulate_resize(size(px(620.), px(650.)));
         cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         let search = cx.debug_bounds("theme-search").unwrap();
         assert!(search.size.width > px(500.));
         assert!(search.size.height > px(0.));
@@ -876,7 +903,7 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, cx| {
             window.refresh();
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let last = cx.debug_bounds("log-row-4999").unwrap();
         assert!(last.top() > search.bottom() && last.bottom() < px(650.));
@@ -918,7 +945,7 @@ mod tests {
             cx.run_until_parked();
             cx.update(|window, cx| {
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
             });
             let short = cx.debug_bounds("log-row-0").unwrap();
             let long = cx.debug_bounds("log-row-1").unwrap();
@@ -947,7 +974,7 @@ mod tests {
             cx.run_until_parked();
             cx.update(|window, cx| {
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
             });
             let last = cx.debug_bounds("log-row-4999").unwrap();
             view.read_with(cx, |view, _| {
@@ -1018,7 +1045,7 @@ mod tests {
             view
         });
         cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.simulate_input("SLOW");
         cx.executor().advance_clock(Duration::from_millis(250));
         cx.run_until_parked();
@@ -1028,11 +1055,11 @@ mod tests {
             assert!(Arc::ptr_eq(&view.rows[0], &retained[0]));
             assert!(Arc::ptr_eq(&view.rows[1], &retained[1]));
         });
-        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         let select = cx.debug_bounds("minimum-level").unwrap();
         cx.simulate_click(select.center(), Modifiers::default());
         cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         let warn = cx.debug_bounds("level-option-3").unwrap();
         cx.simulate_click(warn.center(), Modifiers::default());
         cx.executor().advance_clock(Duration::from_millis(250));
@@ -1101,8 +1128,8 @@ mod tests {
             LogWindow::new(window, cx)
         });
         cx.update(|window, cx| {
-            window.focus(&view.read(cx).focus);
-            window.draw(cx).clear();
+            window.focus(&view.read(cx).focus.clone(), cx);
+            window.draw(cx).clear(cx);
             assert!(!view.read(cx).search.read(cx).focus.is_focused(window));
         });
         cx.simulate_keystrokes("cmd-f");
@@ -1190,13 +1217,14 @@ mod tests {
 
     #[gpui::test]
     fn level_dropdown_keyboard_dismissal_focus_and_input_isolation(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.bind_keys(key_bindings()));
         let (view, cx) = cx.add_window_view(LogWindow::new);
         cx.simulate_resize(size(px(620.), px(360.)));
         cx.run_until_parked();
         cx.simulate_keystrokes("cmd-l enter");
         cx.run_until_parked();
         cx.update(|window, cx| {
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
             assert!(view.read(cx).menu_focus.is_focused(window));
         });
         let menu = cx.debug_bounds("level-menu").unwrap();
@@ -1221,7 +1249,7 @@ mod tests {
         view.read_with(cx, |view, _| assert_eq!(view.minimum, Level::DEBUG));
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.simulate_click(point(px(600.), px(340.)), Modifiers::default());
         view.read_with(cx, |view, _| assert!(view.level_menu.is_none()));
         cx.simulate_keystrokes("shift-tab");

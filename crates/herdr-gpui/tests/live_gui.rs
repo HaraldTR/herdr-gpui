@@ -5,6 +5,10 @@
 #[path = "../../test-support/sandbox.rs"]
 mod sandbox;
 
+#[cfg(target_os = "macos")]
+#[path = "support/clipboard_guard.rs"]
+mod clipboard_guard;
+
 use sandbox::{Sandbox, daemon_binary, stop_children};
 use std::{
     ffi::OsString,
@@ -137,24 +141,42 @@ impl Drop for Isolated {
 #[ignore = "requires active desktop and explicit HERDR_TEST_BINARY; launches a native GUI and isolated daemon"]
 fn native_gui_live() {
     let binary = daemon_binary();
+    #[cfg(target_os = "macos")]
+    let _clipboard = clipboard_guard::ClipboardGuard::acquire();
     let mut isolated = Isolated {
         sandbox: Sandbox::new(),
         daemon: None,
         gui: None,
     };
     let socket = isolated.sandbox.socket();
-    isolated.daemon = Some(
-        isolated
-            .sandbox
-            .command(binary, "daemon.log")
-            .arg("server")
-            .spawn()
-            .unwrap(),
-    );
+    let mut daemon = isolated.sandbox.command(binary, "daemon.log");
+    // macOS /bin/sh otherwise edits UTF-8 input in the C locale, interpreting
+    // high-bit bytes as editing keys before the selection fixture can run.
+    #[cfg(target_os = "macos")]
+    daemon.env("LC_ALL", "en_US.UTF-8");
+    isolated.daemon = Some(daemon.arg("server").spawn().unwrap());
     isolated
         .sandbox
         .wait_for_daemon(isolated.daemon.as_mut().unwrap(), Duration::from_secs(20));
     let mut gui_command = gui_command(&isolated.sandbox, |name| std::env::var_os(name));
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(
+            isolated.sandbox.dir.join("clipboard_capture.py"),
+            include_str!("support/clipboard_capture.py"),
+        )
+        .unwrap();
+        let tools = isolated.sandbox.dir.join("bin");
+        fs::create_dir(&tools).unwrap();
+        let ssh = tools.join("ssh");
+        fs::write(&ssh, include_str!("support/clipboard_ssh.py")).unwrap();
+        fs::set_permissions(&ssh, fs::Permissions::from_mode(0o700)).unwrap();
+        gui_command.env(
+            "PATH",
+            format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", tools.display()),
+        );
+    }
     isolated.gui = Some(
         gui_command
             .arg("--socket")
@@ -193,6 +215,17 @@ fn native_gui_live() {
     assert!(
         log.contains("GUI input pipeline verified:"),
         "GUI did not verify native action, key, and text delivery"
+    );
+    #[cfg(target_os = "macos")]
+    assert!(
+        log.contains("GUI clipboard native PASS: local")
+            && log.contains("GUI clipboard native PASS: remote"),
+        "native clipboard matrix did not complete"
+    );
+    #[cfg(target_os = "macos")]
+    assert!(
+        log.contains("GUI CJK selection verified:"),
+        "GUI did not verify CJK native drag, clipboard, and paste byte readback"
     );
     assert!(
         log.contains("GUI second window verified:") && log.contains("windows=2 first_space="),

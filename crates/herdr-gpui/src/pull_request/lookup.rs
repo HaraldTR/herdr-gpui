@@ -2,7 +2,7 @@
 //! in flight at a time; a superseded request is dropped by generation rather
 //! than cancelled mid-flight, and dropping the handle retires the generation.
 
-use super::{Input, PullRequest, Result, fetch_with_backoff};
+use super::{Input, Origin, Origins, PullRequest, Result, fetch_with_backoff};
 use std::{
     sync::{
         Arc,
@@ -13,8 +13,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+type Request = (u64, Input, Origin, Arc<secrecy::SecretString>);
+
 pub(super) struct Worker {
-    pub(super) requests: mpsc::SyncSender<(u64, Input, Arc<secrecy::SecretString>)>,
+    pub(super) requests: mpsc::SyncSender<Request>,
     pub(super) results: mpsc::Receiver<(u64, Result, Option<Duration>)>,
 }
 
@@ -23,7 +25,7 @@ pub(crate) struct Lookup {
     pub(super) worker: Option<Worker>,
     pub(super) generation: Arc<AtomicU64>,
     pub(super) busy: bool,
-    pub(super) waiting: Option<(Input, Arc<secrecy::SecretString>)>,
+    pub(super) waiting: Option<(Input, Origin, Arc<secrecy::SecretString>)>,
     pub loading: bool,
     pub value: Option<PullRequest>,
     pub message: Option<String>,
@@ -55,9 +57,9 @@ impl Lookup {
         self.cooldown = None;
     }
 
-    pub fn request(&mut self, input: Input, token: Arc<secrecy::SecretString>) {
+    pub fn request(&mut self, input: Input, origin: Origin, token: Arc<secrecy::SecretString>) {
         self.generation.fetch_add(1, Ordering::Relaxed);
-        self.waiting = Some((input, token));
+        self.waiting = Some((input, origin, token));
         self.loading = true;
         self.message = None;
     }
@@ -94,20 +96,24 @@ impl Lookup {
             }
         }
         if !self.busy
-            && let Some((input, token)) = self.waiting.take()
+            && let Some((input, origin, token)) = self.waiting.take()
         {
             if self.worker.is_none() {
-                let (requests, incoming) =
-                    mpsc::sync_channel::<(u64, Input, Arc<secrecy::SecretString>)>(1);
+                let (requests, incoming) = mpsc::sync_channel::<Request>(1);
                 let (outgoing, results) = mpsc::sync_channel(1);
                 let current = self.generation.clone();
                 match thread::Builder::new()
                     .name("herdr-pr".into())
                     .spawn(move || {
-                        for (generation, input, token) in incoming {
+                        // Remote repositories are resolved over SSH; remember
+                        // them so a refresh does not dial the host again.
+                        let mut origins = Origins::default();
+                        for (generation, input, origin, token) in incoming {
                             let mut cooldown = None;
                             let result = fetch_with_backoff(
                                 &input,
+                                &origin,
+                                &mut origins,
                                 &token,
                                 || current.load(Ordering::Relaxed) != generation,
                                 &mut cooldown,
@@ -128,7 +134,12 @@ impl Lookup {
             if let Some(worker) = &self.worker {
                 self.busy = worker
                     .requests
-                    .try_send((self.generation.load(Ordering::Relaxed), input, token))
+                    .try_send((
+                        self.generation.load(Ordering::Relaxed),
+                        input,
+                        origin,
+                        token,
+                    ))
                     .is_ok();
             }
         }

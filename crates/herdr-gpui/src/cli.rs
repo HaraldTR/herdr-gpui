@@ -1,18 +1,52 @@
 use herdr_client::ConnectTarget;
 use std::ffi::OsString;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum LaunchMode {
     #[default]
     Normal,
     Help,
     BuildInfo,
+    /// Talk to the running app, then exit without starting GPUI.
+    Browser(BrowserCommand),
+    /// Show the UI variants compiled in from `HERDR_MOCKUP_FILE`.
+    #[cfg(feature = "mockup")]
+    Mockup(MockupOptions),
     #[cfg(feature = "integration-test")]
     Integration,
     #[cfg(feature = "integration-test")]
     Sidebar,
     #[cfg(feature = "integration-test")]
     Performance,
+}
+
+/// `herdr-gpui browser ...`, answered by the running app.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BrowserCommand {
+    Open {
+        /// A web address or a local file, told apart when it runs.
+        target: String,
+        workspace: Option<String>,
+        focus: bool,
+    },
+    Reload,
+    /// Waits up to `wait` seconds for notes; zero only checks.
+    Feedback {
+        wait: u64,
+    },
+    Skill,
+    Help,
+}
+
+/// `herdr-gpui --mockup [--feedback PATH] [--capture PATH]`: never connects
+/// to a daemon.
+#[cfg(feature = "mockup")]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MockupOptions {
+    /// Where "Send to agent" writes the user's picks and notes.
+    pub feedback: Option<std::path::PathBuf>,
+    /// Where to save a PNG of the window once it has drawn.
+    pub capture: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
@@ -37,6 +71,26 @@ pub enum CliError {
     UnknownOption(OsString),
     #[error("--socket cannot be combined with --session or --dev")]
     ConflictingConnectionOptions,
+    #[error("browser requires a command: open, reload, feedback, skill, or --help")]
+    MissingBrowserCommand,
+    #[error("Unknown browser command: {}", .0.to_string_lossy())]
+    UnknownBrowserCommand(OsString),
+    #[error("browser open requires one URL or file")]
+    MissingUrl,
+    #[error("--wait requires a number of seconds")]
+    InvalidWait,
+    #[error("browser open accepts one URL; unexpected {}", .0.to_string_lossy())]
+    UnexpectedArgument(OsString),
+    #[error("--workspace requires an ID")]
+    MissingWorkspace,
+    #[error("browser arguments must be UTF-8")]
+    InvalidBrowserEncoding(OsString),
+    #[cfg(feature = "mockup")]
+    #[error("{0} requires a path")]
+    MissingMockupPath(&'static str),
+    #[cfg(feature = "mockup")]
+    #[error("{0} may only be specified once")]
+    DuplicateMockupPath(&'static str),
     #[cfg(feature = "integration-test")]
     #[error("native test modes are mutually exclusive and may only be specified once")]
     ConflictingTestModes,
@@ -70,9 +124,115 @@ pub fn build_info() -> &'static str {
     &record[PREFIX_LEN..record.len() - 1]
 }
 
+fn utf8(value: OsString) -> Result<String, CliError> {
+    value
+        .into_string()
+        .map_err(CliError::InvalidBrowserEncoding)
+}
+
+fn parse_browser(mut args: impl Iterator<Item = OsString>) -> Result<BrowserCommand, CliError> {
+    let command = args.next().ok_or(CliError::MissingBrowserCommand)?;
+    match command.to_str() {
+        Some("--help" | "-h") => return Ok(BrowserCommand::Help),
+        Some(simple @ ("skill" | "reload")) => {
+            let command = if simple == "skill" {
+                BrowserCommand::Skill
+            } else {
+                BrowserCommand::Reload
+            };
+            return match args.next() {
+                None => Ok(command),
+                Some(extra) if extra == "--help" || extra == "-h" => Ok(BrowserCommand::Help),
+                Some(extra) => Err(CliError::UnexpectedArgument(extra)),
+            };
+        }
+        Some("feedback") => {
+            let mut wait = 0;
+            while let Some(arg) = args.next() {
+                match arg.to_str() {
+                    Some("--help" | "-h") => return Ok(BrowserCommand::Help),
+                    Some("--wait") => {
+                        wait = args
+                            .next()
+                            .and_then(|value| value.to_str()?.parse::<u64>().ok())
+                            .filter(|seconds| *seconds > 0)
+                            .ok_or(CliError::InvalidWait)?;
+                    }
+                    _ => return Err(CliError::UnexpectedArgument(arg)),
+                }
+            }
+            return Ok(BrowserCommand::Feedback { wait });
+        }
+        Some("open") => {}
+        _ => return Err(CliError::UnknownBrowserCommand(command)),
+    }
+    let (mut target, mut workspace, mut focus) = (None, None, true);
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--help" | "-h") => return Ok(BrowserCommand::Help),
+            Some("--no-focus") => focus = false,
+            Some("--workspace") => {
+                let value = args
+                    .next()
+                    .filter(|value| {
+                        !value.is_empty() && !value.as_encoded_bytes().starts_with(b"-")
+                    })
+                    .ok_or(CliError::MissingWorkspace)?;
+                workspace = Some(utf8(value)?);
+            }
+            _ if target.is_none() && !arg.as_encoded_bytes().starts_with(b"-") => {
+                target = Some(utf8(arg)?);
+            }
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+    Ok(BrowserCommand::Open {
+        target: target.ok_or(CliError::MissingUrl)?,
+        workspace,
+        focus,
+    })
+}
+
+/// The arguments after a leading `--mockup`. Paths stay OS strings.
+#[cfg(feature = "mockup")]
+fn parse_mockup(mut args: impl Iterator<Item = OsString>) -> Result<LaunchMode, CliError> {
+    let mut options = MockupOptions::default();
+    while let Some(arg) = args.next() {
+        let (flag, slot) = match arg.to_str() {
+            Some("--help" | "-h") => return Ok(LaunchMode::Help),
+            Some("--feedback") => ("--feedback", &mut options.feedback),
+            Some("--capture") => ("--capture", &mut options.capture),
+            _ => return Err(CliError::UnknownOption(arg)),
+        };
+        let path = args
+            .next()
+            .filter(|value| !value.is_empty() && !value.as_encoded_bytes().starts_with(b"-"))
+            .ok_or(CliError::MissingMockupPath(flag))?;
+        if slot.replace(path.into()).is_some() {
+            return Err(CliError::DuplicateMockupPath(flag));
+        }
+    }
+    Ok(LaunchMode::Mockup(options))
+}
+
 impl LaunchOptions {
     pub fn parse(args: impl IntoIterator<Item = impl Into<OsString>>) -> Result<Self, CliError> {
-        let mut args = args.into_iter().map(Into::into);
+        let mut args = args.into_iter().map(Into::into).peekable();
+        if args.peek().is_some_and(|arg| arg == "browser") {
+            args.next();
+            return Ok(Self {
+                target: ConnectTarget::Local,
+                mode: LaunchMode::Browser(parse_browser(args)?),
+            });
+        }
+        #[cfg(feature = "mockup")]
+        if args.peek().is_some_and(|arg| arg == "--mockup") {
+            args.next();
+            return Ok(Self {
+                target: ConnectTarget::Local,
+                mode: parse_mockup(args)?,
+            });
+        }
         let mut socket = None;
         let mut session = None;
         let mut development = false;
@@ -193,6 +353,116 @@ mod tests {
     }
 
     #[test]
+    fn browser_commands_never_start_the_gui() {
+        let mode = |args: &[&str]| LaunchOptions::parse(args.iter().copied()).map(|o| o.mode);
+        assert_eq!(
+            mode(&["browser", "open", "localhost:3000"]).unwrap(),
+            LaunchMode::Browser(BrowserCommand::Open {
+                target: "localhost:3000".into(),
+                workspace: None,
+                focus: true,
+            })
+        );
+        assert_eq!(
+            mode(&[
+                "browser",
+                "open",
+                "--no-focus",
+                "--workspace",
+                "w_2",
+                "https://a.test"
+            ])
+            .unwrap(),
+            LaunchMode::Browser(BrowserCommand::Open {
+                target: "https://a.test".into(),
+                workspace: Some("w_2".into()),
+                focus: false,
+            })
+        );
+        assert_eq!(
+            mode(&["browser", "skill"]).unwrap(),
+            LaunchMode::Browser(BrowserCommand::Skill)
+        );
+        assert_eq!(
+            mode(&["browser", "reload"]).unwrap(),
+            LaunchMode::Browser(BrowserCommand::Reload)
+        );
+        assert_eq!(
+            mode(&["browser", "feedback"]).unwrap(),
+            LaunchMode::Browser(BrowserCommand::Feedback { wait: 0 })
+        );
+        assert_eq!(
+            mode(&["browser", "feedback", "--wait", "300"]).unwrap(),
+            LaunchMode::Browser(BrowserCommand::Feedback { wait: 300 })
+        );
+        for help in [&["browser", "--help"][..], &["browser", "open", "-h"]] {
+            assert_eq!(
+                mode(help).unwrap(),
+                LaunchMode::Browser(BrowserCommand::Help)
+            );
+        }
+        for (args, expected) in [
+            (&["browser"][..], CliError::MissingBrowserCommand),
+            (
+                &["browser", "eval"],
+                CliError::UnknownBrowserCommand("eval".into()),
+            ),
+            (&["browser", "open"], CliError::MissingUrl),
+            (
+                &["browser", "open", "--workspace"],
+                CliError::MissingWorkspace,
+            ),
+            (
+                &["browser", "open", "a", "b"],
+                CliError::UnexpectedArgument("b".into()),
+            ),
+            (
+                &["browser", "open", "--new"],
+                CliError::UnexpectedArgument("--new".into()),
+            ),
+            (
+                &["browser", "skill", "x"],
+                CliError::UnexpectedArgument("x".into()),
+            ),
+            (
+                &["browser", "reload", "x"],
+                CliError::UnexpectedArgument("x".into()),
+            ),
+            (&["browser", "feedback", "--wait"], CliError::InvalidWait),
+            (
+                &["browser", "feedback", "--wait", "0"],
+                CliError::InvalidWait,
+            ),
+            (
+                &["browser", "feedback", "--wait", "soon"],
+                CliError::InvalidWait,
+            ),
+            (
+                &["browser", "feedback", "now"],
+                CliError::UnexpectedArgument("now".into()),
+            ),
+        ] {
+            assert_eq!(mode(args).unwrap_err(), expected, "{args:?}");
+        }
+        // Only a leading "browser" is the subcommand.
+        assert_eq!(
+            mode(&["--dev", "browser"]).unwrap_err(),
+            CliError::UnknownOption("browser".into())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn browser_arguments_must_be_utf8() {
+        use std::os::unix::ffi::OsStringExt;
+        let invalid = OsString::from_vec(b"https://a.test/\xff".to_vec());
+        let error =
+            LaunchOptions::parse([OsString::from("browser"), "open".into(), invalid.clone()])
+                .unwrap_err();
+        assert_eq!(error, CliError::InvalidBrowserEncoding(invalid));
+    }
+
+    #[test]
     fn connection_selection() {
         assert!(
             matches!(LaunchOptions::parse(["--dev"]).unwrap().target, ConnectTarget::Session { name, development: true } if name == "default")
@@ -287,6 +557,90 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!("Unknown option: {}", path.to_string_lossy())
+        );
+    }
+
+    #[cfg(feature = "mockup")]
+    #[test]
+    fn mockup_mode_takes_feedback_and_capture_paths() {
+        let mode = |args: &[&str]| LaunchOptions::parse(args.iter().copied()).map(|o| o.mode);
+        assert_eq!(
+            mode(&["--mockup"]).unwrap(),
+            LaunchMode::Mockup(MockupOptions::default())
+        );
+        assert_eq!(
+            mode(&[
+                "--mockup",
+                "--capture",
+                "/tmp/m/shot.png",
+                "--feedback",
+                "/tmp/m/feedback.md"
+            ])
+            .unwrap(),
+            LaunchMode::Mockup(MockupOptions {
+                feedback: Some("/tmp/m/feedback.md".into()),
+                capture: Some("/tmp/m/shot.png".into()),
+            })
+        );
+        assert_eq!(mode(&["--mockup", "-h"]).unwrap(), LaunchMode::Help);
+        for (args, expected, message) in [
+            (
+                &["--mockup", "--feedback"][..],
+                CliError::MissingMockupPath("--feedback"),
+                "--feedback requires a path",
+            ),
+            (
+                &["--mockup", "--capture", "--dev"],
+                CliError::MissingMockupPath("--capture"),
+                "--capture requires a path",
+            ),
+            (
+                &["--mockup", "--feedback", "a", "--feedback", "b"],
+                CliError::DuplicateMockupPath("--feedback"),
+                "--feedback may only be specified once",
+            ),
+            (
+                &["--mockup", "--capture", "a", "--capture", "b"],
+                CliError::DuplicateMockupPath("--capture"),
+                "--capture may only be specified once",
+            ),
+            (
+                &["--mockup", "--dev"],
+                CliError::UnknownOption("--dev".into()),
+                "Unknown option: --dev",
+            ),
+        ] {
+            let error = mode(args).unwrap_err();
+            assert_eq!(error, expected, "{args:?}");
+            assert_eq!(error.to_string(), message);
+        }
+        // Like `browser`, only a leading `--mockup` selects the mode, so it
+        // can never be mixed with connection options.
+        assert_eq!(
+            mode(&["--dev", "--mockup"]).unwrap_err(),
+            CliError::UnknownOption("--mockup".into())
+        );
+    }
+
+    #[cfg(all(feature = "mockup", unix))]
+    #[test]
+    fn mockup_paths_need_not_be_utf8() {
+        use std::os::unix::ffi::OsStringExt;
+        let path = OsString::from_vec(b"/tmp/mockup-\xff".to_vec());
+        let options = LaunchOptions::parse([
+            OsString::from("--mockup"),
+            "--feedback".into(),
+            path.clone(),
+            "--capture".into(),
+            path.clone(),
+        ])
+        .unwrap();
+        assert_eq!(
+            options.mode,
+            LaunchMode::Mockup(MockupOptions {
+                feedback: Some(path.clone().into()),
+                capture: Some(path.into()),
+            })
         );
     }
 

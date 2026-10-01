@@ -31,7 +31,10 @@ pub(super) fn read(image_only: bool) -> Result<Option<ClipboardItem>> {
                     Some(ImageFormat::Gif) => "com.compuserve.gif",
                     Some(ImageFormat::Webp) => "org.webmproject.webp",
                     Some(ImageFormat::Bmp) => "com.microsoft.bmp",
-                    Some(ImageFormat::Tiff | ImageFormat::Svg) => return Err(Error::ImageFormat),
+                    Some(ImageFormat::Tiff) => "public.tiff",
+                    Some(ImageFormat::Svg | ImageFormat::Ico | ImageFormat::Pnm) => {
+                        return Err(Error::ImageFormat);
+                    }
                 });
                 let Some(data) = pasteboard.dataForType(&kind) else {
                     return Ok(None);
@@ -73,12 +76,15 @@ fn read_with(
             .map_err(|error| Error::ClipboardEncoding(error.utf8_error()))?;
         return Ok(Some(ClipboardItem::new_string(text)));
     }
+    // TIFF is last: AppKit apps often publish it beside a PNG that needs no
+    // conversion, while Preview and some browsers publish only TIFF.
     for format in [
         ImageFormat::Png,
         ImageFormat::Jpeg,
         ImageFormat::Gif,
         ImageFormat::Webp,
         ImageFormat::Bmp,
+        ImageFormat::Tiff,
     ] {
         if let Some(bytes) = acquire(Some(format), IMAGE_LIMIT)? {
             if bytes.len() > IMAGE_LIMIT {
@@ -157,7 +163,8 @@ mod linux {
                                 ImageFormat::Gif => image::ImageFormat::Gif,
                                 ImageFormat::Webp => image::ImageFormat::WebP,
                                 ImageFormat::Bmp => image::ImageFormat::Bmp,
-                                ImageFormat::Tiff | ImageFormat::Svg => {
+                                ImageFormat::Tiff => image::ImageFormat::Tiff,
+                                ImageFormat::Svg | ImageFormat::Ico | ImageFormat::Pnm => {
                                     return Err(Error::ImageFormat);
                                 }
                             };
@@ -339,7 +346,11 @@ mod tests {
                 assert_eq!(limit, TEXT_LIMIT);
                 Ok(Some(text.as_bytes().to_vec()))
             })?;
-            assert_eq!(item.and_then(|item| item.text()).as_deref(), Some(text));
+            // `ClipboardItem::text` reports empty text as `None`; inspect the entry.
+            assert!(matches!(
+                item.as_ref().map(ClipboardItem::entries),
+                Some([gpui::ClipboardEntry::String(entry)]) if entry.text() == text
+            ));
         }
         Ok(())
     }
@@ -358,6 +369,29 @@ mod tests {
         assert!(matches!(item.as_ref().map(|item| item.entries()),
             Some([gpui::ClipboardEntry::Image(image)]) if image.format == ImageFormat::Jpeg && image.bytes == [1, 2, 3]));
         assert!(read_with(true, |_, _| Ok(None))?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn tiff_is_requested_only_after_every_bridge_format() -> Result<()> {
+        let mut requested = Vec::new();
+        let item = read_with(true, |format, _| {
+            requested.push(format);
+            Ok((format == Some(ImageFormat::Tiff)).then(|| vec![1, 2, 3]))
+        })?;
+        assert_eq!(
+            requested,
+            [
+                Some(ImageFormat::Png),
+                Some(ImageFormat::Jpeg),
+                Some(ImageFormat::Gif),
+                Some(ImageFormat::Webp),
+                Some(ImageFormat::Bmp),
+                Some(ImageFormat::Tiff),
+            ]
+        );
+        assert!(matches!(item.as_ref().map(|item| item.entries()),
+            Some([gpui::ClipboardEntry::Image(image)]) if image.format == ImageFormat::Tiff));
         Ok(())
     }
 

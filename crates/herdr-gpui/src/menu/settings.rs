@@ -3,7 +3,10 @@
 //! thread, and a superseded load cannot overwrite a newer one.
 
 use super::{Page, accent};
-use crate::{HerdrWindow, config::Config};
+use crate::{
+    HerdrWindow,
+    config::{Config, FONT_SIZE_RANGE, FONT_SIZE_STEP, FontFace},
+};
 use gpui::{prelude::*, *};
 
 impl HerdrWindow {
@@ -23,18 +26,24 @@ impl HerdrWindow {
         cx.notify();
     }
 
+    /// Reloads when the GUI overrides change, or the daemon's config whose
+    /// `[keys]` and clipboard toast the GUI also honors.
     pub(crate) fn watch_gui_config(&mut self, cx: &mut Context<Self>) {
         let Ok(path) = Config::local_path() else {
             return;
         };
+        let daemon = crate::config::daemon_config_path(|key| std::env::var_os(key));
         let executor = cx.background_executor().clone();
         self.config_watch = Some(cx.spawn(async move |this, cx| {
             let mut watch = crate::config::watch::Watch::default();
             let mut pending = None;
             loop {
-                let path = path.clone();
+                let (path, daemon) = (path.clone(), daemon.clone());
                 let sample = executor
-                    .spawn(async move { crate::config::watch::fingerprint(&path) })
+                    .spawn(async move {
+                        use crate::config::watch::fingerprint;
+                        [fingerprint(&path), fingerprint(&daemon)]
+                    })
                     .await;
                 let updated = this.update(cx, |this, cx| {
                     if let Some((sample, revision)) = pending
@@ -45,11 +54,14 @@ impl HerdrWindow {
                     }
                     if watch.observe(sample)
                         && this.config_load.is_none()
-                        && this.menu.page != Some(Page::Themes)
+                        && this.settings.task.is_none()
+                        && !this.font_size_saves.is_busy()
+                        && !matches!(this.menu.page, Some(Page::Themes | Page::Fonts))
                         && !this.theme_save_in_flight()
                         && !this.native_settings_save_in_flight()
                     {
                         this.load_gui_config(cx);
+                        this.load_shared_settings(cx);
                         pending = Some((sample, this.config_load_revision));
                     }
                 });
@@ -71,7 +83,7 @@ impl HerdrWindow {
         search.update(cx, |input, cx| {
             input.set_placeholder("Search shortcuts...", cx);
             input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
-            window.focus(&input.focus);
+            window.focus(&input.focus, cx);
         });
         self.menu._keybinds_subscription = Some(cx.subscribe(
             &search,
@@ -91,6 +103,18 @@ impl HerdrWindow {
         self.menu.preferences_scroll.set_offset(Point::default());
         self.load_shared_settings(cx);
         self.select_settings_tab(self.settings.tab, window, cx);
+    }
+
+    pub(crate) fn change_font_size(
+        &mut self,
+        face: FontFace,
+        direction: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let current = face.size(&self.config);
+        let size = (current + direction * FONT_SIZE_STEP)
+            .clamp(*FONT_SIZE_RANGE.start(), *FONT_SIZE_RANGE.end());
+        self.set_font_size(face, size, cx);
     }
 
     pub(crate) fn reload_gui_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -129,7 +153,7 @@ impl HerdrWindow {
         load: impl FnOnce() -> crate::Result<(Config, crate::config::Theme)> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
-        if self.config_load.is_some() {
+        if self.config_load.is_some() || self.font_size_saves.is_busy() {
             return;
         }
         let load = cx.background_executor().spawn(async move { load() });
@@ -145,10 +169,19 @@ impl HerdrWindow {
                         if let Some(shared) = &this.settings.shared {
                             config.apply_shared_notifications(shared);
                         }
-                        if this.avatars.is_some() && this.menu.github.initialize(&config) {
-                            this.menu.pr_cache.clear();
-                            this.menu.pr.clear();
-                            this.menu.pr_connection = None;
+                        // A reload discards session zoom; queued Settings edits
+                        // remain visible but do not become the saved baseline yet.
+                        this.configured_terminal_size = config.terminal.size;
+                        cx.set_global(crate::app::InitialAppearance {
+                            config: config.clone(),
+                            theme: theme.clone(),
+                            error: None,
+                        });
+                        if config.keybindings != this.config.keybindings {
+                            crate::actions::rebind_keys(cx);
+                        } else if config.layout.mode != this.config.layout.mode {
+                            // The View menu checks the layout in use.
+                            crate::menus::install(cx);
                         }
                         if !this.config.notifications.enabled && config.notifications.enabled {
                             let cutoff = std::time::Instant::now();
@@ -156,14 +189,7 @@ impl HerdrWindow {
                                 endpoint.toasts.enabled_since = Some(cutoff);
                             }
                         }
-                        // Replacing the config also discards any session font
-                        // adjustment, so the baseline follows the file again.
-                        this.configured_terminal_size = config.terminal.size;
-                        this.config = config;
-                        this.tick_toasts(
-                            this.menu.page.is_some() || this.toasts_hidden,
-                            std::time::Instant::now(),
-                        );
+                        this.config = config.clone();
                         if this.config.theme != "Follow Herdr" {
                             this.theme = theme;
                         }
@@ -173,6 +199,12 @@ impl HerdrWindow {
                             theme: this.theme.clone(),
                             error: None,
                         });
+                        this.font_size_saves.apply_pending(&mut config);
+                        this.config = config;
+                        this.tick_toasts(
+                            this.menu.page.is_some() || this.toasts_hidden,
+                            std::time::Instant::now(),
+                        );
                         if native_reload {
                             this.settings.native_status =
                                 Some("GUI config saved and applied".into());
@@ -183,6 +215,7 @@ impl HerdrWindow {
                         this.local_error = None;
                     }
                     Err(error) => {
+                        tracing::warn!(%error, "Could not load GUI config; keeping current settings");
                         let message = format!("Load GUI config: {error}");
                         if native_reload {
                             this.settings.native_status =
@@ -192,7 +225,22 @@ impl HerdrWindow {
                         this.local_error = Some(message);
                     }
                 }
-                this.refresh_deferred_font_inputs(cx);
+                // A config another build wrote, such as a setting this version
+                // does not know, must not sign GitHub out: restore the saved
+                // credential under the settings already in effect.
+                let mut reloaded = false;
+                if this.avatars.is_some() {
+                    reloaded = this.menu.github.initialize(&this.config);
+                    for auth in this.menu.github_hosts.values_mut() {
+                        reloaded |= auth.initialize(&this.config);
+                    }
+                }
+                if reloaded {
+                    this.menu.pr_cache.clear();
+                    this.menu.pr.clear();
+                    this.menu.pr_connection = None;
+                }
+                this.flush_font_sizes(cx);
                 cx.notify();
             });
         }));
@@ -224,17 +272,25 @@ impl HerdrWindow {
         let mut groups = [
             ("WORKSPACES & PANES", Vec::new()),
             ("NAVIGATION", Vec::new()),
-            ("APPLICATION", vec![("cmd-v", "Paste into terminal")]),
+            ("APPLICATION", vec![(vec!["cmd-v"], "Paste into terminal")]),
         ];
-        for info in COMMANDS.iter().filter(|info| !info.shortcut.is_empty()) {
+        for info in COMMANDS {
+            let keys: Vec<&str> = self.config.keybindings.shortcuts(info.command).collect();
+            if keys.is_empty() {
+                continue;
+            }
             let group = match info.command {
                 Command::Workspace
+                | Command::NewWorktree
                 | Command::Tab
                 | Command::SplitRight
                 | Command::SplitDown
                 | Command::Zoom
+                | Command::ClearPane
                 | Command::ClosePane
-                | Command::CloseTab => 0,
+                | Command::CloseTab
+                | Command::NewBrowserTab
+                | Command::SplitEditor => 0,
                 Command::NextTab
                 | Command::PreviousTab
                 | Command::FocusLeft
@@ -252,22 +308,27 @@ impl HerdrWindow {
                 | Command::ResetFontSize
                 | Command::Settings
                 | Command::Keybinds
+                | Command::Sessions
                 | Command::Themes
                 | Command::Palette
                 | Command::Reconnect
                 | Command::Quit
                 | Command::Logs
-                | Command::About => 2,
+                | Command::About
+                | Command::InstallBrowserSkill => 2,
                 Command::OpenNotificationTarget => 1,
             };
-            groups[group].1.push((info.shortcut, info.label));
+            groups[group].1.push((keys, info.label));
         }
         let total: usize = groups.iter().map(|(_, shortcuts)| shortcuts.len()).sum();
         let mut count = 0;
         for (section, shortcuts) in groups {
             let shortcuts: Vec<_> = shortcuts
                 .into_iter()
-                .filter(|(keys, description)| shortcut_matches(query, keys, description, section))
+                .filter(|(keys, description)| {
+                    keys.iter()
+                        .any(|keys| shortcut_matches(query, keys, description, section))
+                })
                 .collect();
             if shortcuts.is_empty() {
                 continue;
@@ -299,26 +360,23 @@ impl HerdrWindow {
                                 .flex_none()
                                 .flex()
                                 .flex_wrap()
-                                .gap(px(4.))
-                                .children(keys.split('-').map(|key| {
-                                    let mut chars = key.chars();
-                                    let key: String = chars
-                                        .next()
-                                        .map(|first| first.to_ascii_uppercase())
-                                        .into_iter()
-                                        .chain(chars)
-                                        .collect();
-                                    div()
-                                        .flex_none()
-                                        .px(px(6.))
-                                        .py(px(2.))
-                                        .rounded(px(4.))
-                                        .border_1()
-                                        .border_color(rgb(theme.active))
-                                        .bg(rgb(theme.background))
-                                        .text_size(px(font.size * 0.9))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child(key)
+                                .gap(px(10.))
+                                .children(keys.into_iter().map(|keys| {
+                                    div().flex().flex_wrap().gap(px(4.)).children(
+                                        keycaps(keys).map(|key| {
+                                            div()
+                                                .flex_none()
+                                                .px(px(6.))
+                                                .py(px(2.))
+                                                .rounded(px(crate::config::corners::SMALL))
+                                                .border_1()
+                                                .border_color(rgb(theme.active))
+                                                .bg(rgb(theme.background))
+                                                .text_size(px(font.size * 0.9))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .child(key)
+                                        }),
+                                    )
                                 })),
                         )
                         .child(
@@ -344,7 +402,7 @@ impl HerdrWindow {
             div()
                 .py(px(14.))
                 .text_color(rgb(theme.muted))
-                .child("Native GUI shortcuts only. Terminal applications and daemon/TUI keybindings keep their own shortcuts."),
+                .child("Includes the prefix chords from Herdr's [keys] in config.toml. Daemon actions with no GUI command, and terminal applications, keep their own shortcuts."),
         );
         div()
             .flex()
@@ -391,7 +449,7 @@ impl HerdrWindow {
                             .flex_none()
                             .px(px(8.))
                             .py(px(4.))
-                            .rounded(px(4.))
+                            .rounded(px(crate::config::corners::CONTROL))
                             .cursor_pointer()
                             .text_color(rgb(theme.muted))
                             .hover(|style| {
@@ -437,6 +495,35 @@ impl HerdrWindow {
     }
 }
 
+/// The keycaps of a shortcut, capitalized for display, a prefix chord's
+/// keystrokes in turn. `cmd--` splits into `cmd` and a `-` key rather than an
+/// empty cap, as does a chord's bare `-`.
+fn keycaps(shortcut: &str) -> impl Iterator<Item = String> + '_ {
+    shortcut
+        .split(' ')
+        .flat_map(|keystroke| {
+            let (modifiers, key) = match keystroke.strip_suffix('-') {
+                Some(modifiers) if modifiers.is_empty() || modifiers.ends_with('-') => {
+                    (modifiers, "-")
+                }
+                _ => keystroke.rsplit_once('-').unwrap_or(("", keystroke)),
+            };
+            modifiers
+                .split('-')
+                .filter(|modifier| !modifier.is_empty())
+                .chain(std::iter::once(key))
+        })
+        .map(|key| {
+            let mut chars = key.chars();
+            chars
+                .next()
+                .map(|first| first.to_ascii_uppercase())
+                .into_iter()
+                .chain(chars)
+                .collect()
+        })
+}
+
 fn shortcut_matches(query: &str, keys: &str, description: &str, section: &str) -> bool {
     let query = query.to_lowercase().replace(['-', '+'], " ");
     if query
@@ -447,7 +534,7 @@ fn shortcut_matches(query: &str, keys: &str, description: &str, section: &str) -
         // A key combination should match keycaps, not letters in an action's name.
         return query
             .split_whitespace()
-            .all(|token| keys.split('-').any(|key| key == token));
+            .all(|token| keys.split(['-', ' ']).any(|key| key == token));
     }
     let text = format!("{keys} {description} {section}")
         .to_lowercase()
@@ -560,7 +647,8 @@ mod tests {
                         herdr_client::protocol::ToastHerdrPosition::TopRight;
                     config.terminal.size = 18.;
                     config.layout.sidebar_gap = 16.;
-                    config.layout.mode = crate::config::LayoutMode::Compact;
+                    config.layout.mode =
+                        crate::config::LayoutMode::from(crate::config::Density::Compact);
                     let theme = config.theme()?;
                     Ok((config, theme))
                 },
@@ -574,7 +662,10 @@ mod tests {
             assert_eq!(view.config.terminal.size, 18.);
             assert_eq!(view.configured_terminal_size, 18.);
             assert_eq!(view.config.layout.sidebar_gap, 16.);
-            assert_eq!(view.config.layout.mode, crate::config::LayoutMode::Compact);
+            assert_eq!(
+                view.config.layout.mode,
+                crate::config::LayoutMode::from(crate::config::Density::Compact)
+            );
             view.set_terminal_font_size(20., cx);
             view.load_gui_config_with(|| Err(crate::Error::MissingHome), cx);
         });
@@ -585,7 +676,10 @@ mod tests {
             assert_eq!(view.config.terminal.size, 20.);
             assert_eq!(view.configured_terminal_size, 18.);
             assert_eq!(view.config.layout.sidebar_gap, 16.);
-            assert_eq!(view.config.layout.mode, crate::config::LayoutMode::Compact);
+            assert_eq!(
+                view.config.layout.mode,
+                crate::config::LayoutMode::from(crate::config::Density::Compact)
+            );
             view.load_gui_config_with(|| Ok((Config::default(), Default::default())), cx);
         });
         cx.run_until_parked();
@@ -644,6 +738,26 @@ mod tests {
                 });
             }
         }
+    }
+
+    #[gpui::test]
+    fn failed_config_load_still_restores_the_saved_github_sign_in(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        view.update(cx, |view, cx| {
+            view.avatars = Some(crate::avatars::Avatars::new());
+            view.load_gui_config_with(|| Err(crate::Error::MissingHome), cx);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(view.local_error.is_some());
+            // The restore is queued under the settings already in effect; the
+            // next poll reads the saved credential off the UI thread.
+            assert!(view.menu.github.loading_profile());
+            assert_eq!(
+                view.menu.github.store(),
+                crate::github::Store::select(&view.config)
+            );
+        });
     }
 
     #[gpui::test]
@@ -728,5 +842,93 @@ mod tests {
             "Split Right",
             "WORKSPACES & PANES"
         ));
+    }
+
+    #[test]
+    fn keycaps_split_modifiers_from_the_key() {
+        let caps = |keystroke| super::keycaps(keystroke).collect::<Vec<_>>();
+        assert_eq!(caps("cmd-shift-t"), ["Cmd", "Shift", "T"]);
+        assert_eq!(caps("cmd--"), ["Cmd", "-"]);
+        assert_eq!(caps("cmd-+"), ["Cmd", "+"]);
+        assert_eq!(caps("f5"), ["F5"]);
+        assert_eq!(caps("ctrl-b c"), ["Ctrl", "B", "C"]);
+        assert_eq!(caps("ctrl-b -"), ["Ctrl", "B", "-"]);
+        assert_eq!(caps("ctrl-b shift-tab"), ["Ctrl", "B", "Shift", "Tab"]);
+    }
+
+    /// A saved `[keybindings]` change must reach the live keymap, the palette,
+    /// and the keybindings page without restarting, and keep the console keys.
+    #[gpui::test]
+    #[allow(clippy::unwrap_used)]
+    fn config_reload_rebinds_the_keymap(cx: &mut gpui::TestAppContext) {
+        use crate::{
+            Command, RunCommand,
+            config::Config,
+            keymap::{Binding, Keymap},
+        };
+        use gpui::Keystroke;
+
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        cx.update(|_, cx| crate::bind_keys(cx));
+        let runs = |keystroke: &str, command: Command, cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| {
+                cx.key_bindings()
+                    .borrow()
+                    .all_bindings_for_input(&[Keystroke::parse(keystroke).unwrap()])
+                    .iter()
+                    .any(|binding| binding.action().partial_eq(&RunCommand { command }))
+            })
+        };
+        assert!(runs("cmd-t", Command::Tab, cx));
+        assert!(!runs("cmd-n", Command::Tab, cx));
+        assert!(runs("cmd-shift-n", Command::Workspace, cx));
+
+        view.update(cx, |view, cx| {
+            view.load_gui_config_with(
+                || {
+                    let overrides = [
+                        ("new_workspace", Binding::One("cmd-t".into())),
+                        ("toggle_sidebar", Binding::Many(Vec::new())),
+                    ]
+                    .into_iter()
+                    .map(|(name, binding)| (name.to_owned(), binding))
+                    .collect();
+                    let config = Config {
+                        keybindings: Keymap::with_overrides(
+                            &overrides,
+                            &crate::keymap::DaemonKeys::default(),
+                        )?,
+                        ..Config::default()
+                    };
+                    Ok((config, Default::default()))
+                },
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert!(runs("cmd-t", Command::Workspace, cx));
+        assert!(!runs("cmd-t", Command::Tab, cx));
+        assert!(!runs("cmd-shift-n", Command::Workspace, cx));
+        assert!(!runs("cmd-b", Command::ToggleSidebar, cx));
+        cx.update(|_, cx| {
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            let console = keymap.all_bindings_for_input(&[Keystroke::parse("cmd-l").unwrap()]);
+            assert_eq!(console.len(), 1);
+        });
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.config.keybindings.primary(Command::Workspace), "cmd-t");
+            // Only Herdr's default chord is left once cmd-t moves away.
+            assert_eq!(view.config.keybindings.primary(Command::Tab), "ctrl-b c");
+        });
+
+        view.update(cx, |view, cx| {
+            view.load_gui_config_with(|| Ok((Config::default(), Default::default())), cx)
+        });
+        cx.run_until_parked();
+        assert!(runs("cmd-t", Command::Tab, cx));
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.config.keybindings, Keymap::default())
+        });
     }
 }

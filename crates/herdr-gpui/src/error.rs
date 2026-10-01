@@ -5,6 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(any(target_os = "macos", windows))]
+use wry::raw_window_handle::HandleError as WindowHandleError;
+
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 fn daemon_error_message(error: &serde_json::Value) -> &str {
@@ -19,10 +22,14 @@ fn daemon_error_message(error: &serde_json::Value) -> &str {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("Invalid saved window geometry or too many saved windows")]
+    InvalidWindowState,
     #[error("ui.toast.delay_seconds must be between 0 and 3600")]
     SoundDelay,
     #[error("Sound configuration exceeds 1 MiB")]
     SoundConfigSize,
+    #[error("Unknown sidebar layout {0:?}")]
+    UnknownLayout(String),
     #[error("Could not open audio output: {0}")]
     SoundDevice(#[from] rodio::DeviceSinkError),
     #[error("Audio output failed: {0}")]
@@ -42,7 +49,7 @@ pub enum Error {
     #[error("Audio playback cancelled")]
     SoundCancelled,
     #[error(
-        "PR lookup requires your owned local session socket. Select Local using its standard socket; SSH and other socket locations are unsupported."
+        "PR lookup requires your owned local session socket or a saved SSH device. Other socket locations are unsupported."
     )]
     PrUntrustedEndpoint,
     #[error("The selected pane is no longer on screen.")]
@@ -81,7 +88,7 @@ pub enum Error {
     ImageEncode(#[source] image::ImageError),
     #[error("Reading the local image timed out (3 seconds).")]
     ImageReadTimeout,
-    #[error("TIFF and SVG clipboard images are not supported. Use PNG, JPEG, GIF, WebP, or BMP.")]
+    #[error("SVG clipboard images are not supported. Use PNG, JPEG, GIF, WebP, BMP, or TIFF.")]
     ImageFormat,
     #[error("Clipboard content exceeds the {limit}-byte limit.")]
     ClipboardSize { limit: usize },
@@ -167,10 +174,6 @@ pub enum Error {
         #[source]
         source: io::Error,
     },
-    #[error(
-        "Pull request #{number} comes from the fork {owner}. Fetch its branch yourself, then create the checkout from the branch field."
-    )]
-    ForkPullRequest { number: u64, owner: String },
     #[error("git {operation} failed: {details}")]
     GitFailed {
         operation: &'static str,
@@ -222,6 +225,19 @@ pub enum Error {
     #[cfg(target_os = "macos")]
     #[error("GitHub Keychain update failed. Unlock your login Keychain and try again.")]
     KeychainWrite(#[source] security_framework::base::Error),
+    #[cfg(target_os = "linux")]
+    #[error(
+        "Cannot read GitHub sign-in from the desktop keyring. Unlock your keyring or set GH_TOKEN."
+    )]
+    SecretServiceRead(#[source] Box<oo7::Error>),
+    #[cfg(target_os = "linux")]
+    #[error("GitHub keyring update failed. Unlock your desktop keyring and try again.")]
+    SecretServiceWrite(#[source] Box<oo7::Error>),
+    #[cfg(target_os = "linux")]
+    #[error(
+        "No desktop keyring (Secret Service) is running. Start GNOME Keyring, KWallet, or KeePassXC, or set [github] allow_plaintext_credentials = true, or use GH_TOKEN / GITHUB_TOKEN."
+    )]
+    SecretServiceUnavailable,
     #[error("Missing credential directory.")]
     CredentialDirectory,
     #[error(
@@ -274,6 +290,53 @@ pub enum Error {
         "{0} must be 1..256 ASCII letters, digits, '.', '_' or '-' (public client ID, not a secret)"
     )]
     InvalidClientId(&'static str),
+    #[error("Could not {operation}.")]
+    UsageProcess {
+        operation: &'static str,
+        #[source]
+        source: io::Error,
+    },
+    #[error("Usage check timed out.")]
+    UsageTimeout,
+    #[error("Usage output exceeded the size limit.")]
+    UsageSize,
+    #[error("Usage request failed or timed out.")]
+    UsageNetwork(#[source] ureq::Error),
+    #[error("Could not reach the usage service from this host.")]
+    UsageConnect,
+    #[error(
+        "[usage] names unknown provider {0:?}. See the provider list in config-gpui.example.toml."
+    )]
+    UnknownUsageProvider(String),
+    #[error("[usage.providers.{provider}] has no setting named {setting:?}.")]
+    UnknownUsageSetting { provider: String, setting: String },
+    #[error("No sign-in found on this host. Set it up under [usage.providers] in the config.")]
+    UsageNotSignedIn,
+    #[error("This account has no plan with usage limits to show.")]
+    UsageNoPlan,
+    #[error("Usage request mixes this machine's settings with the remote host's sign-in.")]
+    UsageMixedSecrets,
+    #[error("Usage command failed: {0}.")]
+    UsageCommand(&'static str),
+    #[error("Saved sign-in cannot be sent as a header.")]
+    UsageHeader(#[source] ureq::http::header::InvalidHeaderValue),
+    #[error("Saved sign-in was rejected. Open the agent to sign in again.")]
+    UsageRejected,
+    #[error("Usage is rate limited. Retrying later.")]
+    UsageRateLimited,
+    #[error("Usage service returned HTTP {0}.")]
+    UsageStatus(u16),
+    /// The body may hold account details, so only the parser's category is kept.
+    #[error("Usage response was not the expected JSON.")]
+    UsageJson(serde_json::error::Category),
+    #[error("Could not reach this host over SSH to read usage.")]
+    UsageUnreachable,
+    #[error("curl is not installed on this host, so usage cannot be read.")]
+    UsageMissingCurl,
+    #[error("Remote usage needs SSH, which this platform's client does not support.")]
+    UsageUnsupported,
+    #[error("usage must be a TOML table")]
+    InvalidUsageTable,
     #[error("{0}")]
     Update(#[from] UpdateError),
     #[error("{0}")]
@@ -288,6 +351,76 @@ pub enum Error {
     Client(#[from] herdr_client::Error),
     #[error("neither XDG_STATE_HOME nor HOME is set")]
     MissingStateRoot,
+    #[error("{} exceeds {limit} bytes", path.display())]
+    StateFileSize { path: PathBuf, limit: u64 },
+    #[error("Browser tabs open only http and https addresses with a host, of at most 8 KiB.")]
+    InvalidBrowserUrl,
+    #[error(
+        "Local pages must be a plain file in a folder that is not hidden and does not hold your home directory."
+    )]
+    InvalidLocalPage,
+    #[error("The page reported an invalid annotation")]
+    InvalidAnnotation,
+    #[error("Invalid saved browser tabs")]
+    InvalidBrowserTabs,
+    #[error("Invalid saved editor groups")]
+    InvalidGroupLayouts,
+    #[error("Herdr GPUI is not running, or its control socket {} is unreachable: {source}", path.display())]
+    ControlUnavailable {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("Another Herdr GPUI already serves {}", path.display())]
+    ControlSocketInUse { path: PathBuf },
+    #[error("Control request or response exceeds {limit} bytes")]
+    ControlMessageSize { limit: usize },
+    #[error("Herdr GPUI closed the control connection without answering")]
+    ControlNoResponse,
+    #[error("{message}")]
+    ControlRejected {
+        code: crate::control::ErrorCode,
+        message: String,
+    },
+    #[error(
+        "Controlling a running Herdr GPUI needs a Unix socket, which this platform build does not provide"
+    )]
+    ControlUnsupported,
+    #[cfg(any(target_os = "macos", windows))]
+    #[error("Could not create the page: {0}")]
+    WebView(#[from] wry::Error),
+    #[cfg(any(target_os = "macos", windows))]
+    #[error("Could not reach the native window for the page: {0}")]
+    WindowHandle(#[from] WindowHandleError),
+    #[error("Could not install the agent skill at {}: {source}", path.display())]
+    SkillInstall {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("{0}")]
+    DeviceSetupInput(&'static str),
+    #[error("Saving the device failed ({status}){}", if detail.is_empty() { String::new() } else { format!(": {detail}") })]
+    DeviceSetup {
+        status: std::process::ExitStatus,
+        detail: String,
+    },
+    #[error("Saving the device timed out")]
+    DeviceSetupTimeout,
+    #[error("This host and session are already saved as \u{201c}{0}\u{201d}.")]
+    DeviceExists(String),
+    #[error("This host is already being added.")]
+    DeviceAdding,
+    #[error("Removing the device failed ({status}){}", if detail.is_empty() { String::new() } else { format!(": {detail}") })]
+    DeviceRemove {
+        status: std::process::ExitStatus,
+        detail: String,
+    },
+    #[error("Renaming the device failed ({status}){}", if detail.is_empty() { String::new() } else { format!(": {detail}") })]
+    DeviceRename {
+        status: std::process::ExitStatus,
+        detail: String,
+    },
     #[error("preferences must be an object")]
     PreferencesNotObject,
     #[error("sidebar_width_px must be finite and positive, or null")]
@@ -329,6 +462,30 @@ pub enum Error {
     InvalidSidebarGap,
     #[error("theme must be a name, absolute path, or ~/ path")]
     InvalidThemePath,
+    #[error("keybindings.{0} is not a command; see the keybindings list in config-gpui.toml")]
+    UnknownKeybinding(String),
+    #[error("keybindings.{command}: invalid keystroke {keystroke:?}")]
+    InvalidKeystroke {
+        command: &'static str,
+        keystroke: String,
+        #[source]
+        source: gpui::InvalidKeystrokeError,
+    },
+    #[error(
+        "keybindings.{command}: {keystroke:?} needs a cmd, ctrl, alt, or fn modifier so typing still reaches the terminal"
+    )]
+    KeystrokeWithoutModifier {
+        command: &'static str,
+        keystroke: String,
+    },
+    #[error("keybindings.{0} must list at most 8 keystrokes")]
+    TooManyKeystrokes(&'static str),
+    #[error("keybindings: {keystroke:?} is bound to both {first} and {second}")]
+    DuplicateKeystroke {
+        keystroke: String,
+        first: &'static str,
+        second: &'static str,
+    },
     #[error("theme {name:?} not found in {directories:?}")]
     ThemeNotFound {
         name: String,
@@ -371,6 +528,10 @@ pub enum Error {
     PaletteTabRemoved,
     #[error("The original pane no longer exists in its tab. Reopen the palette.")]
     PalettePaneRemoved,
+    #[error("This agent or terminal no longer exists. Reopen the palette.")]
+    PaletteDestinationRemoved,
+    #[error("This host is no longer connected. Reopen the palette.")]
+    PaletteHostUnavailable,
     #[error("The selected connection is not ready.")]
     PaletteConnectionNotReady,
     #[error("No current daemon snapshot.")]

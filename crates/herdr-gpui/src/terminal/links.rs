@@ -1,16 +1,14 @@
 //! Resolve user-selected web links within the painted pane or popup only.
 use super::{HIDDEN, InputTarget, popup_origin, wheel_target};
 use herdr_client::protocol::{FrameData, PaneSurfaceFrame};
+use std::ops::Range;
 
-const MAX_URL_BYTES: usize = 8192;
-const MAX_ROW_BYTES: usize = 32768;
+pub(super) const MAX_ROW_BYTES: usize = 32768;
 
 fn web_url(value: &str) -> Option<String> {
-    if value.len() > MAX_URL_BYTES || value.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        return None;
-    }
-    let url = url::Url::parse(value).ok()?;
-    (matches!(url.scheme(), "http" | "https") && url.host_str().is_some()).then(|| url.into())
+    crate::browser::WebUrl::try_from(value)
+        .ok()
+        .map(String::from)
 }
 
 pub(crate) fn link_at(
@@ -96,6 +94,17 @@ fn frame_link(frame: &FrameData, column: u16, row: u16, start: u16, end: u16) ->
     }
     // Plain URLs are row-local: the protocol doesn't distinguish soft wraps from
     // separate lines, so joining rows could silently change the destination.
+    match plain_url(&text, hit)? {
+        (_, true) => None,
+        (range, false) => web_url(&text[range]),
+    }
+}
+
+/// The byte range of the plain web URL in one row's `text` that covers the
+/// byte at `hit`, trimmed of the prose punctuation around it, and whether the
+/// URL runs to the end of the row, where it may continue off-screen or on the
+/// next row.
+pub(super) fn plain_url(text: &str, hit: usize) -> Option<(Range<usize>, bool)> {
     for (start, _) in text.match_indices("http") {
         if start > hit {
             break;
@@ -111,9 +120,7 @@ fn frame_link(frame: &FrameData, column: u16, row: u16, start: u16, end: u16) ->
             .unwrap_or(tail.len());
         // Check the original token: punctuation at the edge may be part of a
         // destination continuing off-screen or on the next row.
-        if end == tail.len() {
-            return None;
-        }
+        let open = end == tail.len();
         let mut candidate = tail[..end].trim_end_matches(['.', ',', ';', ':', '!', '?']);
         for (open, close) in [('(', ')'), ('[', ']'), ('{', '}')] {
             let excess = candidate
@@ -128,7 +135,10 @@ fn frame_link(frame: &FrameData, column: u16, row: u16, start: u16, end: u16) ->
             }
         }
         if hit < start + candidate.len() {
-            return web_url(candidate);
+            return Some((start..start + candidate.len(), open));
+        }
+        if open {
+            return None;
         }
     }
     None
@@ -221,13 +231,7 @@ mod tests {
         s.frame.hyperlinks[0] = "https://example.com".into();
         s.frame.cells[0].modifier = HIDDEN;
         assert!(link_at(&s, 1., 1., 10., 20.).is_none());
-        assert!(
-            web_url(&format!(
-                "https://example.com/{}",
-                "a".repeat(MAX_URL_BYTES)
-            ))
-            .is_none()
-        );
+        assert!(web_url(&format!("https://example.com/{}", "a".repeat(8192))).is_none());
     }
 
     #[test]
@@ -323,6 +327,38 @@ mod tests {
     }
 
     #[gpui::test]
+    fn link_modifier_click_bypasses_mouse_reporting_only_on_links(cx: &mut gpui::TestAppContext) {
+        use gpui::{Modifiers, point, px};
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = crate::sidebar::layout_tests::fixture_window(window, cx);
+            let mut s = surface("https://example.com/app plain");
+            s.panes[0].mouse_reporting = true;
+            let snapshot = view.live.snapshot.as_ref().unwrap();
+            s.boot_id = snapshot.boot_id.clone();
+            s.projection_revision = snapshot.revision;
+            view.live.surface = Some(Arc::new(s));
+            view
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        let origin = view.read_with(cx, |view, _| view.bounds.origin);
+        let link = origin + point(px(1.), px(1.));
+        let plain = origin + point(px(251.), px(1.));
+        cx.simulate_click(link, Modifiers::default());
+        assert!(cx.opened_url().is_none());
+        view.read_with(cx, |view, _| {
+            assert!(!view.terminal_link_hovered(link, Modifiers::default()));
+            assert!(view.terminal_link_hovered(link, Modifiers::secondary_key()));
+            assert!(!view.terminal_link_hovered(plain, Modifiers::secondary_key()));
+            assert!(!view.link_modifier_held(plain, Modifiers::secondary_key()));
+        });
+        cx.simulate_click(link, Modifiers::secondary_key());
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com/app"));
+    }
+
+    #[gpui::test]
     fn click_dispatch_opens_browser_and_respects_menu_and_revision(cx: &mut gpui::TestAppContext) {
         use gpui::{point, px};
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -336,7 +372,7 @@ mod tests {
         });
         cx.update(|window, cx| {
             window.refresh();
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let position = view.read_with(cx, |view, _| view.bounds.origin + point(px(1.), px(1.)));
         cx.update(|window, cx| {

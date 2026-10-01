@@ -5,7 +5,7 @@
 use super::{STATUS_DOT_UNKNOWN, STATUS_WIDTH, first_text, label_text, line_height};
 use crate::{
     HerdrWindow,
-    config::FontConfig,
+    config::{FontConfig, Theme},
     herdr_settings::{IndicatorStyle, Settings},
 };
 use gpui::{prelude::*, *};
@@ -70,15 +70,9 @@ pub(super) fn sorted_agents(
     ordered
 }
 
-/// Upstream's default agent rows: host, workspace and tab on the first line,
-/// the agent itself on the second. The tab only earns its place when the
-/// workspace has more than one or the user named it, as upstream decides.
-pub(super) fn agent_labels<'a>(
-    agent: &'a ClientShellAgent,
-    snapshot: &'a ClientShellSnapshot,
-    host: Option<&'a str>,
-) -> (Vec<(&'a str, bool)>, &'a str) {
-    let name = first_text(
+/// What an agent is called wherever it is listed.
+pub(crate) fn agent_name(agent: &ClientShellAgent) -> &str {
+    first_text(
         [
             agent.display_agent.as_deref(),
             agent.name.as_deref(),
@@ -86,16 +80,20 @@ pub(super) fn agent_labels<'a>(
             agent.title.as_deref(),
         ],
         "agent",
-    );
-    // A pane whose workspace has gone leaves the agent to name the row.
-    let Some(workspace) = snapshot
+    )
+}
+
+/// Where an agent runs: its workspace, and its tab when that earns a place,
+/// which upstream decides by the workspace having several tabs or the user
+/// naming it. `None` once the agent's workspace has gone.
+pub(super) fn agent_place<'a>(
+    agent: &ClientShellAgent,
+    snapshot: &'a ClientShellSnapshot,
+) -> Option<(&'a str, Option<&'a str>)> {
+    let workspace = snapshot
         .workspaces
         .iter()
-        .find(|workspace| workspace.workspace_id == agent.workspace_id)
-        .map(|workspace| workspace.label.as_str())
-    else {
-        return (vec![(name, true)], "");
-    };
+        .find(|workspace| workspace.workspace_id == agent.workspace_id)?;
     let tabs = snapshot
         .tabs
         .iter()
@@ -107,6 +105,20 @@ pub(super) fn agent_labels<'a>(
         .find(|tab| tab.tab_id == agent.tab_id)
         .filter(|tab| tabs > 1 || tab.custom_label)
         .map(|tab| tab.label.as_str());
+    Some((workspace.label.as_str(), tab))
+}
+
+/// Upstream's default agent rows: host, workspace and tab on the first line,
+/// the agent itself on the second. A pane whose workspace has gone leaves the
+/// agent to name the row.
+pub(super) fn agent_labels<'a>(
+    name: &'a str,
+    place: Option<(&'a str, Option<&'a str>)>,
+    host: Option<&'a str>,
+) -> (Vec<(&'a str, bool)>, &'a str) {
+    let Some((workspace, tab)) = place else {
+        return (vec![(name, true)], "");
+    };
     // Only the workspace carries the row's weight: upstream paints the host and
     // tab around it in its secondary color.
     let segments = [(host, false), (Some(workspace), true), (tab, false)]
@@ -117,15 +129,15 @@ pub(super) fn agent_labels<'a>(
     (segments, name)
 }
 
-/// Resolve the shared palette once per sidebar render, not once per row.
-#[derive(Clone, Copy)]
-pub(super) struct Indicators {
+/// Prepared, comparable props for the cached sidebar, never loaded during render.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Indicators {
     pub(super) style: IndicatorStyle,
     colors: [u32; 5],
 }
 
 impl Indicators {
-    pub(super) fn new(settings: Option<&Settings>, light: bool) -> Self {
+    pub(crate) fn new(settings: Option<&Settings>, light: bool, theme: &Theme) -> Self {
         Self {
             style: settings.map_or(IndicatorStyle::Dots, |settings| settings.indicators),
             colors: [
@@ -137,8 +149,8 @@ impl Indicators {
             ]
             .map(|status| {
                 settings.map_or_else(
-                    || status_style(status).2,
-                    |settings| settings.status_color(status, light),
+                    || status_style(status, theme).2,
+                    |settings| theme.ink(settings.status_color(status, light)),
                 )
             }),
         }
@@ -154,7 +166,7 @@ impl Indicators {
         }]
     }
 
-    pub(super) fn width(self, font: &FontConfig) -> f32 {
+    pub(crate) fn width(self, font: &FontConfig) -> f32 {
         match self.style {
             IndicatorStyle::Dots => STATUS_WIDTH,
             IndicatorStyle::Symbols => font.size.ceil().max(STATUS_WIDTH),
@@ -172,13 +184,17 @@ pub(super) fn status_symbol(status: AgentStatus) -> &'static str {
     }
 }
 
-pub(super) fn status_indicator(
+pub(crate) fn status_indicator(
     status: AgentStatus,
     font: &FontConfig,
     indicators: Indicators,
 ) -> Div {
     // Upstream dots: working/blocked/done filled, idle hollow, unknown a small dot.
-    let (diameter, filled, _) = status_style(status);
+    let (diameter, filled) = match status {
+        AgentStatus::Unknown => (STATUS_DOT_UNKNOWN, true),
+        AgentStatus::Idle => (STATUS_WIDTH, false),
+        _ => (STATUS_WIDTH, true),
+    };
     let color = indicators.color(status);
     let symbol = indicators.style == IndicatorStyle::Symbols;
     let height = if symbol {
@@ -213,18 +229,33 @@ pub(super) fn status_indicator(
         })
 }
 
+/// The word the daemon's `state_text` token shows for a status when its
+/// sidebar config asks for it. Lowercase, matching the daemon's status names
+/// and what the terminal client prints.
+pub(super) fn status_text(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Working => "working",
+        AgentStatus::Blocked => "blocked",
+        AgentStatus::Done => "done",
+        AgentStatus::Idle => "idle",
+        AgentStatus::Unknown => "unknown",
+    }
+}
+
 /// Upstream draws status from its own palette, defaulting to Catppuccin Mocha,
 /// and never from the terminal's ANSI colors. Matching those literals keeps a
 /// dot the same color in both clients whatever terminal theme is loaded, where
-/// ANSI slots would drift: Xcode Dark paints its cyan purple.
-pub(super) fn status_style(status: AgentStatus) -> (f32, bool, u32) {
-    match status {
+/// ANSI slots would drift: Xcode Dark paints its cyan purple. Mocha's pastels
+/// vanish on light chrome, so [`Theme::ink`] darkens them there, keeping hue.
+pub(super) fn status_style(status: AgentStatus, theme: &Theme) -> (f32, bool, u32) {
+    let (diameter, filled, color) = match status {
         AgentStatus::Working => (STATUS_WIDTH, true, 0xf9e2af),
         AgentStatus::Blocked => (STATUS_WIDTH, true, 0xf38ba8),
         AgentStatus::Done => (STATUS_WIDTH, true, 0x94e2d5),
         AgentStatus::Idle => (STATUS_WIDTH, false, 0xa6e3a1),
         AgentStatus::Unknown => (STATUS_DOT_UNKNOWN, true, 0x6c7086),
-    }
+    };
+    (diameter, filled, theme.ink(color))
 }
 
 #[cfg(test)]
@@ -233,6 +264,44 @@ mod tests {
     use crate::{config::FontConfig, herdr_settings::IndicatorStyle};
     use gpui::{Styled, rgb};
     use herdr_client::protocol::AgentStatus;
+
+    #[test]
+    fn shared_palette_props_keep_style_and_follow_chrome_contrast() -> anyhow::Result<()> {
+        use crate::{config::Theme, contrast::Contrast, herdr_settings::Settings};
+        use anyhow::Context as _;
+        let settings = Settings::parse_text(
+            "[ui]\nstatus_indicators = 'symbols'\n[theme.custom]\nyellow = '#123456'\n",
+        )?;
+        for light in [false, true] {
+            for name in ["Default", "Catppuccin Latte"] {
+                let theme = Theme::builtin(name)
+                    .context("builtin theme")?
+                    .with_contrast(Contrast::High);
+                let indicators = Indicators::new(Some(&settings), light, &theme);
+                assert_eq!(indicators, Indicators::new(Some(&settings), light, &theme));
+                assert_eq!(indicators.style, IndicatorStyle::Symbols);
+                for status in [
+                    AgentStatus::Unknown,
+                    AgentStatus::Idle,
+                    AgentStatus::Working,
+                    AgentStatus::Done,
+                    AgentStatus::Blocked,
+                ] {
+                    assert_eq!(
+                        indicators.color(status),
+                        theme.ink(settings.status_color(status, light))
+                    );
+                    for background in [theme.background, theme.surface, theme.active] {
+                        assert!(
+                            crate::contrast::ratio(indicators.color(status), background)
+                                >= Contrast::High.mark_ratio()
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn prepared_custom_palette_keeps_each_authoritative_status_color() {
@@ -256,10 +325,7 @@ mod tests {
                 assert_eq!(indicators.color(status), expected);
                 if style == IndicatorStyle::Symbols {
                     let mut slot = status_indicator(status, &font, indicators);
-                    assert_eq!(
-                        slot.text_style().as_ref().and_then(|text| text.color),
-                        Some(rgb(expected).into())
-                    );
+                    assert_eq!(slot.text_style().color, Some(rgb(expected).into()));
                 }
             }
         }

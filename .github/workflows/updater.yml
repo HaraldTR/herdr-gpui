@@ -12,6 +12,8 @@ on:
       - 'rust-toolchain.toml'
       - '.github/workflows/**'
       - '!**/*.md'
+      - '!assets/social-preview-*'
+      - '!assets/icons/herdr-ui-icon-badge.*'
   push:
     branches: [main]
     paths:
@@ -24,6 +26,8 @@ on:
       - 'rust-toolchain.toml'
       - '.github/workflows/**'
       - '!**/*.md'
+      - '!assets/social-preview-*'
+      - '!assets/icons/herdr-ui-icon-badge.*'
   workflow_dispatch:
 
 permissions: {}

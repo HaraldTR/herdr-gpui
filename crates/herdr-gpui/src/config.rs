@@ -2,7 +2,12 @@
 //! preference the user already expressed there, never written and never used
 //! to change daemon behavior. Managed defaults are refreshed from the binary;
 //! `config-gpui.local.toml` holds persistent user overrides.
-use crate::{Error, Result, error::ThemeParseError};
+use crate::{
+    Error, Result,
+    contrast::Contrast,
+    error::ThemeParseError,
+    keymap::{Binding, DaemonKeys, Keymap},
+};
 pub(crate) mod watch;
 use gpui::{Font, FontFallbacks};
 use serde::Deserialize;
@@ -15,39 +20,12 @@ use std::{
 
 const DEFAULT_CONFIG: &str = include_str!("../config-gpui.example.toml");
 const FOLLOW_HERDR: &str = "Follow Herdr";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum FontRole {
-    Sidebar,
-    Tabs,
-    Terminal,
-    Ui,
-}
-
-impl FontRole {
-    pub(crate) const ALL: [Self; 4] = [Self::Sidebar, Self::Tabs, Self::Terminal, Self::Ui];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Sidebar => "Sidebar",
-            Self::Tabs => "Tabs",
-            Self::Terminal => "Terminal",
-            Self::Ui => "UI",
-        }
-    }
-
-    pub(crate) fn key(self) -> &'static str {
-        match self {
-            Self::Sidebar => "sidebar",
-            Self::Tabs => "tabs",
-            Self::Terminal => "terminal",
-            Self::Ui => "ui",
-        }
-    }
-}
 // Compare the first line so Windows checkouts and editors can use CRLF.
 const MANAGED_HEADER: &str = "# DO NOT EDIT -- WILL BE OVERWRITTEN";
-const LOCAL_CONFIG: &str = "# Herdr GPUI overrides. Saved changes reload automatically.\n# Unset keys inherit config-gpui.toml; tables merge key by key.\n";
+/// Seeds the overrides file on first launch only. Existing overrides and
+/// migrated personal configs are never rewritten, so settings placed here
+/// reach new installs without changing what current users see.
+const LOCAL_CONFIG: &str = "# Herdr GPUI overrides. Saved changes reload automatically.\n# Unset keys inherit config-gpui.toml; tables merge key by key.\n\n# New installs start with the roomy rounded sidebar. Remove this line for\n# the managed default, or pick another layout listed in config-gpui.toml.\nlayout = \"comfortable-rounded\"\n";
 
 /// Every face is held to this range, whether it comes from the config file or
 /// from a runtime adjustment, so the two can never disagree on what is valid.
@@ -56,11 +34,65 @@ pub const FONT_SIZE_RANGE: RangeInclusive<f32> = 8.0..=48.0;
 /// One logical pixel: the smallest step that can move the terminal cell grid.
 pub const FONT_SIZE_STEP: f32 = 1.0;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FontFace {
+    Sidebar,
+    Tabs,
+    Terminal,
+    Ui,
+}
+
+impl FontFace {
+    pub(crate) fn set_size(self, config: &mut Config, size: f32) {
+        match self {
+            Self::Sidebar => config.sidebar.size = size,
+            Self::Tabs => config.tabs.size = size,
+            Self::Terminal => config.terminal.size = size,
+            Self::Ui => config.ui.size = size,
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Sidebar => "sidebar",
+            Self::Tabs => "tabs",
+            Self::Terminal => "terminal",
+            Self::Ui => "ui",
+        }
+    }
+
+    pub(crate) fn size(self, config: &Config) -> f32 {
+        match self {
+            Self::Sidebar => config.sidebar.size,
+            Self::Tabs => config.tabs.size,
+            Self::Terminal => config.terminal.size,
+            Self::Ui => config.ui.size,
+        }
+    }
+}
+
+/// Shared logical-pixel radii for native-style chrome, independent of the
+/// terminal grid. Small badges/keycaps retain a tighter curve than controls.
+pub(crate) mod corners {
+    pub(crate) const PANEL: f32 = 12.;
+    pub(crate) const CONTROL: f32 = 8.;
+    pub(crate) const SMALL: f32 = 4.;
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub theme: String,
     pub confirm_close_tab: bool,
     pub show_agents: bool,
+    /// How far the app's own marks and labels stand off its chrome.
+    pub contrast: Contrast,
+    /// Show each agent's status word beside it, following the daemon's
+    /// `[ui.sidebar.agents]` rows when they name the `state_text` token.
+    pub agent_status_text: AgentStatusText,
+    /// Plan usage of the selected host's AI services in the status bar.
+    pub usage: crate::usage::UsageConfig,
+    pub option_as_alt: OptionAsAlt,
+    pub open_links_in: LinkTarget,
     pub sidebar: FontConfig,
     pub tabs: FontConfig,
     pub terminal: FontConfig,
@@ -71,6 +103,68 @@ pub struct Config {
     pub(crate) notification_overrides: NotificationSettings,
     pub clipboard_toast: ClipboardToast,
     pub layout: Layout,
+    pub keybindings: Keymap,
+}
+
+/// Where a clicked terminal link opens. Alt-click (Option on macOS) opens it
+/// in the other one.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LinkTarget {
+    #[default]
+    System,
+    /// A browser tab in the workspace, where the build can show pages.
+    BrowserTab,
+}
+
+/// Whether macOS Option sends Alt shortcuts to a pane or types the character
+/// the keyboard layout puts on it. Other platforms have no Option layer, so
+/// Alt always reaches the pane there.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OptionAsAlt {
+    /// Alt on the U.S. and ABC layouts, whose Option layer only holds symbols
+    /// like `π`; typing elsewhere, where it holds `@`, `[`, or letters.
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+impl OptionAsAlt {
+    /// macOS layouts whose Option characters a terminal user rarely types.
+    const ALT_LAYOUTS: [&'static str; 2] = ["com.apple.keylayout.US", "com.apple.keylayout.ABC"];
+
+    /// Whether Option-modified keys go to the pane as Alt under `layout`, the
+    /// platform keyboard layout ID.
+    pub fn sends_alt(self, layout: &str) -> bool {
+        if !cfg!(target_os = "macos") {
+            return true;
+        }
+        match self {
+            Self::Auto => Self::ALT_LAYOUTS.contains(&layout),
+            Self::Always => true,
+            Self::Never => false,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OptionAsAlt {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Value {
+            Bool(bool),
+            Name(String),
+        }
+        match Value::deserialize(deserializer)? {
+            Value::Bool(true) => Ok(Self::Always),
+            Value::Bool(false) => Ok(Self::Never),
+            Value::Name(name) if name == "auto" => Ok(Self::Auto),
+            Value::Name(name) => Err(serde::de::Error::unknown_variant(&name, &["auto"])),
+        }
+    }
 }
 
 /// Where the "copied to clipboard" flash sits, and whether it appears at all.
@@ -162,7 +256,7 @@ fn notification_delay<'de, D: serde::Deserializer<'de>>(
     Ok(seconds)
 }
 
-/// Sidebar density and spacing the config file can adjust.
+/// Sidebar layout and spacing the config file can adjust.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Layout {
     pub mode: LayoutMode,
@@ -175,18 +269,168 @@ pub struct Layout {
 impl Default for Layout {
     fn default() -> Self {
         Self {
-            mode: LayoutMode::Normal,
+            mode: LayoutMode::default(),
             sidebar_gap: DEFAULT_SIDEBAR_GAP,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum LayoutMode {
+/// How much the sidebar fits: spacing, indents, and which details show.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Density {
     #[default]
     Normal,
     Compact,
+    Comfortable,
+}
+
+/// How sidebar rows are drawn, independent of how dense they are.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Style {
+    /// Edge-to-edge rows with square highlights and tree lines.
+    #[default]
+    Flat,
+    /// Inset rows with rounded, bordered highlights.
+    Rounded,
+}
+
+/// A named sidebar layout. Each one draws its rows differently: Herdr's own
+/// rows at a density, flat or rounded, or a design of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LayoutMode {
+    /// Herdr's rows: `normal`, `compact`, `comfortable`, or any of them with a
+    /// `-rounded` suffix.
+    Classic { density: Density, style: Style },
+    /// Single-line rows with an icon slot and pull request counts.
+    Superset,
+    /// Rounded cards with a meta line for host, branch, and pull request.
+    Orca,
+    /// One line per row with only the status and the name.
+    Minimal,
+}
+
+impl Default for LayoutMode {
+    fn default() -> Self {
+        Self::new(Density::Normal, Style::Flat)
+    }
+}
+
+impl LayoutMode {
+    /// `ALL`'s names, for errors that list what a config may say.
+    const NAMES: &'static [&'static str] = &[
+        "normal",
+        "compact",
+        "comfortable",
+        "normal-rounded",
+        "compact-rounded",
+        "comfortable-rounded",
+        "superset",
+        "orca",
+        "minimal",
+    ];
+
+    /// Every named layout, in the order menus list them.
+    pub const ALL: [Self; 9] = [
+        Self::new(Density::Normal, Style::Flat),
+        Self::new(Density::Compact, Style::Flat),
+        Self::new(Density::Comfortable, Style::Flat),
+        Self::new(Density::Normal, Style::Rounded),
+        Self::new(Density::Compact, Style::Rounded),
+        Self::new(Density::Comfortable, Style::Rounded),
+        Self::Superset,
+        Self::Orca,
+        Self::Minimal,
+    ];
+
+    pub const fn new(density: Density, style: Style) -> Self {
+        Self::Classic { density, style }
+    }
+
+    /// The spacing the list around the rows uses. Layouts with their own
+    /// design fix theirs, so no second setting half-changes them.
+    pub const fn density(self) -> Density {
+        match self {
+            Self::Classic { density, .. } => density,
+            Self::Superset | Self::Minimal => Density::Normal,
+            Self::Orca => Density::Comfortable,
+        }
+    }
+
+    /// The highlight shape and heading case the list uses.
+    pub const fn style(self) -> Style {
+        match self {
+            Self::Classic { style, .. } => style,
+            Self::Superset | Self::Minimal => Style::Flat,
+            Self::Orca => Style::Rounded,
+        }
+    }
+
+    /// The config value that selects it.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Classic { density, style } => match (density, style) {
+                (Density::Normal, Style::Flat) => "normal",
+                (Density::Compact, Style::Flat) => "compact",
+                (Density::Comfortable, Style::Flat) => "comfortable",
+                (Density::Normal, Style::Rounded) => "normal-rounded",
+                (Density::Compact, Style::Rounded) => "compact-rounded",
+                (Density::Comfortable, Style::Rounded) => "comfortable-rounded",
+            },
+            Self::Superset => "superset",
+            Self::Orca => "orca",
+            Self::Minimal => "minimal",
+        }
+    }
+
+    /// How menus title it.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Classic { density, style } => match (density, style) {
+                (Density::Normal, Style::Flat) => "Normal",
+                (Density::Compact, Style::Flat) => "Compact",
+                (Density::Comfortable, Style::Flat) => "Comfortable",
+                (Density::Normal, Style::Rounded) => "Normal Rounded",
+                (Density::Compact, Style::Rounded) => "Compact Rounded",
+                (Density::Comfortable, Style::Rounded) => "Comfortable Rounded",
+            },
+            Self::Superset => "Superset",
+            Self::Orca => "Orca",
+            Self::Minimal => "Minimal",
+        }
+    }
+}
+
+impl From<Density> for LayoutMode {
+    fn from(density: Density) -> Self {
+        Self::new(density, Style::Flat)
+    }
+}
+
+impl TryFrom<&str> for LayoutMode {
+    type Error = Error;
+
+    fn try_from(name: &str) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|mode| mode.name() == name)
+            .ok_or_else(|| Error::UnknownLayout(name.to_owned()))
+    }
+}
+
+impl std::fmt::Display for LayoutMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl<'de> Deserialize<'de> for LayoutMode {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Self::try_from(name.as_str())
+            .map_err(|_| serde::de::Error::unknown_variant(&name, Self::NAMES))
+    }
 }
 
 impl<'de> Deserialize<'de> for Layout {
@@ -266,10 +510,8 @@ impl GitHubConfig {
     }
 }
 
-/// The first terminal column otherwise starts against the sidebar's divider,
-/// which crowds the prompt. Two-thirds of a default cell reads as a gutter
-/// without costing a column at any usable window width.
-const DEFAULT_SIDEBAR_GAP: f32 = 8.;
+/// Keep the terminal flush with the divider unless spacing is requested.
+const DEFAULT_SIDEBAR_GAP: f32 = 0.;
 
 /// A gap wider than this stops reading as spacing and starts eating columns the
 /// terminal needs, so the config file is held to a band a window can afford.
@@ -369,11 +611,17 @@ impl Default for Config {
             github: GitHubConfig::default(),
             confirm_close_tab: true,
             show_agents: true,
+            contrast: Contrast::default(),
+            agent_status_text: AgentStatusText::default(),
+            usage: crate::usage::UsageConfig::default(),
+            option_as_alt: OptionAsAlt::default(),
+            open_links_in: LinkTarget::default(),
             features: Features::default(),
             notifications: NotificationConfig::default(),
             notification_overrides: NotificationSettings::default(),
             clipboard_toast: ClipboardToast::default(),
             layout: Layout::default(),
+            keybindings: Keymap::default(),
             sidebar: font(monospace, 12.0),
             // Tabs are terminal chrome, so they read in the monospace face the
             // sidebar and terminal use, as they do in the reference UI.
@@ -390,6 +638,10 @@ struct Settings {
     theme: Option<String>,
     confirm_close_tab: Option<bool>,
     show_agents: Option<bool>,
+    contrast: Contrast,
+    usage: crate::usage::UsageConfig,
+    option_as_alt: OptionAsAlt,
+    open_links_in: LinkTarget,
     sidebar: FontSettings,
     tabs: FontSettings,
     terminal: FontSettings,
@@ -399,6 +651,7 @@ struct Settings {
     notifications: NotificationSettings,
     clipboard_toast: ClipboardToastSettings,
     layout: Layout,
+    keybindings: std::collections::BTreeMap<String, Binding>,
 }
 
 /// Each key overrides the daemon's answer on its own, so naming one of them
@@ -428,7 +681,7 @@ struct FontSettings {
 }
 
 /// Windows sets `USERPROFILE` rather than `HOME`, and upstream Herdr reads both.
-fn home() -> Result<PathBuf> {
+pub(crate) fn home() -> Result<PathBuf> {
     let variable = |name| env::var_os(name).filter(|value: &std::ffi::OsString| !value.is_empty());
     variable("HOME")
         .or_else(|| {
@@ -497,25 +750,77 @@ pub(crate) fn daemon_config_path(get: impl Fn(&str) -> Option<std::ffi::OsString
     root.join("herdr/config.toml")
 }
 
+/// What the GUI honors from the daemon's own config.
+#[derive(Clone, Debug, Default)]
+struct Daemon {
+    clipboard_toast: ClipboardToast,
+    keys: DaemonKeys,
+    /// Which agents' daemon rows name the `state_text` token.
+    agent_status_text: AgentStatusText,
+}
+
+/// Which agents the daemon's `[ui.sidebar.agents]` rows give a status word.
+/// The daemon uses an agent's `rows_by_agent` entry instead of `rows`, never
+/// both, so each agent is decided by the list it will actually draw.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgentStatusText {
+    /// Whether `rows` names the token: agents without their own entry.
+    rows: bool,
+    /// Per canonical agent id, whether its `rows_by_agent` entry names it.
+    by_agent: std::collections::BTreeMap<String, bool>,
+}
+
+impl AgentStatusText {
+    /// Whether an agent, by the canonical id the daemon reports for it, shows
+    /// its status word.
+    pub fn shown_for(&self, agent: Option<&str>) -> bool {
+        agent
+            .and_then(|agent| self.by_agent.get(agent))
+            .copied()
+            .unwrap_or(self.rows)
+    }
+
+    /// The setting for `rows` plus the given `rows_by_agent` overrides.
+    #[cfg(test)]
+    pub(crate) fn from_rows<'a>(
+        rows: bool,
+        by_agent: impl IntoIterator<Item = (&'a str, bool)>,
+    ) -> Self {
+        Self {
+            rows,
+            by_agent: by_agent
+                .into_iter()
+                .map(|(agent, shown)| (agent.to_owned(), shown))
+                .collect(),
+        }
+    }
+}
+
 /// A config file the GUI does not own can hold anything, including settings
 /// from a newer herdr, so only the keys read here matter and anything
 /// unreadable, oversized, malformed, or unrecognized leaves the defaults alone.
-fn daemon_clipboard_toast(path: &Path) -> ClipboardToast {
-    let mut resolved = ClipboardToast::default();
+fn daemon_settings(path: &Path) -> Daemon {
     if fs::metadata(path).is_ok_and(|data| data.len() > MAX_DAEMON_CONFIG_BYTES) {
-        return resolved;
+        return Daemon::default();
     }
-    let Some(clipboard) = fs::read_to_string(path)
+    let Some(table) = fs::read_to_string(path)
         .ok()
         .and_then(|text| text.parse::<toml::Table>().ok())
-        .and_then(|table| {
-            table
-                .get("ui")?
-                .get("toast")?
-                .get("clipboard")?
-                .as_table()
-                .cloned()
-        })
+    else {
+        return Daemon::default();
+    };
+    Daemon {
+        clipboard_toast: daemon_clipboard_toast(&table),
+        keys: DaemonKeys::from_table(table.get("keys").and_then(toml::Value::as_table)),
+        agent_status_text: daemon_agent_status_text(&table),
+    }
+}
+
+fn daemon_clipboard_toast(table: &toml::Table) -> ClipboardToast {
+    let mut resolved = ClipboardToast::default();
+    let Some(clipboard) = table
+        .get("ui")
+        .and_then(|ui| ui.get("toast")?.get("clipboard")?.as_table())
     else {
         return resolved;
     };
@@ -530,6 +835,52 @@ fn daemon_clipboard_toast(path: &Path) -> ClipboardToast {
         resolved.position = position;
     }
     resolved
+}
+
+/// Which agents the daemon's `[ui.sidebar.agents]` rows give the `state_text`
+/// token. That is the TUI's status word beside each agent, so the GUI shows the
+/// same text instead of only the dot. Rows without it, or a differently shaped
+/// table, leave it off, matching the daemon's default rows.
+fn daemon_agent_status_text(table: &toml::Table) -> AgentStatusText {
+    let Some(agents) = table
+        .get("ui")
+        .and_then(|ui| ui.get("sidebar")?.get("agents")?.as_table())
+    else {
+        return AgentStatusText::default();
+    };
+    AgentStatusText {
+        rows: agents.get("rows").is_some_and(rows_have_state_text),
+        by_agent: agents
+            .get("rows_by_agent")
+            .and_then(toml::Value::as_table)
+            .map(|by_agent| {
+                by_agent
+                    .iter()
+                    .filter(|(_, rows)| rows.is_array())
+                    .map(|(agent, rows)| (agent.clone(), rows_have_state_text(rows)))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// One sidebar row list: arrays of tokens, each a plain name or an inline table
+/// with a `token` key. Unknown shapes are ignored rather than treated as a match.
+fn rows_have_state_text(rows: &toml::Value) -> bool {
+    rows.as_array().is_some_and(|rows| {
+        rows.iter().any(|row| {
+            row.as_array().is_some_and(|tokens| {
+                tokens.iter().any(|token| {
+                    token.as_str() == Some("state_text")
+                        || token
+                            .as_table()
+                            .and_then(|token| token.get("token"))
+                            .and_then(toml::Value::as_str)
+                            == Some("state_text")
+                })
+            })
+        })
+    })
 }
 
 fn theme_directories() -> Result<Vec<PathBuf>> {
@@ -563,15 +914,6 @@ impl Config {
             delay_seconds: shared.toast_delay_seconds,
             position: shared.toast_position,
         });
-    }
-
-    pub(crate) fn font(&self, role: FontRole) -> &FontConfig {
-        match role {
-            FontRole::Sidebar => &self.sidebar,
-            FontRole::Tabs => &self.tabs,
-            FontRole::Terminal => &self.terminal,
-            FontRole::Ui => &self.ui,
-        }
     }
 
     pub fn path() -> Result<PathBuf> {
@@ -620,32 +962,34 @@ impl Config {
         let local = path.with_extension("local.toml");
         let (text, source) = match fs::read_to_string(&local) {
             Ok(text) => (text, local),
+            // Without overrides or a personal config to migrate, maintenance
+            // will seed the first-launch overrides; show them from frame one.
             Err(error) if error.kind() == ErrorKind::NotFound => match fs::read_to_string(path) {
                 Ok(text) if text.lines().next() != Some(MANAGED_HEADER) => (text, path.to_owned()),
-                Ok(_) => (String::new(), local),
-                Err(error) if error.kind() == ErrorKind::NotFound => (String::new(), local),
+                Ok(_) => (LOCAL_CONFIG.into(), local),
+                Err(error) if error.kind() == ErrorKind::NotFound => (LOCAL_CONFIG.into(), local),
                 Err(error) => return Err(Error::from(error).at_path(path)),
             },
             Err(error) => return Err(Error::from(error).at_path(&local)),
         };
-        Self::parse_layers([DEFAULT_CONFIG, &text], daemon_clipboard_toast(daemon))
+        Self::parse_layers([DEFAULT_CONFIG, &text], &daemon_settings(daemon))
             .map_err(|error| error.at_path(&source))
     }
 
     /// `daemon` is the herdr config whose settings this GUI also honors. It is
     /// read for those keys alone and never written; a missing one is normal.
     fn load_path(path: &Path, daemon: &Path) -> Result<Self> {
-        let base = daemon_clipboard_toast(daemon);
+        let base = daemon_settings(daemon);
         let (_lock, local) = Self::prepare_files(path)?;
         let text =
             fs::read_to_string(&local).map_err(|error| Error::from(error).at_path(&local))?;
         // Validate the override independently so bad types/unknown keys cannot
         // disappear inside the merge. Empty arrays explicitly replace defaults.
-        Self::parse_over(&text, base).map_err(|error| error.at_path(&local))?;
-        Self::parse_layers([DEFAULT_CONFIG, &text], base).map_err(|error| error.at_path(&local))
+        Self::parse_over(&text, &base).map_err(|error| error.at_path(&local))?;
+        Self::parse_layers([DEFAULT_CONFIG, &text], &base).map_err(|error| error.at_path(&local))
     }
 
-    /// Serialize migration, defaults refresh, and appearance saves across GUI windows
+    /// Serialize migration, defaults refresh, and theme saves across GUI windows
     /// and processes. This is only called by background config workers.
     fn prepare_files(path: &Path) -> Result<(fs::File, PathBuf)> {
         let parent = path
@@ -675,8 +1019,7 @@ impl Config {
         if let Some(text) = legacy {
             // Never replace an old user's file until its exact contents are
             // safely stored in the local file. A conflict needs human resolution.
-            Self::parse_over(text, ClipboardToast::default())
-                .map_err(|error| error.at_path(path))?;
+            Self::parse_over(text, &Daemon::default()).map_err(|error| error.at_path(path))?;
         }
         match fs::read_to_string(&local) {
             Ok(text) if legacy.is_some_and(|legacy| legacy != text) => {
@@ -724,19 +1067,16 @@ impl Config {
     /// tests below read, since loading also consults the daemon's config.
     #[cfg(test)]
     fn parse(text: &str) -> Result<Self> {
-        Self::parse_over(text, ClipboardToast::default())
+        Self::parse_over(text, &Daemon::default())
     }
 
     /// `base` is what the daemon's own config asked for, which every key this
     /// file names overrides.
-    fn parse_over(text: &str, base: ClipboardToast) -> Result<Self> {
+    fn parse_over(text: &str, base: &Daemon) -> Result<Self> {
         Self::parse_layers([text], base)
     }
 
-    fn parse_layers<'a>(
-        texts: impl IntoIterator<Item = &'a str>,
-        base: ClipboardToast,
-    ) -> Result<Self> {
+    fn parse_layers<'a>(texts: impl IntoIterator<Item = &'a str>, base: &Daemon) -> Result<Self> {
         let mut builder = config_loader::Config::builder();
         for text in texts {
             builder = builder.add_source(config_loader::File::from_str(
@@ -757,13 +1097,15 @@ impl Config {
         config.notifications = settings
             .notifications
             .resolve(NotificationConfig::default());
-        config.clipboard_toast = settings.clipboard_toast.resolve(base);
+        config.clipboard_toast = settings.clipboard_toast.resolve(base.clipboard_toast);
+        config.agent_status_text = base.agent_status_text.clone();
         if !settings.layout.sidebar_gap.is_finite()
             || !(0.0..=MAX_SIDEBAR_GAP).contains(&settings.layout.sidebar_gap)
         {
             return Err(Error::InvalidSidebarGap);
         }
         config.layout = settings.layout;
+        config.keybindings = Keymap::with_overrides(&settings.keybindings, &base.keys)?;
         if let Some(theme) = settings.theme {
             if theme.trim().is_empty() {
                 return Err(Error::EmptyTheme);
@@ -772,6 +1114,11 @@ impl Config {
         }
         config.confirm_close_tab = settings.confirm_close_tab.unwrap_or(true);
         config.show_agents = settings.show_agents.unwrap_or(true);
+        config.contrast = settings.contrast;
+        settings.usage.validate()?;
+        config.usage = settings.usage;
+        config.option_as_alt = settings.option_as_alt;
+        config.open_links_in = settings.open_links_in;
         for (name, font, settings) in [
             ("sidebar", &mut config.sidebar, settings.sidebar),
             ("tabs", &mut config.tabs, settings.tabs),
@@ -862,57 +1209,6 @@ impl Config {
             ..self.clone()
         };
         selected.theme()?;
-        Self::edit_path(path, |document| {
-            let mut value = toml_edit::Value::from(name);
-            if let Some(previous) = document.get("theme").and_then(toml_edit::Item::as_value) {
-                *value.decor_mut() = previous.decor().clone();
-            }
-            document["theme"] = toml_edit::Item::Value(value);
-            Ok(())
-        })
-    }
-
-    /// Blocking I/O: save only family and size to native local overrides.
-    pub(crate) fn save_font(&self, role: FontRole, family: &str, size: f32) -> Result<()> {
-        self.save_font_at(role, family, size, &Self::path()?)
-    }
-
-    fn save_font_at(&self, role: FontRole, family: &str, size: f32, path: &Path) -> Result<()> {
-        let key = role.key();
-        if family.trim().is_empty() {
-            return Err(Error::EmptyFontFamily(key));
-        }
-        if !size.is_finite() || !FONT_SIZE_RANGE.contains(&size) {
-            return Err(Error::InvalidFontSize(key));
-        }
-        let (_lock, local) = Self::prepare_files(path)?;
-        Self::edit_path(&local, |document| {
-            if !document.contains_key(key) {
-                document[key] = toml_edit::Item::Table(toml_edit::Table::new());
-            }
-            let table = document[key].as_table_like_mut().ok_or_else(|| {
-                Error::Toml(<toml::de::Error as serde::de::Error>::custom(format!(
-                    "{key} must be a table"
-                )))
-            })?;
-            for (field, mut value) in [
-                ("family", toml_edit::Value::from(family)),
-                ("size", toml_edit::Value::from(f64::from(size))),
-            ] {
-                if let Some(previous) = table.get(field).and_then(toml_edit::Item::as_value) {
-                    *value.decor_mut() = previous.decor().clone();
-                }
-                table.insert(field, toml_edit::Item::Value(value));
-            }
-            Ok(())
-        })
-    }
-
-    /// The caller holds the native config lock while reading and replacing overrides.
-    fn edit_path(
-        path: &Path,
-        edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<()>,
-    ) -> Result<()> {
         let result = (|| -> Result<()> {
             let text = match fs::read_to_string(path) {
                 Ok(text) => text,
@@ -920,15 +1216,204 @@ impl Config {
                 Err(error) => return Err(error.into()),
             };
             let mut document = text.parse::<toml_edit::DocumentMut>()?;
-            edit(&mut document)?;
+            let mut value = toml_edit::Value::from(name);
+            if let Some(previous) = document.get("theme").and_then(toml_edit::Item::as_value) {
+                *value.decor_mut() = previous.decor().clone();
+            }
+            document["theme"] = toml_edit::Item::Value(value);
             write_config(path, &document.to_string())?;
             Ok(())
         })();
         result.map_err(|error| error.at_path(path))
     }
 
+    /// Persist only the sidebar layout, retaining the latest on-disk
+    /// settings: a `layout = "..."` name is replaced in place, and a
+    /// `[layout]` table gets its `mode`.
+    pub fn save_layout(mode: LayoutMode) -> Result<()> {
+        let (_lock, local) = Self::prepare_files(&Self::path()?)?;
+        Self::save_layout_path(mode, &local)
+    }
+
+    fn save_layout_path(mode: LayoutMode, path: &Path) -> Result<()> {
+        let result = (|| -> Result<()> {
+            let text = match fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == ErrorKind::NotFound => LOCAL_CONFIG.into(),
+                Err(error) => return Err(error.into()),
+            };
+            let mut document = text.parse::<toml_edit::DocumentMut>()?;
+            match document.get_mut("layout") {
+                Some(item) if item.is_table_like() => {
+                    if let Some(layout) = item.as_table_like_mut() {
+                        layout.insert("mode", toml_edit::value(mode.name()));
+                    }
+                }
+                Some(toml_edit::Item::Value(named)) => {
+                    let decor = named.decor().clone();
+                    *named = toml_edit::Value::from(mode.name());
+                    *named.decor_mut() = decor;
+                }
+                _ => {
+                    document.insert("layout", toml_edit::value(mode.name()));
+                }
+            }
+            write_config(path, &document.to_string())
+        })();
+        result.map_err(|error| error.at_path(path))
+    }
+
+    /// Persist a batch of logical pixel sizes without replacing other overrides.
+    /// The lock also serializes this edit with migration and other GUI saves.
+    pub(crate) fn save_font_sizes(sizes: &[(FontFace, f32)]) -> Result<()> {
+        let (_lock, local) = Self::prepare_files(&Self::path()?)?;
+        Self::save_font_sizes_path(sizes, &local)
+    }
+
+    /// Persist usage visibility without replacing provider settings.
+    pub(crate) fn save_usage_visibility(show: bool) -> Result<()> {
+        let (_lock, local) = Self::prepare_files(&Self::path()?)?;
+        Self::save_usage_visibility_path(show, &local)
+    }
+
+    fn save_usage_visibility_path(show: bool, path: &Path) -> Result<()> {
+        let result = (|| -> Result<()> {
+            let text = match fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == ErrorKind::NotFound => LOCAL_CONFIG.into(),
+                Err(error) => return Err(error.into()),
+            };
+            let mut document = text.parse::<toml_edit::DocumentMut>()?;
+            let usage = document
+                .entry("usage")
+                .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+                .as_table_like_mut()
+                .ok_or(Error::InvalidUsageTable)?;
+            let mut value = toml_edit::Value::from(show);
+            if let Some(previous) = usage.get("show").and_then(toml_edit::Item::as_value) {
+                *value.decor_mut() = previous.decor().clone();
+            }
+            usage.insert("show", toml_edit::Item::Value(value));
+            write_config(path, &document.to_string())
+        })();
+        result.map_err(|error| error.at_path(path))
+    }
+
+    /// Persist only the contrast setting, keeping the rest of the local file.
+    pub(crate) fn save_contrast(contrast: Contrast) -> Result<()> {
+        let (_lock, local) = Self::prepare_files(&Self::path()?)?;
+        Self::save_contrast_path(contrast, &local)
+    }
+
+    fn save_contrast_path(contrast: Contrast, path: &Path) -> Result<()> {
+        let result = (|| -> Result<()> {
+            let text = match fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == ErrorKind::NotFound => LOCAL_CONFIG.into(),
+                Err(error) => return Err(error.into()),
+            };
+            let mut document = text.parse::<toml_edit::DocumentMut>()?;
+            let mut value = toml_edit::Value::from(contrast.name());
+            if let Some(previous) = document.get("contrast").and_then(toml_edit::Item::as_value) {
+                *value.decor_mut() = previous.decor().clone();
+            }
+            document["contrast"] = toml_edit::Item::Value(value);
+            write_config(path, &document.to_string())
+        })();
+        result.map_err(|error| error.at_path(path))
+    }
+
+    /// `None` removes the local override, inheriting the platform's managed default.
+    pub(crate) fn save_font_family(face: FontFace, family: Option<&str>) -> Result<()> {
+        let (_lock, local) = Self::prepare_files(&Self::path()?)?;
+        Self::save_font_family_path(face, family, &local)
+    }
+
+    pub(crate) fn save_all_font_families(family: Option<&str>) -> Result<()> {
+        let (_lock, local) = Self::prepare_files(&Self::path()?)?;
+        Self::save_font_families_path(
+            &[
+                FontFace::Sidebar,
+                FontFace::Tabs,
+                FontFace::Terminal,
+                FontFace::Ui,
+            ],
+            family,
+            &local,
+        )
+    }
+
+    fn save_font_family_path(face: FontFace, family: Option<&str>, path: &Path) -> Result<()> {
+        Self::save_font_families_path(&[face], family, path)
+    }
+
+    fn save_font_families_path(
+        faces: &[FontFace],
+        family: Option<&str>,
+        path: &Path,
+    ) -> Result<()> {
+        if family.is_some_and(|name| name.trim().is_empty()) {
+            return Err(Error::EmptyFontFamily("fonts"));
+        }
+        let result = (|| -> Result<()> {
+            let text = fs::read_to_string(path)?;
+            let mut document = text.parse::<toml_edit::DocumentMut>()?;
+            for face in faces {
+                if let Some(family) = family {
+                    let font = document
+                        .entry(face.name())
+                        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+                    let table = font
+                        .as_table_like_mut()
+                        .ok_or(Error::EmptyFontFamily(face.name()))?;
+                    let mut value = toml_edit::Value::from(family);
+                    if let Some(previous) = table.get("family").and_then(toml_edit::Item::as_value)
+                    {
+                        *value.decor_mut() = previous.decor().clone();
+                    }
+                    table.insert("family", toml_edit::Item::Value(value));
+                } else if let Some(table) = document
+                    .get_mut(face.name())
+                    .and_then(toml_edit::Item::as_table_like_mut)
+                {
+                    table.remove("family");
+                }
+            }
+            write_config(path, &document.to_string())
+        })();
+        result.map_err(|error| error.at_path(path))
+    }
+
+    fn save_font_sizes_path(sizes: &[(FontFace, f32)], path: &Path) -> Result<()> {
+        for &(face, size) in sizes {
+            if !size.is_finite() || !FONT_SIZE_RANGE.contains(&size) {
+                return Err(Error::InvalidFontSize(face.name()));
+            }
+        }
+        let result = (|| -> Result<()> {
+            let text = fs::read_to_string(path)?;
+            let mut document = text.parse::<toml_edit::DocumentMut>()?;
+            for &(face, size) in sizes {
+                let font = document
+                    .entry(face.name())
+                    .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+                let table = font
+                    .as_table_like_mut()
+                    .ok_or(Error::InvalidFontSize(face.name()))?;
+                let mut value = toml_edit::Value::from(size as f64);
+                if let Some(previous) = table.get("size").and_then(toml_edit::Item::as_value) {
+                    *value.decor_mut() = previous.decor().clone();
+                }
+                table.insert("size", toml_edit::Item::Value(value));
+            }
+            write_config(path, &document.to_string())
+        })();
+        result.map_err(|error| error.at_path(path))
+    }
+
     pub fn theme(&self) -> Result<Theme> {
         self.theme_with_directories(theme_directories)
+            .map(|theme| theme.with_contrast(self.contrast))
     }
 
     fn theme_with_directories(
@@ -1006,6 +1491,8 @@ pub struct Theme {
     pub active: u32,
     pub muted: u32,
     pub palette: [u32; 256],
+    /// Applied by [`Theme::with_contrast`]; every theme loads as `Standard`.
+    pub contrast: Contrast,
 }
 
 impl Default for Theme {
@@ -1033,12 +1520,13 @@ impl Default for Theme {
             active: 0x2b2933,
             muted: 0x827e91,
             palette,
+            contrast: Contrast::Standard,
         }
     }
 }
 
 /// `percent` of `over` blended onto `base`, per channel.
-fn mix(base: u32, over: u32, percent: u32) -> u32 {
+pub(crate) fn mix(base: u32, over: u32, percent: u32) -> u32 {
     let channel = |shift: u32| {
         let base = (base >> shift) & 255;
         let over = (over >> shift) & 255;
@@ -1065,7 +1553,7 @@ impl Theme {
     /// Dimmed foreground for rows that are not the current one: upstream's
     /// subtext sits between its text and its muted overlay.
     pub fn subtext(&self) -> u32 {
-        mix(self.background, self.foreground, 78)
+        self.ink(mix(self.background, self.foreground, 78))
     }
 
     /// A wash of [`Self::primary`] over the chrome, for filled selections such
@@ -1089,6 +1577,29 @@ impl Theme {
         } else {
             self.foreground
         }
+    }
+
+    /// `color` as a colored mark or label drawn on this theme's chrome: moved
+    /// only as far as the contrast setting needs to read on the background,
+    /// the surface, and a selected row, keeping its hue. Never for terminal
+    /// cells, whose colors belong to the program that wrote them.
+    pub fn ink(&self, color: u32) -> u32 {
+        crate::contrast::ink_on_chrome(
+            color,
+            [self.background, self.surface, self.active],
+            self.contrast.mark_ratio(),
+        )
+    }
+
+    /// High contrast parts selected rows further from the surface and raises
+    /// dim labels to text contrast. Standard leaves the theme as drawn.
+    pub fn with_contrast(mut self, contrast: Contrast) -> Self {
+        self.contrast = contrast;
+        if contrast == Contrast::High {
+            self.active = mix(self.active, self.foreground, 12);
+            self.muted = self.ink(self.muted);
+        }
+        self
     }
 
     fn derive_chrome(&mut self) {
@@ -1209,8 +1720,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
-    fn shared_notifications_inherit_only_supported_delivery_without_resetting_session()
-    -> anyhow::Result<()> {
+    fn shared_notifications_inherit_without_resetting_session() -> anyhow::Result<()> {
         use crate::herdr_settings::Settings as Shared;
         use herdr_client::protocol::ToastHerdrPosition;
 
@@ -1225,6 +1735,7 @@ mod tests {
             config.ui.size = 18.;
             config.terminal.fallbacks = Some(vec!["Session Fallback".into()]);
             config.clipboard_toast.enabled = false;
+            config.contrast = Contrast::High;
             let session = config.clone();
             for (delivery, enabled) in [
                 ("herdr", true),
@@ -1245,14 +1756,24 @@ mod tests {
                         position: ToastHerdrPosition::TopLeft
                     }
                 );
-                for role in FontRole::ALL {
-                    assert_eq!(config.font(role).family, session.font(role).family);
-                    assert_eq!(config.font(role).size, session.font(role).size);
-                    assert_eq!(config.font(role).fallbacks, session.font(role).fallbacks);
+                for (font, original) in [
+                    (&config.sidebar, &session.sidebar),
+                    (&config.tabs, &session.tabs),
+                    (&config.terminal, &session.terminal),
+                    (&config.ui, &session.ui),
+                ] {
+                    assert_eq!(font.family, original.family);
+                    assert_eq!(font.size, original.size);
+                    assert_eq!(font.fallbacks, original.fallbacks);
                 }
                 assert_eq!(config.clipboard_toast, session.clipboard_toast);
                 assert_eq!(config.layout, session.layout);
                 assert_eq!(config.theme, session.theme);
+                assert_eq!(config.contrast, session.contrast);
+                assert_eq!(
+                    config.keybindings.bindings().collect::<Vec<_>>(),
+                    session.keybindings.bindings().collect::<Vec<_>>()
+                );
             }
             config.apply_shared_notifications(&Shared::parse_text("")?);
             assert_eq!(config.notifications, NotificationConfig::default());
@@ -1280,7 +1801,7 @@ mod tests {
         ] {
             let mut config = Config::parse_layers(
                 [DEFAULT_CONFIG, &format!("[notifications]\n{text}")],
-                ClipboardToast::default(),
+                &Daemon::default(),
             )?;
             for _ in 0..2 {
                 config.apply_shared_notifications(&shared);
@@ -1300,17 +1821,13 @@ mod tests {
             config.apply_shared_notifications(&Shared::parse_text(&format!(
                 "[ui.toast]\ndelivery = '{delivery}'"
             ))?);
-            assert!(
-                config.notifications.enabled,
-                "explicit native opt-in wins over {delivery}"
-            );
+            assert!(config.notifications.enabled);
         }
         Ok(())
     }
 
     #[test]
-    fn managed_notifications_defer_but_persisted_local_and_legacy_keys_still_win()
-    -> anyhow::Result<()> {
+    fn managed_notifications_defer_but_local_and_legacy_keys_win() -> anyhow::Result<()> {
         use crate::herdr_settings::Settings as Shared;
         let shared = Shared::parse_text("[ui.toast]\ndelivery = 'herdr'\ndelay_seconds = 9")?;
         for legacy in [false, true] {
@@ -1328,9 +1845,8 @@ mod tests {
                 assert_eq!(config.notifications.enabled, !legacy);
                 assert_eq!(config.notifications.delay_seconds, 9);
             }
-            let local = path.with_extension("local.toml");
             fs::write(
-                &local,
+                path.with_extension("local.toml"),
                 "[notifications]\nenabled = false\ndelay_seconds = 1\nposition = 'bottom-right'\n",
             )?;
             for mut config in [
@@ -1341,128 +1857,6 @@ mod tests {
                 assert_eq!(config.notifications, NotificationConfig::default());
             }
             assert_eq!(fs::read_to_string(&path)?, DEFAULT_CONFIG);
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn font_saves_use_local_overrides_and_preserve_other_fields() -> anyhow::Result<()> {
-        let temp = TempDirectory::new()?;
-        let path = temp.0.join("config-gpui.toml");
-        let local = path.with_extension("local.toml");
-        let config = Config::default();
-        for role in FontRole::ALL {
-            Config::load_path(&path, &temp.0.join("absent.toml"))?;
-            let original = format!(
-                "# personal\ntheme = 'Nord'\n[{}] # face\nfamily = 'Old' # family\nsize = 19 # size\nfallback = [] # cascade\n",
-                role.key()
-            );
-            fs::write(&local, &original)?;
-            config.save_font_at(role, "New Font", 20.5, &path)?;
-            assert_eq!(
-                fs::read_to_string(&local)?,
-                original
-                    .replace("'Old'", "\"New Font\"")
-                    .replace("size = 19", "size = 20.5")
-            );
-            assert_eq!(fs::read_to_string(&path)?, DEFAULT_CONFIG);
-            let loaded = Config::load_path(&path, &temp.0.join("absent.toml"))?;
-            assert_eq!(loaded.font(role).family, "New Font");
-            assert_eq!(loaded.font(role).fallbacks, Some(vec![]));
-            assert_eq!(loaded.theme, "Nord");
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn invalid_font_saves_do_not_create_files() -> anyhow::Result<()> {
-        let temp = TempDirectory::new()?;
-        let path = temp.0.join("missing/config-gpui.toml");
-        for role in FontRole::ALL {
-            for size in [7.9, 48.1, f32::NAN, f32::INFINITY] {
-                assert!(matches!(
-                    Config::default().save_font_at(role, "Font", size, &path),
-                    Err(Error::InvalidFontSize(_))
-                ));
-            }
-            assert!(matches!(
-                Config::default().save_font_at(role, "  ", 12., &path),
-                Err(Error::EmptyFontFamily(_))
-            ));
-        }
-        assert!(!path.parent().context("parent")?.exists());
-        Ok(())
-    }
-
-    #[test]
-    fn font_saves_migrate_legacy_and_handle_inline_or_invalid_tables() -> anyhow::Result<()> {
-        let temp = TempDirectory::new()?;
-        let path = temp.0.join("config-gpui.toml");
-        let local = path.with_extension("local.toml");
-        let daemon = temp.0.join("absent.toml");
-        fs::write(&path, "# legacy\ntheme = 'Nord'\n")?;
-        let config = Config::default();
-        config.save_font_at(FontRole::Ui, "Font \"Quoted\" \\ Face", 48., &path)?;
-        assert_eq!(fs::read_to_string(&path)?, DEFAULT_CONFIG);
-        let loaded = Config::load_path(&path, &daemon)?;
-        assert_eq!(loaded.ui.family, "Font \"Quoted\" \\ Face");
-        assert_eq!(loaded.ui.size, 48.);
-        assert_eq!(loaded.theme, "Nord");
-        fs::write(&local, "ui = { fallback = [] } # inline\n")?;
-        config.save_font_at(FontRole::Ui, "New Font", 8., &path)?;
-        assert_eq!(
-            Config::load_path(&path, &daemon)?.ui.fallbacks,
-            Some(vec![])
-        );
-        assert!(fs::read_to_string(&local)?.contains("# inline"));
-        for text in [
-            "ui = [",
-            "ui = 'not a table'",
-            "ui = []",
-            "[[ui]]\nsize = 12\n",
-        ] {
-            fs::write(&local, text)?;
-            assert!(
-                config
-                    .save_font_at(FontRole::Ui, "New Font", 12., &path)
-                    .is_err()
-            );
-            assert_eq!(fs::read_to_string(&local)?, text);
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn concurrent_font_and_theme_saves_share_the_native_lock() -> anyhow::Result<()> {
-        let temp = TempDirectory::new()?;
-        let path = temp.0.join("config-gpui.toml");
-        let config = Config::default();
-        let barrier = std::sync::Barrier::new(5);
-        std::thread::scope(|scope| {
-            let (config, barrier, path) = (&config, &barrier, &path);
-            let mut handles = Vec::new();
-            for role in FontRole::ALL {
-                handles.push(scope.spawn(move || {
-                    barrier.wait();
-                    config.save_font_at(role, role.label(), 20., path)
-                }));
-            }
-            handles.push(scope.spawn(move || {
-                barrier.wait();
-                config.save_theme_at("Nord", path)
-            }));
-            for handle in handles {
-                handle
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("save worker panicked"))??;
-            }
-            anyhow::Ok(())
-        })?;
-        let loaded = Config::load_path(&path, &temp.0.join("absent.toml"))?;
-        assert_eq!(loaded.theme, "Nord");
-        for role in FontRole::ALL {
-            assert_eq!(loaded.font(role).family, role.label());
-            assert_eq!(loaded.font(role).size, 20.);
         }
         Ok(())
     }
@@ -1618,6 +2012,77 @@ mod tests {
                 position: TopLeft
             }
         );
+        Ok(())
+    }
+
+    /// The daemon's `state_text` token turns the GUI's status word on for the
+    /// agents whose rows name it: an agent's `rows_by_agent` entry replaces
+    /// `rows` for that agent only. Rows without it, or a file the GUI cannot
+    /// use, leave it off.
+    #[test]
+    fn daemon_sidebar_state_text_turns_agent_status_words_on() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let daemon = temp.0.join("config.toml");
+        // Expected for Claude, Codex, and an agent the daemon did not identify.
+        for (text, expected) in [
+            ("", [false; 3]),
+            ("[ui]\nstatus_indicators = \"dots\"\n", [false; 3]),
+            (
+                "[ui.sidebar.agents]\nrows = [[\"state_icon\", \"workspace\", \"tab\"], [\"agent\"]]\n",
+                [false; 3],
+            ),
+            (
+                "[ui.sidebar.agents]\nrows = [[\"state_icon\", \"agent\", \"state_text\"], [\"agent\"]]\n",
+                [true; 3],
+            ),
+            (
+                "[ui.sidebar.agents]\nrows = [[{ token = \"state_text\", dim = true }]]\n",
+                [true; 3],
+            ),
+            (
+                "[ui.sidebar.agents.rows_by_agent]\nclaude = [[\"state_icon\", \"state_text\"]]\n",
+                [true, false, false],
+            ),
+            (
+                "[ui.sidebar.agents.rows_by_agent]\nclaude = [[\"agent\"]]\n",
+                [false; 3],
+            ),
+            (
+                "[ui.sidebar.agents]\nrows = [[\"state_text\"]]\n\
+                 [ui.sidebar.agents.rows_by_agent]\nclaude = [[\"agent\"]]\n",
+                [false, true, true],
+            ),
+            ("not toml", [false; 3]),
+        ] {
+            fs::write(&daemon, text)?;
+            let settings = daemon_settings(&daemon).agent_status_text;
+            assert_eq!(
+                [
+                    settings.shown_for(Some("claude")),
+                    settings.shown_for(Some("codex")),
+                    settings.shown_for(None),
+                ],
+                expected,
+                "{text}"
+            );
+        }
+        let off = AgentStatusText::default();
+        assert_eq!(
+            daemon_settings(&temp.0).agent_status_text,
+            off,
+            "a directory is not a config"
+        );
+        assert_eq!(
+            daemon_settings(&temp.0.join("absent.toml")).agent_status_text,
+            off
+        );
+
+        // Oversized files are skipped rather than parsed on every config load.
+        let mut oversized = "[ui.sidebar.agents]\nrows = [[\"state_text\"]]\n".to_owned();
+        oversized.push_str(&"# pad\n".repeat(MAX_DAEMON_CONFIG_BYTES as usize / 6));
+        assert!(oversized.len() as u64 > MAX_DAEMON_CONFIG_BYTES);
+        fs::write(&daemon, &oversized)?;
+        assert_eq!(daemon_settings(&daemon).agent_status_text, off);
         Ok(())
     }
 
@@ -1897,6 +2362,224 @@ mod tests {
     }
 
     #[test]
+    fn font_family_saves_and_reset_preserve_other_overrides() -> anyhow::Result<()> {
+        let directory = TempDirectory::new()?;
+        let path = directory.0.join("config-gpui.local.toml");
+        let original = "# keep me\ntheme = 'Nord'\n\n[terminal]\nsize = 18 # size comment\nfamily = 'Old' # family comment\n";
+        fs::write(&path, original)?;
+        for face in [
+            FontFace::Sidebar,
+            FontFace::Tabs,
+            FontFace::Terminal,
+            FontFace::Ui,
+        ] {
+            Config::save_font_family_path(face, Some("Any Installed Font"), &path)?;
+            let text = fs::read_to_string(&path)?;
+            let document = text.parse::<toml_edit::DocumentMut>()?;
+            assert_eq!(
+                document[face.name()]["family"].as_str(),
+                Some("Any Installed Font")
+            );
+            assert!(text.contains("# keep me"));
+            assert!(text.contains("size = 18 # size comment"));
+            Config::save_font_family_path(face, None, &path)?;
+            let text = fs::read_to_string(&path)?;
+            let document = text.parse::<toml_edit::DocumentMut>()?;
+            assert!(
+                document
+                    .get(face.name())
+                    .and_then(|item| item.get("family"))
+                    .is_none()
+            );
+            assert!(text.contains("# keep me"));
+            assert!(text.contains("size = 18 # size comment"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn all_font_families_save_and_reset_in_one_document() -> anyhow::Result<()> {
+        let directory = TempDirectory::new()?;
+        let path = directory.0.join("config-gpui.local.toml");
+        fs::write(
+            &path,
+            "# keep\n[terminal]\nsize = 18 # keep size\nfamily = 'Old'\n",
+        )?;
+        let faces = [
+            FontFace::Sidebar,
+            FontFace::Tabs,
+            FontFace::Terminal,
+            FontFace::Ui,
+        ];
+        Config::save_font_families_path(&faces, Some("Shared"), &path)?;
+        let document = fs::read_to_string(&path)?;
+        let parsed = document.parse::<toml_edit::DocumentMut>()?;
+        for face in faces {
+            assert_eq!(parsed[face.name()]["family"].as_str(), Some("Shared"));
+        }
+        Config::save_font_family_path(FontFace::Tabs, Some("Independent"), &path)?;
+        let parsed = fs::read_to_string(&path)?.parse::<toml_edit::DocumentMut>()?;
+        assert_eq!(parsed["tabs"]["family"].as_str(), Some("Independent"));
+        assert_eq!(parsed["terminal"]["family"].as_str(), Some("Shared"));
+        Config::save_font_families_path(&faces, None, &path)?;
+        let text = fs::read_to_string(&path)?;
+        let parsed = text.parse::<toml_edit::DocumentMut>()?;
+        for face in faces {
+            assert!(
+                parsed
+                    .get(face.name())
+                    .and_then(|item| item.get("family"))
+                    .is_none()
+            );
+        }
+        assert!(text.contains("# keep"));
+        assert!(text.contains("size = 18 # keep size"));
+        Ok(())
+    }
+
+    #[test]
+    fn font_size_saves_preserve_other_overrides_and_comments() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config.toml");
+        let original = "# user settings\ntheme = 'Nord'\nfuture = true\n\n[tabs] # keep table\nsize = 19 # keep size\nfamily = 'Custom'\n";
+        fs::write(&path, original)?;
+        for (face, size) in [
+            (FontFace::Sidebar, 8.),
+            (FontFace::Tabs, 20.),
+            (FontFace::Terminal, 48.),
+            (FontFace::Ui, 14.),
+        ] {
+            Config::save_font_sizes_path(&[(face, size)], &path)?;
+            let text = fs::read_to_string(&path)?;
+            let known = text.replace("future = true\n", "");
+            assert_eq!(
+                face.size(&Config::parse_layers(
+                    [DEFAULT_CONFIG, &known],
+                    &Daemon::default()
+                )?),
+                size
+            );
+            assert!(text.contains("future = true"));
+            assert!(text.contains("family = 'Custom'"));
+            assert!(text.contains("[tabs] # keep table"));
+            assert!(text.contains("size = 20.0 # keep size") || face != FontFace::Tabs);
+        }
+        let before = fs::read_to_string(&path)?;
+        for invalid in [7., 49., f32::NAN, f32::INFINITY] {
+            assert!(Config::save_font_sizes_path(&[(FontFace::Tabs, invalid)], &path).is_err());
+            assert_eq!(fs::read_to_string(&path)?, before);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn font_size_batches_validate_every_change_before_writing() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config-gpui.local.toml");
+        let original = "# retained\ntheme = 'Nord'\n[sidebar]\nsize = 12 # retained size\n";
+        fs::write(&path, original)?;
+        assert!(matches!(
+            Config::save_font_sizes_path(&[(FontFace::Sidebar, 14.), (FontFace::Ui, 49.)], &path),
+            Err(Error::InvalidFontSize("ui"))
+        ));
+        assert_eq!(fs::read_to_string(&path)?, original);
+        Config::save_font_sizes_path(&[(FontFace::Sidebar, 14.), (FontFace::Ui, 20.)], &path)?;
+        let saved = fs::read_to_string(&path)?;
+        let config = Config::parse(&saved)?;
+        assert_eq!((config.sidebar.size, config.ui.size), (14., 20.));
+        assert!(saved.contains("size = 14.0 # retained size"));
+        assert!(saved.contains("theme = 'Nord'"));
+        Ok(())
+    }
+
+    #[test]
+    fn usage_visibility_preserves_settings_and_rejects_invalid_tables() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config.toml");
+        let original = "theme = 'Nord' # keep\n[usage]\nshow = true # visibility\nhide_providers = ['claude']\n";
+        fs::write(&path, original)?;
+        Config::save_usage_visibility_path(false, &path)?;
+        assert_eq!(
+            fs::read_to_string(&path)?,
+            original.replace("show = true", "show = false")
+        );
+        assert!(!Config::parse(&fs::read_to_string(&path)?)?.usage.show);
+        Config::save_usage_visibility_path(true, &path)?;
+        assert_eq!(fs::read_to_string(&path)?, original);
+        for original in [
+            "theme = 'Nord'\n",
+            "usage = { show = true, browser_cookies = false }\n",
+        ] {
+            fs::write(&path, original)?;
+            Config::save_usage_visibility_path(false, &path)?;
+            assert!(!Config::parse(&fs::read_to_string(&path)?)?.usage.show);
+        }
+        fs::write(&path, "usage = false\n")?;
+        let error = Config::save_usage_visibility_path(false, &path)
+            .err()
+            .context("invalid usage table must be rejected")?;
+        assert!(matches!(&error, Error::Path { path: failed, source }
+            if failed == &path && matches!(**source, Error::InvalidUsageTable)));
+        assert!(std::error::Error::source(&error).is_some());
+        assert_eq!(fs::read_to_string(&path)?, "usage = false\n");
+        Ok(())
+    }
+
+    #[test]
+    fn contrast_parses_reaches_the_theme_and_saves_in_place() -> anyhow::Result<()> {
+        assert_eq!(Config::parse("")?.contrast, Contrast::Standard);
+        let high = Config::parse("theme = 'Catppuccin Latte'\ncontrast = 'high'")?;
+        assert_eq!(high.contrast, Contrast::High);
+        assert_eq!(high.theme()?.contrast, Contrast::High);
+        assert!(Config::parse("contrast = 'loud'").is_err());
+        assert!(Config::parse("contrast = true").is_err());
+
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config.toml");
+        let original =
+            "theme = 'Nord' # keep\ncontrast = 'standard' # mine\n[usage]\nshow = false\n";
+        fs::write(&path, original)?;
+        Config::save_contrast_path(Contrast::High, &path)?;
+        let saved = fs::read_to_string(&path)?;
+        assert_eq!(saved, original.replace("'standard'", "\"high\""));
+        assert_eq!(Config::parse(&saved)?.contrast, Contrast::High);
+        assert!(!Config::parse(&saved)?.usage.show);
+        fs::remove_file(&path)?;
+        Config::save_contrast_path(Contrast::High, &path)?;
+        let created = fs::read_to_string(&path)?;
+        assert!(created.starts_with(LOCAL_CONFIG), "{created}");
+        assert_eq!(Config::parse(&created)?.contrast, Contrast::High);
+        Ok(())
+    }
+
+    #[test]
+    fn high_contrast_parts_selected_rows_and_lifts_dim_labels_on_every_theme() {
+        let ratio = crate::contrast::ratio;
+        for name in Theme::BUILTIN_NAMES {
+            let standard = Theme::builtin(name).unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(standard.clone().with_contrast(Contrast::Standard), standard);
+            let high = standard.clone().with_contrast(Contrast::High);
+            // Terminal cells keep the program's colors.
+            assert_eq!(high.palette, standard.palette);
+            assert_eq!(
+                (high.background, high.foreground, high.cursor, high.surface),
+                (
+                    standard.background,
+                    standard.foreground,
+                    standard.cursor,
+                    standard.surface
+                )
+            );
+            assert!(ratio(high.active, high.surface) > ratio(standard.active, standard.surface));
+            for background in [high.background, high.surface, high.active] {
+                assert!(ratio(high.muted, background) >= 4.5, "{name} muted");
+                assert!(ratio(high.subtext(), background) >= 4.5, "{name} subtext");
+                assert!(ratio(high.foreground, background) >= 4.5, "{name} text");
+            }
+        }
+    }
+
+    #[test]
     fn saves_only_theme_and_preserves_latest_settings_and_comments() -> anyhow::Result<()> {
         let temp = TempDirectory::new()?;
         let path = temp.0.join("config.toml");
@@ -2048,6 +2731,109 @@ mod tests {
     }
 
     #[test]
+    fn links_open_in_the_system_browser_unless_configured() -> anyhow::Result<()> {
+        assert_eq!(Config::parse("")?.open_links_in, LinkTarget::System);
+        assert_eq!(
+            Config::parse(DEFAULT_CONFIG)?.open_links_in,
+            LinkTarget::System
+        );
+        assert_eq!(
+            Config::parse("open_links_in = \"browser-tab\"")?.open_links_in,
+            LinkTarget::BrowserTab
+        );
+        assert!(Config::parse("open_links_in = \"tab\"").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn option_as_alt_accepts_auto_or_a_bool() -> anyhow::Result<()> {
+        assert_eq!(Config::parse("")?.option_as_alt, OptionAsAlt::Auto);
+        assert_eq!(
+            Config::parse(DEFAULT_CONFIG)?.option_as_alt,
+            OptionAsAlt::Auto
+        );
+        for (value, expected) in [
+            ("'auto'", OptionAsAlt::Auto),
+            ("true", OptionAsAlt::Always),
+            ("false", OptionAsAlt::Never),
+        ] {
+            let config = Config::parse(&format!("option_as_alt = {value}"))?;
+            assert_eq!(config.option_as_alt, expected);
+        }
+        for value in ["'left'", "'true'", "1"] {
+            assert!(Config::parse(&format!("option_as_alt = {value}")).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_layout_has_its_own_name_and_label() -> anyhow::Result<()> {
+        assert_eq!(LayoutMode::NAMES, LayoutMode::ALL.map(LayoutMode::name));
+        let labels: std::collections::HashSet<_> =
+            LayoutMode::ALL.iter().map(|mode| mode.label()).collect();
+        assert_eq!(labels.len(), LayoutMode::ALL.len());
+        for mode in LayoutMode::ALL {
+            let name = mode.name();
+            assert_eq!(LayoutMode::try_from(name)?, mode);
+            assert_eq!(
+                Config::parse(&format!("layout = '{name}'"))?.layout.mode,
+                mode
+            );
+            let table = Config::parse(&format!("[layout]\nmode = '{name}'\nsidebar_gap = 4"))?;
+            assert_eq!((table.layout.mode, table.layout.sidebar_gap), (mode, 4.));
+        }
+        // Layouts with a design of their own fix their spacing.
+        assert_eq!(
+            (LayoutMode::Orca.density(), LayoutMode::Orca.style()),
+            (Density::Comfortable, Style::Rounded)
+        );
+        // A second setting for rows no longer exists.
+        assert!(Config::parse("[layout]\nrows = 'orca'").is_err());
+        assert!(Config::parse("layout = 'herdr'").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn saving_a_layout_keeps_every_other_setting() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config-gpui.local.toml");
+        let mode = |path: &Path| -> anyhow::Result<Layout> {
+            Ok(Config::parse(&fs::read_to_string(path)?)?.layout)
+        };
+        // A new install's plain name is replaced in place, comments and all,
+        // and still layers over the managed file.
+        Config::save_layout_path(LayoutMode::Orca, &path)?;
+        let text = fs::read_to_string(&path)?;
+        assert!(text.contains("layout = \"orca\""), "{text}");
+        assert!(text.contains("# New installs start"), "{text}");
+        let merged = Config::parse_layers([DEFAULT_CONFIG, text.as_str()], &Daemon::default())?;
+        assert_eq!(merged.layout.mode, LayoutMode::Orca);
+        // A table gets its mode beside the gap, and keeps its comments.
+        fs::write(
+            &path,
+            "# mine\ntheme = 'Nord'\n\n[layout] # sidebar\nmode = 'compact'\nsidebar_gap = 4\n",
+        )?;
+        for chosen in LayoutMode::ALL {
+            Config::save_layout_path(chosen, &path)?;
+            let layout = mode(&path)?;
+            assert_eq!((layout.mode, layout.sidebar_gap), (chosen, 4.));
+        }
+        let text = fs::read_to_string(&path)?;
+        assert!(
+            text.contains("# mine") && text.contains("# sidebar"),
+            "{text}"
+        );
+        assert_eq!(Config::parse(&text)?.theme, "Nord");
+        // Inline tables and files without a layout work too.
+        for original in ["layout = { sidebar_gap = 4 }\n", "theme = 'Nord'\n"] {
+            fs::write(&path, original)?;
+            Config::save_layout_path(LayoutMode::Minimal, &path)?;
+            assert_eq!(mode(&path)?.mode, LayoutMode::Minimal, "{original}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn compact_layout_is_opt_in() -> anyhow::Result<()> {
         for config in [
             Config::default(),
@@ -2056,16 +2842,47 @@ mod tests {
             Config::parse("[layout]")?,
             Config::parse("layout = 'normal'")?,
         ] {
-            assert_eq!(config.layout.mode, LayoutMode::Normal);
+            assert_eq!(config.layout.mode, LayoutMode::default());
+            assert_eq!(config.layout.mode, LayoutMode::from(Density::Normal));
         }
         let config = Config::parse("layout = 'compact'")?;
-        assert_eq!(config.layout.mode, LayoutMode::Compact);
+        assert_eq!(config.layout.mode, LayoutMode::from(Density::Compact));
         assert_eq!(config.layout.sidebar_gap, Layout::default().sidebar_gap);
         assert_eq!(config.sidebar.size, Config::default().sidebar.size);
         let custom = Config::parse("[layout]\nmode = 'compact'\nsidebar_gap = 4")?;
-        assert_eq!(custom.layout.mode, LayoutMode::Compact);
+        assert_eq!(custom.layout.mode, LayoutMode::from(Density::Compact));
         assert_eq!(custom.layout.sidebar_gap, 4.);
-        for value in ["'unknown'", "true", "1"] {
+        for density in [Density::Compact, Density::Normal, Density::Comfortable] {
+            for style in [Style::Flat, Style::Rounded] {
+                let mode = LayoutMode::new(density, style);
+                let name = mode.to_string();
+                assert_eq!(LayoutMode::try_from(name.as_str())?, mode);
+                assert_eq!(
+                    Config::parse(&format!("layout = '{name}'"))?.layout.mode,
+                    mode
+                );
+                let config = Config::parse(&format!("[layout]\nmode = '{name}'\nsidebar_gap = 4"))?;
+                assert_eq!(config.layout.mode, mode);
+                assert_eq!(config.layout.sidebar_gap, 4.);
+            }
+        }
+        assert_eq!(
+            LayoutMode::try_from("compact-rounded")?,
+            LayoutMode::new(Density::Compact, Style::Rounded)
+        );
+        for name in [
+            "rounded",
+            "-rounded",
+            "normal-",
+            "Normal",
+            "normal-rounded-rounded",
+        ] {
+            assert!(matches!(
+                LayoutMode::try_from(name),
+                Err(Error::UnknownLayout(unknown)) if unknown == name
+            ));
+        }
+        for value in ["'unknown'", "'rounded'", "'normal-square'", "true", "1"] {
             assert!(matches!(
                 Config::parse(&format!("layout = {value}")),
                 Err(Error::Toml(_))
@@ -2075,17 +2892,17 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_gap_defaults_to_a_gutter_and_accepts_its_band() -> anyhow::Result<()> {
+    fn sidebar_gap_defaults_to_flush_and_accepts_its_band() -> anyhow::Result<()> {
         for config in [
             Config::default(),
             Config::parse("")?,
             Config::parse(DEFAULT_CONFIG)?,
         ] {
             assert_eq!(config.layout, Layout::default());
-            assert_eq!(config.layout.sidebar_gap, 8.);
+            assert_eq!(config.layout.sidebar_gap, 0.);
         }
         // An empty table keeps the default; only a written value replaces it.
-        assert_eq!(Config::parse("[layout]")?.layout.sidebar_gap, 8.);
+        assert_eq!(Config::parse("[layout]")?.layout.sidebar_gap, 0.);
         for (text, gap) in [
             ("[layout]\nsidebar_gap = 0", 0.),
             ("[layout]\nsidebar_gap = 12", 12.),
@@ -2145,6 +2962,90 @@ mod tests {
             assert!(Config::parse(text).is_err(), "accepted {text:?}");
         }
         assert!(Config::parse("[tabs]\nsize = 8\n[ui]\nsize = 48").is_ok());
+    }
+
+    #[test]
+    fn keybindings_override_defaults_and_reject_bad_entries() -> anyhow::Result<()> {
+        use crate::Command;
+        let config = Config::parse("")?;
+        assert_eq!(config.keybindings.primary(Command::Tab), "cmd-t");
+        let config = Config::parse(
+            "[keybindings]\nnew_workspace = \"cmd-n\"\nnew_tab = [\"cmd-t\", \"ctrl-t\"]\nquit = \"\"",
+        )?;
+        let shortcuts = |command| config.keybindings.shortcuts(command).collect::<Vec<_>>();
+        assert_eq!(shortcuts(Command::Workspace), ["cmd-n"]);
+        assert_eq!(shortcuts(Command::Tab), ["cmd-t", "ctrl-t"]);
+        assert!(shortcuts(Command::Quit).is_empty());
+        // The managed defaults document the table without setting it.
+        let layered = Config::parse_layers(
+            [DEFAULT_CONFIG, "[keybindings]\nthemes = \"cmd-k\""],
+            &Daemon::default(),
+        )?;
+        assert_eq!(layered.keybindings.primary(Command::Themes), "cmd-k");
+        assert_eq!(layered.keybindings.primary(Command::Tab), "cmd-t");
+        assert!(matches!(
+            Config::parse("[keybindings]\nnew_space = \"cmd-n\""),
+            Err(Error::UnknownKeybinding(_))
+        ));
+        assert!(matches!(
+            Config::parse("[keybindings]\nnew_tab = \"t\""),
+            Err(Error::KeystrokeWithoutModifier { .. })
+        ));
+        assert!(Config::parse("[keybindings]\nnew_tab = 5").is_err());
+        Ok(())
+    }
+
+    /// The daemon's `[keys]` reach the GUI keymap under the GUI's own
+    /// `[keybindings]`, and a daemon file the GUI cannot use falls back to
+    /// Herdr's defaults instead of failing the GUI config.
+    #[test]
+    fn daemon_keys_layer_under_gui_keybindings() -> anyhow::Result<()> {
+        use crate::Command;
+        let temp = TempDirectory::new()?;
+        let gui = temp.0.join("config-gpui.toml");
+        let local = gui.with_extension("local.toml");
+        let daemon = temp.0.join("config.toml");
+        let load = || Config::load_path(&gui, &daemon);
+        fs::write(&gui, "")?;
+        let shortcuts = |config: &Config, command| {
+            config
+                .keybindings
+                .shortcuts(command)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+
+        // No daemon file: Herdr's defaults.
+        assert_eq!(shortcuts(&load()?, Command::Tab), ["cmd-t", "ctrl-b c"]);
+
+        fs::write(
+            &daemon,
+            "[keys]\nprefix = \"ctrl+a\"\nsplit_vertical = [\"prefix+v\", \"prefix+\\\\\"]\nswitch_tab = [\"prefix+1..9\", \"alt+1..9\"]\n",
+        )?;
+        let config = load()?;
+        assert_eq!(
+            shortcuts(&config, Command::SplitRight),
+            ["cmd-d", "ctrl-a v", "ctrl-a \\"]
+        );
+        assert_eq!(
+            shortcuts(&config, Command::TabNumber(2)),
+            ["cmd-2", "ctrl-a 2", "alt-2"]
+        );
+        assert!(
+            config
+                .keybindings
+                .bindings()
+                .any(|binding| binding == (Command::TabNumber(2), "alt-2"))
+        );
+
+        // The GUI's own entry replaces the command's list, daemon chords too.
+        fs::write(&local, "[keybindings]\nsplit_right = \"cmd-d\"\n")?;
+        assert_eq!(shortcuts(&load()?, Command::SplitRight), ["cmd-d"]);
+
+        fs::write(&local, "")?;
+        fs::write(&daemon, "[keys\nprefix = ")?;
+        assert_eq!(shortcuts(&load()?, Command::Tab), ["cmd-t", "ctrl-b c"]);
+        Ok(())
     }
 
     #[test]
@@ -2287,15 +3188,17 @@ mod tests {
         let temp = TempDirectory::new()?;
         let path = temp.0.join("config-gpui.toml");
         let daemon = temp.0.join("absent.toml");
+        // A fresh install's first frame already shows the layout its seeded
+        // overrides will hold, without writing them yet.
         assert_eq!(
             Config::load_startup_path(&path, &daemon)?.layout.mode,
-            LayoutMode::Normal
+            LayoutMode::new(Density::Comfortable, Style::Rounded)
         );
         assert_eq!(fs::read_dir(&temp.0)?.count(), 0);
         let legacy = "layout = 'compact'\ntheme = 'Nord'\n[terminal]\nsize = 18\n";
         fs::write(&path, legacy)?;
         let config = Config::load_startup_path(&path, &daemon)?;
-        assert_eq!(config.layout.mode, LayoutMode::Compact);
+        assert_eq!(config.layout.mode, LayoutMode::from(Density::Compact));
         assert_eq!(config.theme, "Nord");
         assert_eq!(config.terminal.size, 18.);
         assert_eq!(fs::read_to_string(&path)?, legacy);
@@ -2345,7 +3248,7 @@ mod tests {
             let config = Config::load_startup_path(&path, &daemon)?;
             let theme = config.theme()?;
             samples.push(start.elapsed());
-            assert_eq!(config.layout.mode, LayoutMode::Compact);
+            assert_eq!(config.layout.mode, LayoutMode::from(Density::Compact));
             assert_eq!(Some(theme), Theme::builtin("Nord"));
         }
         let first = samples[0];
@@ -2355,6 +3258,62 @@ mod tests {
             samples[50], samples[94]
         );
         // Timing is reported, not gated: filesystem latency is machine-dependent.
+        Ok(())
+    }
+
+    #[test]
+    fn only_new_installs_start_with_the_rounded_comfortable_layout() -> anyhow::Result<()> {
+        let rounded = LayoutMode::new(Density::Comfortable, Style::Rounded);
+        let daemon = Path::new("absent.toml");
+        // The managed defaults keep the flat layout for everyone else.
+        assert_eq!(
+            Config::parse(DEFAULT_CONFIG)?.layout.mode,
+            LayoutMode::default()
+        );
+        assert_eq!(Config::parse(LOCAL_CONFIG)?.layout.mode, rounded);
+
+        let fresh = TempDirectory::new()?;
+        let path = fresh.0.join("config-gpui.toml");
+        assert_eq!(
+            Config::load_startup_path(&path, daemon)?.layout.mode,
+            rounded
+        );
+        assert_eq!(Config::load_path(&path, daemon)?.layout.mode, rounded);
+        assert_eq!(
+            fs::read_to_string(path.with_extension("local.toml"))?,
+            LOCAL_CONFIG
+        );
+        // A later launch reads the seeded file, not the first-launch fallback.
+        assert_eq!(
+            Config::load_startup_path(&path, daemon)?.layout.mode,
+            rounded
+        );
+
+        // Existing overrides without a layout keep the managed default.
+        let existing = TempDirectory::new()?;
+        let path = existing.0.join("config-gpui.toml");
+        fs::write(path.with_extension("local.toml"), "theme = 'Nord'\n")?;
+        for config in [
+            Config::load_startup_path(&path, daemon)?,
+            Config::load_path(&path, daemon)?,
+        ] {
+            assert_eq!(config.layout.mode, LayoutMode::default());
+        }
+        assert_eq!(
+            fs::read_to_string(path.with_extension("local.toml"))?,
+            "theme = 'Nord'\n"
+        );
+
+        // So does a personal config migrated from before local overrides.
+        let legacy = TempDirectory::new()?;
+        let path = legacy.0.join("config-gpui.toml");
+        fs::write(&path, "theme = 'Nord'\n")?;
+        for config in [
+            Config::load_startup_path(&path, daemon)?,
+            Config::load_path(&path, daemon)?,
+        ] {
+            assert_eq!(config.layout.mode, LayoutMode::default());
+        }
         Ok(())
     }
 
@@ -2392,7 +3351,7 @@ mod tests {
         fs::write(&local, overrides)?;
         fs::write(&path, format!("{MANAGED_HEADER}\ntheme = 'old-default'\n"))?;
         let config = Config::load_path(&path, &daemon)?;
-        assert_eq!(config.layout.mode, LayoutMode::Compact);
+        assert_eq!(config.layout.mode, LayoutMode::from(Density::Compact));
         assert_eq!(config.terminal.size, 19.);
         assert_eq!(config.terminal.fallbacks, Some(vec![]));
         assert!(config.notifications.enabled);
@@ -2408,7 +3367,7 @@ mod tests {
                 "[terminal]\nfallback = ['first', 'second']",
                 "[terminal]\nfallback = []",
             ],
-            ClipboardToast::default(),
+            &Daemon::default(),
         )?;
         assert_eq!(merged.terminal.fallbacks, Some(vec![]));
         Ok(())

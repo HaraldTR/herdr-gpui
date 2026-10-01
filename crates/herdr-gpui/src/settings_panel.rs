@@ -1,10 +1,8 @@
 //! Prepared preferences state and background-only configuration operations.
 use crate::{
     HerdrWindow,
-    config::FontRole,
     fonts::StyledFont,
     herdr_settings::{Edit, IndicatorStyle, Settings, THEME_NAMES, ToastDelivery},
-    search_input::SearchInput,
 };
 use gpui::{prelude::*, *};
 
@@ -64,8 +62,6 @@ pub(crate) struct SettingsPanel {
     pub(crate) native_reloading: bool,
     reload_status: Option<String>,
     native_task: Option<Task<()>>,
-    font_inputs: Vec<(FontRole, Entity<SearchInput>, f32)>,
-    font_inputs_deferred: bool,
 }
 
 impl SettingsPanel {
@@ -129,7 +125,7 @@ impl HerdrWindow {
             );
             match shared.theme(light) {
                 Ok(theme) => {
-                    self.theme = theme;
+                    self.theme = theme.with_contrast(self.config.contrast);
                     if let Some(mut appearance) =
                         cx.try_global::<crate::app::InitialAppearance>().cloned()
                         && appearance.config.theme == "Follow Herdr"
@@ -217,43 +213,17 @@ impl HerdrWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.finish_font_size_edit(true, cx);
         self.settings.tab = tab;
         if let Some(index) = Tab::ALL.iter().position(|item| *item == tab) {
             self.settings.tabs_scroll.scroll_to_item(index);
         }
         self.menu.preferences_scroll.set_offset(Point::default());
-        window.focus(&self.menu.focus);
+        window.focus(&self.menu.focus, cx);
         if tab == Tab::Integrations {
             self.load_integrations(cx);
         }
-        if tab == Tab::Font {
-            self.settings.font_inputs_deferred = true;
-            self.refresh_deferred_font_inputs(cx);
-        }
         cx.notify();
-    }
-
-    /// Only a tab entry requests fresh drafts; ordinary saves must retain other role edits.
-    pub(crate) fn refresh_deferred_font_inputs(&mut self, cx: &mut Context<Self>) {
-        if !self.settings.font_inputs_deferred
-            || self.native_settings_save_in_flight()
-            || self.config_load.is_some()
-        {
-            return;
-        }
-        self.settings.font_inputs_deferred = false;
-        self.settings.font_inputs = FontRole::ALL
-            .into_iter()
-            .map(|role| {
-                let font = self.config.font(role);
-                let input = cx.new(SearchInput::new);
-                input.update(cx, |input, cx| {
-                    input.set_text_selected(&font.family, cx);
-                    input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
-                });
-                (role, input, font.size)
-            })
-            .collect();
     }
 
     /// Return true when the preferences page owns routing, including native IME input.
@@ -266,25 +236,9 @@ impl HerdrWindow {
         if self.menu.page != Some(crate::menu::Page::Preferences) {
             return false;
         }
-        let focused = self.settings.tab == Tab::Font
-            && self
-                .settings
-                .font_inputs
-                .iter()
-                .any(|(_, input, _)| input.read(cx).focus.is_focused(window));
-        if focused {
-            if event.keystroke.key == "escape"
-                && !self
-                    .settings
-                    .font_inputs
-                    .iter()
-                    .any(|(_, input, _)| input.read(cx).is_composing())
-            {
-                window.focus(&self.menu.focus);
-                cx.stop_propagation();
-                window.prevent_default();
-            }
-            return true;
+        // The native size editor owns text and IME keys before tab navigation.
+        if self.menu.font_size_editor.is_some() {
+            return false;
         }
         if event.keystroke.key == "tab" {
             self.select_settings_tab(
@@ -299,19 +253,9 @@ impl HerdrWindow {
         false
     }
 
-    fn save_native_settings(
-        &mut self,
-        font: Option<(FontRole, String, f32)>,
-        cx: &mut Context<Self>,
-    ) {
+    fn follow_herdr_theme(&mut self, cx: &mut Context<Self>) {
         let config = self.config.clone();
-        self.save_native_settings_with(
-            move || match font {
-                Some((role, family, size)) => config.save_font(role, &family, size),
-                None => config.save_theme("Follow Herdr"),
-            },
-            cx,
-        );
+        self.save_native_settings_with(move || config.save_theme("Follow Herdr"), cx);
     }
 
     fn save_native_settings_with(
@@ -321,6 +265,7 @@ impl HerdrWindow {
     ) {
         if self.native_settings_save_in_flight()
             || self.config_load.is_some()
+            || self.font_size_saves.is_busy()
             || self.theme_save_in_flight()
             || self.menu.page == Some(crate::menu::Page::Themes)
         {
@@ -343,7 +288,6 @@ impl HerdrWindow {
                     Err(error) => {
                         this.settings.native_status = None;
                         this.settings.native_error = Some(format!("Save GUI config: {error}"));
-                        this.refresh_deferred_font_inputs(cx);
                     }
                 }
                 cx.notify();
@@ -392,6 +336,7 @@ impl HerdrWindow {
         let ready = self.settings.ready();
         let native_ready = !self.native_settings_save_in_flight()
             && self.config_load.is_none()
+            && !self.font_size_saves.is_busy()
             && !self.theme_save_in_flight();
         let mut body = div()
             .id("preferences-body")
@@ -410,9 +355,9 @@ impl HerdrWindow {
                 body = body.child(div().debug_selector(|| "preferences-theme".into()).py(px(8.)).child(format!("GUI theme: {}", self.config.theme)))
                     .child(div().flex().flex_wrap().gap(px(6.))
                         .child(self.settings_button("preferences-choose-theme", "Native override...", false, native_ready).on_click(cx.listener(|this, _, window, cx| {
-                            if !this.native_settings_save_in_flight() && this.config_load.is_none() && !this.theme_save_in_flight() { this.open_theme_picker(window, cx); }
+                            if !this.native_settings_save_in_flight() && this.config_load.is_none() && !this.font_size_saves.is_busy() && !this.theme_save_in_flight() { this.open_theme_picker(window, cx); }
                         })))
-                        .child(self.settings_button("preferences-follow-herdr", "Follow Herdr", self.config.theme == "Follow Herdr", native_ready).on_click(cx.listener(|this, _, _, cx| this.save_native_settings(None, cx)))))
+                        .child(self.settings_button("preferences-follow-herdr", "Follow Herdr", self.config.theme == "Follow Herdr", native_ready).on_click(cx.listener(|this, _, _, cx| this.follow_herdr_theme(cx)))))
                     .child(div().py(px(8.)).child("Choosing a shared theme preserves your native override. Follow Herdr to use it in the GUI."));
                 let mut choices = div().flex().flex_wrap().gap(px(6.));
                 for &name in THEME_NAMES {
@@ -473,7 +418,7 @@ impl HerdrWindow {
                             (AgentStatus::Idle, "Idle", "\u{25cb}"),
                             (AgentStatus::Unknown, "Unknown", "\u{b7}"),
                         ] {
-                            let color = rgb(shared.status_color(status, light));
+                            let color = rgb(self.theme.ink(shared.status_color(status, light)));
                             let mark = div()
                                 .flex_none()
                                 .flex()
@@ -566,77 +511,10 @@ impl HerdrWindow {
                     );
                 }
             }
-            Tab::Font => {
-                body = body.child(div().pb(px(8.)).child("Native GUI fonts. Sizes are logical pixels (8-48). Save each role to apply; configured fallbacks are preserved."));
-                for (role, input, size) in &self.settings.font_inputs {
-                    let role = *role;
-                    let input = input.clone();
-                    let mut row = div()
-                        .debug_selector(move || format!("preferences-font-{}", role.key()))
-                        .py(px(8.))
-                        .child(role.label())
-                        .child(
-                            div()
-                                .debug_selector(move || format!("font-input-{}", role.key()))
-                                .min_w_0()
-                                .when(native_ready, |row| row.child(input.clone()))
-                                .when(!native_ready, |row| {
-                                    row.opacity(0.5).child(input.read(cx).text().to_owned())
-                                }),
-                        );
-                    let mut buttons = div().flex().flex_wrap().gap(px(6.)).items_center();
-                    for (label, delta) in [("-", -1.), ("+", 1.)] {
-                        buttons = buttons.child(
-                            self.settings_button(
-                                format!("font-{}-{label}", role.key()),
-                                label,
-                                false,
-                                native_ready,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    if !this.native_settings_save_in_flight()
-                                        && this.config_load.is_none()
-                                        && !this.theme_save_in_flight()
-                                        && let Some((_, _, size)) = this
-                                            .settings
-                                            .font_inputs
-                                            .iter_mut()
-                                            .find(|(r, _, _)| *r == role)
-                                    {
-                                        *size = (*size + delta).clamp(8., 48.);
-                                        cx.notify();
-                                    }
-                                },
-                            )),
-                        );
-                    }
-                    let size = *size;
-                    buttons = buttons.child(format!("{size} px")).child(
-                        self.settings_button(
-                            format!("font-{}-save", role.key()),
-                            "Save",
-                            false,
-                            native_ready,
-                        )
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
-                                window.focus(&this.menu.focus);
-                                this.save_native_settings(
-                                    Some((role, input.read(cx).text().trim().into(), size)),
-                                    cx,
-                                );
-                            },
-                        )),
-                    );
-                    row = row.child(buttons);
-                    body = body.child(row);
-                }
-            }
-            Tab::Integrations | Tab::General => {}
+            Tab::Font | Tab::Integrations | Tab::General => {}
         }
         let content = match tab {
-            Tab::General => self.render_general_preferences(cx).into_any_element(),
+            Tab::Font | Tab::General => self.render_native_preferences(cx).into_any_element(),
             Tab::Integrations => self.render_integrations(cx).into_any_element(),
             _ => body.into_any_element(),
         };
@@ -709,6 +587,9 @@ impl HerdrWindow {
                     .px(px(12.))
                     .py(px(8.))
                     .text_size(px(self.config.ui.size * 0.85))
+                    .when_some(self.font_size_saves.status(), |footer, text| {
+                        footer.child(div().child(text.to_owned()))
+                    })
                     .when_some(self.settings.status.clone(), |footer, text| {
                         footer.child(text)
                     })
@@ -755,11 +636,12 @@ mod tests {
             view.update(cx, |view, cx| {
                 view.open_menu(window, cx);
                 view.menu.page = Some(crate::menu::Page::Preferences);
-                view.config.layout.mode = crate::config::LayoutMode::Compact;
+                view.config.layout.mode =
+                    crate::config::LayoutMode::from(crate::config::Density::Compact);
                 view.config.layout.sidebar_gap = 16.;
                 view.select_settings_tab(Tab::General, window, cx);
             });
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         for selector in ["preferences-layout", "preferences-sidebar-gap"] {
             assert!(cx.debug_bounds(selector).is_some(), "{selector}");
@@ -769,7 +651,7 @@ mod tests {
             view.update(cx, |view, cx| {
                 view.select_settings_tab(Tab::Sound, window, cx);
             });
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         assert!(cx.debug_bounds("sound-preview").is_some());
         assert!(cx.debug_bounds("preferences-layout").is_none());
@@ -819,6 +701,31 @@ mod tests {
             let appearance = cx.global::<crate::app::InitialAppearance>();
             assert_eq!(appearance.theme, expected);
             assert_eq!(appearance.config.terminal.size, saved_size);
+        });
+    }
+
+    #[gpui::test]
+    #[allow(clippy::unwrap_used)]
+    fn followed_theme_applies_contrast_to_a_fresh_palette(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        view.update(cx, |view, cx| {
+            let shared = Settings::parse_text("[theme]\nname = 'nord'").unwrap();
+            let light = matches!(
+                cx.window_appearance(),
+                WindowAppearance::Light | WindowAppearance::VibrantLight
+            );
+            let fresh = shared.theme(light).unwrap();
+            view.settings.shared = Some(shared);
+            view.config.theme = "Follow Herdr".into();
+            for contrast in [
+                crate::contrast::Contrast::High,
+                crate::contrast::Contrast::High,
+                crate::contrast::Contrast::Standard,
+            ] {
+                view.config.contrast = contrast;
+                view.apply_shared_theme(cx);
+                assert_eq!(view.theme, fresh.clone().with_contrast(contrast));
+            }
         });
     }
 
@@ -886,7 +793,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn font_tab_entry_waits_for_startup_or_post_save_config(cx: &mut TestAppContext) {
+    fn font_tab_reads_loaded_config_without_separate_drafts(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
         for reenter in [false, true] {
             cx.update(|window, cx| {
@@ -894,11 +801,6 @@ mod tests {
                     if reenter {
                         view.select_settings_tab(Tab::Font, window, cx);
                         view.select_settings_tab(Tab::General, window, cx);
-                        // Hold a native write slot before its synthetic post-save reload.
-                        view.settings.native_task = Some(Task::ready(()));
-                        view.select_settings_tab(Tab::Font, window, cx);
-                        assert!(view.settings.font_inputs_deferred);
-                        view.settings.native_task = None;
                     }
                     let mut config = view.config.clone();
                     config.sidebar.family = if reenter {
@@ -913,79 +815,76 @@ mod tests {
                     // Completion cannot run until this UI update returns. No disk writes are needed.
                     view.select_settings_tab(Tab::Font, window, cx);
                     assert!(view.config_load.is_some());
-                    assert!(view.settings.font_inputs_deferred);
                 })
             });
             cx.run_until_parked();
-            view.read_with(cx, |view, cx| {
-                assert!(!view.settings.font_inputs_deferred);
+            view.read_with(cx, |view, _| {
                 assert!(!view.native_settings_save_in_flight());
                 assert!(view.config_load.is_none());
-                let (_, input, size) = &view.settings.font_inputs[0];
                 assert_eq!(
-                    input.read(cx).text(),
+                    view.config.sidebar.family,
                     if reenter {
                         "Saved Sidebar"
                     } else {
                         "Loaded Sidebar"
                     }
                 );
-                assert_eq!(*size, if reenter { 23. } else { 19. });
+                assert_eq!(view.config.sidebar.size, if reenter { 23. } else { 19. });
             });
         }
     }
 
     #[gpui::test]
-    fn config_completion_preserves_font_drafts_without_tab_reentry(cx: &mut TestAppContext) {
+    fn font_controls_are_only_on_font_tab(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        cx.simulate_resize(size(px(800.), px(600.)));
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.select_settings_tab(Tab::Font, window, cx);
-                let (_, input, size) = &mut view.settings.font_inputs[0];
-                input.update(cx, |input, cx| {
-                    input.set_text_selected("Unsaved family", cx)
-                });
-                *size = 27.;
-                view.load_gui_config_with(|| Ok((Default::default(), Default::default())), cx);
-                view.settings.native_reloading = true;
-                assert!(!view.settings.font_inputs_deferred);
-            })
+                view.open_menu(window, cx);
+                view.menu.page = Some(crate::menu::Page::Preferences);
+            });
+            window.draw(cx).clear(cx);
         });
-        cx.run_until_parked();
-        view.read_with(cx, |view, cx| {
-            let (_, input, size) = &view.settings.font_inputs[0];
-            assert_eq!(input.read(cx).text(), "Unsaved family");
-            assert_eq!(*size, 27.);
-            assert!(!view.settings.font_inputs_deferred);
+        let Some(font_tab) = cx.debug_bounds("preferences-tab-Font") else {
+            panic!("Font tab is missing");
+        };
+        cx.simulate_click(font_tab.center(), Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.read_with(cx, |view, _| assert_eq!(view.settings.tab, Tab::Font));
+        for selector in [
+            "preferences-font-all-choose",
+            "preferences-font-sidebar-size",
+            "preferences-font-sidebar-increase",
+        ] {
+            assert!(cx.debug_bounds(selector).is_some(), "{selector}");
+        }
+        assert!(cx.debug_bounds("preferences-shared-path").is_none());
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.select_settings_tab(Tab::General, window, cx)
+            });
+            window.draw(cx).clear(cx);
         });
+        assert!(cx.debug_bounds("preferences-font-all-choose").is_none());
+        assert!(cx.debug_bounds("preferences-high-contrast").is_some());
     }
 
     #[gpui::test]
-    fn preferences_font_editor_is_not_interactive_during_native_reload(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            crate::bind_keys(cx);
-            crate::sidebar::layout_tests::fixture_window(window, cx)
-        });
-        cx.simulate_resize(size(px(800.), px(600.)));
-        let original = cx.update(|window, cx| {
+    fn native_theme_save_blocks_both_font_workflows(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        cx.update(|window, cx| {
             view.update(cx, |view, cx| {
                 view.open_menu(window, cx);
                 view.menu.page = Some(crate::menu::Page::Preferences);
                 view.select_settings_tab(Tab::Font, window, cx);
                 view.settings.native_reloading = true;
-                view.settings.font_inputs[0].1.read(cx).text().to_owned()
-            })
+                let original = view.config.sidebar.size;
+                view.set_font_size(crate::config::FontFace::Sidebar, original + 1., cx);
+                view.open_font_picker(crate::font_picker::FontTarget::All, window, cx);
+                assert_eq!(view.config.sidebar.size, original);
+                assert!(!view.font_size_saves.is_busy());
+                assert_eq!(view.menu.page, Some(crate::menu::Page::Preferences));
+            });
         });
-        cx.update(|window, cx| window.draw(cx).clear());
-        let Some(input) = cx.debug_bounds("font-input-sidebar") else {
-            panic!("font editor");
-        };
-        cx.simulate_click(input.center(), Default::default());
-        cx.simulate_keystrokes("cmd-a b a d");
-        view.read_with(cx, |view, cx| {
-            assert_eq!(view.settings.font_inputs[0].1.read(cx).text(), original);
-        });
-        cx.simulate_keystrokes("tab");
-        view.read_with(cx, |view, _| assert_eq!(view.settings.tab, Tab::General));
     }
 }

@@ -68,7 +68,7 @@ mod tests {
         });
         cx.simulate_resize(size(px(800.), px(600.)));
         cx.update(|window, cx| {
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         let original_focus = view.read_with(cx, |view, _| {
             view.live.snapshot.as_ref().unwrap().focused_tab_id.clone()
@@ -79,11 +79,20 @@ mod tests {
             MouseButton::Right,
             Modifiers::default(),
         );
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        // A second press before release must not dismiss the menu just opened.
+        cx.simulate_mouse_down(
+            tab_bounds.center(),
+            MouseButton::Right,
+            Modifiers::default(),
+        );
+        assert!(view.read_with(cx, |v, _| v.menu.page == Some(Page::Tab)));
         cx.simulate_mouse_up(
             tab_bounds.center(),
             MouseButton::Right,
             Modifiers::default(),
         );
+        assert!(view.read_with(cx, |v, _| !v.menu.opening_right_click));
         view.read_with(cx, |view, _| {
             let tab = view.menu.tab.as_ref().unwrap();
             assert_eq!(tab.target.tab, "inactive");
@@ -112,7 +121,7 @@ mod tests {
             })
         });
         cx.update(|window, cx| {
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         cx.simulate_keystrokes("enter");
         assert!(view.read_with(cx, |v, _| v.menu.page == Some(Page::RenameTab)));
@@ -121,7 +130,7 @@ mod tests {
                 input.set_text_selected("", cx);
                 input.replace_and_mark_text_in_range(None, "\u{4e2d}", Some(0..1), window, cx);
             });
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         cx.simulate_keystrokes("escape");
         assert!(view.read_with(cx, |v, _| v.menu.page == Some(Page::RenameTab)));
@@ -148,7 +157,7 @@ mod tests {
             view.update(cx, |view, cx| {
                 view.open_tab_menu("inactive", tab_bounds.center(), window, cx)
             });
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         assert!(cx.debug_bounds("tab-menu-1").is_none());
         let rename_row = cx.debug_bounds("tab-menu-0").unwrap();
@@ -187,7 +196,7 @@ mod tests {
                 view.update(cx, |view, cx| {
                     view.open_tab_menu("inactive", point(px(799.), px(599.)), window, cx)
                 });
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
             });
             let panel = cx.debug_bounds("menu-panel").unwrap();
             assert_eq!(panel.left(), (px(788.) - panel.size.width).round());
@@ -398,7 +407,7 @@ impl HerdrWindow {
                     input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
                     input.set_placeholder("Tab name", cx);
                     input.set_text_selected(&target.label, cx);
-                    window.focus(&input.focus);
+                    window.focus(&input.focus, cx);
                 });
                 if let Some(tab) = &mut self.menu.tab {
                     tab.input = Some(input);
@@ -447,7 +456,7 @@ impl HerdrWindow {
                     tab.pending = Some(request);
                     tab.error = None;
                 }
-                window.focus(&self.menu.focus);
+                window.focus(&self.menu.focus, cx);
                 cx.notify();
             }
             Err(error) => self.tab_error(error, cx),
@@ -473,7 +482,7 @@ impl HerdrWindow {
                 if let Some(tab) = &mut self.menu.tab {
                     tab.pending = None;
                     if let Some(input) = &tab.input {
-                        window.focus(&input.read(cx).focus);
+                        window.focus(&input.read(cx).focus.clone(), cx);
                     }
                 }
                 self.tab_error(error, cx);
@@ -589,7 +598,7 @@ impl HerdrWindow {
                                 div()
                                     .id("tab-rename-submit")
                                     .p(px(6.))
-                                    .rounded(px(4.))
+                                    .rounded(px(crate::config::corners::CONTROL))
                                     .bg(rgb(theme.active))
                                     .cursor_pointer()
                                     .child(if tab.pending.is_some() {

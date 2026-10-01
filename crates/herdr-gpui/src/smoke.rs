@@ -20,6 +20,14 @@ use std::{
 
 pub static EXIT_CODE: AtomicU8 = AtomicU8::new(0);
 
+#[cfg(target_os = "macos")]
+#[path = "smoke_selection.rs"]
+mod selection;
+
+#[cfg(target_os = "macos")]
+#[path = "smoke_clipboard.rs"]
+mod clipboard;
+
 fn banner_height() -> f32 {
     if env!("HERDR_BUILD_WORKTREE") == "1" {
         22.
@@ -132,10 +140,10 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
         #[cfg(target_os = "macos")]
         if let Err(error) = sidebar_preferences(handle, cx).await {
             eprintln!("SIDEBAR native preferences FAIL: {error:#}");
-            let _ = cx.update(|cx| cx.quit());
+            cx.update(|cx| cx.quit());
             return;
         }
-        for frame in 0..24 {
+        for frame in 0..72 {
             timer.timer(Duration::from_millis(100)).await;
             let result = AnyWindowHandle::from(handle).update(
                 cx,
@@ -143,7 +151,18 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                     use crate::sidebar::layout_tests::PaintedProbes;
                     let (w, h) =
                         [(1200., 780.), (640., 400.), (1000., 650.), (800., 600.)][(frame % 12) / 3];
-                    let compact = frame >= 12;
+                    // Retain the glyph fixture's list viewport while reserving
+                    // the fixed device footer below both scrollable sections.
+                    use crate::config::{Density, LayoutMode, Style};
+                    let density = [Density::Comfortable, Density::Normal, Density::Compact][frame / 12 % 3];
+                    let style = [Style::Flat, Style::Rounded][frame / 36];
+                    // Rounded rows are taller; grow both sections so the probed
+                    // rows stay inside their lists at the smallest size too.
+                    let h = h
+                        + sidebar::DEVICE_FOOTER_HEIGHT
+                        + if style == Style::Rounded { 160. } else { 0. };
+                    let mode = LayoutMode::new(density, style);
+                    let compact = density == Density::Compact;
                     if frame % 3 == 0 {
                         window.resize(fixture_size(w, h));
                     } else if window.viewport_size() != fixture_size(w, h) {
@@ -156,15 +175,11 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                     root.downcast::<HerdrWindow>()
                         .map_err(|_| anyhow!("unexpected root"))?
                         .update(cx, |view, cx| {
-                            view.config.layout.mode = if compact {
-                                crate::config::LayoutMode::Compact
-                            } else {
-                                crate::config::LayoutMode::Normal
-                            };
+                            view.config.layout.mode = mode;
                             cx.notify();
                         });
                     window.refresh();
-                    window.draw(cx).clear();
+                    window.draw(cx).clear(cx);
                     cx.default_global::<PaintedProbes>().check()?;
                     let probes = &cx.global::<PaintedProbes>().0;
                     let mut failed = false;
@@ -191,7 +206,26 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                         }
                         let expected_short = input.len() < 20;
                         let title_icon = matches!(input, "herdr" | "herdr-gpui-sidebar-rendering-regression-investigation");
-                        let expected_width = px(sidebar::LABEL_WIDTH + if compact { 16. } else { 0. } - if title_icon { sidebar::ICON_RESERVE } else { 0. });
+                        // Rounded rows give up the highlight's inset, the
+                        // density's gap, on both edges.
+                        let extra_width = match density {
+                            Density::Comfortable => 0.,
+                            Density::Normal => 10.,
+                            Density::Compact => 16.,
+                        } - match (style, density) {
+                            (Style::Flat, _) => 0.,
+                            (Style::Rounded, Density::Comfortable) => 16.,
+                            (Style::Rounded, Density::Normal) => 12.,
+                            (Style::Rounded, Density::Compact) => 8.,
+                        };
+                        let icon_reserve = if title_icon {
+                            sidebar::ICON_RESERVE
+                        } else if matches!(input, "Claude Code" | "agent") {
+                            16. // 12px agent mark and 4px gap before its name.
+                        } else {
+                            0.
+                        };
+                        let expected_width = px(sidebar::LABEL_WIDTH + extra_width - icon_reserve);
                         if p.glyph_text != p.cached
                             || (expected_short && p.glyph_text != input)
                             || (!expected_short
@@ -210,7 +244,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                         bail!("incomplete/cropped native glyph output");
                     }
                     eprintln!(
-                        "SIDEBAR verified frame={frame} compact={compact} viewport={:?} clipped=0",
+                        "SIDEBAR verified frame={frame} mode={mode:?} viewport={:?} clipped=0",
                         window.viewport_size()
                     );
                     Ok(())
@@ -221,10 +255,68 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                 std::process::exit(1);
             }
         }
+        // The other row layouts place text by their own geometry, so they are
+        // held to what every layout owes: shaped glyphs match the text they
+        // were given, and none is cropped or wider than its box.
+        {
+            use crate::config::LayoutMode;
+            cx.update(|cx| cx.set_global(sidebar::layout_tests::VerifyChildGeometry(false)));
+            for mode in [LayoutMode::Superset, LayoutMode::Orca, LayoutMode::Minimal] {
+                        timer.timer(Duration::from_millis(100)).await;
+                        let result = AnyWindowHandle::from(handle).update(
+                            cx,
+                            |root, window, cx| -> Result<()> {
+                                use crate::sidebar::layout_tests::PaintedProbes;
+                                cx.default_global::<PaintedProbes>().0.clear();
+                                root.downcast::<HerdrWindow>()
+                                    .map_err(|_| anyhow!("unexpected root"))?
+                                    .update(cx, |view, cx| {
+                                        view.config.layout.mode = mode;
+                                        cx.notify();
+                                    });
+                                window.refresh();
+                                window.draw(cx).clear(cx);
+                                cx.default_global::<PaintedProbes>().check()?;
+                                let probes = &cx.global::<PaintedProbes>().0;
+                                // The long name must be cut short in every
+                                // layout, which proves ellipsizing natively.
+                                const LONG: &str =
+                                    "herdr-gpui-sidebar-rendering-regression-investigation";
+                                if !probes.get(LONG).is_some_and(|p| p.glyph_text.ends_with('\u{2026}')) {
+                                    bail!("{mode}: {LONG:?} was not ellipsized");
+                                }
+                                for input in ["herdr", "Claude Code", LONG] {
+                                    let p = probes
+                                        .get(input)
+                                        .with_context(|| format!("missing paint: {input}"))?;
+                                    // Orca shares one line between an agent and
+                                    // its place, so a name may end in an ellipsis.
+                                    let shown = p.glyph_text == input
+                                        || p.glyph_text.strip_suffix('\u{2026}').is_some_and(
+                                            |kept| input.starts_with(kept.trim_end()),
+                                        );
+                                    if p.glyph_text != p.cached
+                                        || !shown
+                                        || p.clipped
+                                        || p.width > p.bounds.size.width
+                                    {
+                                        bail!("{mode}: bad paint {input:?} {p:?}");
+                                    }
+                                }
+                                eprintln!("SIDEBAR verified layout={mode}");
+                                Ok(())
+                            },
+                        );
+                        if !matches!(result, Ok(Ok(()))) {
+                            eprintln!("SIDEBAR native FAIL: {result:?}");
+                            std::process::exit(1);
+                        }
+            }
+        }
         let _ = handle.update(cx, |view, _, cx| {
             // Later fixtures add PR badges and dialogs that change label budgets.
             cx.set_global(sidebar::layout_tests::VerifyChildGeometry(false));
-            view.config.layout.mode = crate::config::LayoutMode::Normal;
+            view.config.layout.mode = crate::config::LayoutMode::from(crate::config::Density::Comfortable);
             cx.notify();
         });
         #[cfg(target_os = "macos")]
@@ -249,7 +341,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                 cx.default_global::<sidebar::layout_tests::PaintedProbes>()
                     .0
                     .clear();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 let label = match step {
                     0 => "\u{25be}",
                     1 => "\u{25b8}",
@@ -269,10 +361,34 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
             timer.timer(Duration::from_millis(50)).await;
             let result = if step == 3 {
                 result.and_then(|()| {
-                    let target = AnyWindowHandle::from(handle)
-                        .update(cx, |_, window, _| sidebar::native_tests::Target::acquire(window))
+                    let (target, point) = AnyWindowHandle::from(handle)
+                        .update(cx, |root, window, cx| -> Result<_> {
+                            // Paint the reopened menu before targeting its outside hitbox.
+                            window.draw(cx).clear(cx);
+                            let view = root.downcast::<HerdrWindow>()
+                                .map_err(|_| anyhow!("unexpected root"))?;
+                            let state = view.read(cx);
+                            if state.menu.page != Some(menu::Page::Menu) {
+                                bail!("native footer click did not reopen menu");
+                            }
+                            let menu::Cover::Panel(panel) = state.menu.cover.get() else {
+                                bail!("reopened native menu has no painted panel bounds");
+                            };
+                            let viewport = Bounds::new(Point::default(), window.viewport_size());
+                            let x = if viewport.right() - panel.right() >= panel.left() {
+                                (panel.right() + viewport.right()) / 2.
+                            } else {
+                                panel.left() / 2.
+                            };
+                            let point = gpui::point(x, viewport.center().y);
+                            if !viewport.contains(&point) || panel.contains(&point) {
+                                bail!("no outside click target: panel={panel:?} viewport={viewport:?}");
+                            }
+                            eprintln!("SIDEBAR native outside click: panel={panel:?} viewport={viewport:?} target={point:?}");
+                            Ok((sidebar::native_tests::Target::acquire(window)?, point))
+                        })
                         .context("acquiring outside-click target")??;
-                    target.click(700., 500. + f64::from(banner_height()))
+                    target.click(point.x.to_f64(), point.y.to_f64())
                 })
             } else {
                 result
@@ -342,7 +458,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                 });
                 cx.default_global::<sidebar::layout_tests::PaintedProbes>().0.clear();
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 let probes = &cx.global::<sidebar::layout_tests::PaintedProbes>().0;
                 if probes.contains_key("Claude Code") != show_agents
                     || !probes.contains_key("herdr")
@@ -380,7 +496,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                     std::process::exit(1);
                 }
                 let point = AnyWindowHandle::from(handle).update(cx, |_, window, cx| {
-                    window.draw(cx).clear();
+                    window.draw(cx).clear(cx);
                     cx.global::<sidebar::layout_tests::PaintedProbes>().0.get(if action == menu::WorkspaceAction::DeleteWorktree { "sidebar-child" } else { "agent-launcher" }).map(|probe| {
                         eprintln!("DIALOG native {action:?} viewport={:?}", window.viewport_size());
                          probe.bounds.center()
@@ -392,7 +508,13 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                     _ => Err(anyhow!("missing native workspace")),
                 };
                 timer.timer(Duration::from_millis(50)).await;
-                let verified = AnyWindowHandle::from(handle).update(cx, |root, window, cx| -> Result<()> {
+                // Observe only this dialog's inputs without exposing menu-private fields.
+                let inputs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                let observed = inputs.clone();
+                let subscription = cx.update(|cx| cx.observe_new::<crate::search_input::SearchInput>(
+                    move |_, _, cx| observed.borrow_mut().push(cx.entity()),
+                ));
+                let opened = AnyWindowHandle::from(handle).update(cx, |root, window, cx| -> Result<_> {
                     clicked?;
                     let view = root.downcast::<HerdrWindow>().map_err(|_| anyhow!("unexpected root"))?;
                     if view.read(cx).menu.page != Some(menu::Page::Workspace) { bail!("right click did not open workspace menu"); }
@@ -403,7 +525,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                         Ok(())
                     })?;
                     cx.default_global::<sidebar::layout_tests::PaintedProbes>().0.clear();
-                    window.draw(cx).clear();
+                    window.draw(cx).clear(cx);
                     let probes = &cx.global::<sidebar::layout_tests::PaintedProbes>().0;
                     for (text, probe) in probes.iter().filter(|(text, _)| text.starts_with("#8 ") || matches!(text.as_str(), "+1730" | "-31")) {
                         if probe.glyph_text != probe.cached || probe.clipped || probe.glyph_text.is_empty() {
@@ -428,17 +550,59 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                     for key in keys.split(' ') {
                         window.dispatch_keystroke(Keystroke::parse(key)?, cx);
                     }
-                    window.draw(cx).clear();
+                    window.draw(cx).clear(cx);
                     if view.read(cx).menu.page != Some(menu::Page::Dialog(action)) { bail!("workspace menu opened wrong dialog"); }
                     window.dispatch_action(Box::new(RunCommand { command: Command::Tab }), cx);
+                    let branch = view.read(cx).menu.input.as_ref().map(|input| input.text.clone());
+                    Ok((before, branch))
+                });
+                // Finish entity creation before inspecting the dialog's focused input.
+                let verified = AnyWindowHandle::from(handle).update(cx, |root, window, cx| -> Result<()> {
+                    let (before, branch) = opened.context("opening native dialog")??;
+                    let view = root.downcast::<HerdrWindow>().map_err(|_| anyhow!("unexpected root"))?;
+                    let name = if action == menu::WorkspaceAction::NewWorktree {
+                        if !view.read(cx).worktree_name_focused(window, cx) {
+                            bail!("new worktree did not focus its name field");
+                        }
+                        Some(inputs.borrow().iter()
+                            .find(|input| input.read(cx).focus.is_focused(window))
+                            .cloned().context("missing native worktree name editor")?)
+                    } else {
+                        None
+                    };
                     // Only the editable dialogs carry a text field; confirmations do not.
                     if matches!(action, menu::WorkspaceAction::Rename | menu::WorkspaceAction::NewWorktree) {
                         window.dispatch_keystroke(Keystroke::parse("cmd-a")?, cx);
                         for ch in "long-label-\u{65e5}\u{672c}-\u{1f600}".repeat(4).chars() {
                             window.dispatch_keystroke(Keystroke::parse(&ch.to_string())?, cx);
                         }
-                        window.draw(cx).clear();
-                        view.update(cx, |view, cx| -> Result<()> {
+                        window.draw(cx).clear(cx);
+                        if let Some(name) = name {
+                            if view.read(cx).menu.input.as_ref().map(|input| &input.text) != branch.as_ref() {
+                                bail!("typing the worktree name changed its branch draft");
+                            }
+                            name.update(cx, |input, cx| -> Result<()> {
+                                if input.text() != "long-label-\u{65e5}\u{672c}-\u{1f600}".repeat(4)
+                                    || !input.focus.is_focused(window) {
+                                    bail!("native worktree name editor lost Unicode text or focus");
+                                }
+                                let end = input.text().encode_utf16().count();
+                                let field = input.bounds_for_range(0..end, Bounds::default(), window, cx)
+                                    .context("missing native name field bounds")?;
+                                let caret = input.bounds_for_range(end..end, Bounds::default(), window, cx)
+                                    .context("missing native name IME bounds")?;
+                                // Text-range bounds end at the caret; Bounds::contains
+                                // excludes that right edge, unlike an input's padded box.
+                                if caret.left() != field.right() || caret.top() != field.top()
+                                    || caret.bottom() != field.bottom() || field.size.width <= px(0.)
+                                    || field.left() < px(0.) || field.top() < px(0.)
+                                    || field.right() > window.viewport_size().width || field.bottom() > window.viewport_size().height {
+                                    bail!("native name caret/field out of bounds: field={field:?} caret={caret:?} viewport={:?}", window.viewport_size());
+                                }
+                                Ok(())
+                            })?;
+                        } else {
+                            view.update(cx, |view, cx| -> Result<()> {
                             let input = view.menu.input.as_ref().context("missing native editor")?;
                             if input.text != "long-label-\u{65e5}\u{672c}-\u{1f600}".repeat(4) { bail!("native editor lost Unicode text"); }
                             let end = input.text.encode_utf16().count();
@@ -447,12 +611,14 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                             if !field.contains(&caret.origin) || field.right() > window.viewport_size().width || field.bottom() > window.viewport_size().height { bail!("native dialog caret/field out of bounds"); }
                             Ok(())
                         })?;
+                        }
                     }
                     window.dispatch_keystroke(Keystroke::parse("escape")?, cx);
                     let state = view.read(cx);
                     if state.menu.page.is_some() || state.input_probe.text != before.text || state.input_probe.keys != before.keys || state.input_probe.actions != before.actions || !state.focus.is_focused(window) { bail!("workspace dialog leaked input or lost focus"); }
                     Ok(())
                 });
+                drop(subscription);
                 if !matches!(verified, Ok(Ok(()))) {
                     eprintln!("SIDEBAR native dialog FAIL: {verified:?}");
                     std::process::exit(1);
@@ -477,7 +643,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                         }
                     });
                     cx.default_global::<sidebar::layout_tests::PaintedProbes>().0.clear();
-                    window.draw(cx).clear();
+                    window.draw(cx).clear(cx);
                     if state == 1 {
                         let probe = cx.global::<sidebar::layout_tests::PaintedProbes>().0.get("ABCD-1234").context("GitHub device code not painted")?;
                         if probe.clipped || probe.glyph_text != "ABCD-1234" { bail!("GitHub device code clipped"); }
@@ -509,11 +675,11 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
             std::process::exit(1);
         }
         let probes = cx.update(|cx| cx.default_global::<sidebar::layout_tests::PaintedProbes>().check());
-        if !matches!(probes, Ok(Ok(()))) {
+        if !matches!(probes, Ok(())) {
             eprintln!("SIDEBAR native paint FAIL: {probes:?}");
             std::process::exit(1);
         }
-        eprintln!("SIDEBAR native PASS: {cascade}; 24 Menlo draws, normal/compact layouts at 4 sizes, collapse/expand, menu isolation, PR title/stats glyphs, GitHub auth fixtures, right-click dialogs and Unicode fields at 2 sizes; host routing, disabled selection, scoped repositories, resized host/agent glyphs, independent scroll and decoy key window");
+        eprintln!("SIDEBAR native PASS: {cascade}; 72 Menlo draws, flat and rounded normal/compact/comfortable layouts at 4 sizes, collapse/expand, menu isolation, PR title/stats glyphs, GitHub auth fixtures, right-click dialogs and Unicode fields at 2 sizes; host routing, disabled selection, scoped repositories, resized host/agent glyphs, independent scroll and decoy key window");
         std::process::exit(0);
     })
     .detach();
@@ -536,7 +702,7 @@ fn start_notifications(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                     view.menu.reset();
                     view.config.notifications.enabled = false;
                     view.config.notifications.delay_seconds = 3600;
-                    window.focus(&view.focus);
+                    window.focus(&view.focus, cx);
                     let selected = view.selected_endpoint;
                     let snapshot = view.live.snapshot.clone();
                     view.show_toast_preview(kind, cx);
@@ -550,7 +716,7 @@ fn start_notifications(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                     }
                     Ok(())
                 });
-                let drawn = AnyWindowHandle::from(handle).update(cx, |_, window, cx| window.draw(cx).clear());
+                let drawn = AnyWindowHandle::from(handle).update(cx, |_, window, cx| window.draw(cx).clear(cx));
                 if !matches!(result, Ok(Ok(()))) || drawn.is_err() {
                     eprintln!("NOTIFICATIONS native FAIL: {result:?} {drawn:?}");
                     std::process::exit(1);
@@ -628,7 +794,7 @@ async fn sidebar_preferences(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncAp
                     cx,
                     |root, window, cx| -> Result<_> {
                         window.refresh();
-                        window.draw(cx).clear();
+                        window.draw(cx).clear(cx);
                         let entity = root
                             .downcast::<HerdrWindow>()
                             .map_err(|_| anyhow!("unexpected root"))?;
@@ -681,7 +847,7 @@ async fn sidebar_preferences(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncAp
             }
             AnyWindowHandle::from(handle).update(cx, |root, window, cx| -> Result<()> {
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 let entity = root
                     .downcast::<HerdrWindow>()
                     .map_err(|_| anyhow!("unexpected root"))?;
@@ -744,13 +910,13 @@ async fn sidebar_preferences(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncAp
             if tab == Tab::Font {
                 let (target, point, before) =
                     handle.update(cx, |view, window, _| -> Result<_> {
-                        // First font row follows the explanatory text. Its center
-                        // lands in the editor, above the size/save button strip.
+                        // The All fonts row follows the heading. Its center
+                        // lands in the installed-font chooser, not the label.
                         let row = view
                             .menu
                             .preferences_scroll
                             .bounds_for_item(1)
-                            .context("missing first font row")?;
+                            .context("missing All fonts row")?;
                         let body = view.menu.preferences_scroll.bounds();
                         if row.left() < body.left()
                             || row.right() > body.right()
@@ -767,7 +933,7 @@ async fn sidebar_preferences(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncAp
                 target.click(point.x.to_f64(), point.y.to_f64())?;
                 drop(target);
                 AnyWindowHandle::from(handle).update(cx, |root, window, cx| -> Result<()> {
-                    window.draw(cx).clear();
+                    window.draw(cx).clear(cx);
                     let entity = root
                         .downcast::<HerdrWindow>()
                         .map_err(|_| anyhow!("unexpected root"))?;
@@ -780,8 +946,10 @@ async fn sidebar_preferences(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncAp
                     for key in ["cmd-a", "M", "e", "n", "l", "o", "tab"] {
                         window.dispatch_keystroke(Keystroke::parse(key)?, cx);
                     }
-                    window.draw(cx).clear();
-                    if entity.read(cx).settings.tab != Tab::Font || !editor_focus.is_focused(window)
+                    window.draw(cx).clear(cx);
+                    if entity.read(cx).menu.page != Some(menu::Page::Fonts)
+                        || entity.read(cx).settings.tab != Tab::Font
+                        || !editor_focus.is_focused(window)
                     {
                         bail!("font typing/Tab lost editor focus");
                     }
@@ -789,7 +957,7 @@ async fn sidebar_preferences(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncAp
                     if !entity.read(cx).menu.focus.is_focused(window) {
                         bail!("font Escape did not return focus to Preferences");
                     }
-                    window.draw(cx).clear();
+                    window.draw(cx).clear(cx);
                     window.dispatch_keystroke(Keystroke::parse("tab")?, cx);
                     if entity.read(cx).settings.tab != Tab::General {
                         bail!("Tab did not resume Preferences section navigation");
@@ -807,7 +975,7 @@ async fn sidebar_preferences(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncAp
         }
     }
     AnyWindowHandle::from(handle).update(cx, |root, window, cx| -> Result<()> {
-        window.draw(cx).clear();
+        window.draw(cx).clear(cx);
         window.dispatch_keystroke(Keystroke::parse("escape")?, cx);
         let entity = root
             .downcast::<HerdrWindow>()
@@ -855,7 +1023,6 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
                 })
             })
         })
-        .context("updating app for decoy window")?
         .context("opening decoy window")?;
     handle
         .update(cx, |view, window, cx| {
@@ -897,8 +1064,7 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
             cx.notify();
         })
         .context("preparing sidebar host fixtures")?;
-    cx.update(|cx| cx.activate(true))
-        .context("activating sidebar fixture")?;
+    cx.update(|cx| cx.activate(true));
     decoy
         .update(cx, |_, window, _| window.activate_window())
         .context("activating decoy window")?;
@@ -970,7 +1136,7 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
             .update(cx, |_, window, cx| -> Result<_> {
                 cx.default_global::<PaintedProbes>().0.clear();
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 let probes = &cx.global::<PaintedProbes>().0;
                 for (name, prefix) in [
                     (REMOTE, "Synthetic host"),
@@ -1011,7 +1177,7 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
             .update(cx, |root, window, cx| -> Result<()> {
                 cx.default_global::<PaintedProbes>().0.clear();
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 let entity = root
                     .downcast::<HerdrWindow>()
                     .map_err(|_| anyhow!("unexpected root"))?;
@@ -1063,34 +1229,36 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
         eprintln!("SIDEBAR native host step={step} verified");
     }
     // Exercise wider, narrower, then restored native allocations. This catches
-    // stale truncated font runs as well as host labels left at the old 116px.
+    // stale truncated font runs as well as host labels left at the default width.
+    // Host and agent labels each reserve 57px in the comfortable flat layout:
+    // hosts use border + padding + arrow + two gaps + status; agents use their icon.
     for (window_width, preferred, host_width, agent_width, host_prefix, agent_prefix) in [
         (
             800.,
             Some(400.),
-            284.,
-            359.,
+            343.,
+            343.,
             "Synthetic host",
             "agent-1-with-a",
         ),
-        (360., None, 77., 79., "Synthetic", "agent-1"),
+        (360., None, 63., 63., "Synthe", "agent-1"),
         (
             800.,
             Some(160.),
-            117.,
-            119.,
-            "Synthetic host",
-            "agent-1-with-a",
+            103.,
+            103.,
+            "Synthetic",
+            "agent-1-with\u{2026}",
         ),
         (
             800.,
             Some(480.),
-            364.,
-            439.,
+            423.,
+            423.,
             REMOTE,
             "agent-1-with-a-deliberately-long-label",
         ),
-        (480., None, 116., 191., "Synthetic host", "agent-1-with-a"),
+        (480., None, 175., 175., "Synthetic host", "agent-1-with-a"),
     ] {
         handle
             .update(cx, |view, window, cx| {
@@ -1108,7 +1276,7 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
                 }
                 cx.default_global::<PaintedProbes>().0.clear();
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 for (name, prefix, expected_width) in [
                     (REMOTE, host_prefix, host_width),
                     ("agent-1-with-a-deliberately-long-label", agent_prefix, agent_width),
@@ -1160,7 +1328,7 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
                 })?;
                 cx.default_global::<PaintedProbes>().0.clear();
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 for name in [REMOTE, "agent-1-with-a-deliberately-long-label"] {
                     let probe = cx
                         .global::<PaintedProbes>()
@@ -1210,7 +1378,7 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
         AnyWindowHandle::from(handle)
             .update(cx, |root, window, cx| -> Result<()> {
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 let entity = root
                     .downcast::<HerdrWindow>()
                     .map_err(|_| anyhow!("unexpected root"))?;
@@ -1218,7 +1386,7 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
                 let other = scroll[1 - list].offset();
                 scroll[list].set_offset(point(px(0.), px(-80.)));
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 if scroll[list].offset().y != px(-80.) || scroll[1 - list].offset() != other {
                     bail!("scroll handles are not independent: list={list}");
                 }
@@ -1257,7 +1425,7 @@ const STEPS: &[&str] = &[
     "Cmd-Shift-D below split",
     "previous tab",
     "next tab",
-    "Cmd-N workspace",
+    "Cmd-Shift-N workspace",
     "workspace navigation",
     "return to full-width tab",
     "text commit + Enter output",
@@ -1412,14 +1580,14 @@ pub fn start(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                 if frames == 0 {
                     // Exercise the regression: no foreground app or pre-existing input focus.
                     cx.hide();
-                    window.blur();
+                    window.blur(cx);
                 }
                 // on_next_frame runs BEFORE draw, and hidden windows may not receive it.
                 // Build the real native window's dispatch tree and input handler synchronously,
                 // without activating the app or relying on desktop/OS keyboard focus.
-                window.focus(&view.read(cx).focus);
+                window.focus(&view.read(cx).focus.clone(), cx);
                 window.refresh();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 frames += 1;
                 let focused = view.read(cx).focus.is_focused(window);
                 let active = window.is_window_active();
@@ -1495,16 +1663,16 @@ pub fn start(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                         window.dispatch_action(Box::new(RunCommand { command: Command::NextTab }), cx);
                     }
                     5 if focused_tab == second_tab && surface.panes.len() == 3 => {
-                        key("cmd-n", window, cx)?;
+                        key("cmd-shift-n", window, cx)?;
                     }
                     6 if snapshot.workspaces.len() == 2 && focused_workspace != workspace && surface.panes.len() == 1 => {
                         let before = view.read(cx).presentation.probe;
-                        view.update(cx, |view, cx| { view.navigate(NavigationTarget::Workspace(&workspace), cx); window.focus(&view.focus); });
+                        view.update(cx, |view, cx| { view.navigate(NavigationTarget::Workspace(&workspace), cx); window.focus(&view.focus, cx); });
                         // Draw the frame that follows the focus change immediately: the client
                         // has just dropped its surface and the next projection is a round trip
                         // away, which is precisely when the terminal area used to blank.
                         window.refresh();
-                        window.draw(cx).clear();
+                        window.draw(cx).clear(cx);
                         let after = view.read(cx).presentation.probe;
                         if after.blank > before.blank {
                             bail!("space switch blanked the terminal area: {} empty frame(s); {}", after.blank - before.blank, diagnostic());
@@ -1535,7 +1703,7 @@ pub fn start(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                     10 if options.surface_size != old_size && last_queued_options == Some(options)
                         && surface.frame.width == options.surface_size.cols && surface.frame.height == options.surface_size.rows => {
                         eprintln!("GUI native resize verified: {:?} -> {:?}", old_size, options.surface_size);
-                        view.update(cx, |view, cx| { view.reconnect(); window.focus(&view.focus); cx.notify(); });
+                        view.update(cx, |view, cx| { view.reconnect(); window.focus(&view.focus, cx); cx.notify(); });
                     }
                     11 if snapshot.boot_id == boot && snapshot.workspaces.len() == 2 && snapshot.tabs.len() == 3
                         && focused_workspace == workspace && focused_tab == first_tab && has_output(&surface.frame, &marker) => {
@@ -1573,14 +1741,35 @@ pub fn start(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                 error => {
                     EXIT_CODE.store(1, Ordering::SeqCst);
                     eprintln!("GUI integration FAIL: {error:?}");
-                    let _ = cx.update(|cx| cx.quit());
+                    cx.update(|cx| cx.quit());
                     break;
                 }
             }
         }
         if completed {
+            #[cfg(target_os = "macos")]
+            if let Err(error) = clipboard::verify(handle, cx).await {
+                EXIT_CODE.store(1, Ordering::SeqCst);
+                eprintln!("GUI clipboard FAIL: {error:#}");
+                cx.update(|cx| cx.quit());
+                return;
+            }
+            #[cfg(target_os = "macos")]
+            if let Err(error) = selection::verify(handle, cx).await {
+                EXIT_CODE.store(1, Ordering::SeqCst);
+                eprintln!("GUI selection FAIL: {error:#}");
+                cx.update(|cx| cx.quit());
+                return;
+            }
             match second_window(handle, cx).await {
                 Ok(()) => {
+                    #[cfg(target_os = "macos")]
+                    if let Err(error) = clipboard::verify_remote(cx).await {
+                        EXIT_CODE.store(1, Ordering::SeqCst);
+                        eprintln!("GUI remote clipboard FAIL: {error:#}");
+                        cx.update(|cx| cx.quit());
+                        return;
+                    }
                     eprintln!("GUI integration PASS: same boot={boot}, 3 workspaces / 4 tabs, persisted shell output after reconnect, external workspace pushed to idle GUI, second window on its own space");
                     EXIT_CODE.store(0, Ordering::SeqCst);
                 }
@@ -1589,7 +1778,7 @@ pub fn start(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                     eprintln!("GUI second window FAIL: {error:#}");
                 }
             }
-            let _ = cx.update(|cx| cx.quit());
+            cx.update(|cx| cx.quit());
         }
     }).detach();
 }
@@ -1611,7 +1800,7 @@ async fn second_window(first: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> R
                 if draw {
                     // A hidden window still needs a draw to publish its geometry.
                     window.refresh();
-                    window.draw(cx).clear();
+                    window.draw(cx).clear(cx);
                 }
                 let view = view.read(cx);
                 Ok((view.live.clone(), view.local_error.clone()))
@@ -1662,7 +1851,6 @@ async fn second_window(first: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> R
         .context("the daemon has only one workspace to show")?;
     let second = cx
         .update(|cx| open_window(target, updater::Updater::secondary(), cx, false))
-        .context("updating the app for a second window")?
         .context("opening a second window")?;
     if AnyWindowHandle::from(second) == AnyWindowHandle::from(first) {
         bail!("the second window replaced the first");
@@ -1774,6 +1962,9 @@ fn has_output(frame: &FrameData, marker: &str) -> bool {
             row.iter()
                 .map(|cell| cell.symbol.as_str())
                 .collect::<String>()
+                // The daemon paints a scrollbar after the terminal's last column
+                // once this fixture has produced more than a screen of output.
+                .trim_end_matches(['▕', '▐'])
                 .trim()
                 == marker
         })
