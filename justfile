@@ -106,6 +106,9 @@ bundle profile="release" features="":
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
     cp target/{{profile}}/herdr-gpui "$app/Contents/MacOS/Herdr"
     cp assets/macos/Info.plist "$app/Contents/Info.plist"
+    # LaunchServices and the Dock cache icons by bundle ID, so every worktree
+    # build sharing the release ID competed with the installed app's icon.
+    plutil -replace CFBundleIdentifier -string so.pen.herdr-gpui.dev "$app/Contents/Info.plist"
     icons=$(python3 scripts/release/build-icon.py macos "$app/Contents/MacOS/Herdr")
     cp "${icons%$'\n'*}" "$app/Contents/Resources/Herdr.icns"
     cp "${icons##*$'\n'}" "$app/Contents/Resources/Assets.car"
