@@ -1097,6 +1097,9 @@ Windows setup) nothing is saved and the window says so.
 - Right-click spaces for Rename, Close (Close group on non-linked parents with
   multiple spaces sharing `worktree.key`), and New worktree / Open worktree... on non-linked Git
   parents, including spaces with a known Git branch but no worktree metadata yet.
+  Linked spaces offer New worktree too, while their main checkout is open: the
+  daemon creates it through the main checkout, but the new branch starts from
+  the linked space's branch rather than the main checkout's `HEAD`.
   Right-click also selects the space, switching the terminal and sidebar highlight
   when the daemon confirms the selection. A compact header repeats the target name
   and Git branch. Right-clicking another visible space while this menu is open
@@ -1293,11 +1296,12 @@ Windows setup) nothing is saved and the window says so.
   Both icons use the current theme's foreground tint.
 - Cmd-T creates and focuses a tab; Cmd-Shift-N creates and focuses
   a workspace. Cmd-N opens the New worktree dialog for the focused workspace
-  (for a linked worktree, its repository's main checkout). The dialog opens on
+  (for a linked worktree, through its repository's main checkout, starting from
+  the linked worktree's branch). The dialog opens on
   its Name field: left empty, the daemon picks the workspace name; anything
   typed is sent as the new workspace's label. When there is none,
   because the workspace is not a Git repository, the main checkout is not open,
-  nothing is focused, or the window is disconnected, a two-second flash in the
+  a linked worktree has a detached `HEAD`, nothing is focused, or the window is disconnected, a two-second flash in the
   clipboard toast's position says why.
   Cmd-D splits the focused pane vertically (new pane on the right);
   Cmd-Shift-D splits horizontally (new pane below). Cmd-Shift-] / Cmd-Shift-[

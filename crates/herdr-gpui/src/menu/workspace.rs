@@ -20,6 +20,10 @@ pub(crate) struct WorkspaceTarget {
     pub(super) worktree: Option<ClientShellWorktree>,
     pub(super) close_members: Vec<String>,
     pub(super) branch: Option<String>,
+    /// The branch a new worktree starts from, when it is not this checkout's
+    /// `HEAD`: a linked checkout asks its main checkout, the only source the
+    /// daemon accepts, to branch from the linked checkout's branch instead.
+    pub(super) base: Option<String>,
 }
 
 impl WorkspaceTarget {
@@ -31,7 +35,51 @@ impl WorkspaceTarget {
             worktree: workspace.worktree.clone(),
             close_members: close_members(snapshot, workspace),
             branch: workspace.branch.clone(),
+            base: None,
         }
+    }
+
+    /// The target a new worktree for `workspace` is created through. A linked
+    /// checkout resolves to its repository's open main checkout, based on the
+    /// linked checkout's branch so the new branch starts where it stands.
+    pub(super) fn for_new_worktree(
+        snapshot: &ClientShellSnapshot,
+        workspace: &ClientShellWorkspace,
+    ) -> Result<Self, NewWorktreeUnavailable> {
+        let Some(tree) = workspace
+            .worktree
+            .as_ref()
+            .filter(|tree| tree.is_linked_worktree)
+        else {
+            let target = Self::new(snapshot, workspace);
+            return if target.can_create() {
+                Ok(target)
+            } else {
+                Err(NewWorktreeUnavailable::NotGit)
+            };
+        };
+        let branch = workspace
+            .branch
+            .clone()
+            .ok_or(NewWorktreeUnavailable::Detached)?;
+        let main = snapshot
+            .workspaces
+            .iter()
+            .find(|w| {
+                w.worktree
+                    .as_ref()
+                    .is_some_and(|other| other.key == tree.key && !other.is_linked_worktree)
+            })
+            .ok_or(NewWorktreeUnavailable::MainCheckoutClosed)?;
+        Ok(Self {
+            base: Some(branch),
+            ..Self::new(snapshot, main)
+        })
+    }
+
+    /// What the new worktree dialog says it branches from.
+    pub(super) fn base_label(&self) -> &str {
+        self.base.as_deref().unwrap_or("HEAD")
     }
 
     pub(super) fn can_create(&self) -> bool {
@@ -113,7 +161,15 @@ impl WorkspaceTarget {
             }
             WorkspaceAction::NewWorktree => {
                 self.validate_repository(snapshot)?;
-                let mut params = serde_json::json!({"workspace_id": self.id, "base": "HEAD", "focus": true, "trust_repository": false});
+                // A full ref, so a tag of the same name cannot shadow the branch.
+                let base = match &self.base {
+                    Some(branch) => {
+                        crate::worktree::validate_branch(branch)?;
+                        format!("refs/heads/{branch}")
+                    }
+                    None => "HEAD".to_owned(),
+                };
+                let mut params = serde_json::json!({"workspace_id": self.id, "base": base, "focus": true, "trust_repository": false});
                 if !text.trim().is_empty() {
                     crate::worktree::validate_branch(text.trim())?;
                     params["branch"] = text.trim().into();
@@ -152,6 +208,7 @@ pub(super) enum NewWorktreeUnavailable {
     NoWorkspace,
     NotGit,
     MainCheckoutClosed,
+    Detached,
 }
 
 impl NewWorktreeUnavailable {
@@ -161,33 +218,21 @@ impl NewWorktreeUnavailable {
             Self::NoWorkspace => "No workspace is focused to create a worktree from",
             Self::NotGit => "This workspace is not a Git repository",
             Self::MainCheckoutClosed => "Open this repository's main checkout to create a worktree",
+            Self::Detached => "This checkout has no branch to start a worktree from",
         }
     }
 }
 
-/// The workspace a new worktree for the focused one is created from.
+/// The workspace focused when the new worktree shortcut is pressed, once it
+/// is known to have a source for one.
 fn new_worktree_source(snapshot: &ClientShellSnapshot) -> Result<String, NewWorktreeUnavailable> {
     let focused = snapshot
         .workspaces
         .iter()
         .find(|w| Some(&w.workspace_id) == snapshot.focused_workspace_id.as_ref())
         .ok_or(NewWorktreeUnavailable::NoWorkspace)?;
-    let source = match &focused.worktree {
-        Some(tree) if tree.is_linked_worktree => snapshot
-            .workspaces
-            .iter()
-            .find(|w| {
-                w.worktree
-                    .as_ref()
-                    .is_some_and(|other| other.key == tree.key && !other.is_linked_worktree)
-            })
-            .ok_or(NewWorktreeUnavailable::MainCheckoutClosed)?,
-        _ => focused,
-    };
-    if !WorkspaceTarget::new(snapshot, source).can_create() {
-        return Err(NewWorktreeUnavailable::NotGit);
-    }
-    Ok(source.workspace_id.clone())
+    WorkspaceTarget::for_new_worktree(snapshot, focused)?;
+    Ok(focused.workspace_id.clone())
 }
 
 fn close_members(snapshot: &ClientShellSnapshot, workspace: &ClientShellWorkspace) -> Vec<String> {
@@ -253,10 +298,8 @@ impl HerdrWindow {
     }
 
     /// Opens the new worktree dialog for the focused workspace, as its menu's
-    /// "New worktree" row would. A linked checkout offers no such row, so its
-    /// repository's main checkout seeds the worktree instead.
-    /// When there is none, a flash says why rather than the shortcut doing
-    /// nothing visible.
+    /// "New worktree" row would. When there is no source for one, a flash says
+    /// why rather than the shortcut doing nothing visible.
     pub(crate) fn open_new_worktree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let source = match &self.live.snapshot {
             Some(snapshot) if self.live.status.is_connected() => new_worktree_source(snapshot),
@@ -287,6 +330,8 @@ impl HerdrWindow {
         if target.can_create() {
             items.push((Dialog(WorkspaceAction::NewWorktree), "New worktree"));
             items.push((Dialog(WorkspaceAction::OpenWorktree), "Open worktree..."));
+        } else if self.linked_new_worktree_target().is_some() {
+            items.push((Dialog(WorkspaceAction::NewWorktree), "New worktree"));
         }
         if target.can_delete() {
             items.push((
@@ -353,12 +398,34 @@ impl HerdrWindow {
         cx.notify();
     }
 
+    /// The main-checkout target a linked checkout's menu creates through.
+    fn linked_new_worktree_target(&self) -> Option<WorkspaceTarget> {
+        let target = self
+            .menu
+            .target
+            .as_ref()
+            .filter(|target| target.can_delete())?;
+        let snapshot = self.live.snapshot.as_ref()?;
+        let workspace = snapshot
+            .workspaces
+            .iter()
+            .find(|w| w.workspace_id == target.id && snapshot.boot_id == target.boot_id)?;
+        WorkspaceTarget::for_new_worktree(snapshot, workspace).ok()
+    }
+
     pub(super) fn open_workspace_dialog(
         &mut self,
         action: WorkspaceAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Every listing and request of the dialog goes through the main
+        // checkout; only the base remembers the linked checkout.
+        if action == WorkspaceAction::NewWorktree
+            && let Some(target) = self.linked_new_worktree_target()
+        {
+            self.menu.target = Some(target);
+        }
         let Some(target) = &self.menu.target else {
             return;
         };
@@ -929,7 +996,10 @@ impl HerdrWindow {
                     )
                 }))
                 .child(row("Branch", self.render_dialog_input(cx).into_any_element()))
-                .child("Creates this folder from HEAD, without granting repository trust:")
+                .child(format!(
+                    "Creates this folder from {}, without granting repository trust:",
+                    target.base_label()
+                ))
                 .child(
                     div()
                         .debug_selector(|| "dialog-checkout".into())

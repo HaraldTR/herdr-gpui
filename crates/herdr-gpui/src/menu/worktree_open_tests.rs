@@ -205,12 +205,19 @@ fn open_worktree_picker_menu_keyboard_mouse_and_narrow_layout(cx: &mut TestAppCo
     }
     cx.update(|window, cx| {
         view.update(cx, |view, cx| {
-            for id in ["w3", "w4"] {
+            // A linked checkout creates from its branch, but only the main
+            // checkout opens existing ones.
+            for (id, opens) in [("w3", true), ("w4", false)] {
                 view.open_workspace_menu(id, Default::default(), window, cx);
                 let actions = view.workspace_menu_actions();
-                assert_eq!(
+                assert!(
                     actions.contains(&WorkspaceMenuAction::Dialog(WorkspaceAction::NewWorktree)),
-                    actions.contains(&WorkspaceMenuAction::Dialog(WorkspaceAction::OpenWorktree))
+                    "{id}"
+                );
+                assert_eq!(
+                    actions.contains(&WorkspaceMenuAction::Dialog(WorkspaceAction::OpenWorktree)),
+                    opens,
+                    "{id}"
                 );
                 view.dismiss_menu(window, cx);
             }
