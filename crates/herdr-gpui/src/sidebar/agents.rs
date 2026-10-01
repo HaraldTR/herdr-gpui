@@ -72,15 +72,16 @@ pub(super) fn sorted_agents(
 
 /// What an agent is called wherever it is listed.
 pub(crate) fn agent_name(agent: &ClientShellAgent) -> &str {
-    first_text(
-        [
-            agent.display_agent.as_deref(),
-            agent.name.as_deref(),
-            agent.agent.as_deref(),
-            agent.title.as_deref(),
-        ],
-        "agent",
-    )
+    first_text(agent_names(agent), "agent")
+}
+
+pub(super) fn agent_names(agent: &ClientShellAgent) -> [Option<&str>; 4] {
+    [
+        agent.display_agent.as_deref(),
+        agent.name.as_deref(),
+        agent.agent.as_deref(),
+        agent.title.as_deref(),
+    ]
 }
 
 /// Where an agent runs: its workspace, and its tab when that earns a place,
@@ -189,13 +190,23 @@ pub(crate) fn status_indicator(
     font: &FontConfig,
     indicators: Indicators,
 ) -> Div {
+    status_mark(status, font, indicators, indicators.color(status), false)
+}
+
+/// Configured tokens can override color and weight without changing indicator style.
+pub(super) fn status_mark(
+    status: AgentStatus,
+    font: &FontConfig,
+    indicators: Indicators,
+    color: u32,
+    bold: bool,
+) -> Div {
     // Upstream dots: working/blocked/done filled, idle hollow, unknown a small dot.
     let (diameter, filled) = match status {
         AgentStatus::Unknown => (STATUS_DOT_UNKNOWN, true),
         AgentStatus::Idle => (STATUS_WIDTH, false),
         _ => (STATUS_WIDTH, true),
     };
-    let color = indicators.color(status);
     let symbol = indicators.style == IndicatorStyle::Symbols;
     let height = if symbol {
         line_height(font)
@@ -215,14 +226,16 @@ pub(crate) fn status_indicator(
                 .text_size(px(font.size))
                 .line_height(px(line_height(font)))
                 .text_color(rgb(color))
+                .when(bold, |slot| slot.font_weight(FontWeight::BOLD))
                 .child(status_symbol(status))
         })
         .when(!symbol, |slot| {
             slot.child(
                 div()
-                    .size(px(diameter))
+                    .size(px(if bold { STATUS_WIDTH } else { diameter }))
                     .rounded_full()
                     .border_1()
+                    .when(bold, |dot| dot.border_2())
                     .border_color(rgb(color))
                     .when(filled, |dot| dot.bg(rgb(color))),
             )

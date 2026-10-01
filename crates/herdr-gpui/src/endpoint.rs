@@ -803,10 +803,13 @@ impl HerdrWindow {
         // OSC 52 writes are drained per endpoint so they are written once and
         // never linger in a live state that a later poll would re-read.
         let mut clipboard_writes = std::collections::VecDeque::new();
+        // Capture the local config reload before sound.poll consumes its flag.
+        let mut reload_config = false;
         for (index, endpoint) in self.endpoints.iter_mut().enumerate() {
             let updated = endpoint.poll(Instant::now());
             clipboard_writes.append(&mut endpoint.live.clipboard_writes);
             selected_changed |= index == self.selected_endpoint && updated != Redraw::None;
+            reload_config |= endpoint.live.reload_sound && endpoint.id == LOCAL;
             self.sound.poll(
                 &mut endpoint.sounds,
                 &mut endpoint.live,
@@ -836,6 +839,15 @@ impl HerdrWindow {
         }
         if self.apply_clipboard_writes(clipboard_writes, cx) {
             changed = Redraw::Window;
+        }
+        if reload_config
+            && !matches!(
+                self.menu.page,
+                Some(crate::menu::Page::Themes | crate::menu::Page::Fonts)
+            )
+            && !self.theme_save_in_flight()
+        {
+            self.load_gui_config(cx);
         }
         self.restore_selection(cx);
         if self.tick_toasts(

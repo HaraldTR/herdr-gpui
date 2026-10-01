@@ -1,6 +1,4 @@
-//! The `[usage]` config table: whether usage shows at all, which providers to
-//! show although they were not detected or to hide although they were, and
-//! each provider's own settings such as an API key or a session cookie.
+//! `[usage]` display switches and provider settings.
 
 use super::{model::Provider, registry};
 use crate::{Error, Result};
@@ -12,6 +10,8 @@ use std::collections::BTreeMap;
 #[serde(default, deny_unknown_fields)]
 pub struct UsageConfig {
     pub show: bool,
+    pub topbar: bool,
+    pub inline: bool,
     /// Provider ids shown even when this machine has no sign-in for them.
     pub show_providers: Vec<String>,
     /// Provider ids never shown, even when detected.
@@ -27,6 +27,8 @@ impl Default for UsageConfig {
     fn default() -> Self {
         Self {
             show: true,
+            topbar: true,
+            inline: true,
             show_providers: Vec::new(),
             hide_providers: Vec::new(),
             browser_cookies: true,

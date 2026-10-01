@@ -1,4 +1,6 @@
 //! Native chrome and GitHub account access.
+mod status;
+
 use crate::{HerdrWindow, fonts::StyledFont, menu::Page};
 use gpui::{prelude::*, *};
 
@@ -240,6 +242,16 @@ impl HerdrWindow {
                     .into_any_element(),
             ),
         )
+        .child(
+            div()
+                .debug_selector(|| "titlebar-center".into())
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .when(self.config.usage.topbar, |center| {
+                    center.child(status::render(&self.live, &self.config.ui, &self.theme))
+                }),
+        )
         .children(self.render_git_button(cx))
         .child(
             div()
@@ -320,13 +332,6 @@ pub(super) fn render(surface: u32, leading: Option<AnyElement>) -> Stateful<Div>
         .bg(rgb(surface).blend(rgba(0xffffff1a)))
         .child(div().flex_none().w(px(80.)).h_full())
         .children(leading)
-        .child(
-            div()
-                .debug_selector(|| "titlebar-center".into())
-                .flex_1()
-                .min_w_0()
-                .h_full(),
-        )
         .on_click(|event, window, _| {
             if event.click_count() == 2 {
                 window.titlebar_double_click();

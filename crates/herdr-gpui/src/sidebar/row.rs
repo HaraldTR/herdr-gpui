@@ -6,11 +6,12 @@
 use super::layout_tests;
 use super::{
     ARROW_RESERVE, ICON_RESERVE, STATUS_WIDTH,
-    agents::Indicators,
-    cell::RowState,
+    agents::{Indicators, status_indicator, status_mark},
+    cell::{RowContext, RowState},
     glyph_width,
-    layout::{SidebarDensity, SidebarLook},
-    line_height, segment_budgets, status_indicator,
+    layout::SidebarDensity,
+    line_height, segment_budgets,
+    tokens::{ResolvedToken, TextRole, TokenKind, budgets, separator},
 };
 use crate::config::{FontConfig, Theme};
 use gpui::{prelude::*, *};
@@ -27,6 +28,18 @@ pub(super) enum RowIcon {
 }
 
 impl RowIcon {
+    fn slot(self, key: &str, font: &FontConfig, color: u32) -> Div {
+        div()
+            .debug_selector(|| format!("github-{key}"))
+            .absolute()
+            .left_0()
+            .top(px((line_height(font) - 12.) / 2.))
+            .size(px(12.))
+            .flex_none()
+            .overflow_hidden()
+            .child(self.element(color))
+    }
+
     /// The icon filling its parent, or nothing for rows without one. An
     /// avatar still loading or failing to decode shows the mark instead.
     pub(super) fn element(self, color: u32) -> AnyElement {
@@ -161,6 +174,10 @@ pub(super) struct RowBadge {
 }
 
 impl RowBadge {
+    pub(super) fn lines(&self, layout: &dyn SidebarDensity) -> usize {
+        1 + usize::from(self.pr.is_some() && layout.pr_counts())
+    }
+
     /// Nothing to draw is nothing to reserve, so a row with neither keeps its
     /// full label width.
     pub(super) fn new(pr: Option<PrBadge>, dirty: bool, teleported: bool) -> Option<Self> {
@@ -245,6 +262,36 @@ pub(super) fn name_line(
     // line exactly as it did before a line could carry several.
     let used: f32 = budgets.iter().map(|budget| *budget as f32 * glyph).sum();
     let slack = (available - used).max(0.);
+    let parts =
+        segments
+            .iter()
+            .zip(budgets)
+            .enumerate()
+            .map(|(index, ((text, is_primary), budget))| {
+                let advance = budget as f32 * glyph
+                    + if index + 1 == segments.len() {
+                        slack
+                    } else {
+                        0.
+                    };
+                let cell = div()
+                    .truncate()
+                    .when(*is_primary, |part| {
+                        part.font_weight(weight).text_color(rgb(primary))
+                    })
+                    .when(!*is_primary, |part| part.text_color(rgb(muted)))
+                    .child(label_text(text));
+                (if index == 0 { "" } else { " · " }, advance, cell)
+            });
+    place_line(parts, width, font, muted)
+}
+
+fn place_line(
+    parts: impl IntoIterator<Item = (&'static str, f32, Div)>,
+    width: f32,
+    font: &FontConfig,
+    muted: u32,
+) -> Div {
     let mut line = div()
         .relative()
         .w(px(width))
@@ -252,39 +299,25 @@ pub(super) fn name_line(
         .flex_none()
         .overflow_hidden();
     let mut x = 0.;
-    for (index, ((text, is_primary), budget)) in segments.iter().zip(budgets).enumerate() {
-        if index > 0 {
+    for (separator, advance, cell) in parts {
+        if !separator.is_empty() {
+            let gap = separator.chars().count() as f32 * glyph_width(font);
             line = line.child(
                 div()
                     .absolute()
                     .left(px(x))
-                    .w(px(separator))
+                    .w(px(gap))
                     .text_color(rgb(muted))
-                    .child(label_text(" \u{b7} ")),
+                    .child(label_text(separator)),
             );
-            x += separator;
+            x += gap;
         }
-        let last = index + 1 == segments.len();
-        let segment = budget as f32 * glyph + if last { slack } else { 0. };
-        line = line.child(
-            div()
-                .absolute()
-                .left(px(x))
-                .w(px(segment))
-                .truncate()
-                .when(*is_primary, |part| {
-                    part.font_weight(weight).text_color(rgb(primary))
-                })
-                .when(!*is_primary, |part| part.text_color(rgb(muted)))
-                .child(label_text(text)),
-        );
-        x += segment;
+        line = line.child(cell.absolute().left(px(x)).w(px(advance)));
+        x += advance;
     }
     line
 }
 
-/// The pulsing dot shown while something this row names is being removed,
-/// shared by worktree rows and device headers so both read the same way.
 pub(super) fn removing_dot(selector: &'static str, theme: &Theme) -> Div {
     div()
         .debug_selector(move || selector.into())
@@ -303,6 +336,226 @@ pub(super) fn removing_dot(selector: &'static str, theme: &Theme) -> Div {
         )
 }
 
+fn token_appearance(
+    kind: &TokenKind,
+    status: AgentStatus,
+    kind_of_row: RowKind,
+    focused: bool,
+    cx: &RowContext<'_>,
+) -> (u32, FontWeight) {
+    let theme = cx.theme;
+    let (name, weight, secondary) = row_text(kind_of_row, focused, theme);
+    match kind {
+        TokenKind::StateIcon | TokenKind::Text(_, TextRole::Status) => {
+            (cx.indicators.color(status), FontWeight::NORMAL)
+        }
+        TokenKind::Text(_, TextRole::Workspace) => (name, weight),
+        TokenKind::Text(_, TextRole::Secondary | TextRole::Agent) => {
+            (secondary, FontWeight::NORMAL)
+        }
+        _ => (theme.muted, FontWeight::NORMAL),
+    }
+}
+
+fn styled(
+    (color, weight): (u32, FontWeight),
+    style: crate::config::TokenStyle,
+    theme: &Theme,
+) -> (u32, FontWeight) {
+    let color = style.fg.unwrap_or(color);
+    let color = if style.dim == Some(true) {
+        theme.dimmed(color)
+    } else {
+        color
+    };
+    let weight = match style.bold {
+        Some(true) => FontWeight::BOLD,
+        Some(false) => FontWeight::NORMAL,
+        None => weight,
+    };
+    (color, weight)
+}
+
+/// Status icons and git counters retain their full width when text truncates.
+fn fixed_glyphs(kind: &TokenKind, glyph: f32, status_width: f32) -> usize {
+    match kind {
+        TokenKind::StateIcon => (status_width / glyph).ceil() as usize,
+        TokenKind::GitStatus { ahead, behind } => {
+            let count = |n: &usize| format!("{n}").chars().count() + 1;
+            usize::from(*ahead > 0) * count(ahead)
+                + usize::from(*behind > 0) * count(behind)
+                + usize::from(*ahead > 0 && *behind > 0)
+        }
+        _ => 0,
+    }
+}
+
+/// Fixed token widths preserve GPUI's text truncation during layout.
+fn token_line(
+    row: &[ResolvedToken],
+    status: AgentStatus,
+    kind: RowKind,
+    focused: bool,
+    width: f32,
+    cx: &RowContext<'_>,
+) -> Div {
+    let (font, theme) = (cx.font, cx.theme);
+    let glyph = glyph_width(font);
+    let budgets = budgets(
+        row,
+        |kind| fixed_glyphs(kind, glyph, cx.indicators.width(font)),
+        (width / glyph).floor() as usize,
+    );
+    let visible: Vec<_> = row
+        .iter()
+        .zip(budgets)
+        .filter_map(|(token, width)| Some((token, width?)))
+        .collect();
+    let used = visible.iter().map(|(_, width)| width).sum::<usize>()
+        + visible
+            .windows(2)
+            .map(|pair| separator(pair[0].0, pair[1].0).chars().count())
+            .sum::<usize>();
+    let slack = (width - used as f32 * glyph).max(0.);
+    let last_text = visible
+        .iter()
+        .rposition(|(token, _)| token.kind.text().is_some());
+    let parts = visible.iter().enumerate().map(|(index, (token, budget))| {
+        let gap = if index == 0 {
+            ""
+        } else {
+            separator(visible[index - 1].0, token)
+        };
+        let advance = *budget as f32 * glyph + if last_text == Some(index) { slack } else { 0. };
+        let (color, weight) = styled(
+            token_appearance(&token.kind, status, kind, focused, cx),
+            token.style,
+            theme,
+        );
+        let cell = div();
+        let cell = match &token.kind {
+            TokenKind::StateIcon => cell
+                .h(px(line_height(font)))
+                .flex()
+                .justify_center()
+                .debug_selector(|| "inline-status-cell".into())
+                .child(
+                    status_mark(
+                        status,
+                        font,
+                        cx.indicators,
+                        color,
+                        weight == FontWeight::BOLD,
+                    )
+                    .debug_selector(|| "inline-status-mark".into()),
+                ),
+            TokenKind::GitStatus { ahead, behind } => cell.flex().gap(px(glyph)).children(
+                [("↑", *ahead, 2), ("↓", *behind, 1)]
+                    .into_iter()
+                    .filter(|(_, count, _)| *count > 0)
+                    .map(|(arrow, count, palette)| {
+                        let (color, weight) = styled(
+                            (theme.ink(theme.palette[palette]), FontWeight::NORMAL),
+                            token.style,
+                            theme,
+                        );
+                        div()
+                            .flex_none()
+                            .text_color(rgb(color))
+                            .font_weight(weight)
+                            .child(label_text(&format!("{arrow}{count}")))
+                    }),
+            ),
+            TokenKind::Text(text, _) => cell
+                .truncate()
+                .font_weight(weight)
+                .text_color(rgb(color))
+                .child(shared_label_text(text.clone())),
+        };
+        (gap, advance, cell)
+    });
+    place_line(parts, width, font, theme.muted)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn configured_lines(
+    mut column: Div,
+    key: &str,
+    lines: &[Vec<ResolvedToken>],
+    kind: RowKind,
+    status: AgentStatus,
+    focused: bool,
+    label_width: f32,
+    mut workspace_icon: RowIcon,
+    cx: &RowContext<'_>,
+) -> Div {
+    let (font, theme) = (cx.font, cx.theme);
+    let agent_icon = match kind {
+        RowKind::Agent(icon) => Some(icon),
+        RowKind::Workspace => None,
+    };
+    let agent_at = lines.iter().position(|line| {
+        line.iter()
+            .any(|token| matches!(token.kind, TokenKind::Text(_, TextRole::Agent)))
+    });
+    let (agent_size, agent_reserve) = agent_icon_size(font);
+    let workspace_reserve = if matches!(workspace_icon, RowIcon::None) {
+        0.
+    } else {
+        ICON_RESERVE
+    };
+    for (index, line) in lines.iter().enumerate() {
+        let tokens = if index == 0
+            && line
+                .first()
+                .is_some_and(|token| matches!(token.kind, TokenKind::StateIcon))
+        {
+            &line[1..]
+        } else {
+            line.as_slice()
+        };
+        let agent_here = agent_at == Some(index);
+        let reserve = if index == 0 { workspace_reserve } else { 0. }
+            + if agent_here { agent_reserve } else { 0. };
+        let text_width = (label_width - reserve).max(0.);
+        let selector = match index {
+            0 => format!("name-{key}"),
+            1 => format!("detail-{key}"),
+            index => format!("line-{key}-{index}"),
+        };
+        let icon_color = line
+            .iter()
+            .find(|token| matches!(token.kind, TokenKind::Text(_, TextRole::Agent)))
+            .map(|token| {
+                styled(
+                    token_appearance(&token.kind, status, kind, focused, cx),
+                    token.style,
+                    theme,
+                )
+                .0
+            })
+            .unwrap_or(theme.muted);
+        let mut text = div().relative().w(px(label_width)).h(px(line_height(font)));
+        if agent_here && let Some(icon) = agent_icon {
+            text = text.child(agent_mark(key, icon, agent_size, icon_color, font));
+        }
+        if index == 0 && !matches!(workspace_icon, RowIcon::None) {
+            text = text.child(std::mem::replace(&mut workspace_icon, RowIcon::None).slot(
+                key,
+                font,
+                theme.muted,
+            ));
+        }
+        text = text.child(
+            token_line(tokens, status, kind, focused, text_width, cx)
+                .debug_selector(|| selector.clone())
+                .ml(px(reserve.min(label_width))),
+        );
+        column = column.child(text);
+    }
+    column
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn row(
     // Rows are probed by key, not by label: an agent names its workspace, which
@@ -317,7 +570,6 @@ pub(super) fn row(
     state: RowState,
     tree: RowTree,
     reserve_arrow: bool,
-    width: f32,
     workspace_icon: RowIcon,
     arrow: Option<Stateful<Div>>,
     badge: Option<RowBadge>,
@@ -325,12 +577,25 @@ pub(super) fn row(
     // sidebar config names it. Painted at the row's trailing edge in the dot's
     // color so a status reads at a glance, not only by hue.
     status_text: Option<&'static str>,
-    look: SidebarLook,
-    appearance: (&FontConfig, &Theme),
+    lines: &[Vec<ResolvedToken>],
+    cx: &RowContext<'_>,
 ) -> Div {
-    let (font, theme) = appearance;
+    let (font, theme, look, width) = (cx.font, cx.theme, cx.look, cx.width);
     let focused = state.selected;
     let layout = look.density;
+    let configured = !lines.is_empty();
+    let leading_icon = lines
+        .first()
+        .and_then(|line| line.first())
+        .filter(|token| matches!(token.kind, TokenKind::StateIcon));
+    let show_status = !configured || leading_icon.is_some() || removing;
+    let status_text = status_text.filter(|_| !configured);
+    let text_lines = if configured {
+        let badge_lines = badge.as_ref().map_or(0, |badge| badge.lines(layout));
+        lines.len().max(badge_lines)
+    } else {
+        0
+    };
     let padding = layout.padding();
     let content_x = look.content_x();
     let gap = layout.gap();
@@ -364,8 +629,8 @@ pub(super) fn row(
     };
     let arrow_reserve = if reserve_arrow { ARROW_RESERVE } else { 0. };
     let arrow_absent = arrow.is_none();
-    let available =
-        (look.content_width(width) - status_width - gap - indent - arrow_reserve).max(0.);
+    let status_gutter = if show_status { status_width + gap } else { 0. };
+    let available = (look.content_width(width) - status_gutter - indent - arrow_reserve).max(0.);
     // Narrow sidebars and large fonts can leave less room than a badge needs.
     // Clip its column within the row rather than painting over the terminal.
     let badge_width = badge.as_ref().map_or(0., |badge| {
@@ -399,13 +664,19 @@ pub(super) fn row(
     // its location. Reserve the same fixed icon + gap on whichever line owns it.
     let agent_first = agent_icon.filter(|_| detail.is_empty());
     let agent_detail = agent_icon.filter(|_| !detail.is_empty());
-    let agent_size = line_height(font).min(12.);
-    let agent_reserve = agent_size + 4.;
+    let (agent_size, agent_reserve) = agent_icon_size(font);
     let name_reserve = icon_reserve + agent_first.map_or(0., |_| agent_reserve);
     div()
         .debug_selector(|| format!("row-{key}"))
         .h(px(look.row_height(
-            line_height(font) * if show_detail { 2. } else { 1. },
+            line_height(font)
+                * if configured {
+                    text_lines as f32
+                } else if show_detail {
+                    2.
+                } else {
+                    1.
+                },
         )))
         .w_full()
         .min_w_0()
@@ -454,16 +725,22 @@ pub(super) fn row(
                     ),
             )
         })
-        .child(if removing {
-            div()
-                .w(px(indicators.width(font)))
-                .mt(px((line_height(font) - STATUS_WIDTH) / 2.))
-                .flex_none()
-                .flex()
-                .justify_center()
-                .child(removing_dot("worktree-removing", theme))
-        } else {
-            status_indicator(status, font, indicators)
+        .when(show_status, |row| {
+            row.child(if removing {
+                div()
+                    .w(px(indicators.width(font)))
+                    .mt(px((line_height(font) - STATUS_WIDTH) / 2.))
+                    .flex_none()
+                    .flex()
+                    .justify_center()
+                    .child(removing_dot("worktree-removing", theme))
+            } else if let Some(token) = leading_icon {
+                let (color, weight) =
+                    styled((status_color, FontWeight::NORMAL), token.style, theme);
+                status_mark(status, font, indicators, color, weight == FontWeight::BOLD)
+            } else {
+                status_indicator(status, font, indicators)
+            })
         })
         .child(
             div()
@@ -475,63 +752,75 @@ pub(super) fn row(
                 .flex_none()
                 .overflow_hidden()
                 .debug_selector(|| format!("column-{key}"))
-                .child(
-                    div()
-                        .relative()
-                        .w(px(label_width))
-                        .h(px(line_height(font)))
-                        .when_some(agent_first, |line, icon| {
-                            line.child(agent_mark(key, icon, agent_size, name_color, font))
-                        })
-                        .when(!matches!(workspace_icon, RowIcon::None), |title| {
-                            title.child(
-                                div()
-                                    .debug_selector(|| format!("github-{key}"))
-                                    .absolute()
-                                    .left_0()
-                                    .top(px((line_height(font) - 12.) / 2.))
-                                    .size(px(12.))
-                                    .flex_none()
-                                    .overflow_hidden()
-                                    .child(workspace_icon.element(muted)),
-                            )
-                        })
+                .map(|column| {
+                    if configured {
+                        return configured_lines(
+                            column,
+                            key,
+                            lines,
+                            kind,
+                            status,
+                            focused,
+                            label_width,
+                            workspace_icon,
+                            cx,
+                        );
+                    }
+                    column
                         .child(
-                            name_line(
-                                name,
-                                (name_color, weight, theme.muted),
-                                (label_width - name_reserve).max(0.),
-                                font,
-                            )
-                            .debug_selector(|| format!("name-{key}"))
-                            .ml(px(name_reserve.min(label_width))),
-                        ),
-                )
-                .when(show_detail, |column| {
-                    column.child(
-                        div()
-                            .relative()
-                            .w(px(label_width))
-                            .h(px(line_height(font)))
-                            .when_some(agent_detail, |line, icon| {
-                                line.child(agent_mark(key, icon, agent_size, detail_color, font))
-                            })
-                            .child(
+                            div()
+                                .relative()
+                                .w(px(label_width))
+                                .h(px(line_height(font)))
+                                .when_some(agent_first, |line, icon| {
+                                    line.child(agent_mark(key, icon, agent_size, name_color, font))
+                                })
+                                .when(!matches!(workspace_icon, RowIcon::None), |title| {
+                                    title.child(workspace_icon.slot(key, font, muted))
+                                })
+                                .child(
+                                    name_line(
+                                        name,
+                                        (name_color, weight, theme.muted),
+                                        (label_width - name_reserve).max(0.),
+                                        font,
+                                    )
+                                    .debug_selector(|| format!("name-{key}"))
+                                    .ml(px(name_reserve.min(label_width))),
+                                ),
+                        )
+                        .when(show_detail, |column| {
+                            column.child(
                                 div()
-                                    .debug_selector(|| format!("detail-{key}"))
-                                    .ml(px(if agent_detail.is_some() {
-                                        agent_reserve.min(label_width)
-                                    } else {
-                                        0.
-                                    }))
-                                    .w(px((label_width
-                                        - agent_detail.map_or(0., |_| agent_reserve))
-                                    .max(0.)))
-                                    .truncate()
-                                    .text_color(rgb(detail_color))
-                                    .child(label_text(detail)),
-                            ),
-                    )
+                                    .relative()
+                                    .w(px(label_width))
+                                    .h(px(line_height(font)))
+                                    .when_some(agent_detail, |line, icon| {
+                                        line.child(agent_mark(
+                                            key,
+                                            icon,
+                                            agent_size,
+                                            detail_color,
+                                            font,
+                                        ))
+                                    })
+                                    .child(
+                                        div()
+                                            .debug_selector(|| format!("detail-{key}"))
+                                            .ml(px(if agent_detail.is_some() {
+                                                agent_reserve.min(label_width)
+                                            } else {
+                                                0.
+                                            }))
+                                            .w(px((label_width
+                                                - agent_detail.map_or(0., |_| agent_reserve))
+                                            .max(0.)))
+                                            .truncate()
+                                            .text_color(rgb(detail_color))
+                                            .child(label_text(detail)),
+                                    ),
+                            )
+                        })
                 }),
         )
         .when_some(status_text, |row, text| {
@@ -640,6 +929,11 @@ pub(super) fn row(
         })
 }
 
+fn agent_icon_size(font: &FontConfig) -> (f32, f32) {
+    let size = line_height(font).min(12.);
+    (size, size + 4.)
+}
+
 fn agent_mark(
     key: &str,
     icon: crate::icons::AgentIcon,
@@ -656,14 +950,18 @@ fn agent_mark(
         .child(svg().path(icon.path()).size_full().text_color(rgb(color)))
 }
 
+pub(crate) fn label_text(text: &str) -> impl IntoElement {
+    shared_label_text(SharedString::from(text))
+}
+
 #[cfg(not(any(test, feature = "integration-test")))]
-pub(crate) fn label_text(text: &str) -> SharedString {
-    text.to_owned().into()
+fn shared_label_text(text: SharedString) -> SharedString {
+    text
 }
 
 #[cfg(any(test, feature = "integration-test"))]
-pub(crate) fn label_text(text: &str) -> layout_tests::ProbeText {
-    layout_tests::ProbeText(text.to_owned().into())
+fn shared_label_text(text: SharedString) -> layout_tests::ProbeText {
+    layout_tests::ProbeText(text)
 }
 
 pub(super) fn first_text<'a>(

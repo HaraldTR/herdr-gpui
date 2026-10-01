@@ -11,6 +11,7 @@ pub(crate) mod preview;
 mod render;
 mod reorder;
 mod row;
+mod tokens;
 mod view;
 mod workspaces;
 

@@ -568,7 +568,7 @@ fn agent_icons_follow_names_and_reserve_narrow_label_width(cx: &mut gpui::TestAp
 /// An agent's own `rows_by_agent` entry decides for it instead of `rows`.
 #[gpui::test]
 fn agent_status_words_follow_the_daemon_sidebar_config(cx: &mut gpui::TestAppContext) {
-    use crate::config::{AgentStatusText, Density, LayoutMode};
+    use crate::config::{Density, LayoutMode};
     let (view, cx) = cx.add_window_view(|window, cx| {
         let mut view = fixture_window(window, cx);
         view.live.snapshot = Some(Arc::new(snapshot(2)));
@@ -578,11 +578,14 @@ fn agent_status_words_follow_the_daemon_sidebar_config(cx: &mut gpui::TestAppCon
     cx.run_until_parked();
     // The fixture's agents are Claude.
     let settings = [
-        (AgentStatusText::default(), false),
-        (AgentStatusText::from_rows(true, []), true),
-        (AgentStatusText::from_rows(false, [("claude", true)]), true),
-        (AgentStatusText::from_rows(true, [("claude", false)]), false),
-        (AgentStatusText::from_rows(false, [("codex", true)]), false),
+        ("", false),
+        ("rows = [[\"state_text\"]]", true),
+        ("rows_by_agent.claude = [[\"state_text\"]]", true),
+        (
+            "rows = [[\"state_text\"]]\nrows_by_agent.claude = [[\"agent\"]]",
+            false,
+        ),
+        ("rows_by_agent.codex = [[\"state_text\"]]", false),
     ];
     for mode in [
         LayoutMode::from(Density::Comfortable),
@@ -595,7 +598,8 @@ fn agent_status_words_follow_the_daemon_sidebar_config(cx: &mut gpui::TestAppCon
                 view.config.layout.mode = mode;
                 view.config.sidebar.size = 12.;
                 view.sidebar_width = Some(320.);
-                view.config.agent_status_text = setting.clone();
+                view.config.sidebar_layout.agents = toml::from_str(setting).unwrap();
+                view.config.usage.inline = false;
                 cx.notify();
             });
             let rendered = cx.update(|window, cx| {
@@ -620,11 +624,144 @@ fn agent_status_words_follow_the_daemon_sidebar_config(cx: &mut gpui::TestAppCon
     }
 }
 
+#[gpui::test]
+fn configured_sidebar_rows_render_all_lines_within_the_row(cx: &mut gpui::TestAppContext) {
+    use crate::config::LayoutMode;
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = fixture_window(window, cx);
+        view.live.snapshot = Some(Arc::new(snapshot(2)));
+        view.config.sidebar_layout = toml::from_str(
+            r#"
+            [agents]
+            rows = [["state_icon", "workspace"], ["agent"], ["state_text"]]
+            [spaces]
+            rows = [["workspace"], ["state_text"], ["branch"]]
+        "#,
+        )
+        .unwrap();
+        view
+    });
+    cx.simulate_resize(size(px(800.), px(900.)));
+    cx.run_until_parked();
+    for mode in LayoutMode::ALL {
+        for width in [160., 320.] {
+            view.update(cx, |view, cx| {
+                view.config.layout.mode = mode;
+                view.sidebar_width = Some(width);
+                cx.notify();
+            });
+            cx.update(|window, cx| {
+                cx.default_global::<TextProbes>().0.clear();
+                full_draw(window, cx).clear(cx);
+                let probes = &cx.global::<TextProbes>().0;
+                for text in ["herdr", "Claude Code", "working", "main"] {
+                    assert!(probes.contains_key(text), "{mode:?}: missing {text}");
+                }
+            });
+            assert!(cx.debug_bounds("status-agent-p0").is_none());
+            for (key, name, detail, last) in [
+                ("row-herdr", "name-herdr", "detail-herdr", "line-herdr-2"),
+                (
+                    "row-agent-p0",
+                    "name-agent-p0",
+                    "detail-agent-p0",
+                    "line-agent-p0-2",
+                ),
+            ] {
+                let row = cx.debug_bounds(key).unwrap();
+                let first = cx.debug_bounds(name).unwrap();
+                let second = cx.debug_bounds(detail).unwrap();
+                let third = cx.debug_bounds(last).unwrap();
+                assert!(first.bottom() <= second.top(), "{mode:?}: {key}");
+                assert!(second.bottom() <= third.top(), "{mode:?}: {key}");
+                assert!(third.bottom() <= row.bottom(), "{mode:?}: {key}");
+                for line in [first, second, third] {
+                    assert!(line.left() >= row.left(), "{mode:?}: {key}");
+                    assert!(line.right() <= row.right(), "{mode:?}: {key}");
+                }
+            }
+        }
+    }
+}
+
+#[gpui::test]
+fn empty_configured_rows_keep_only_the_upstream_fallback(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = cx.add_window_view(fixture_window);
+    for rows in [
+        "[]",
+        "[[\"$missing\"]]",
+        "[[{ token = \"workspace\", rules = [{ contains = \"\", hide = true }] }]]",
+    ] {
+        view.update(cx, |view, cx| {
+            view.config.sidebar_layout =
+                toml::from_str(&format!("[agents]\nrows = {rows}\n[spaces]\nrows = {rows}"))
+                    .unwrap();
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            cx.default_global::<TextProbes>().0.clear();
+            full_draw(window, cx).clear(cx);
+            let probes = &cx.global::<TextProbes>().0;
+            for text in ["herdr", "Claude Code", "main"] {
+                assert!(!probes.contains_key(text), "{rows}: unexpected {text}");
+            }
+        });
+        for key in ["row-herdr", "row-agent-p0"] {
+            assert!(cx.debug_bounds(key).unwrap().size.height > px(0.));
+        }
+        assert!(cx.debug_bounds("detail-agent-p0").is_none());
+    }
+}
+
+#[gpui::test]
+fn configured_inline_status_is_centered_in_its_glyph_budget(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = cx.add_window_view(fixture_window);
+    let tolerance = cx.update(|window, _| px(1. / window.scale_factor()));
+    for (size, style) in [12., 20., 36.]
+        .into_iter()
+        .flat_map(|size| ["dots", "symbols"].map(|style| (size, style)))
+    {
+        view.update(cx, |view, cx| {
+            view.config.sidebar.size = size;
+            view.sidebar_width = Some(160.);
+            view.settings.shared = Some(
+                crate::herdr_settings::Settings::parse_text(&format!(
+                    "[ui]\nstatus_indicators = '{style}'\n"
+                ))
+                .unwrap(),
+            );
+            view.config.sidebar_layout.agents =
+                toml::from_str(r#"rows = [["workspace", "state_icon"]]"#).unwrap();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let cell = cx.debug_bounds("inline-status-cell").unwrap();
+        let mark = cx.debug_bounds("inline-status-mark").unwrap();
+        assert!(mark.size.width <= cell.size.width);
+        assert_eq!(
+            mark.size.width,
+            px(if style == "symbols" {
+                size
+            } else {
+                super::STATUS_WIDTH
+            })
+        );
+        assert!(
+            (cell.center().x - mark.center().x).abs() <= tolerance,
+            "size={size}, cell={cell:?}, mark={mark:?}"
+        );
+        assert!(
+            (cell.center().y - mark.center().y).abs() <= tolerance,
+            "size={size}, cell={cell:?}, mark={mark:?}"
+        );
+    }
+}
+
 /// A sidebar too narrow for the status word clips it within the row rather
 /// than letting it paint past the row's edge onto the terminal.
 #[gpui::test]
 fn agent_status_words_stay_inside_narrow_rows(cx: &mut gpui::TestAppContext) {
-    use crate::config::{AgentStatusText, Density, LayoutMode};
+    use crate::config::{Density, LayoutMode};
     let (view, cx) = cx.add_window_view(|window, cx| {
         let mut view = fixture_window(window, cx);
         view.live.snapshot = Some(Arc::new(snapshot(2)));
@@ -638,7 +775,9 @@ fn agent_status_words_stay_inside_narrow_rows(cx: &mut gpui::TestAppContext) {
                 view.config.layout.mode = LayoutMode::from(density);
                 view.config.sidebar.size = font;
                 view.sidebar_width = Some(width);
-                view.config.agent_status_text = AgentStatusText::from_rows(true, []);
+                view.config.sidebar_layout.agents =
+                    toml::from_str("rows = [[\"state_text\"]]").unwrap();
+                view.config.usage.inline = false;
                 cx.notify();
             });
             cx.update(|window, cx| {
@@ -4307,12 +4446,13 @@ fn holding_a_workspace_row_lifts_it_and_a_release_picks_the_gap(cx: &mut gpui::T
 /// pointer, the row it passes closes its place, and a release without a
 /// daemon puts every row back.
 #[cfg(test)]
-fn check_row_drag(style: crate::config::LayoutMode, cx: &mut gpui::TestAppContext) {
+fn check_row_drag(style: crate::config::LayoutMode, row_gap: u16, cx: &mut gpui::TestAppContext) {
     use gpui::{MouseButton, point};
 
     let (view, cx) = cx.add_window_view(|window, cx| {
         let mut view = fixture_window(window, cx);
         view.config.layout.mode = style;
+        view.config.sidebar_layout.spaces.row_gap = row_gap;
         view.live.status = crate::state::ConnectionStatus::Connected;
         view
     });
@@ -4361,18 +4501,23 @@ fn check_row_drag(style: crate::config::LayoutMode, cx: &mut gpui::TestAppContex
 }
 
 #[gpui::test]
+fn configured_row_gap_is_included_in_drag_displacement(cx: &mut gpui::TestAppContext) {
+    check_row_drag(crate::config::LayoutMode::default(), 1, cx);
+}
+
+#[gpui::test]
 fn superset_rows_lift_and_drop(cx: &mut gpui::TestAppContext) {
-    check_row_drag(crate::config::LayoutMode::Superset, cx);
+    check_row_drag(crate::config::LayoutMode::Superset, 0, cx);
 }
 
 #[gpui::test]
 fn orca_rows_lift_and_drop(cx: &mut gpui::TestAppContext) {
-    check_row_drag(crate::config::LayoutMode::Orca, cx);
+    check_row_drag(crate::config::LayoutMode::Orca, 0, cx);
 }
 
 #[gpui::test]
 fn minimal_rows_lift_and_drop(cx: &mut gpui::TestAppContext) {
-    check_row_drag(crate::config::LayoutMode::Minimal, cx);
+    check_row_drag(crate::config::LayoutMode::Minimal, 0, cx);
 }
 
 #[gpui::test]

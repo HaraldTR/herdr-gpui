@@ -168,6 +168,10 @@ size = 12
 # cookie set below on this machine.
 # [usage]
 # show = true
+# Daemon toolbar segments, including plugin usage percentages; independent of show.
+# topbar = true
+# Honor the daemon's [ui.sidebar] rows and plugin tokens; false uses native layouts.
+# inline = true
 # Show these even when no sign-in was found, with what to set up.
 # show_providers = ["cursor", "openrouter"]
 # Never show these, even when signed in.

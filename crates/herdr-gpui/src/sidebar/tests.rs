@@ -459,13 +459,19 @@ fn symbol_rows_keep_layout_density_and_expand_child_indent() {
                     super::cell::RowState::default(),
                     RowTree::LastChild,
                     true,
-                    160.,
                     RowIcon::None,
                     None,
                     None,
                     None,
-                    layout,
-                    (&font, &theme),
+                    &[],
+                    &super::cell::RowContext {
+                        indicators,
+                        font: &font,
+                        theme: &theme,
+                        look: layout,
+                        width: 160.,
+                        host: None,
+                    },
                 );
                 assert_eq!(
                     row.style().padding.left,
@@ -608,6 +614,8 @@ fn cells_hand_their_state_and_data_to_the_layout() {
             grouped: false,
             badge: None,
             removing: false,
+            status: snapshot.workspaces[0].agent_status,
+            lines: vec![],
         })
     };
     let _ = Cell::new(&recorder, workspace(), &cx).row();
@@ -621,6 +629,7 @@ fn cells_hand_their_state_and_data_to_the_layout() {
             status: AgentStatus::Working,
             place: None,
             status_text: None,
+            lines: vec![],
         }),
         &cx,
     )
