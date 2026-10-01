@@ -80,6 +80,20 @@ pub(super) fn row_text(kind: RowKind, focused: bool, theme: &Theme) -> (u32, Fon
     (name, weight, detail)
 }
 
+/// A teleported checkout's name: its work lives on another host now, so the
+/// name fades toward the background to read as the copy not to use. The fade
+/// stops at the standard mark contrast even when high contrast is on: high
+/// contrast already lifts dim labels to its own floor, so honoring it here
+/// would leave the fade invisible, and the teleport icon beside the name
+/// keeps the meaning readable.
+pub(super) fn left_behind(color: u32, theme: &Theme) -> u32 {
+    crate::contrast::ink_on_chrome(
+        crate::config::mix(theme.background, color, 45),
+        [theme.background, theme.surface, theme.active],
+        crate::contrast::Contrast::Standard.mark_ratio(),
+    )
+}
+
 /// Where a row stands while a workspace is dragged: rows the lifted card
 /// passes over stop answering hover, so only the drop line marks a place.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -330,6 +344,11 @@ pub(super) fn row(
             layout.child_details()
         };
     let (name_color, weight, detail_color) = row_text(kind, focused, theme);
+    let name_color = if badge.as_ref().is_some_and(|badge| badge.teleported) {
+        left_behind(name_color, theme)
+    } else {
+        name_color
+    };
     let icon_reserve = match workspace_icon {
         RowIcon::None => 0.,
         _ => ICON_RESERVE,

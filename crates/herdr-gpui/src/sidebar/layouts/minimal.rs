@@ -8,7 +8,7 @@ use super::{
         agents::status_style,
         cell::{AgentRow, RowContext, RowLayout, RowState, WorkspaceRow},
         line_height,
-        row::{RowKind, RowTree, row_text},
+        row::{RowKind, RowTree, left_behind, row_text},
     },
     parts::{self, Line},
 };
@@ -34,12 +34,16 @@ fn shell(key: &str, state: RowState, indent: f32, line: Line<'_>, cx: &RowContex
         .child(line.into_div())
 }
 
-fn name(key: &str, kind: RowKind, state: RowState, theme: &Theme) -> Div {
+fn name(key: &str, kind: RowKind, state: RowState, teleported: bool, theme: &Theme) -> Div {
     let (color, weight, _) = row_text(kind, state.selected, theme);
     div()
         .debug_selector(|| format!("name-{key}"))
         .font_weight(weight)
-        .text_color(rgb(color))
+        .text_color(rgb(if teleported {
+            left_behind(color, theme)
+        } else {
+            color
+        }))
 }
 
 impl RowLayout for Minimal {
@@ -51,12 +55,22 @@ impl RowLayout for Minimal {
         } else {
             density.child_indent()
         };
+        // Pull requests and uncommitted work stay off these rows, but a
+        // teleported checkout is a copy left behind, so it keeps its mark.
+        let teleported = row.badge.as_ref().is_some_and(|badge| badge.teleported);
+        let mark = (line_height(font) * 0.75).round().min(15.);
         let line = Line::new(cx.look.content_width(cx.width) - indent, density.gap())
             .fixed(
                 STATUS_WIDTH,
                 parts::status(row.status(), row.removing, theme, font),
             )
-            .fill(name(row.label, RowKind::Workspace, state, theme), row.label)
+            .fill(
+                name(row.label, RowKind::Workspace, state, teleported, theme),
+                row.label,
+            )
+            .when(teleported, |line| {
+                line.fixed(mark, parts::teleported(row.label, mark, theme))
+            })
             .when_some(row.fold, |line, fold| {
                 let width = ARROW_RESERVE - density.gap();
                 line.fixed(width, fold.element(theme).w(px(width)).text_size(px(16.)))
@@ -76,7 +90,7 @@ impl RowLayout for Minimal {
                 parts::status(agent.status, false, theme, font),
             )
             .fixed(icon, parts::icon(agent.icon.path(), icon, color))
-            .fill(name(&agent.key, kind, state, theme), agent.name)
+            .fill(name(&agent.key, kind, state, false, theme), agent.name)
             .when_some(agent.status_text, |line, text| {
                 line.label(
                     div()

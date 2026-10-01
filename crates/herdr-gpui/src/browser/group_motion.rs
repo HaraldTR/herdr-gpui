@@ -48,10 +48,10 @@ pub(crate) struct GroupMotion {
     /// Off in tests, which split and click at once and so need groups
     /// settled; the tests of the motion itself turn it on.
     enabled: bool,
-    /// A time tests fix motion at, since their frames are too slow to catch
-    /// it mid-way on their own.
+    /// How far after the latest motion began tests fix it, since their
+    /// frames are too slow to catch it mid-way on their own.
     #[cfg(test)]
-    frozen: Option<Instant>,
+    frozen: Option<std::time::Duration>,
 }
 
 impl Default for GroupMotion {
@@ -70,8 +70,16 @@ impl GroupMotion {
     /// The time motion is drawn at: `now`, unless a test fixed it.
     fn at(&self, now: Instant) -> Instant {
         #[cfg(test)]
-        if let Some(frozen) = self.frozen {
-            return frozen;
+        if let Some(offset) = self.frozen {
+            let latest = self
+                .opening
+                .iter()
+                .map(|opening| opening.since)
+                .chain(self.folding.iter().map(|folding| folding.since))
+                .max();
+            if let Some(since) = latest {
+                return since + offset;
+            }
         }
         now
     }
@@ -182,16 +190,12 @@ impl GroupMotion {
         self.enabled = true;
     }
 
-    /// Fixes motion `offset` after the latest one began, for tests.
+    /// Fixes motion `offset` after the latest one began, for tests. Freeze
+    /// before the split or close: the offset follows motion that starts
+    /// later, so a slow frame in between cannot settle it first.
     #[cfg(test)]
     pub(crate) fn freeze(&mut self, offset: std::time::Duration) {
-        let latest = self
-            .opening
-            .iter()
-            .map(|opening| opening.since)
-            .chain(self.folding.iter().map(|folding| folding.since))
-            .max();
-        self.frozen = latest.map(|since| since + offset);
+        self.frozen = Some(offset);
     }
 }
 

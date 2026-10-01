@@ -7,7 +7,7 @@ use super::{
         agents::status_style,
         cell::{AgentRow, RowContext, RowLayout, RowState, WorkspaceRow},
         line_height,
-        row::RowTree,
+        row::{RowTree, left_behind},
     },
     parts::{self, Line, glyph_at, wash},
 };
@@ -114,7 +114,11 @@ impl RowLayout for Orca {
                 div()
                     .debug_selector(|| format!("name-{label}"))
                     .h(px(line))
-                    .text_color(rgb(theme.foreground))
+                    .text_color(rgb(if teleported {
+                        left_behind(theme.foreground, theme)
+                    } else {
+                        theme.foreground
+                    }))
                     .when(state.selected, |title| {
                         title.font_weight(FontWeight::SEMIBOLD)
                     }),
