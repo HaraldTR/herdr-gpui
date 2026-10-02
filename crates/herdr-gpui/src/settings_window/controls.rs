@@ -638,33 +638,32 @@ impl SettingsWindow {
 
     fn render_general_controls(&self, cx: &mut Context<Self>) -> Div {
         let ready = !self.busy();
-        let general = self
-            .control_card("Interface")
-            .child(
-                self.control_choice(
-                    "settings-usage",
-                    format!(
-                        "Show usage: {}",
-                        if self.config.usage.show { "On" } else { "Off" }
-                    ),
-                    self.config.usage.show,
-                    ready,
+        let general =
+            self.control_card("Interface")
+                .child(
+                    self.control_choice(
+                        "settings-usage",
+                        format!(
+                            "Show usage: {}",
+                            if self.config.usage.show { "On" } else { "Off" }
+                        ),
+                        self.config.usage.show,
+                        ready,
+                    )
+                    .when(ready, |button| {
+                        button.on_click(cx.listener(|this, _, _, cx| {
+                            let show = !this.config.usage.show;
+                            this.save_native(move || Config::save_usage_visibility(show), cx);
+                        }))
+                    }),
                 )
-                .when(ready, |button| {
-                    button.on_click(cx.listener(|this, _, _, cx| {
-                        let show = !this.config.usage.show;
-                        this.save_native(move || Config::save_usage_visibility(show), cx);
-                    }))
-                }),
-            )
-            .child(self.control_row("Show agents", self.config.show_agents.to_string()))
-            .child(self.control_row(
-                "Confirm tab close",
-                self.config.confirm_close_tab.to_string(),
-            ))
-            .child(self.control_note(
-                "Show agents and tab-close confirmation are configured in the local override file.",
-            ));
+                .child(self.control_row(
+                    "Confirm tab close",
+                    self.config.confirm_close_tab.to_string(),
+                ))
+                .child(self.control_note(
+                    "Tab-close confirmation is configured in the local override file.",
+                ));
         div().flex().flex_col().gap(px(24.)).child(general)
             .child(self.render_skill_controls(cx))
             .child(self.control_card("Clipboard feedback")
@@ -779,6 +778,24 @@ impl SettingsWindow {
                 card
             })
             .child(chooser)
+            .child(
+                self.control_choice(
+                    "settings-show-agents",
+                    format!(
+                        "Show agents: {}",
+                        if self.config.show_agents { "On" } else { "Off" }
+                    ),
+                    self.config.show_agents,
+                    !self.busy(),
+                )
+                .debug_selector(|| "settings-show-agents".into())
+                .when(!self.busy(), |button| {
+                    button.on_click(cx.listener(|this, _, _, cx| {
+                        let show = !this.config.show_agents;
+                        this.save_native(move || Config::save_show_agents(show), cx);
+                    }))
+                }),
+            )
             .child(self.control_row(
                 "Sidebar gap",
                 format!("{} px", self.config.layout.sidebar_gap),
@@ -806,6 +823,49 @@ mod tests {
             shared: None,
             error: None,
         })
+    }
+
+    #[gpui::test]
+    fn show_agents_is_in_appearance_and_disabled_during_saves(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(skill_fixture);
+        cx.simulate_resize(size(px(960.), px(2200.)));
+        cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+        assert!(cx.debug_bounds("settings-show-agents").is_none());
+        for show in [false, true] {
+            view.update(cx, |view, cx| {
+                view.section = Section::Appearance;
+                view.config.show_agents = show;
+                view.saving = true;
+                cx.notify();
+            });
+            cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+            let button = cx.debug_bounds("settings-show-agents").unwrap();
+            cx.simulate_click(button.center(), Default::default());
+            view.update(cx, |view, cx| {
+                assert_eq!(view.config.show_agents, show);
+                assert!(view.save_completion.is_none());
+                view.saving = false;
+                view.accept_layout_choice(LayoutMode::Orca, cx);
+                // Exercise reconciliation without touching personal configuration.
+                view.save_with(
+                    || Ok(()),
+                    move || {
+                        let mut loaded = skill_load()?;
+                        loaded.config.show_agents = !show;
+                        Ok(loaded)
+                    },
+                    false,
+                    cx,
+                );
+            });
+            cx.run_until_parked();
+            view.read_with(cx, |view, _| {
+                assert_eq!(view.config.show_agents, !show);
+                assert_eq!(view.layout_intent, Some(LayoutMode::Orca));
+                assert_eq!(view.config.layout.mode, LayoutMode::Orca);
+                assert!(!view.busy());
+            });
+        }
     }
 
     #[gpui::test]

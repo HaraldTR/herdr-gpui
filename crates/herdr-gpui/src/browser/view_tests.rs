@@ -333,9 +333,9 @@ mod groups {
         cx.update(|_, cx| view.update(cx, |view, _| view.browser.group_motion.enable()));
         draw(cx);
         let whole = cx.debug_bounds("group").unwrap();
-        run(&view, cx, Command::SplitEditor);
         let early = crate::motion::ENTER / 8;
         cx.update(|_, cx| view.update(cx, |view, _| view.browser.group_motion.freeze(early)));
+        run(&view, cx, Command::SplitEditor);
         draw(cx);
         // Early on, the source still has most of the row, and the new group,
         // laid out at its settled width, is only partly uncovered from the
@@ -365,12 +365,12 @@ mod groups {
         let [_, right] = groups(&view, cx)[..] else {
             panic!("two groups")
         };
-        cx.update(|window, cx| view.update(cx, |view, cx| view.close_group(right, window, cx)));
         cx.update(|_, cx| {
             view.update(cx, |view, _| {
                 view.browser.group_motion.freeze(std::time::Duration::ZERO)
             })
         });
+        cx.update(|window, cx| view.update(cx, |view, cx| view.close_group(right, window, cx)));
         draw(cx);
         let folding = cx.debug_bounds("folding-group").unwrap();
         let left = cx.debug_bounds("group").unwrap();

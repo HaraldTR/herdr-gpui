@@ -202,11 +202,6 @@ impl HerdrWindow {
             .py(px(8.));
         if self.settings.tab == crate::settings_panel::Tab::General {
             body = body.child(section("GENERAL"))
-            .child(row(
-                "preferences-show-agents",
-                "Show agents",
-                self.config.show_agents.to_string(),
-            ))
             .child(
                 toggle(
                     "preferences-show-usage",
