@@ -349,7 +349,12 @@ fn every_palette_status_overrides_and_auto_switch() -> anyhow::Result<()> {
     )?;
     assert_eq!(settings.theme(false)?.surface, 0x282828);
     assert_eq!(settings.theme(true)?.surface, 0xeff1f5);
-    assert_eq!(settings.theme(true)?.background, 0xfefefe);
+    // `sidebar_bg` colors the sidebar alone, as in Herdr, never the window.
+    assert_eq!(settings.theme(true)?.background, 0xe6e9ef);
+    assert_eq!(settings.theme(true)?.sidebar, Some(0xfefefe));
+    assert_eq!(settings.theme(true)?.sidebar_background(), 0xfefefe);
+    assert_eq!(settings.theme(false)?.sidebar, None);
+    assert_eq!(settings.theme(false)?.sidebar_background(), 0x282828);
     assert_eq!(settings.theme(false)?.palette[5], 0x010203);
     assert_eq!(settings.status_color(AgentStatus::Blocked, false), 0x112233);
     assert_eq!(settings.status_color(AgentStatus::Blocked, true), 0xabcdef);
@@ -583,5 +588,39 @@ fn lock_symlinks_and_nonregular_configs_are_rejected() -> anyhow::Result<()> {
     assert!(!path.exists());
     fs::create_dir(&path)?;
     assert!(matches!(persistence::read(&path), Err(Error::UnsafePath)));
+    Ok(())
+}
+
+/// Herdr paints `sidebar_bg` on the sidebar and nowhere else, whether set for
+/// both modes or per mode; built-in themes leave it unset.
+#[test]
+fn sidebar_background_colors_only_the_sidebar() -> anyhow::Result<()> {
+    let plain = parsed("[theme]\nname = 'catppuccin'")?.theme(false)?;
+    assert_eq!(plain.sidebar, None);
+    assert_eq!(plain.sidebar_background(), plain.surface);
+    for light in [false, true] {
+        let base = parsed("[theme]\nname = 'catppuccin'\nauto_switch = true")?.theme(light)?;
+        let common = parsed(
+            "[theme]\nname = 'catppuccin'\nauto_switch = true\n[theme.custom]\nsidebar_bg = '#0d0e0f'",
+        )?
+        .theme(light)?;
+        assert_eq!(common.sidebar, Some(0x0d0e0f), "light {light}");
+        assert_eq!(
+            crate::config::Theme {
+                sidebar: None,
+                ..common
+            },
+            base,
+            "light {light}: nothing but the sidebar changes"
+        );
+        let per_mode = parsed(
+            "[theme]\nname = 'catppuccin'\nauto_switch = true\n[theme.custom]\nsidebar_bg = '#0d0e0f'\n[theme.custom.light]\nsidebar_bg = '#f0f1f2'\n[theme.custom.dark]\nsidebar_bg = '#101112'",
+        )?
+        .theme(light)?;
+        assert_eq!(
+            per_mode.sidebar,
+            Some(if light { 0xf0f1f2 } else { 0x101112 })
+        );
+    }
     Ok(())
 }

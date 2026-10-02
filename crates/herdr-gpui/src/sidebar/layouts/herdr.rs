@@ -72,7 +72,7 @@ impl RowLayout for Herdr {
             RowIcon::None,
             None,
             None,
-            agent.status_text,
+            agent.status_text.as_deref(),
             cx.look,
             (cx.font, cx.theme),
         )

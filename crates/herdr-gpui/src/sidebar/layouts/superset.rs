@@ -96,7 +96,7 @@ fn slot(
                 .absolute()
                 .top(px(-2.))
                 .right(px(-2.))
-                .bg(rgb(theme.surface));
+                .bg(rgb(theme.sidebar_background()));
         }
         let (diameter, filled, _) = status_style(status, theme);
         let color = cx.indicators.color(status);
@@ -108,7 +108,11 @@ fn slot(
             .rounded_full()
             .border_1()
             .border_color(rgb(color))
-            .bg(rgb(if filled { color } else { theme.surface }))
+            .bg(rgb(if filled {
+                color
+            } else {
+                theme.sidebar_background()
+            }))
     });
     div()
         .debug_selector(|| format!("icon-{key}"))
@@ -240,7 +244,7 @@ impl RowLayout for Superset {
                     0.5,
                 )
             })
-            .when_some(agent.status_text, |line, text| {
+            .when_some(agent.status_text.as_deref(), |line, text| {
                 line.label(
                     div()
                         .debug_selector(|| format!("status-{key}"))

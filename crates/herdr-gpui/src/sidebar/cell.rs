@@ -21,6 +21,7 @@ use crate::{
 };
 use gpui::{App, ClickEvent, Div, ElementId, Window};
 use herdr_client::protocol::{AgentStatus, ClientShellWorkspace};
+use std::borrow::Cow;
 
 /// Read-only inputs every row of one render shares.
 pub(super) struct RowContext<'a> {
@@ -89,8 +90,9 @@ pub(super) struct AgentRow<'a> {
     /// workspace has gone.
     pub(super) place: Option<(&'a str, Option<&'a str>)>,
     /// The daemon's `state_text` word when its sidebar config asks for it, so
-    /// the GUI and the TUI name the status the same way.
-    pub(super) status_text: Option<&'static str>,
+    /// the GUI and the TUI name the status the same way: the agent's own
+    /// state label when its integration set one.
+    pub(super) status_text: Option<Cow<'a, str>>,
 }
 
 /// What a row shows.

@@ -211,7 +211,7 @@ impl RowLayout for Orca {
                     0.5,
                 )
             })
-            .when_some(agent.status_text, |line, text| {
+            .when_some(agent.status_text.as_deref(), |line, text| {
                 line.label(
                     div()
                         .debug_selector(|| format!("status-{key}"))

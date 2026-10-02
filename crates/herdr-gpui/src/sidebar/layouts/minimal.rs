@@ -90,7 +90,7 @@ impl RowLayout for Minimal {
             )
             .fixed(icon, parts::icon(agent.icon.path(), icon, color))
             .fill(name(&agent.key, kind, state, false, theme), agent.name)
-            .when_some(agent.status_text, |line, text| {
+            .when_some(agent.status_text.as_deref(), |line, text| {
                 line.label(
                     div()
                         .debug_selector(|| format!("status-{}", agent.key))

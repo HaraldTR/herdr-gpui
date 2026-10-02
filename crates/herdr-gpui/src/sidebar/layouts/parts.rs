@@ -218,7 +218,7 @@ pub(super) fn mark(row: Div, state: RowState, colors: (Rgba, Rgba), theme: &Them
             .bg(rgb(if selected {
                 theme.active
             } else {
-                theme.surface
+                theme.sidebar_background()
             }))
             .border_color(wash(theme.foreground, if selected { 0x40 } else { 0x20 }))
             .shadow_lg(),

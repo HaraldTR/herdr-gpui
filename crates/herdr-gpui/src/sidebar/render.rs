@@ -4,7 +4,7 @@
 
 use super::{
     DEVICE_FOOTER_HEIGHT, HOST_ARROW_WIDTH, HOST_GAP, STATUS_WIDTH, SidebarDrag, agent_name,
-    agents::{Indicators, agent_place, status_text},
+    agents::{Indicators, agent_place, state_label, status_text},
     agents_sort,
     cell::{AgentRow, Cell, Fold, RowContext, RowData, RowState, WorkspaceRow, layout_for},
     label_text,
@@ -476,7 +476,7 @@ impl HerdrWindow {
                                 .config
                                 .agent_status_text
                                 .shown_for(agent.agent.as_deref())
-                                .then(|| status_text(agent.agent_status)),
+                                .then(|| state_label(agent, status_text(agent.agent_status))),
                         }),
                         &row_cx,
                     )
@@ -543,7 +543,7 @@ impl HerdrWindow {
             .text_size(px(font.size))
             .line_height(px(line_height(font)))
             .text_color(rgb(theme.foreground))
-            .bg(rgb(theme.surface))
+            .bg(rgb(theme.sidebar_background()))
             .border_r_1()
             .border_color(rgb(theme.active))
             // Zero flex bases keep long workspace lists from displacing agents.
