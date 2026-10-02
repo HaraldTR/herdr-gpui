@@ -134,6 +134,8 @@ pub(super) struct Endpoint {
     pub live: LiveState,
     pub generation: u64,
     pub(crate) toasts: crate::notifications::Toasts,
+    /// Derived from `live.snapshot`; refreshed by `sync_live` whenever `live` changes.
+    pub(crate) config_diagnostic: crate::config_diagnostic::ConfigDiagnostic,
     retry_at: Instant,
     attempts: u32,
     online_since: Option<Instant>,
@@ -158,7 +160,13 @@ impl Endpoint {
     ) {
         std::mem::swap(&mut self.connection, connection);
         std::mem::swap(&mut self.live, live);
+        self.sync_live();
         self.initial_surface = true;
+    }
+
+    /// Refreshes state derived from `live` after it is replaced.
+    pub(crate) fn sync_live(&mut self) {
+        self.config_diagnostic.sync(self.live.snapshot.as_deref());
     }
     pub fn new(id: String, label: String, target: ConnectTarget, enabled: bool) -> Self {
         Self {
@@ -172,6 +180,7 @@ impl Endpoint {
             live: LiveState::default(),
             generation: 0,
             toasts: Default::default(),
+            config_diagnostic: Default::default(),
             retry_at: Instant::now(),
             attempts: 0,
             online_since: None,
@@ -188,6 +197,7 @@ impl Endpoint {
         self.online_since = None;
         self.generation += 1;
         self.live = self.connection.take_update().unwrap_or_default();
+        self.sync_live();
     }
 
     /// The SSH target and session this device was saved with. The sessions list
@@ -215,6 +225,7 @@ impl Endpoint {
         self.attempts = 0;
         // The replacement transport has produced no state of its own yet.
         self.live = LiveState::default();
+        self.sync_live();
     }
 
     fn connect(&mut self, options: ConnectOptions, active: bool) {
@@ -224,6 +235,7 @@ impl Endpoint {
         self.attempts = self.attempts.saturating_add(1);
         self.connection.reconnect(options, false, active);
         self.live = self.connection.take_update().unwrap_or_default();
+        self.sync_live();
         self.toasts.receive(self.live.notifications.drain(..));
         self.retry_at = Instant::now() + self.retry_delay();
     }
@@ -249,6 +261,7 @@ impl Endpoint {
             }
             self.toasts.receive(state.notifications.drain(..));
             self.live = state;
+            self.sync_live();
         }
         if self
             .connection

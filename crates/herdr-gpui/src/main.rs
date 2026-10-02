@@ -14,6 +14,7 @@ mod caffeine;
 mod cli;
 mod close_modal;
 mod config;
+mod config_diagnostic;
 mod connection;
 mod constants;
 mod contrast;

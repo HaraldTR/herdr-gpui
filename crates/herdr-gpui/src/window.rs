@@ -5,6 +5,7 @@
 
 mod clipboard;
 mod commands;
+mod config_diagnostic;
 mod file_drop;
 mod flash;
 pub(crate) use flash::Flash;
