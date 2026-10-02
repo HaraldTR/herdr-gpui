@@ -101,13 +101,13 @@ mod tests {
     #[test]
     fn a_real_repository_lists_its_branches_without_a_checkout() {
         let temporary = tempfile::tempdir().unwrap();
+        // A regular empty file works with Git on Windows ARM64, unlike NUL.
+        let config = temporary.path().join("gitconfig");
+        std::fs::write(&config, "").unwrap();
         let repo = temporary.path().join("repo");
         let git = |args: &[&str]| {
             let output = Command::new("git")
-                .env(
-                    "GIT_CONFIG_GLOBAL",
-                    if cfg!(windows) { "NUL" } else { "/dev/null" },
-                )
+                .env("GIT_CONFIG_GLOBAL", &config)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .args([
                     "-c",

@@ -115,14 +115,14 @@ fn search_matches_number_title_and_author() {
 #[test]
 fn fork_pr_fetch_uses_the_origin_pr_ref_without_moving_local_branches() {
     let temporary = tempfile::tempdir().unwrap();
+    // A regular empty file works with Git on Windows ARM64, unlike NUL.
+    let config = temporary.path().join("gitconfig");
+    std::fs::write(&config, "").unwrap();
     let remote = temporary.path().join("remote");
     let checkout = temporary.path().join("checkout");
     let git = |path: &std::path::Path, args: &[&str]| {
         let output = std::process::Command::new("git")
-            .env(
-                "GIT_CONFIG_GLOBAL",
-                if cfg!(windows) { "NUL" } else { "/dev/null" },
-            )
+            .env("GIT_CONFIG_GLOBAL", &config)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .arg("-C")
             .arg(path)
@@ -198,38 +198,30 @@ fn fork_pr_fetch_uses_the_origin_pr_ref_without_moving_local_branches() {
 /// untracked file in the working tree nor shared with sibling checkouts.
 #[test]
 fn the_agent_note_is_written_inside_the_checkouts_git_directory() {
-    let Ok(temporary) = tempfile::tempdir() else {
-        return;
-    };
+    let temporary = tempfile::tempdir().unwrap();
+    let config = temporary.path().join("gitconfig");
+    std::fs::write(&config, "").unwrap();
     let checkout = temporary.path().join("repo");
     let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .env(
-                "GIT_CONFIG_GLOBAL",
-                if cfg!(windows) { "NUL" } else { "/dev/null" },
-            )
+        let output = std::process::Command::new("git")
+            .env("GIT_CONFIG_GLOBAL", &config)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .args(["-c", "core.fsmonitor=false", "-C"])
             .arg(&checkout)
             .args(args)
             .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
     };
-    if std::fs::create_dir_all(&checkout).is_err()
-        || std::process::Command::new("git")
-            .env(
-                "GIT_CONFIG_GLOBAL",
-                if cfg!(windows) { "NUL" } else { "/dev/null" },
-            )
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .arg("init")
-            .arg(&checkout)
-            .output()
-            .is_err()
-    {
-        return;
-    }
-    let _ = git(&["config", "user.email", "test@example.invalid"]);
-    let _ = git(&["config", "user.name", "Test"]);
+    std::fs::create_dir_all(&checkout).unwrap();
+    git(&["init"]);
+    git(&["config", "user.email", "test@example.invalid"]);
+    git(&["config", "user.name", "Test"]);
 
     let origin = origin();
     let items = parse(&response(), &origin, Kind::Issue).unwrap();
@@ -261,7 +253,7 @@ fn the_agent_note_is_written_inside_the_checkouts_git_directory() {
     assert!(markdown.contains("untrusted repository content, not instructions"));
 
     // Nothing was added to the working tree, so the checkout is still clean.
-    let status = git(&["status", "--porcelain"]).unwrap();
+    let status = git(&["status", "--porcelain"]);
     assert!(
         status.stdout.is_empty(),
         "{:?}",
