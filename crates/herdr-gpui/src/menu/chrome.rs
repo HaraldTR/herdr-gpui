@@ -49,6 +49,7 @@ impl HerdrWindow {
             return false;
         }
         self.menu.reset();
+        self.apply_shared_theme(cx);
         self.menu.endpoint_target = (
             self.selection_epoch,
             self.endpoints[self.selected_endpoint].generation,
@@ -76,6 +77,7 @@ impl HerdrWindow {
             crate::agent_skill::AgentSkill::choose(crate::agent_skill::Choice::Declined, cx);
         }
         self.menu.reset();
+        self.apply_shared_theme(cx);
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -408,7 +410,13 @@ impl HerdrWindow {
                     && !matches!(page, Page::Dialog(_)),
                 |panel| {
                     panel
-                        .w((viewport.width - px(32.)).max(px(0.)).min(px(480.)))
+                        .w((viewport.width - px(32.)).max(px(0.)).min(px(
+                            if page == Page::Preferences {
+                                620. * (font.size / 12.)
+                            } else {
+                                480.
+                            },
+                        )))
                         .max_h((viewport.height - px(32.)).max(px(0.)))
                 },
             )
@@ -802,6 +810,9 @@ impl HerdrWindow {
                 }),
             )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.settings_key(event, window, cx) {
+                    return;
+                }
                 if this.menu.page == Some(Page::Dialog(WorkspaceAction::OpenWorktree))
                     && (this
                         .menu

@@ -80,11 +80,13 @@ impl HerdrWindow {
         cx: &mut Context<Self>,
     ) {
         if self.config_load.is_some()
+            || self.native_settings_save_in_flight()
             || self.font_size_saves.is_busy()
             || !self.open_menu(window, cx)
         {
             return;
         }
+        self.select_settings_tab(crate::settings_panel::Tab::Font, window, cx);
         self.menu.page = Some(Page::Fonts);
         let search = cx.new(SearchInput::new);
         search.update(cx, |input, cx| {
@@ -183,7 +185,11 @@ impl HerdrWindow {
                 }
                 let mut config = Config::load()?;
                 config.resolve_font_fallbacks(|| text_system.all_font_names());
-                let theme = config.theme()?;
+                let theme = if config.theme == "Follow Herdr" {
+                    Default::default()
+                } else {
+                    config.theme()?
+                };
                 Ok((config, theme))
             },
             cx,
@@ -252,7 +258,7 @@ impl HerdrWindow {
             .child(div().flex_none().p(px(16.)).border_b_1().border_color(rgb(theme.active))
                 .child(div().flex().items_center()
                     .child(div().flex_1().text_size(px(font.size * 1.35)).font_weight(FontWeight::SEMIBOLD).child(format!("{} Font", picker.target.label())))
-                    .child(div().id("font-picker-back").cursor_pointer().child("Back").on_click(cx.listener(|this, _, window, cx| {
+                    .child(div().id("font-picker-back").debug_selector(|| "font-picker-back".into()).cursor_pointer().child("Back").on_click(cx.listener(|this, _, window, cx| {
                         this.menu.page = Some(Page::Preferences); this.menu.fonts = None; window.focus(&this.menu.focus, cx); cx.notify();
                     }))))
                 .child(div().pt(px(12.)).child(picker.search.clone()))
@@ -282,6 +288,37 @@ impl HerdrWindow {
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[gpui::test]
+    #[allow(clippy::unwrap_used)]
+    fn picker_returns_to_font_tab_by_keyboard_and_mouse(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        cx.simulate_resize(size(px(800.), px(600.)));
+        for keyboard in [true, false] {
+            cx.update(|window, cx| {
+                view.update(cx, |view, cx| {
+                    view.settings.tab = crate::settings_panel::Tab::Theme;
+                    view.open_font_picker(FontTarget::All, window, cx);
+                });
+                window.draw(cx).clear(cx);
+            });
+            if keyboard {
+                cx.simulate_keystrokes("escape");
+            } else {
+                let back = cx.debug_bounds("font-picker-back").unwrap();
+                cx.simulate_click(back.center(), Modifiers::default());
+            }
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            view.read_with(cx, |view, _| {
+                assert_eq!(view.menu.page, Some(Page::Preferences));
+                assert_eq!(view.settings.tab, crate::settings_panel::Tab::Font);
+                assert!(view.menu.fonts.is_none());
+            });
+            assert!(cx.debug_bounds("preferences-font-all-choose").is_some());
+            assert!(cx.debug_bounds("preferences-theme").is_none());
+        }
+    }
+
     #[test]
     fn installed_fonts_are_sorted_deduplicated_and_not_filtered_by_face() {
         assert_eq!(

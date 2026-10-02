@@ -24,6 +24,7 @@ use herdr_client::protocol::{AgentStatus, ClientShellWorkspace};
 
 /// Read-only inputs every row of one render shares.
 pub(super) struct RowContext<'a> {
+    pub(super) indicators: super::agents::Indicators,
     pub(super) font: &'a FontConfig,
     pub(super) theme: &'a Theme,
     /// Density and style: spacing, highlight shape, and which details show.

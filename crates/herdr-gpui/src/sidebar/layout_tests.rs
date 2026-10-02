@@ -1182,6 +1182,8 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         hover_menu: None,
         local_error: None,
         menu: crate::menu::MenuState::new(cx),
+        settings: Default::default(),
+        integrations: Default::default(),
         install_warning_shown: false,
         collapsed_repos: Default::default(),
         wheel: WheelAccumulator::default(),
@@ -1202,9 +1204,18 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         sidebar_revealed: Default::default(),
         _poll: Task::ready(()),
         _activation: cx.observe_window_activation(window, |_, _, _| {}),
+        _appearance: cx.observe_window_appearance(window, |this, _, cx| {
+            this.apply_shared_theme(cx);
+            cx.notify();
+        }),
         sidebar_view: {
             let weak = cx.weak_entity();
-            cx.new(|_| crate::sidebar::SidebarView::new(weak))
+            cx.new(|_| {
+                crate::sidebar::SidebarView::new(
+                    weak,
+                    super::agents::Indicators::new(None, false, &crate::config::Theme::default()),
+                )
+            })
         },
         surface_signal: cx.new(|_| crate::window::SurfaceSignal),
         _sidebar_invalidation: HerdrWindow::invalidate_sidebar(cx),
@@ -1857,19 +1868,25 @@ fn check_sidebar(fixture: Entity<SidebarFixture>, cx: &mut gpui::VisualTestConte
             gpui::EntityInputHandler::unmark_text(input, window, cx)
         });
     });
-    cx.simulate_keystrokes("escape cmd-,");
+    cx.simulate_keystrokes("escape");
+    // Exercise the retained modal, not the standalone Settings command.
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.open_preferences_fixture(window, cx));
+    });
+    // General has enough content to exercise the independent body scroll.
+    cx.simulate_keystrokes("shift-tab");
     cx.simulate_resize(size(px(360.), px(240.)));
     cx.update(|window, cx| full_draw(window, cx).clear(cx));
     let header = cx.debug_bounds("preferences-header").unwrap();
     let footer = cx.debug_bounds("preferences-footer").unwrap();
     let body = cx.debug_bounds("preferences-body").unwrap();
-    let theme_row = cx.debug_bounds("preferences-theme").unwrap();
+    let usage_row = cx.debug_bounds("preferences-show-usage").unwrap();
     assert!(body.size.height > px(0.));
     assert!(header.bottom() <= body.top());
     assert!(body.bottom() <= footer.top());
     cx.simulate_keystrokes("pagedown");
     cx.update(|window, cx| full_draw(window, cx).clear(cx));
-    assert!(cx.debug_bounds("preferences-theme").unwrap().top() < theme_row.top());
+    assert!(cx.debug_bounds("preferences-show-usage").unwrap().top() < usage_row.top());
     assert_eq!(cx.debug_bounds("preferences-header").unwrap(), header);
     assert_eq!(cx.debug_bounds("preferences-footer").unwrap(), footer);
     let close = cx.debug_bounds("preferences-close").unwrap();
@@ -1960,7 +1977,12 @@ fn check_sidebar(fixture: Entity<SidebarFixture>, cx: &mut gpui::VisualTestConte
         }
     }
     cx.simulate_resize(size(px(800.), px(600.)));
-    cx.simulate_keystrokes("cmd-,");
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.open_preferences_fixture(window, cx);
+            view.select_settings_tab(crate::settings_panel::Tab::Theme, window, cx)
+        });
+    });
     cx.update(|window, cx| full_draw(window, cx).clear(cx));
     let choose_theme = cx.debug_bounds("preferences-choose-theme").unwrap();
     cx.simulate_click(choose_theme.center(), Default::default());
@@ -2068,7 +2090,10 @@ fn check_sidebar(fixture: Entity<SidebarFixture>, cx: &mut gpui::VisualTestConte
         assert!(view.read(cx).menu.page.is_none());
         assert!(view.read(cx).focus.is_focused(window));
     });
-    cx.simulate_keystrokes("cmd-b cmd-,");
+    cx.simulate_keystrokes("cmd-b");
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.open_preferences_fixture(window, cx));
+    });
     cx.update(|_, cx| {
         assert!(view.read(cx).sidebar_visible);
         assert!(view.read(cx).menu.page == Some(crate::menu::Page::Preferences));
@@ -2919,7 +2944,7 @@ fn the_sidebar_menu_stays_clear_of_the_window_chrome(cx: &mut gpui::TestAppConte
 }
 
 #[gpui::test]
-fn device_footer_filters_both_lists_and_opens_settings(cx: &mut gpui::TestAppContext) {
+fn device_footer_filters_both_lists_and_keeps_settings_visible(cx: &mut gpui::TestAppContext) {
     let (fixture, cx) = cx.add_window_view(|window, cx| {
         crate::bind_keys(cx);
         let view = cx.new(|cx| fixture_window(window, cx));
@@ -3014,8 +3039,12 @@ fn device_footer_filters_both_lists_and_opens_settings(cx: &mut gpui::TestAppCon
         full_draw(window, cx).clear(cx);
     });
     assert!(cx.debug_bounds("host-ssh:fixture").is_some());
-    let settings = cx.debug_bounds("device-settings").unwrap().center();
-    cx.simulate_click(settings, Modifiers::default());
+    assert!(cx.debug_bounds("device-settings").is_some());
+    // Command routing belongs to settings_window tests; this fixture keeps
+    // testing the legacy modal without starting the personal config loader.
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.open_preferences_fixture(window, cx));
+    });
     cx.update(|_, cx| {
         assert_eq!(
             view.read(cx).menu.page,
@@ -3358,7 +3387,8 @@ fn preferences_list_feature_flags(cx: &mut gpui::TestAppContext) {
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
                 view.config.features.sidebar_hover_menu = enabled;
-                view.open_preferences(window, cx);
+                view.open_preferences_fixture(window, cx);
+                view.select_settings_tab(crate::settings_panel::Tab::General, window, cx);
             });
             full_draw(window, cx).clear(cx);
         });
@@ -3380,6 +3410,118 @@ fn preferences_list_feature_flags(cx: &mut gpui::TestAppContext) {
                 "{label} row outside the body"
             );
         }
+    }
+}
+
+#[gpui::test]
+fn preferences_tabs_stay_on_one_row_and_font_input_keeps_native_focus(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::settings_panel::Tab;
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        crate::bind_keys(cx);
+        fixture_window(window, cx)
+    });
+    cx.simulate_resize(size(px(320.), px(400.)));
+    cx.update(|window, cx| {
+        let focus = view.read(cx).focus.clone();
+        window.focus(&focus, cx);
+        window.draw(cx).clear(cx);
+    });
+    // Opening the modal changes the focus tree; paint it before routing the next key.
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.open_preferences_fixture(window, cx));
+        window.draw(cx).clear(cx);
+        assert!(view.read(cx).menu.page == Some(crate::menu::Page::Preferences));
+        assert!(view.read(cx).menu.focus.is_focused(window));
+    });
+    cx.simulate_keystrokes("shift-tab");
+    cx.update(|window, cx| {
+        assert_eq!(view.read(cx).settings.tab, Tab::General);
+        window.draw(cx).clear(cx);
+    });
+    let panel = cx.debug_bounds("menu-panel").unwrap();
+    let tabs = cx.debug_bounds("preferences-tabs").unwrap();
+    assert!(tabs.left() >= panel.left() && tabs.right() <= panel.right());
+    let first = cx.debug_bounds("preferences-tab-Theme").unwrap();
+    for selector in [
+        "preferences-tab-Theme",
+        "preferences-tab-Indicators",
+        "preferences-tab-Sound",
+        "preferences-tab-Toasts",
+        "preferences-tab-Integrations",
+        "preferences-tab-Font",
+        "preferences-tab-General",
+    ] {
+        let bounds = cx.debug_bounds(selector).unwrap();
+        assert_eq!(bounds.top(), first.top(), "tabs must never wrap");
+        assert_eq!(bounds.size.height, first.size.height);
+    }
+    let selected = cx.debug_bounds("preferences-tab-General").unwrap();
+    assert!(selected.left() >= tabs.left() && selected.right() <= tabs.right());
+    assert!(view.read_with(cx, |view, _| view.settings.tabs_scroll.offset().x < px(0.)));
+    cx.simulate_keystrokes("tab");
+    cx.update(|window, cx| {
+        assert_eq!(view.read(cx).settings.tab, Tab::Theme);
+        view.update(cx, |view, cx| {
+            view.select_settings_tab(Tab::Font, window, cx)
+        });
+        window.draw(cx).clear(cx);
+    });
+    assert!(cx.debug_bounds("preferences-font-terminal").is_some());
+    let input = cx.debug_bounds("preferences-font-sidebar-size").unwrap();
+    cx.simulate_click(input.center(), Default::default());
+    cx.simulate_keystrokes("cmd-a 1 8 tab");
+    cx.update(|_, cx| assert_eq!(view.read(cx).settings.tab, Tab::Font));
+    // Escape first leaves the editor, then Tab resumes section navigation.
+    cx.simulate_keystrokes("escape");
+    cx.simulate_keystrokes("tab");
+    cx.update(|_, cx| assert_eq!(view.read(cx).settings.tab, Tab::General));
+    cx.simulate_keystrokes("escape");
+    cx.update(|window, cx| assert!(view.read(cx).focus.is_focused(window)));
+}
+
+#[gpui::test]
+fn preferences_tabs_fit_desktop_and_shared_details_only_appear_in_general(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::settings_panel::Tab;
+    let (view, cx) = cx.add_window_view(fixture_window);
+    cx.simulate_resize(size(px(1200.), px(850.)));
+    for font_size in [12., 16.] {
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.config.ui.size = font_size;
+                view.menu.page = Some(crate::menu::Page::Preferences);
+                view.select_settings_tab(Tab::Theme, window, cx);
+            });
+            window.draw(cx).clear(cx);
+        });
+        let tabs = cx.debug_bounds("preferences-tabs").unwrap();
+        let first = cx.debug_bounds("preferences-tab-Theme").unwrap();
+        let last = cx.debug_bounds("preferences-tab-General").unwrap();
+        assert_eq!(first.top(), last.top());
+        assert!(first.left() >= tabs.left() && last.right() <= tabs.right());
+    }
+    for tab in [
+        Tab::Theme,
+        Tab::Indicators,
+        Tab::Sound,
+        Tab::Toasts,
+        Tab::General,
+    ] {
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| view.select_settings_tab(tab, window, cx));
+            window.draw(cx).clear(cx);
+        });
+        assert_eq!(
+            cx.debug_bounds("preferences-shared-path").is_some(),
+            tab == Tab::General,
+        );
+        assert_eq!(
+            cx.debug_bounds("preferences-reload-shared").is_some(),
+            tab == Tab::General,
+        );
     }
 }
 

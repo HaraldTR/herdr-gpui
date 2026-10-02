@@ -10,6 +10,22 @@ use crate::{
 use gpui::{prelude::*, *};
 
 impl HerdrWindow {
+    pub(crate) fn reload_notification_config(&mut self, cx: &mut Context<Self>) {
+        self.sound.reload();
+        let enabled = self.config.notifications.enabled;
+        if let Some(shared) = &self.settings.shared {
+            self.config.apply_shared_notifications(shared);
+        }
+        let now = std::time::Instant::now();
+        for endpoint in &mut self.endpoints {
+            if !enabled && self.config.notifications.enabled {
+                endpoint.toasts.enabled_since = Some(now);
+            }
+        }
+        self.tick_toasts(self.menu.page.is_some() || self.toasts_hidden, now);
+        cx.notify();
+    }
+
     /// Reloads when the GUI overrides change, or the daemon's config whose
     /// `[keys]` and clipboard toast the GUI also honors.
     pub(crate) fn watch_gui_config(&mut self, cx: &mut Context<Self>) {
@@ -38,11 +54,14 @@ impl HerdrWindow {
                     }
                     if watch.observe(sample)
                         && this.config_load.is_none()
+                        && this.settings.task.is_none()
                         && !this.font_size_saves.is_busy()
                         && !matches!(this.menu.page, Some(Page::Themes | Page::Fonts))
                         && !this.theme_save_in_flight()
+                        && !this.native_settings_save_in_flight()
                     {
                         this.load_gui_config(cx);
+                        this.load_shared_settings(cx);
                         pending = Some((sample, this.config_load_revision));
                     }
                 });
@@ -77,11 +96,23 @@ impl HerdrWindow {
     }
 
     pub(crate) fn open_preferences(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.theme_save_in_flight() {
+            return;
+        }
+        self.dismiss_menu(window, cx);
+        crate::settings_window::open(cx.weak_entity(), cx);
+    }
+
+    // Existing modal font/theme pickers still return to their own preferences page.
+    #[cfg(any(test, all(feature = "integration-test", target_os = "macos")))]
+    pub(crate) fn open_preferences_fixture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.open_menu(window, cx) {
             return;
         }
         self.menu.page = Some(Page::Preferences);
         self.menu.preferences_scroll.set_offset(Point::default());
+        self.load_shared_settings(cx);
+        self.select_settings_tab(self.settings.tab, window, cx);
     }
 
     pub(crate) fn change_font_size(
@@ -97,7 +128,7 @@ impl HerdrWindow {
     }
 
     pub(crate) fn reload_gui_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.theme_save_in_flight() {
+        if self.theme_save_in_flight() || self.native_settings_save_in_flight() {
             return;
         }
         self.load_gui_config(cx);
@@ -105,6 +136,9 @@ impl HerdrWindow {
     }
 
     pub(crate) fn load_gui_config(&mut self, cx: &mut Context<Self>) {
+        if self.native_settings_save_in_flight() {
+            return;
+        }
         // Enumerating installed families is slow, so it rides the same
         // background load as parsing rather than the UI thread.
         let text_system = cx.text_system().clone();
@@ -112,7 +146,12 @@ impl HerdrWindow {
             move || {
                 let mut config = Config::load()?;
                 config.resolve_font_fallbacks(|| text_system.all_font_names());
-                let theme = config.theme()?;
+                // Follow Herdr is resolved from the latest prepared snapshot on completion.
+                let theme = if config.theme == "Follow Herdr" {
+                    Default::default()
+                } else {
+                    config.theme()?
+                };
                 Ok((config, theme))
             },
             cx,
@@ -127,15 +166,23 @@ impl HerdrWindow {
         if self.config_load.is_some() || self.font_size_saves.is_busy() {
             return;
         }
+        let theme_revision = crate::settings_window::theme_load_revision(cx);
+        let layout_revision = crate::settings_window::layout_load_revision(cx);
         let load = cx.background_executor().spawn(async move { load() });
         self.config_load = Some(cx.spawn(async move |this, cx| {
             let loaded = load.await;
             let _ = this.update(cx, |this, cx| {
                 this.config_load = None;
+                let native_reload = std::mem::take(&mut this.settings.native_reloading);
                 this.config_load_revision = this.config_load_revision.wrapping_add(1);
                 // Apply a coherent pair only after both have loaded successfully.
                 match loaded {
-                    Ok((mut config, theme)) => {
+                    Ok((mut config, mut theme)) => {
+                        crate::settings_window::apply_loaded_layout(&mut config, layout_revision, cx);
+                        crate::settings_window::apply_loaded_theme(&mut config, &mut theme, theme_revision, cx);
+                        if let Some(shared) = &this.settings.shared {
+                            config.apply_shared_notifications(shared);
+                        }
                         // A reload discards session zoom; queued Settings edits
                         // remain visible but do not become the saved baseline yet.
                         this.configured_terminal_size = config.terminal.size;
@@ -156,13 +203,28 @@ impl HerdrWindow {
                                 endpoint.toasts.enabled_since = Some(cutoff);
                             }
                         }
+                        this.config = config.clone();
+                        if this.config.theme != "Follow Herdr" {
+                            this.theme = theme;
+                        }
+                        this.apply_shared_theme(cx);
+                        crate::settings_window::apply_loaded_theme(&mut this.config, &mut this.theme, theme_revision, cx);
+                        cx.set_global(crate::app::InitialAppearance {
+                            config: this.config.clone(),
+                            theme: this.theme.clone(),
+                            error: None,
+                        });
                         this.font_size_saves.apply_pending(&mut config);
                         this.config = config;
+                        crate::settings_window::apply_loaded_theme(&mut this.config, &mut this.theme, theme_revision, cx);
                         this.tick_toasts(
                             this.menu.page.is_some() || this.toasts_hidden,
                             std::time::Instant::now(),
                         );
-                        this.theme = theme;
+                        if native_reload {
+                            this.settings.native_status =
+                                Some("GUI config saved and applied".into());
+                        }
                         crate::log_window::set_appearance(&this.config, &this.theme, cx);
                         this.wheel = Default::default();
                         this.last_queued_options = None;
@@ -170,7 +232,13 @@ impl HerdrWindow {
                     }
                     Err(error) => {
                         tracing::warn!(%error, "Could not load GUI config; keeping current settings");
-                        this.local_error = Some(format!("Load GUI config: {error}"));
+                        let message = format!("Load GUI config: {error}");
+                        if native_reload {
+                            this.settings.native_status =
+                                Some("GUI config saved; appearance reload failed".into());
+                            this.settings.native_error = Some(message.clone());
+                        }
+                        this.local_error = Some(message);
                     }
                 }
                 // A config another build wrote, such as a setting this version

@@ -37,6 +37,7 @@ impl std::fmt::Display for ConnectionStatus {
 
 #[derive(Clone)]
 pub struct LiveState {
+    pub(crate) settings_reload: bool,
     pub(crate) sound_events: std::collections::VecDeque<(
         std::time::Instant,
         herdr_client::protocol::SemanticNotification,
@@ -97,6 +98,7 @@ pub struct SurfaceActivation {
 impl Default for LiveState {
     fn default() -> Self {
         Self {
+            settings_reload: false,
             sound_events: Default::default(),
             reload_sound: false,
             clipboard_writes: Default::default(),
@@ -133,6 +135,7 @@ impl LiveState {
         let Self {
             sound_events,
             reload_sound,
+            settings_reload,
             clipboard_writes,
             sound_cancel,
             sound_connection_cancel,
@@ -168,6 +171,7 @@ impl LiveState {
         };
         sound_events.is_empty()
             && !reload_sound
+            && !settings_reload
             && clipboard_writes.is_empty()
             && Arc::ptr_eq(sound_cancel, &self.sound_cancel)
             && Arc::ptr_eq(sound_connection_cancel, &self.sound_connection_cancel)
@@ -278,6 +282,7 @@ impl LiveState {
     pub fn apply(&mut self, event: ClientEvent) {
         match event {
             ClientEvent::Connected(welcome) => {
+                self.settings_reload = false;
                 self.supports_workspace_get = Method::WorkspaceGet.advertised_in(&welcome.methods);
                 self.supports_pane_clear = Method::PaneClear.advertised_in(&welcome.methods);
                 self.supports_tab_move = Method::TabMove.advertised_in(&welcome.methods);
@@ -328,6 +333,7 @@ impl LiveState {
                 }
             }
             ClientEvent::Disconnected { reason } => {
+                self.settings_reload = false;
                 self.notifications.clear();
                 self.cancel_sounds();
                 self.status = ConnectionStatus::Disconnected;
@@ -440,6 +446,10 @@ impl LiveState {
                         .with_snapshot(self.snapshot.as_deref()),
                 );
             }
+            ClientEvent::Message(ServerMessage::ReloadSoundConfig) => {
+                self.reload_sound = true;
+                self.settings_reload = true;
+            }
             ClientEvent::Message(ServerMessage::Clipboard { data }) => {
                 // OSC 52 bytes from a pane, base64-encoded by the daemon. Only
                 // bounded UTF-8 text is written; anything else is dropped.
@@ -452,7 +462,6 @@ impl LiveState {
                     tracing::debug!("dropped an invalid or oversized clipboard payload");
                 }
             }
-            ClientEvent::Message(ServerMessage::ReloadSoundConfig) => self.reload_sound = true,
             _ => return,
         }
         // Focus is evidence for completing one navigation, not a permanent

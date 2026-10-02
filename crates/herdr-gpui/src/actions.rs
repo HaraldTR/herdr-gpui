@@ -93,6 +93,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         }
     }));
     cx.bind_keys(crate::log_window::key_bindings());
+    cx.bind_keys(crate::settings_window::key_bindings());
     cx.bind_keys([
         KeyBinding::new("cmd-x", Cut, Some(EDIT_MENU_LABELS)),
         KeyBinding::new("cmd-c", Copy, Some(EDIT_MENU_LABELS)),

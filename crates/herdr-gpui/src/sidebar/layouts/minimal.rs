@@ -4,8 +4,7 @@
 
 use super::{
     super::{
-        ARROW_RESERVE, STATUS_WIDTH,
-        agents::status_style,
+        ARROW_RESERVE,
         cell::{AgentRow, RowContext, RowLayout, RowState, WorkspaceRow},
         line_height,
         row::{RowKind, RowTree, left_behind, row_text},
@@ -48,7 +47,7 @@ fn name(key: &str, kind: RowKind, state: RowState, teleported: bool, theme: &The
 
 impl RowLayout for Minimal {
     fn workspace(&self, row: WorkspaceRow<'_>, state: RowState, cx: &RowContext<'_>) -> Div {
-        let (theme, font) = (cx.theme, cx.font);
+        let theme = cx.theme;
         let density = cx.look.density;
         let indent = if row.tree == RowTree::None {
             0.
@@ -58,11 +57,11 @@ impl RowLayout for Minimal {
         // Pull requests and uncommitted work stay off these rows, but a
         // teleported checkout is a copy left behind, so it keeps its mark.
         let teleported = row.badge.as_ref().is_some_and(|badge| badge.teleported);
-        let mark = (line_height(font) * 0.75).round().min(15.);
+        let mark = (line_height(cx.font) * 0.75).round().min(15.);
         let line = Line::new(cx.look.content_width(cx.width) - indent, density.gap())
             .fixed(
-                STATUS_WIDTH,
-                parts::status(row.status(), row.removing, theme, font),
+                cx.indicators.width(cx.font),
+                parts::status(row.status(), row.removing, cx),
             )
             .fill(
                 name(row.label, RowKind::Workspace, state, teleported, theme),
@@ -86,8 +85,8 @@ impl RowLayout for Minimal {
         let icon = line_height(font).min(12.);
         let line = Line::new(cx.look.content_width(cx.width), gap)
             .fixed(
-                STATUS_WIDTH,
-                parts::status(agent.status, false, theme, font),
+                cx.indicators.width(font),
+                parts::status(agent.status, false, cx),
             )
             .fixed(icon, parts::icon(agent.icon.path(), icon, color))
             .fill(name(&agent.key, kind, state, false, theme), agent.name)
@@ -95,7 +94,7 @@ impl RowLayout for Minimal {
                 line.label(
                     div()
                         .debug_selector(|| format!("status-{}", agent.key))
-                        .text_color(rgb(status_style(agent.status, theme).2)),
+                        .text_color(rgb(cx.indicators.color(agent.status))),
                     text,
                     parts::glyph_at(font, font.size),
                     0.5,

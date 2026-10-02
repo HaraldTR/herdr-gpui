@@ -4,7 +4,7 @@
 
 use super::{
     super::{
-        agents::status_style,
+        agents::{status_indicator, status_style},
         cell::{AgentRow, RowContext, RowLayout, RowState, WorkspaceRow},
         line_height,
         row::{RowIcon, RowLift, RowTree, left_behind, removing_dot},
@@ -86,10 +86,20 @@ fn slot(
     glyph: impl IntoElement,
     status: AgentStatus,
     m: &Metrics,
-    theme: &Theme,
+    cx: &RowContext<'_>,
 ) -> Div {
+    let theme = cx.theme;
     let dot = (status != AgentStatus::Unknown).then(|| {
-        let (diameter, filled, color) = status_style(status, theme);
+        if cx.indicators.style == crate::herdr_settings::IndicatorStyle::Symbols {
+            return status_indicator(status, cx.font, cx.indicators)
+                .mt_0()
+                .absolute()
+                .top(px(-2.))
+                .right(px(-2.))
+                .bg(rgb(theme.surface));
+        }
+        let (diameter, filled, _) = status_style(status, theme);
+        let color = cx.indicators.color(status);
         div()
             .absolute()
             .top(px(-2.))
@@ -165,10 +175,10 @@ impl RowLayout for Superset {
                 removing_dot("worktree-removing", theme),
                 AgentStatus::Unknown,
                 &m,
-                theme,
+                cx,
             )
         } else {
-            slot(label, glyph, status, &m, theme)
+            slot(label, glyph, status, &m, cx)
         };
         let counts = if state.selected {
             (theme.ink(theme.palette[2]), theme.ink(theme.palette[1]))
@@ -212,7 +222,7 @@ impl RowLayout for Superset {
         let glyph = parts::icon(agent.icon.path(), m.icon * 0.7, color);
         // Where the agent runs trails its name, never over half the row.
         let line = Line::new(cx.look.content_width(cx.width), m.gap)
-            .fixed(m.icon, slot(key, glyph, agent.status, &m, theme))
+            .fixed(m.icon, slot(key, glyph, agent.status, &m, cx))
             .fill(
                 div()
                     .debug_selector(|| format!("name-{key}"))
@@ -235,7 +245,7 @@ impl RowLayout for Superset {
                     div()
                         .debug_selector(|| format!("status-{key}"))
                         .text_size(px(m.small))
-                        .text_color(rgb(status_style(agent.status, theme).2)),
+                        .text_color(rgb(cx.indicators.color(agent.status))),
                     text,
                     m.glyph,
                     0.5,

@@ -4,7 +4,7 @@
 
 use super::{
     DEVICE_FOOTER_HEIGHT, HOST_ARROW_WIDTH, HOST_GAP, STATUS_WIDTH, SidebarDrag, agent_name,
-    agents::{agent_place, status_text},
+    agents::{Indicators, agent_place, status_text},
     agents_sort,
     cell::{AgentRow, Cell, Fold, RowContext, RowData, RowState, WorkspaceRow, layout_for},
     label_text,
@@ -25,6 +25,7 @@ use gpui::{prelude::*, *};
 impl HerdrWindow {
     pub(crate) fn render_sidebar(
         &self,
+        indicators: Indicators,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -185,6 +186,7 @@ impl HerdrWindow {
                 space_rows += 1;
             }
             let row_cx = RowContext {
+                indicators,
                 font,
                 theme,
                 look,

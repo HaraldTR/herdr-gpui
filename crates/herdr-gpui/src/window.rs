@@ -60,6 +60,8 @@ pub(crate) struct HerdrWindow {
     pub(crate) configured_terminal_size: f32,
     pub(crate) theme: config::Theme,
     pub(crate) config_load: Option<Task<()>>,
+    pub(crate) settings: crate::settings_panel::SettingsPanel,
+    pub(crate) integrations: crate::integrations::Integrations,
     pub(crate) font_size_saves: crate::font_sizes::FontSizeSaves,
     pub(crate) config_watch: Option<Task<()>>,
     pub(crate) config_load_revision: u64,
@@ -152,6 +154,7 @@ pub(crate) struct HerdrWindow {
     pub(crate) sidebar_revealed: [std::cell::Cell<Option<usize>>; 2],
     pub(crate) _poll: Task<()>,
     pub(crate) _activation: Subscription,
+    pub(crate) _appearance: Subscription,
     /// The sidebar as a cached view; see `sidebar::SidebarView`.
     pub(crate) sidebar_view: Entity<sidebar::SidebarView>,
     /// Notified in place of this view by a surface-only update, which redraws
@@ -180,7 +183,20 @@ impl HerdrWindow {
     /// Every notification of this view reaches the cached sidebar, so it
     /// redraws exactly when it did as part of this view.
     pub(crate) fn invalidate_sidebar(cx: &mut Context<Self>) -> Subscription {
-        cx.observe_self(|this, cx| this.sidebar_view.update(cx, |_, cx| cx.notify()))
+        cx.observe_self(|this, cx| {
+            let indicators = sidebar::Indicators::new(
+                this.settings.shared.as_ref(),
+                matches!(
+                    cx.window_appearance(),
+                    WindowAppearance::Light | WindowAppearance::VibrantLight
+                ),
+                &this.theme,
+            );
+            this.sidebar_view.update(cx, |view, cx| {
+                view.set_indicators(indicators, cx);
+                cx.notify();
+            });
+        })
     }
 
     /// Runs every display frame while the window draws, so a new surface is
@@ -242,6 +258,16 @@ impl HerdrWindow {
         };
         let old_tab = focused_tab(&self.live);
         self.poll_endpoints(cx);
+        self.poll_integrations(cx);
+        if self.settings.task.is_none() {
+            let mut reload = false;
+            for endpoint in &self.endpoints {
+                reload |= endpoint.connection.take_settings_reload();
+            }
+            if reload {
+                self.load_shared_settings(cx);
+            }
+        }
         // Switching Herdr tabs, from a shortcut, an agent, or the sidebar,
         // moves the group holding the window's connection to the new tab, or
         // brings the terminal back from behind a page. Arriving in another
@@ -341,7 +367,19 @@ impl HerdrWindow {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let weak = cx.weak_entity();
-        let sidebar_view = cx.new(|_| sidebar::SidebarView::new(weak));
+        let initial_theme = cx
+            .try_global::<crate::app::InitialAppearance>()
+            .map(|appearance| appearance.theme.clone())
+            .unwrap_or_default();
+        let indicators = sidebar::Indicators::new(
+            None,
+            matches!(
+                cx.window_appearance(),
+                WindowAppearance::Light | WindowAppearance::VibrantLight
+            ),
+            &initial_theme,
+        );
+        let sidebar_view = cx.new(|_| sidebar::SidebarView::new(weak, indicators));
         let timer = cx.background_executor().clone();
         let poll = cx.spawn_in(window, async move |this, cx| {
             loop {
@@ -371,6 +409,8 @@ impl HerdrWindow {
             config,
             theme,
             config_load: None,
+            settings: Default::default(),
+            integrations: Default::default(),
             font_size_saves: Default::default(),
             config_watch: None,
             config_load_revision: 0,
@@ -465,6 +505,10 @@ impl HerdrWindow {
                 this.report_focus();
                 cx.notify();
             }),
+            _appearance: cx.observe_window_appearance(window, |this, _, cx| {
+                this.apply_shared_theme(cx);
+                cx.notify();
+            }),
         };
         #[cfg(feature = "integration-test")]
         if sidebar_test {
@@ -487,6 +531,7 @@ impl HerdrWindow {
         this.reconnect();
         log_window::set_appearance(&this.config, &this.theme, cx);
         this.load_gui_config(cx);
+        this.load_shared_settings(cx);
         this.watch_gui_config(cx);
         this
     }

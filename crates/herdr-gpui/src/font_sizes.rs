@@ -67,7 +67,10 @@ impl FontSizeSaves {
 
 impl HerdrWindow {
     pub(crate) fn set_font_size(&mut self, face: FontFace, size: f32, cx: &mut Context<Self>) {
-        if !FONT_SIZE_RANGE.contains(&size) || face.size(&self.config) == size {
+        if self.native_settings_save_in_flight()
+            || !FONT_SIZE_RANGE.contains(&size)
+            || face.size(&self.config) == size
+        {
             return;
         }
         self.font_size_saves
@@ -140,7 +143,7 @@ impl HerdrWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Modifiers, point, px};
+    use gpui::Modifiers;
     use std::sync::{Arc, Mutex};
 
     #[gpui::test]
@@ -149,10 +152,8 @@ mod tests {
         let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.open_preferences(window, cx);
-                view.menu
-                    .preferences_scroll
-                    .set_offset(point(px(0.), px(-120.)));
+                view.open_preferences_fixture(window, cx);
+                view.select_settings_tab(crate::settings_panel::Tab::Font, window, cx);
                 view.font_size_saves.task =
                     Some(cx.spawn(async |_, _| std::future::pending().await));
             });

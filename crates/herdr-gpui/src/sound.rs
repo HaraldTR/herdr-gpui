@@ -168,6 +168,10 @@ pub(crate) struct Service {
 }
 
 impl Service {
+    pub(crate) fn reload(&self) {
+        self.reload.store(true, Ordering::Release);
+    }
+
     pub(crate) fn new() -> Self {
         // Test/native fixtures must never touch personal configuration or audio.
         if cfg!(test) || playback::muted() {
@@ -298,7 +302,7 @@ impl Service {
         now: Instant,
     ) {
         if std::mem::take(&mut live.reload_sound) {
-            self.reload.store(true, Ordering::Release);
+            self.reload();
         }
         let settings = self
             .settings

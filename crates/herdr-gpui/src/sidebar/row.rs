@@ -6,7 +6,7 @@
 use super::layout_tests;
 use super::{
     ARROW_RESERVE, ICON_RESERVE, STATUS_WIDTH,
-    agents::status_style,
+    agents::Indicators,
     cell::RowState,
     glyph_width,
     layout::{SidebarDensity, SidebarLook},
@@ -312,6 +312,7 @@ pub(super) fn row(
     detail: &str,
     kind: RowKind,
     status: AgentStatus,
+    indicators: Indicators,
     removing: bool,
     state: RowState,
     tree: RowTree,
@@ -354,15 +355,17 @@ pub(super) fn row(
         _ => ICON_RESERVE,
     };
     let muted = theme.muted;
+    let status_width = indicators.width(font);
+    let extra_status_width = status_width - STATUS_WIDTH;
     let indent = if tree == RowTree::None {
         0.
     } else {
-        layout.child_indent()
+        layout.child_indent() + extra_status_width
     };
     let arrow_reserve = if reserve_arrow { ARROW_RESERVE } else { 0. };
     let arrow_absent = arrow.is_none();
     let available =
-        (look.content_width(width) - STATUS_WIDTH - gap - indent - arrow_reserve).max(0.);
+        (look.content_width(width) - status_width - gap - indent - arrow_reserve).max(0.);
     // Narrow sidebars and large fonts can leave less room than a badge needs.
     // Clip its column within the row rather than painting over the terminal.
     let badge_width = badge.as_ref().map_or(0., |badge| {
@@ -386,7 +389,7 @@ pub(super) fn row(
     } else {
         0.
     };
-    let status_color = status_style(status, theme).2;
+    let status_color = indicators.color(status);
     let label_width = (available - pr_reserve - status_reserve).max(0.);
     let agent_icon = match kind {
         RowKind::Agent(icon) => Some(icon),
@@ -420,14 +423,16 @@ pub(super) fn row(
         // tied to its parent without box-drawing glyphs in the label.
         .when(tree != RowTree::None && look.style.tree_lines(), |row| {
             let (color, font) = (theme.muted, font.clone());
-            let gutter = look.tree_gutter();
+            let gutter = look.tree_gutter() + extra_status_width;
             row.child(
                 div()
                     .debug_selector(|| format!("tree-{key}"))
                     .absolute()
                     // Between the parent's label column and this row's own dot.
                     .left(px(gutter))
-                    .w(px(padding + indent - layout.tree_gutter()))
+                    .w(px(padding + indent
+                        - layout.tree_gutter()
+                        - extra_status_width))
                     .top_0()
                     .bottom_0()
                     .child(
@@ -450,9 +455,15 @@ pub(super) fn row(
             )
         })
         .child(if removing {
-            removing_dot("worktree-removing", theme).mt(px((line_height(font) - STATUS_WIDTH) / 2.))
+            div()
+                .w(px(indicators.width(font)))
+                .mt(px((line_height(font) - STATUS_WIDTH) / 2.))
+                .flex_none()
+                .flex()
+                .justify_center()
+                .child(removing_dot("worktree-removing", theme))
         } else {
-            status_indicator(status, font, theme)
+            status_indicator(status, font, indicators)
         })
         .child(
             div()

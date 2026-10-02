@@ -7,6 +7,7 @@ mod hover;
 mod layout;
 mod layouts;
 mod metrics;
+pub(crate) mod preview;
 mod render;
 mod reorder;
 mod row;
@@ -23,7 +24,7 @@ pub(crate) mod layout_tests;
 pub(crate) mod native_tests;
 
 pub(crate) use {
-    agents::{agent_name, status_dot},
+    agents::{Indicators, agent_name, status_indicator},
     hover::{HoverMenu, HoverRest},
     metrics::{ARROW_RESERVE, HOST_ARROW_WIDTH, HOST_GAP, ICON_RESERVE, LABEL_GAP, STATUS_WIDTH},
     reorder::WorkspaceDrag,
@@ -37,7 +38,7 @@ pub(crate) use metrics::LABEL_WIDTH;
 
 pub(crate) use view::cached as cached_view;
 
-use agents::{agents_sort, sorted_agents, status_indicator};
+use agents::{agents_sort, sorted_agents};
 use metrics::*;
 use row::{RowBadge, first_text};
 use workspaces::visible_workspace_entries;

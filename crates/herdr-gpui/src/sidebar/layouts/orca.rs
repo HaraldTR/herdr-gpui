@@ -4,7 +4,6 @@
 
 use super::{
     super::{
-        agents::status_style,
         cell::{AgentRow, RowContext, RowLayout, RowState, WorkspaceRow},
         line_height,
         row::{RowTree, left_behind},
@@ -55,12 +54,19 @@ fn card(key: &str, state: RowState, indent: f32, radius: f32, theme: &Theme) -> 
 /// Width inside a card's margins, border, and padding, less its status
 /// column and the gap after it.
 fn inner(cx: &RowContext<'_>, indent: f32) -> f32 {
-    cx.width - 1. - 2. * MARGIN - indent - 2. * BORDER - 2. * GAP - STATUS_COLUMN - GAP
+    cx.width
+        - 1.
+        - 2. * MARGIN
+        - indent
+        - 2. * BORDER
+        - 2. * GAP
+        - STATUS_COLUMN.max(cx.indicators.width(cx.font))
+        - GAP
 }
 
-fn status_column(child: impl IntoElement) -> Div {
+fn status_column(child: impl IntoElement, cx: &RowContext<'_>) -> Div {
     div()
-        .w(px(STATUS_COLUMN))
+        .w(px(STATUS_COLUMN.max(cx.indicators.width(cx.font))))
         .flex_none()
         .flex()
         .justify_center()
@@ -157,7 +163,7 @@ impl RowLayout for Orca {
             .py(px(if meta { 5. } else { 7. }))
             .when(removing, |card| card.opacity(0.5))
             .child(
-                status_column(parts::status(status, removing, theme, font))
+                status_column(parts::status(status, removing, cx), cx)
                     .h(px(line))
                     .items_center(),
             )
@@ -209,7 +215,7 @@ impl RowLayout for Orca {
                 line.label(
                     div()
                         .debug_selector(|| format!("status-{key}"))
-                        .text_color(rgb(status_style(agent.status, theme).2)),
+                        .text_color(rgb(cx.indicators.color(agent.status))),
                     text,
                     glyph_at(font, font.size),
                     0.5,
@@ -218,12 +224,7 @@ impl RowLayout for Orca {
         card(key, state, 0., 4., theme)
             .h(px(line + 8.))
             .items_center()
-            .child(status_column(parts::status(
-                agent.status,
-                false,
-                theme,
-                font,
-            )))
+            .child(status_column(parts::status(agent.status, false, cx), cx))
             .child(parts::icon(agent.icon.path(), icon, color))
             .child(text.into_div())
     }

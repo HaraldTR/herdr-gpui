@@ -3,7 +3,6 @@ use crate::{
     config::{Config, FONT_SIZE_RANGE, Features, FontFace},
     contrast::Contrast,
     font_picker::{FontTarget, shared_family},
-    fonts::StyledFont,
     search_input::SearchInput,
 };
 use gpui::{prelude::*, *};
@@ -87,20 +86,27 @@ impl HerdrWindow {
         save: impl FnOnce() -> crate::Result<()> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
+        if self.native_settings_save_in_flight() || self.theme_save_in_flight() {
+            return;
+        }
         let text_system = cx.text_system().clone();
         self.load_gui_config_with(
             move || {
                 save()?;
                 let mut config = Config::load()?;
                 config.resolve_font_fallbacks(|| text_system.all_font_names());
-                let theme = config.theme()?;
+                let theme = if config.theme == "Follow Herdr" {
+                    Default::default()
+                } else {
+                    config.theme()?
+                };
                 Ok((config, theme))
             },
             cx,
         );
     }
 
-    pub(super) fn render_preferences(&self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_native_preferences(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = &self.theme;
         let font = &self.config.ui;
         let accent = crate::menu::accent(theme);
@@ -193,20 +199,9 @@ impl HerdrWindow {
                 }),
             )
             .px(px(16.))
-            .py(px(8.))
-            .child(section("APPEARANCE"))
-            .child(
-                toggle(
-                    "preferences-show-agents",
-                    "Show agents",
-                    self.config.show_agents,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    let show = !this.config.show_agents;
-                    this.save_preference(move || Config::save_show_agents(show), cx);
-                })),
-            )
+            .py(px(8.));
+        if self.settings.tab == crate::settings_panel::Tab::General {
+            body = body.child(section("GENERAL"))
             .child(
                 toggle(
                     "preferences-show-usage",
@@ -249,100 +244,13 @@ impl HerdrWindow {
                 "Sidebar gap",
                 format!("{} px", self.config.layout.sidebar_gap),
             ))
-            .child(row("preferences-theme", "Theme", self.config.theme.clone()))
-            .child(div().py(px(10.)).child(
-                button("preferences-choose-theme", "Choose theme").on_click(cx.listener(
-                    |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.open_theme_picker(window, cx);
-                    },
-                )),
-            ))
-            .child(section("FONTS"));
-        body = body.child(
-            div()
-                .debug_selector(|| "preferences-font-all".into())
-                .flex()
-                .items_center()
-                .min_w_0()
-                .gap(px(12.))
-                .py(px(7.))
-                .border_b_1()
-                .border_color(rgb(theme.active))
-                .child(
-                    div()
-                        .w(relative(0.3))
-                        .flex_none()
-                        .text_color(rgb(theme.muted))
-                        .child("All fonts"),
-                )
-                .child(
-                    div()
-                        .id("preferences-font-all-choose")
-                        .debug_selector(|| "preferences-font-all-choose".into())
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_right()
-                        .cursor_pointer()
-                        .hover(|style| style.bg(rgb(theme.active)))
-                        .child(format!(
-                            "{} ▾",
-                            shared_family(&self.config).unwrap_or("Mixed")
-                        ))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.open_font_picker(FontTarget::All, window, cx);
-                        })),
-                ),
-        );
-        for (face, id, label, value) in [
-            (
-                FontFace::Sidebar,
-                "preferences-font-sidebar",
-                "Sidebar",
-                &self.config.sidebar,
-            ),
-            (
-                FontFace::Tabs,
-                "preferences-font-tabs",
-                "Tabs",
-                &self.config.tabs,
-            ),
-            (
-                FontFace::Terminal,
-                "preferences-font-terminal",
-                "Terminal",
-                &self.config.terminal,
-            ),
-            (FontFace::Ui, "preferences-font-ui", "UI", &self.config.ui),
-        ] {
-            let control =
-                |suffix: &'static str, symbol: &'static str, direction: f32, enabled: bool| {
-                    div()
-                        .id(format!("{id}-{suffix}"))
-                        .debug_selector(move || format!("{id}-{suffix}"))
-                        .px(px(8.))
-                        .py(px(3.))
-                        .rounded(px(crate::config::corners::CONTROL))
-                        .border_1()
-                        .border_color(rgb(theme.active))
-                        .bg(rgb(theme.background))
-                        .when(enabled, |button| {
-                            button
-                                .cursor_pointer()
-                                .hover(|style| style.bg(rgb(theme.active)))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.change_font_size(face, direction, cx);
-                                }))
-                        })
-                        .when(!enabled, |button| button.text_color(rgb(theme.muted)))
-                        .child(symbol)
-                };
+            .child(note("Edit [layout] mode and sidebar_gap (0-64 logical pixels) in the local override file below; saved changes reload automatically."));
+        }
+        if self.settings.tab == crate::settings_panel::Tab::Font {
+            body = body.child(section("FONTS"));
             body = body.child(
                 div()
-                    .debug_selector(move || id.into())
+                    .debug_selector(|| "preferences-font-all".into())
                     .flex()
                     .items_center()
                     .min_w_0()
@@ -354,74 +262,150 @@ impl HerdrWindow {
                         div()
                             .w(relative(0.3))
                             .flex_none()
-                            .min_w_0()
                             .text_color(rgb(theme.muted))
-                            .child(label),
+                            .child("All fonts"),
                     )
                     .child(
                         div()
-                            .id(format!("{id}-choose"))
-                            .debug_selector(move || format!("{id}-choose"))
+                            .id("preferences-font-all-choose")
+                            .debug_selector(|| "preferences-font-all-choose".into())
                             .flex_1()
                             .min_w_0()
                             .truncate()
                             .text_right()
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(theme.active)))
-                            .child(format!("{} ▾", value.family))
-                            .on_click(cx.listener(move |this, _, window, cx| {
+                            .child(format!(
+                                "{} ▾",
+                                shared_family(&self.config).unwrap_or("Mixed")
+                            ))
+                            .on_click(cx.listener(|this, _, window, cx| {
                                 cx.stop_propagation();
-                                this.open_font_picker(FontTarget::Face(face), window, cx);
+                                this.open_font_picker(FontTarget::All, window, cx);
                             })),
-                    )
-                    .child(control(
-                        "decrease",
-                        "−",
-                        -1.,
-                        value.size > *FONT_SIZE_RANGE.start(),
-                    ))
-                    .child(
-                        if let Some(editor) = &self.menu.font_size_editor
-                            && editor.face == face
-                        {
+                    ),
+            );
+            for (face, id, label, value) in [
+                (
+                    FontFace::Sidebar,
+                    "preferences-font-sidebar",
+                    "Sidebar",
+                    &self.config.sidebar,
+                ),
+                (
+                    FontFace::Tabs,
+                    "preferences-font-tabs",
+                    "Tabs",
+                    &self.config.tabs,
+                ),
+                (
+                    FontFace::Terminal,
+                    "preferences-font-terminal",
+                    "Terminal",
+                    &self.config.terminal,
+                ),
+                (FontFace::Ui, "preferences-font-ui", "UI", &self.config.ui),
+            ] {
+                let control =
+                    |suffix: &'static str, symbol: &'static str, direction: f32, enabled: bool| {
+                        div()
+                            .id(format!("{id}-{suffix}"))
+                            .debug_selector(move || format!("{id}-{suffix}"))
+                            .px(px(8.))
+                            .py(px(3.))
+                            .rounded(px(crate::config::corners::CONTROL))
+                            .border_1()
+                            .border_color(rgb(theme.active))
+                            .bg(rgb(theme.background))
+                            .when(enabled, |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(theme.active)))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.change_font_size(face, direction, cx);
+                                    }))
+                            })
+                            .when(!enabled, |button| button.text_color(rgb(theme.muted)))
+                            .child(symbol)
+                    };
+                body = body.child(
+                    div()
+                        .debug_selector(move || id.into())
+                        .flex()
+                        .items_center()
+                        .min_w_0()
+                        .gap(px(12.))
+                        .py(px(7.))
+                        .border_b_1()
+                        .border_color(rgb(theme.active))
+                        .child(
                             div()
-                                .w(px(55.))
+                                .w(relative(0.3))
                                 .flex_none()
-                                .child(editor.input.clone())
-                                .into_any_element()
-                        } else {
+                                .min_w_0()
+                                .text_color(rgb(theme.muted))
+                                .child(label),
+                        )
+                        .child(
                             div()
-                                .id(format!("{id}-size"))
-                                .debug_selector(move || format!("{id}-size"))
-                                .flex_none()
+                                .id(format!("{id}-choose"))
+                                .debug_selector(move || format!("{id}-choose"))
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_right()
                                 .cursor_pointer()
                                 .hover(|style| style.bg(rgb(theme.active)))
-                                .child(format!("{} px", value.size))
+                                .child(format!("{} ▾", value.family))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
-                                    this.begin_font_size_edit(face, window, cx);
-                                }))
-                                .into_any_element()
-                        },
-                    )
-                    .child(control(
-                        "increase",
-                        "+",
-                        1.,
-                        value.size < *FONT_SIZE_RANGE.end(),
-                    )),
-            );
-        }
-        body = body
-            .child(section("NOTIFICATIONS"))
-            .child(row("preferences-notifications-enabled", "In-app toasts", self.config.notifications.enabled.to_string()))
-            .child(row("preferences-notifications-delay", "Delay (seconds)", self.config.notifications.delay_seconds.to_string()))
-            .child(row("preferences-notifications-position", "Corner", format!("{:?}", self.config.notifications.position)))
-            .child(note("Edit [notifications] in the local GUI config file; saved changes reload automatically. In-app notifications default off; QA previews always work. No sounds or OS notifications."))
-            .child(note(
+                                    this.open_font_picker(FontTarget::Face(face), window, cx);
+                                })),
+                        )
+                        .child(control(
+                            "decrease",
+                            "−",
+                            -1.,
+                            value.size > *FONT_SIZE_RANGE.start(),
+                        ))
+                        .child(
+                            if let Some(editor) = &self.menu.font_size_editor
+                                && editor.face == face
+                            {
+                                div()
+                                    .w(px(55.))
+                                    .flex_none()
+                                    .child(editor.input.clone())
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .id(format!("{id}-size"))
+                                    .debug_selector(move || format!("{id}-size"))
+                                    .flex_none()
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(theme.active)))
+                                    .child(format!("{} px", value.size))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.begin_font_size_edit(face, window, cx);
+                                    }))
+                                    .into_any_element()
+                            },
+                        )
+                        .child(control(
+                            "increase",
+                            "+",
+                            1.,
+                            value.size < *FONT_SIZE_RANGE.end(),
+                        )),
+                );
+            }
+            return body.child(note(
                 "Font families and sizes save to local GUI overrides and reload in every window. Click a size to type 8–48; Enter or leaving the field saves, Escape cancels. Sizes are logical pixels.",
-            ))
-            .child(section("FEATURES"));
+            ));
+        }
+        body = body.child(section("FEATURES"));
         for (id, label, enabled) in feature_rows(&self.config.features) {
             body = body.child(row(id, label, if enabled { "On" } else { "Off" }.into()));
         }
@@ -457,6 +441,22 @@ impl HerdrWindow {
                 "Teaches Claude Code and other agents to show you pages in browser tabs and read the notes you send. Lives in ~/.claude/skills and ~/.agents/skills. Remove deletes only the copies this app wrote.",
             ))
             .child(section("CONFIGURATION"))
+            .child(note("Theme, indicators, sound, and toasts share this computer's Herdr configuration, not a remote daemon's settings."))
+            .child(
+                div()
+                    .debug_selector(|| "preferences-shared-path".into())
+                    .py(px(7.))
+                    .child(
+                        self.settings.shared.as_ref()
+                            .map(|settings| settings.path.display().to_string())
+                            .unwrap_or_else(|| "Shared config path unavailable".into()),
+                    ),
+            )
+            .child(
+                button("preferences-reload-shared", "Reload shared settings")
+                    .when(self.settings.task.is_some(), |button| button.opacity(0.5))
+                    .on_click(cx.listener(|this, _, _, cx| this.load_shared_settings(cx))),
+            )
             .child(
                 div()
                     .text_color(rgb(theme.muted))
@@ -505,89 +505,7 @@ impl HerdrWindow {
                 format!("{:?}", self.endpoints[self.selected_endpoint].connection.target),
             ));
 
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .min_h_0()
-            .min_w_0()
-            .text_font(font)
-            .text_size(px(font.size))
-            .line_height(px(font.line_height()))
-            .text_color(rgb(theme.foreground))
-            .child(
-                div()
-                    .debug_selector(|| "preferences-header".into())
-                    .flex()
-                    .items_center()
-                    .flex_none()
-                    .gap(px(12.))
-                    .p(px(16.))
-                    .border_b_1()
-                    .border_color(rgb(theme.active))
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(3.))
-                            .h(px(font.size * 2.5))
-                            .rounded_full()
-                            .bg(accent),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(px(font.size * 1.35))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Preferences"),
-                            )
-                            .child(
-                                div()
-                                    .text_color(rgb(theme.muted))
-                                    .child("Current GUI settings"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("preferences-close")
-                            .debug_selector(|| "preferences-close".into())
-                            .flex_none()
-                            .px(px(8.))
-                            .py(px(4.))
-                            .rounded(px(crate::config::corners::CONTROL))
-                            .cursor_pointer()
-                            .text_color(rgb(theme.muted))
-                            .hover(|style| {
-                                style
-                                    .bg(rgb(theme.active))
-                                    .text_color(rgb(theme.foreground))
-                            })
-                            .child("Close")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.dismiss_menu(window, cx);
-                            })),
-                    ),
-            )
-            .child(body)
-            .child(
-                div()
-                    .debug_selector(|| "preferences-footer".into())
-                    .flex_none()
-                    .px(px(16.))
-                    .py(px(10.))
-                    .border_t_1()
-                    .border_color(rgb(theme.active))
-                    .text_color(rgb(theme.muted))
-                    .child(
-                        self.font_size_saves
-                            .status()
-                            .unwrap_or("Esc to close  /  click outside to dismiss")
-                            .to_owned(),
-                    ),
-            )
+        body
     }
 }
 

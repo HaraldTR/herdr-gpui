@@ -15,6 +15,7 @@
 
 # Built-ins: Default, Nord, Dracula, Catppuccin Mocha, Catppuccin Latte.
 # Also accepts a Ghostty theme name, an absolute path, or a ~/ path.
+# Set "Follow Herdr" in config-gpui.local.toml to follow the local Herdr theme.
 theme = "Default"
 # How far the app's own colors (status dots, pull request badges, diff counts,
 # warnings, dim labels) stand off the sidebar and menus. "standard" moves a
@@ -47,13 +48,16 @@ open_links_in = "system"
 # only) draw rows with a design of their own. View > Layout lists them all.
 layout = "normal"
 
-[notifications]
-# GUI-local in-app delivery only. QA previews bypass delivery policy.
-enabled = false
+# Inherit shared [ui.toast] delivery, delay_seconds, and herdr.position.
+# Only delivery = "herdr" enables in-app toasts; "off", "terminal", and "system"
+# do not. QA previews bypass delivery policy. In config-gpui.local.toml, each
+# explicit key overrides the shared setting independently, including false.
+# [notifications]
+# enabled = false
 # Inclusive 0..3600. Custom notifications are immediate.
-delay_seconds = 1
+# delay_seconds = 1
 # top-left, top-right, bottom-left, bottom-right. Explicit wire corners win.
-position = "bottom-right"
+# position = "bottom-right"
 
 # The "copied to clipboard" flash shown after a terminal selection is copied.
 # Left commented out, this follows the daemon config's [ui.toast.clipboard], so

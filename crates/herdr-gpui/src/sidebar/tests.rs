@@ -2,7 +2,9 @@
 
 use super::{
     STATUS_DOT_UNKNOWN, STATUS_WIDTH, agent_name,
-    agents::{agent_labels, agent_place, status_style},
+    agents::{
+        Indicators, agent_labels, agent_place, status_indicator, status_style, status_symbol,
+    },
     layout_tests,
     render::header,
     row::first_text,
@@ -12,6 +14,7 @@ use super::{
 use crate::{
     config::{FontConfig, Theme},
     contrast::Contrast,
+    herdr_settings::IndicatorStyle,
 };
 use herdr_client::protocol::{
     AgentStatus, ClientShellAgent, ClientShellSnapshot, ClientShellWorkspace,
@@ -259,18 +262,140 @@ fn status_colors_keep_upstream_literals_where_they_already_read() {
         for name in ["Default", "Nord", "Dracula", "Catppuccin Mocha"] {
             let mut theme = Theme::builtin(name).unwrap();
             assert_eq!(status_style(status, &theme).2, color, "{name}");
-            // ANSI slots must not change the meaning of a status color.
             theme.palette.fill(0x123456);
-            assert_eq!(status_style(status, &theme).2, color, "{name}");
+            let indicators = Indicators::new(None, false, &theme);
+            assert_eq!(indicators.style, IndicatorStyle::Dots);
+            assert_eq!(indicators.color(status), color);
         }
     }
-    // Upstream's Unknown grey falls just short of 3:1 on a selected row, even
-    // in Mocha itself, so it is lifted by only a few steps and stays grey.
     let mocha = Theme::builtin("Catppuccin Mocha").unwrap();
     let unknown = status_style(AgentStatus::Unknown, &mocha).2;
     let channels = |color: u32| [16, 8, 0].map(|shift| ((color >> shift) & 255) as i32);
     for (lifted, upstream) in channels(unknown).into_iter().zip(channels(0x6c7086)) {
         assert!((0..=16).contains(&(lifted - upstream)), "{unknown:06x}");
+    }
+}
+
+#[test]
+fn status_symbols_match_upstream_without_changing_status_colors() {
+    let mut indicators = Indicators::new(None, false, &Theme::default());
+    indicators.style = IndicatorStyle::Symbols;
+    for (status, symbol) in [
+        (AgentStatus::Working, "\u{25d0}"),
+        (AgentStatus::Blocked, "\u{d7}"),
+        (AgentStatus::Done, "\u{2713}"),
+        (AgentStatus::Idle, "\u{25cb}"),
+        (AgentStatus::Unknown, "\u{b7}"),
+    ] {
+        assert_eq!(status_symbol(status), symbol);
+        assert_eq!(
+            indicators.color(status),
+            status_style(status, &Theme::default()).2
+        );
+    }
+}
+
+#[test]
+fn status_slots_are_fixed_for_each_style_and_font_size() {
+    use gpui::{Styled, px};
+    for size in [6., 8., 12., 12.5, 16., 20., 32.] {
+        let font = FontConfig {
+            family: "Menlo".into(),
+            size,
+            fallbacks: None,
+        };
+        for style in [IndicatorStyle::Dots, IndicatorStyle::Symbols] {
+            let mut indicators = Indicators::new(None, false, &Theme::default());
+            indicators.style = style;
+            let width = match style {
+                IndicatorStyle::Dots => STATUS_WIDTH,
+                IndicatorStyle::Symbols => size.ceil().max(STATUS_WIDTH),
+            };
+            assert_eq!(indicators.width(&font), width);
+            for status in [
+                AgentStatus::Working,
+                AgentStatus::Blocked,
+                AgentStatus::Done,
+                AgentStatus::Idle,
+                AgentStatus::Unknown,
+            ] {
+                let mut slot = status_indicator(status, &font, indicators);
+                assert_eq!(slot.style().size.width, Some(px(width).into()));
+                if style == IndicatorStyle::Symbols {
+                    assert_eq!(slot.text_style().font_size, Some(px(size).into()));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn symbol_rows_keep_layout_density_and_expand_child_indent() {
+    use super::row::{RowIcon, RowKind, RowTree, row};
+    use crate::config::LayoutMode;
+    use gpui::{Styled, px};
+
+    let font = FontConfig {
+        family: "Menlo".into(),
+        size: 20.,
+        fallbacks: None,
+    };
+    let theme = Theme::default();
+    for mode in [
+        LayoutMode::default(),
+        LayoutMode::Classic {
+            density: crate::config::Density::Compact,
+            style: crate::config::Style::Flat,
+        },
+    ] {
+        let layout = super::layout::for_mode(mode);
+        for style in [IndicatorStyle::Dots, IndicatorStyle::Symbols] {
+            let mut indicators = Indicators::new(None, false, &theme);
+            indicators.style = style;
+            for kind in [
+                RowKind::Workspace,
+                RowKind::Agent(crate::icons::AgentIcon::Generic),
+            ] {
+                let mut row = row(
+                    "density",
+                    &[("child", true)],
+                    "branch",
+                    kind,
+                    AgentStatus::Working,
+                    indicators,
+                    false,
+                    super::cell::RowState::default(),
+                    RowTree::LastChild,
+                    true,
+                    160.,
+                    RowIcon::None,
+                    None,
+                    None,
+                    None,
+                    layout,
+                    (&font, &theme),
+                );
+                assert_eq!(
+                    row.style().padding.left,
+                    Some(
+                        px(layout.content_x()
+                            + layout.density.child_indent()
+                            + indicators.width(&font)
+                            - STATUS_WIDTH)
+                        .into()
+                    )
+                );
+                let lines = if layout.density.child_details() || matches!(kind, RowKind::Agent(_)) {
+                    2.
+                } else {
+                    1.
+                };
+                assert_eq!(
+                    row.style().size.height,
+                    Some(px(layout.row_height(super::line_height(&font) * lines)).into())
+                );
+            }
+        }
     }
 }
 
@@ -373,6 +498,7 @@ fn cells_hand_their_state_and_data_to_the_layout() {
     let snapshot = layout_tests::snapshot(1);
     let (font, theme) = (crate::config::Config::default().sidebar, Theme::default());
     let cx = RowContext {
+        indicators: Indicators::new(None, false, &theme),
         font: &font,
         theme: &theme,
         look: for_mode(Default::default()),

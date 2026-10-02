@@ -137,6 +137,12 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
             }
         };
         eprintln!("SIDEBAR native symbol cascade: {cascade}");
+        #[cfg(target_os = "macos")]
+        if let Err(error) = sidebar_preferences(handle, cx).await {
+            eprintln!("SIDEBAR native preferences FAIL: {error:#}");
+            cx.update(|cx| cx.quit());
+            return;
+        }
         for frame in 0..72 {
             timer.timer(Duration::from_millis(100)).await;
             let result = AnyWindowHandle::from(handle).update(
@@ -355,10 +361,34 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
             timer.timer(Duration::from_millis(50)).await;
             let result = if step == 3 {
                 result.and_then(|()| {
-                    let target = AnyWindowHandle::from(handle)
-                        .update(cx, |_, window, _| sidebar::native_tests::Target::acquire(window))
+                    let (target, point) = AnyWindowHandle::from(handle)
+                        .update(cx, |root, window, cx| -> Result<_> {
+                            // Paint the reopened menu before targeting its outside hitbox.
+                            window.draw(cx).clear(cx);
+                            let view = root.downcast::<HerdrWindow>()
+                                .map_err(|_| anyhow!("unexpected root"))?;
+                            let state = view.read(cx);
+                            if state.menu.page != Some(menu::Page::Menu) {
+                                bail!("native footer click did not reopen menu");
+                            }
+                            let menu::Cover::Panel(panel) = state.menu.cover.get() else {
+                                bail!("reopened native menu has no painted panel bounds");
+                            };
+                            let viewport = Bounds::new(Point::default(), window.viewport_size());
+                            let x = if viewport.right() - panel.right() >= panel.left() {
+                                (panel.right() + viewport.right()) / 2.
+                            } else {
+                                panel.left() / 2.
+                            };
+                            let point = gpui::point(x, viewport.center().y);
+                            if !viewport.contains(&point) || panel.contains(&point) {
+                                bail!("no outside click target: panel={panel:?} viewport={viewport:?}");
+                            }
+                            eprintln!("SIDEBAR native outside click: panel={panel:?} viewport={viewport:?} target={point:?}");
+                            Ok((sidebar::native_tests::Target::acquire(window)?, point))
+                        })
                         .context("acquiring outside-click target")??;
-                    target.click(700., 500. + f64::from(banner_height()))
+                    target.click(point.x.to_f64(), point.y.to_f64())
                 })
             } else {
                 result
@@ -451,7 +481,8 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                 ("down enter", menu::WorkspaceAction::Rename),
                 ("down down enter", menu::WorkspaceAction::Close),
                 ("down down down enter", menu::WorkspaceAction::NewWorktree),
-                ("down down down enter", menu::WorkspaceAction::DeleteWorktree),
+                // Linked checkouts offer NewWorktree before DeleteWorktree too.
+                ("down down down down enter", menu::WorkspaceAction::DeleteWorktree),
             ] {
                 let point = handle.update(cx, |view, window, cx| {
                     view.live.status = ConnectionStatus::Connected;
@@ -478,7 +509,13 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                     _ => Err(anyhow!("missing native workspace")),
                 };
                 timer.timer(Duration::from_millis(50)).await;
-                let verified = AnyWindowHandle::from(handle).update(cx, |root, window, cx| -> Result<()> {
+                // Observe only this dialog's inputs without exposing menu-private fields.
+                let inputs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                let observed = inputs.clone();
+                let subscription = cx.update(|cx| cx.observe_new::<crate::search_input::SearchInput>(
+                    move |_, _, cx| observed.borrow_mut().push(cx.entity()),
+                ));
+                let opened = AnyWindowHandle::from(handle).update(cx, |root, window, cx| -> Result<_> {
                     clicked?;
                     let view = root.downcast::<HerdrWindow>().map_err(|_| anyhow!("unexpected root"))?;
                     if view.read(cx).menu.page != Some(menu::Page::Workspace) { bail!("right click did not open workspace menu"); }
@@ -515,8 +552,27 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                         window.dispatch_keystroke(Keystroke::parse(key)?, cx);
                     }
                     window.draw(cx).clear(cx);
-                    if view.read(cx).menu.page != Some(menu::Page::Dialog(action)) { bail!("workspace menu opened wrong dialog"); }
+                    if view.read(cx).menu.page != Some(menu::Page::Dialog(action)) {
+                        bail!("workspace menu opened wrong dialog at {width}x{height} after {keys:?}: expected {:?}, actual {:?}", menu::Page::Dialog(action), view.read(cx).menu.page);
+                    }
                     window.dispatch_action(Box::new(RunCommand { command: Command::Tab }), cx);
+                    let branch = view.read(cx).menu.input.as_ref().map(|input| input.text.clone());
+                    Ok((before, branch))
+                });
+                // Finish entity creation before inspecting the dialog's focused input.
+                let verified = AnyWindowHandle::from(handle).update(cx, |root, window, cx| -> Result<()> {
+                    let (before, branch) = opened.context("opening native dialog")??;
+                    let view = root.downcast::<HerdrWindow>().map_err(|_| anyhow!("unexpected root"))?;
+                    let name = if action == menu::WorkspaceAction::NewWorktree {
+                        if !view.read(cx).worktree_name_focused(window, cx) {
+                            bail!("new worktree did not focus its name field");
+                        }
+                        Some(inputs.borrow().iter()
+                            .find(|input| input.read(cx).focus.is_focused(window))
+                            .cloned().context("missing native worktree name editor")?)
+                    } else {
+                        None
+                    };
                     // Only the editable dialogs carry a text field; confirmations do not.
                     if matches!(action, menu::WorkspaceAction::Rename | menu::WorkspaceAction::NewWorktree) {
                         window.dispatch_keystroke(Keystroke::parse("cmd-a")?, cx);
@@ -524,7 +580,32 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                             window.dispatch_keystroke(Keystroke::parse(&ch.to_string())?, cx);
                         }
                         window.draw(cx).clear(cx);
-                        view.update(cx, |view, cx| -> Result<()> {
+                        if let Some(name) = name {
+                            if view.read(cx).menu.input.as_ref().map(|input| &input.text) != branch.as_ref() {
+                                bail!("typing the worktree name changed its branch draft");
+                            }
+                            name.update(cx, |input, cx| -> Result<()> {
+                                if input.text() != "long-label-\u{65e5}\u{672c}-\u{1f600}".repeat(4)
+                                    || !input.focus.is_focused(window) {
+                                    bail!("native worktree name editor lost Unicode text or focus");
+                                }
+                                let end = input.text().encode_utf16().count();
+                                let field = input.bounds_for_range(0..end, Bounds::default(), window, cx)
+                                    .context("missing native name field bounds")?;
+                                let caret = input.bounds_for_range(end..end, Bounds::default(), window, cx)
+                                    .context("missing native name IME bounds")?;
+                                // Text-range bounds end at the caret; Bounds::contains
+                                // excludes that right edge, unlike an input's padded box.
+                                if caret.left() != field.right() || caret.top() != field.top()
+                                    || caret.bottom() != field.bottom() || field.size.width <= px(0.)
+                                    || field.left() < px(0.) || field.top() < px(0.)
+                                    || field.right() > window.viewport_size().width || field.bottom() > window.viewport_size().height {
+                                    bail!("native name caret/field out of bounds: field={field:?} caret={caret:?} viewport={:?}", window.viewport_size());
+                                }
+                                Ok(())
+                            })?;
+                        } else {
+                            view.update(cx, |view, cx| -> Result<()> {
                             let input = view.menu.input.as_ref().context("missing native editor")?;
                             if input.text != "long-label-\u{65e5}\u{672c}-\u{1f600}".repeat(4) { bail!("native editor lost Unicode text"); }
                             let end = input.text.encode_utf16().count();
@@ -533,12 +614,14 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                             if !field.contains(&caret.origin) || field.right() > window.viewport_size().width || field.bottom() > window.viewport_size().height { bail!("native dialog caret/field out of bounds"); }
                             Ok(())
                         })?;
+                        }
                     }
                     window.dispatch_keystroke(Keystroke::parse("escape")?, cx);
                     let state = view.read(cx);
                     if state.menu.page.is_some() || state.input_probe.text != before.text || state.input_probe.keys != before.keys || state.input_probe.actions != before.actions || !state.focus.is_focused(window) { bail!("workspace dialog leaked input or lost focus"); }
                     Ok(())
                 });
+                drop(subscription);
                 if !matches!(verified, Ok(Ok(()))) {
                     eprintln!("SIDEBAR native dialog FAIL: {verified:?}");
                     std::process::exit(1);
@@ -599,7 +682,7 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
             eprintln!("SIDEBAR native paint FAIL: {probes:?}");
             std::process::exit(1);
         }
-        eprintln!("SIDEBAR native PASS: {cascade}; 24 Menlo draws, flat and rounded normal/compact/comfortable layouts at 4 sizes, collapse/expand, menu isolation, PR title/stats glyphs, GitHub auth fixtures, right-click dialogs and Unicode fields at 2 sizes; host routing, disabled selection, scoped repositories, resized host/agent glyphs, independent scroll and decoy key window");
+        eprintln!("SIDEBAR native PASS: {cascade}; 72 Menlo draws, flat and rounded normal/compact/comfortable layouts at 4 sizes, collapse/expand, menu isolation, PR title/stats glyphs, GitHub auth fixtures, right-click dialogs and Unicode fields at 2 sizes; host routing, disabled selection, scoped repositories, resized host/agent glyphs, independent scroll and decoy key window");
         std::process::exit(0);
     })
     .detach();
@@ -647,6 +730,285 @@ fn start_notifications(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
         std::process::exit(0);
     })
     .detach();
+}
+
+#[cfg(target_os = "macos")]
+async fn sidebar_preferences(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> Result<()> {
+    use crate::settings_panel::Tab;
+
+    let original_size = handle.update(cx, |_, window, _| window.viewport_size())?;
+    handle.update(cx, |view, window, cx| {
+        view.open_preferences_fixture(window, cx);
+    })?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let loaded = handle.update(cx, |view, _, _| -> Result<bool> {
+            if let Some(error) = &view.settings.error {
+                bail!("shared settings load: {error}");
+            }
+            Ok(view.settings.loaded
+                && view.settings.task.is_none()
+                && view.settings.shared.is_some())
+        })??;
+        if loaded {
+            break;
+        }
+        if Instant::now() >= deadline {
+            bail!("Preferences settings load timed out");
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(10))
+            .await;
+    }
+    for (width, height) in [(800., 600.), (320., 400.)] {
+        handle.update(cx, |_, window, _| {
+            window.resize(fixture_size(width, height))
+        })?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !handle.update(cx, |_, window, _| {
+            window.viewport_size() == fixture_size(width, height)
+        })? {
+            if Instant::now() >= deadline {
+                bail!("Preferences resize timed out: {width}");
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(10))
+                .await;
+        }
+        handle.update(cx, |view, window, cx| {
+            view.select_settings_tab(Tab::Theme, window, cx)
+        })?;
+        for (index, tab) in Tab::ALL.into_iter().enumerate() {
+            for right_edge in [false, true] {
+                handle.update(cx, |view, window, cx| {
+                    view.select_settings_tab(
+                        if tab == Tab::General {
+                            Tab::Theme
+                        } else {
+                            Tab::General
+                        },
+                        window,
+                        cx,
+                    );
+                    // Selection reveals the other tab; reveal the click target instead.
+                    view.settings.tabs_scroll.scroll_to_item(index);
+                })?;
+                let (target, bounds) = AnyWindowHandle::from(handle).update(
+                    cx,
+                    |root, window, cx| -> Result<_> {
+                        window.refresh();
+                        window.draw(cx).clear(cx);
+                        let entity = root
+                            .downcast::<HerdrWindow>()
+                            .map_err(|_| anyhow!("unexpected root"))?;
+                        let view = entity.read(cx);
+                        let scroll = &view.settings.tabs_scroll;
+                        let viewport = scroll.bounds();
+                        let first = scroll.bounds_for_item(0).context("missing first tab")?;
+                        let mut previous_right = first.left();
+                        for item in 0..Tab::ALL.len() {
+                            let bounds = scroll.bounds_for_item(item).context("missing tab")?;
+                            if bounds.top() != first.top()
+                                || bounds.bottom() != first.bottom()
+                                || bounds.left() < previous_right
+                            {
+                                bail!("Preferences tabs not in a single row: {item} {bounds:?}");
+                            }
+                            previous_right = bounds.right();
+                        }
+                        let mut bounds = scroll.bounds_for_item(index).context("missing tab")?;
+                        bounds.origin += scroll.offset();
+                        if viewport.left() < px(0.)
+                            || viewport.right() > window.viewport_size().width
+                            || viewport.top() < px(0.)
+                            || viewport.bottom() > window.viewport_size().height
+                            || bounds.size.width <= px(8.)
+                            || bounds.size.height <= px(0.)
+                            || bounds.left() < viewport.left()
+                            || bounds.right() > viewport.right()
+                            || bounds.top() < viewport.top()
+                            || bounds.bottom() > viewport.bottom()
+                        {
+                            bail!("Preferences tab clipped: {tab:?} {bounds:?} in {viewport:?}");
+                        }
+                        Ok((sidebar::native_tests::Target::acquire(window)?, bounds))
+                    },
+                )??;
+                let x = if right_edge {
+                    bounds.right() - px(4.)
+                } else {
+                    bounds.left() + px(4.)
+                };
+                target.click(x.to_f64(), bounds.center().y.to_f64())?;
+                drop(target);
+                handle.update(cx, |view, _, _| -> Result<()> {
+                    if view.settings.tab != tab {
+                        bail!("native Preferences tab {tab:?} not reachable at {x:?}, {bounds:?}");
+                    }
+                    Ok(())
+                })??;
+            }
+            AnyWindowHandle::from(handle).update(cx, |root, window, cx| -> Result<()> {
+                window.refresh();
+                window.draw(cx).clear(cx);
+                let entity = root
+                    .downcast::<HerdrWindow>()
+                    .map_err(|_| anyhow!("unexpected root"))?;
+                let view = entity.read(cx);
+                if view.menu.page != Some(menu::Page::Preferences)
+                    || view.settings.tab != tab
+                    || !view.menu.focus.is_focused(window)
+                {
+                    bail!("Preferences tab/focus mismatch: {tab:?}");
+                }
+                // Integrations owns a separate private scroll handle; the
+                // preferences handle would report stale bounds for that tab.
+                if tab != Tab::Integrations {
+                    let body = view.menu.preferences_scroll.bounds();
+                    if body.size.width <= px(0.)
+                        || body.size.height <= px(0.)
+                        || body.left() < px(0.)
+                        || body.right() > window.viewport_size().width
+                        || body.top() < px(0.)
+                        || body.bottom() > window.viewport_size().height
+                    {
+                        bail!("Preferences body out of viewport: {tab:?} {body:?}");
+                    }
+                }
+                if tab == Tab::Indicators {
+                    // Probe the actual UI font on the native text system, not the
+                    // terminal's Nerd Font cascade or the headless fixed glyphs.
+                    let glyphs = |text: &str| {
+                        window
+                            .text_system()
+                            .shape_line(
+                                text.to_owned().into(),
+                                px(view.config.ui.size),
+                                &[TextRun {
+                                    len: text.len(),
+                                    font: view.config.ui.font(),
+                                    color: rgb(view.theme.foreground).into(),
+                                    background_color: None,
+                                    underline: None,
+                                    strikethrough: None,
+                                }],
+                                None,
+                            )
+                            .runs
+                            .iter()
+                            .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.id))
+                            .collect::<Vec<_>>()
+                    };
+                    let missing = glyphs("\u{f0000}");
+                    for symbol in ["\u{25d0}", "\u{d7}", "\u{2713}", "\u{25cb}", "\u{b7}"] {
+                        let shaped = glyphs(symbol);
+                        if shaped.is_empty() || shaped == missing {
+                            bail!("Preferences indicator missing native glyph: {symbol:?}");
+                        }
+                    }
+                }
+                eprintln!("SIDEBAR native preferences tab={tab:?} width={width}");
+                Ok(())
+            })??;
+            if tab == Tab::Font {
+                let (target, point, before) =
+                    handle.update(cx, |view, window, _| -> Result<_> {
+                        // The All fonts row follows the heading. Its center
+                        // lands in the installed-font chooser, not the label.
+                        let row = view
+                            .menu
+                            .preferences_scroll
+                            .bounds_for_item(1)
+                            .context("missing All fonts row")?;
+                        let body = view.menu.preferences_scroll.bounds();
+                        if row.left() < body.left()
+                            || row.right() > body.right()
+                            || !body.contains(&row.center())
+                        {
+                            bail!("first font editor clipped: {row:?} in {body:?}");
+                        }
+                        Ok((
+                            sidebar::native_tests::Target::acquire(window)?,
+                            row.center(),
+                            view.input_probe,
+                        ))
+                    })??;
+                target.click(point.x.to_f64(), point.y.to_f64())?;
+                drop(target);
+                AnyWindowHandle::from(handle).update(cx, |root, window, cx| -> Result<()> {
+                    window.draw(cx).clear(cx);
+                    let entity = root
+                        .downcast::<HerdrWindow>()
+                        .map_err(|_| anyhow!("unexpected root"))?;
+                    let editor_focus = window.focused(cx).context("font editor has no focus")?;
+                    if entity.read(cx).menu.focus.is_focused(window)
+                        || entity.read(cx).focus.is_focused(window)
+                    {
+                        bail!("native font click did not focus editor");
+                    }
+                    for key in ["cmd-a", "M", "e", "n", "l", "o", "tab"] {
+                        window.dispatch_keystroke(Keystroke::parse(key)?, cx);
+                    }
+                    window.draw(cx).clear(cx);
+                    if entity.read(cx).menu.page != Some(menu::Page::Fonts)
+                        || entity.read(cx).settings.tab != Tab::Font
+                        || !editor_focus.is_focused(window)
+                    {
+                        bail!("font typing/Tab lost editor focus");
+                    }
+                    window.dispatch_keystroke(Keystroke::parse("escape")?, cx);
+                    if !entity.read(cx).menu.focus.is_focused(window) {
+                        bail!("font Escape did not return focus to Preferences");
+                    }
+                    window.draw(cx).clear(cx);
+                    window.dispatch_keystroke(Keystroke::parse("tab")?, cx);
+                    if entity.read(cx).settings.tab != Tab::General {
+                        bail!("Tab did not resume Preferences section navigation");
+                    }
+                    let after = entity.read(cx).input_probe;
+                    if after.text != before.text
+                        || after.keys != before.keys
+                        || after.actions != before.actions
+                    {
+                        bail!("Preferences font input leaked to terminal");
+                    }
+                    Ok(())
+                })??;
+            }
+        }
+    }
+    AnyWindowHandle::from(handle).update(cx, |root, window, cx| -> Result<()> {
+        window.draw(cx).clear(cx);
+        window.dispatch_keystroke(Keystroke::parse("escape")?, cx);
+        let entity = root
+            .downcast::<HerdrWindow>()
+            .map_err(|_| anyhow!("unexpected root"))?;
+        let view = entity.read(cx);
+        if view.menu.page.is_some()
+            || !view.focus.is_focused(window)
+            || view.settings.task.is_some()
+            || view.native_settings_save_in_flight()
+        {
+            bail!("Preferences dismissal lost focus or unexpectedly saved settings");
+        }
+        Ok(())
+    })??;
+    handle.update(cx, |_, window, _| window.resize(original_size))?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !handle.update(cx, |_, window, _| window.viewport_size() == original_size)? {
+        if Instant::now() >= deadline {
+            bail!("Preferences fixture viewport restoration timed out");
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(10))
+            .await;
+    }
+    eprintln!(
+        "SIDEBAR native legacy preferences PASS: all 7 tabs in a single scrolling row at 800/320px, indicator glyphs, font editor focus, Tab/Escape isolation; no saves"
+    );
+
+    crate::settings_window::verify_native(handle, cx).await?;
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -872,34 +1234,36 @@ async fn sidebar_hosts(handle: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> 
         eprintln!("SIDEBAR native host step={step} verified");
     }
     // Exercise wider, narrower, then restored native allocations. This catches
-    // stale truncated font runs as well as host labels left at the old 116px.
+    // stale truncated font runs as well as host labels left at the default width.
+    // Host and agent labels each reserve 57px in the comfortable flat layout:
+    // hosts use border + padding + arrow + two gaps + status; agents use their icon.
     for (window_width, preferred, host_width, agent_width, host_prefix, agent_prefix) in [
         (
             800.,
             Some(400.),
-            284.,
+            343.,
             343.,
             "Synthetic host",
             "agent-1-with-a",
         ),
-        (360., None, 77., 63., "Synthetic", "agent-1"),
+        (360., None, 63., 63., "Synthe", "agent-1"),
         (
             800.,
             Some(160.),
-            117.,
             103.,
-            "Synthetic host",
-            "agent-1-with-",
+            103.,
+            "Synthetic",
+            "agent-1-with\u{2026}",
         ),
         (
             800.,
             Some(480.),
-            364.,
+            423.,
             423.,
             REMOTE,
             "agent-1-with-a-deliberately-long-label",
         ),
-        (480., None, 116., 175., "Synthetic host", "agent-1-with-a"),
+        (480., None, 175., 175., "Synthetic host", "agent-1-with-a"),
     ] {
         handle
             .update(cx, |view, window, cx| {

@@ -16,7 +16,7 @@ across reconnects. A failed host is retried with backoff capped at 30 seconds.
 Runtime dependencies include GPUI, `herdr-client`, `serde_json` for API parameters,
 `ureq` for background GitHub owner avatar downloads, and `serde`/`config` (aliased
 as `config_loader`, TOML-only) for GUI configuration. `toml` preserves strict
-field types during deserialization; `toml_edit` preserves comments on theme saves.
+field types during deserialization; `toml_edit` preserves comments on settings saves.
 
 Solid light/heavy box-drawing characters and block elements (including fractional
 blocks and quadrants) are drawn on the terminal cell grid, with device-pixel-aligned
@@ -258,7 +258,8 @@ key to follow the current default again. If a different local file already
 exists, migration stops without overwriting either file and asks you to merge
 them. A sibling `config-gpui.lock` serializes application writes across windows
 and processes. Invalid local settings keep the current in-memory configuration
-on reload. The daemon's config is never modified.
+on reload. Native overrides do not modify Herdr's shared config; the shared
+settings controls described below explicitly edit that separate file.
 
 See
 [`config-gpui.example.toml`](config-gpui.example.toml) for a complete example.
@@ -268,6 +269,114 @@ within half a second. Font family, font size, theme, and layout changes apply
 together; invalid edits keep the last valid settings and show a load error.
 Reload waits while a theme preview/save is active. The manual GUI config reload
 action remains available; daemon config reload is separate.
+
+Settings opens a separate, reusable native window with **Appearance, Fonts,
+Indicators, Sound, Notifications, Integrations, and General** in a sidebar.
+The terminal stays usable while Settings is open. Cmd-W (or Ctrl-W) closes only
+Settings; reopening activates the existing window instead of creating a duplicate.
+Local preferences remain editable if the originating session window closes.
+
+Appearance provides a large live preview and a searchable, virtualized grid of
+theme cards, including every discovered Ghostty theme rather than a small
+shortlist. Each card shows its own background, foreground, and palette swatches;
+search stays above the grid. Cards adapt to the window width, and their palettes
+load off-thread into a bounded cache.
+Typing filters the entire catalog without changing the applied theme. Clicking a
+result or navigating with the arrow keys applies it immediately to Settings,
+open app windows, and Logs. There is no Apply button. Theme selection is an
+in-memory draft: browsing does not write or reload the TOML configuration.
+Uncached theme definition files load in the background; recent definitions are
+cached for quick switching.
+
+Closing Settings, through its native close button or Cmd-W/Ctrl-W, saves only the
+final theme and sidebar layout selections. Quitting also flushes those selections. Closing waits for
+accepted work without blocking the UI; a save failure keeps Settings open with
+the draft and an error so it can be retried. Other controls keep their existing
+automatic-save behavior without resetting the live theme or layout. Reload also
+preserves these drafts. Theme, font, and layout writes from Settings are serialized.
+
+**Ghostty** and **Herdr** are independent library filters, both enabled initially.
+Turn either off to show only the other; search text is preserved, and changing a
+filter does not change the live theme or pending draft. Ghostty includes native
+built-ins and theme files. Every card identifies its source, including themes
+with the same name in both libraries. Herdr selections edit the shared theme,
+which changes the GUI only when it follows Herdr rather than a native override.
+Follow Herdr and high contrast remain available independently.
+
+Fonts uses compact rows for Terminal, Sidebar, Tabs, and Interface, with family
+and size together and a shared specimen of the selected role below. Click a
+family to open the searchable installed-font chooser; **Set all fonts...** changes
+families together without changing their sizes. The catalog stays hidden until
+requested. Size steppers coalesce repeated changes; click a size to type an
+integer from 8 through 48. Enter or blur saves, Escape cancels.
+Accepted saves survive closing Settings. Family and size edits preserve configured
+fallbacks and unrelated settings in `config-gpui.local.toml`. General retains
+browser-skill installation/removal and configuration paths.
+
+General provides switches for **Show usage**, **Confirm tab close**, and the
+clipboard copied notification, plus all six clipboard positions. Notifications
+provides a native in-app switch, a bounded delay stepper (0-3600 seconds), and
+four corner choices. Each notification and clipboard field has a **Follow shared**
+action that removes only its local override; effective values are shown after
+reload. Appearance provides switches for **Show agents** and **High contrast**,
+and a sidebar-gap stepper (0-64 logical pixels). Sound enablement uses a switch;
+custom sound paths and per-agent sound policies remain shared-file settings, not
+read-only preference rows in this window. Configuration paths and installation
+status are diagnostic facts rather than editable preference values.
+
+These native edits save automatically through the serial background save path,
+preserving unrelated TOML keys/comments and pending theme/layout selections.
+Controls are disabled while a save or reload is in progress. Shared settings
+retain their platform restrictions; Windows can edit native overrides but not
+shared Herdr settings. Terminal and OS notification delivery remain unsupported
+by this GUI.
+
+Integrations is sorted case-insensitively by name, with the original integration
+ID breaking ties. Its search field filters names and IDs without contacting the
+daemon. Install actions still use the original ID and selected source host;
+filtering never changes the action destination.
+
+Theme, indicator style, sound, and toast delivery are **shared with the local
+Herdr TUI**. They read `HERDR_CONFIG_PATH`, otherwise
+`$XDG_CONFIG_HOME/herdr/config.toml` or `~/.config/herdr/config.toml`. The GUI uses
+the release `herdr` namespace even in debug builds; select a `herdr-dev` config
+explicitly with `HERDR_CONFIG_PATH` when needed. These are local preferences,
+not a remote daemon's configuration: a socket does not expose the daemon's config
+path or effective settings. General displays the shared file and reload control.
+
+Shared saves preserve comments and unknown keys, reject conflicting external
+edits and unsafe paths, and run off the UI thread. Symlinked config files and
+user-controlled symlink ancestors are refused rather than replaced. Save success
+is separate from the local daemon reload request, which is reported as queued,
+not acknowledged. Opening Preferences, its Reload button, and the daemon's reload
+signal reread the local file. Debounced disk polling also reloads saved changes,
+deferring reloads during active settings saves and font/theme picker operations.
+On Windows shared
+settings are readable, but shared-file writes are unsupported; native settings
+remain editable through the Windows-capable local override writer.
+
+Existing native theme selections remain overrides. Choose **Follow Herdr** to
+use the shared theme, all 18 upstream palettes, custom colors, and automatic
+light/dark selection. Selecting a shared theme disables upstream auto-switching,
+as in the TUI. Status indicators always use the shared indicator style and shared
+status colors, independent of a native terminal theme override. Terminal/default
+reset colors are projected to opaque native colors.
+
+Sound uses the dedicated Rodio backend, shared global/per-agent settings and
+custom local paths, with Herdr's bundled sounds as fallbacks. The Sound tab offers
+an explicit QA preview. Shared Herdr toast delivery enables in-app notifications;
+Terminal and System delivery are not executed by this native client. Per-field
+`[notifications]` settings in the native local override file take precedence.
+Semantic events are bounded, target-validated, and fenced by connection/boot.
+Clipboard feedback has its own shared defaults and native overrides and does not
+authorize remote clipboard writes.
+
+Integrations are managed on the **selected daemon's host** through advertised
+`integration.list`/`integration.install` methods. Installation is only triggered
+by an explicit button click, modifies agent hook/plugin configuration on that
+host, and refreshes the list afterward. No uninstall action is offered because
+the upstream binary endpoint does not advertise it. Native GitHub sign-in remains
+separate from agent integrations.
 
 The terminal face can also be resized for the current session from the View menu,
 the in-app menu, the command palette, or `cmd-=` / `cmd--` / `cmd-0`. Adjustments
@@ -280,9 +389,11 @@ once. Set top-level `confirm_close_tab = false` to never ask for tabs
 (including their running processes), and `show_agents = false` to hide the Agents
 section and give Spaces the full sidebar height. Both default to `true`. Pane
 closures still ask for confirmation. Saved edits apply automatically. The
-**Show agents** switch in **Settings > Appearance** saves `show_agents` for you.
+**Show agents** control in **Settings > Appearance > Sidebar layout** saves
+`show_agents` immediately, independently of the layout draft saved on close.
 
-`[notifications]` controls GUI-local in-app delivery, independently of the daemon:
+`[notifications]` in `config-gpui.local.toml` overrides shared toast preferences
+for GUI-local in-app delivery, independently per key:
 
 ```toml
 [notifications]
@@ -305,7 +416,7 @@ previews remain available regardless of delivery settings.
 
 The sidebar button at the left of the titlebar hides or shows the sidebar.
 It stays available when the sidebar is hidden; the existing View menu command and shortcut still work.
-In **Settings > Appearance**, click **Show usage** to turn the bottom quota display on or off.
+In **Settings > General**, toggle **Show usage** to turn the bottom quota display on or off.
 The choice is saved to `config-gpui.local.toml` and follows the existing `[usage] show` setting.
 
 The app's own colored marks and labels (status dots and words, pull request
@@ -328,6 +439,14 @@ top-level line there (before any table headers):
 ```toml
 layout = "compact"
 ```
+
+**Settings > Appearance > Sidebar layout**, below the theme grid, lists all nine
+choices beside a live preview using the current theme and sidebar font. Preview widths of 240,
+280, and 320 pixels, clicking workspace or agent rows to select them, and clicking
+the repository arrow to fold affect only the sample. Choosing a layout applies it
+live to the sample and app windows, like themes, without writing on each click.
+Only the final choice is saved when Settings closes or the app quits. The list and
+preview stack in narrow Settings windows; the Sidebar gap row remains below them.
 
 Three densities of Herdr's own rows are available:
 
@@ -1082,15 +1201,15 @@ Windows setup) nothing is saved and the window says so.
   stale-while-refresh behavior; see [avatar caching](../../README.md#native-github-sign-in)
   for limits, location, and the startup authentication requirement. Neither cache
   reads nor downloads block rendering; sign-out discards profile refresh results.
-- In-app sidebar menu for settings information, keybinds, config reload, update
-  information, and detach/reconnect. Styled Preferences include Appearance,
-  Fonts, Configuration, and Connection sections, with theme selection and GUI
-  config reload; a searchable installed-font picker can set all four families
+- In-app sidebar menu for settings, keybinds, config reload, update information,
+  and detach/reconnect. The standalone Settings window combines shared Herdr settings,
+  daemon agent integrations, editable native fonts, and general configuration.
+  A searchable installed-font picker can set all four families
   together or each independently (including Platform default), while sizes have
   −/+ controls and editable whole-number fields (8–48; Enter or leave to save,
   Escape to cancel). Size changes appear immediately; repeated clicks stay enabled
   while a background writer coalesces the latest size for each font. Save failures
-  appear in the Preferences footer and restore the previous size. Both families
+  appear in the Settings footer and restore the previous size. Both families
   and sizes save to the local GUI overrides file and reload in all windows.
 - A searchable theme picker previews the available names from built-ins and
   Herdr/Ghostty theme folders. Selecting a theme applies and saves it while

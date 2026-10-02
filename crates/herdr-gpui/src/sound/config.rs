@@ -195,7 +195,14 @@ mod tests {
             ("HERDR_CONFIG_PATH", "/explicit/settings.toml"),
         ];
         for (count, expected) in [
-            (1, "/home/test/.config/herdr/config.toml"),
+            (
+                1,
+                if cfg!(windows) {
+                    "/home/test/AppData/Roaming/herdr/config.toml"
+                } else {
+                    "/home/test/.config/herdr/config.toml"
+                },
+            ),
             (2, "/xdg/herdr/config.toml"),
             (3, "/explicit/settings.toml"),
         ] {

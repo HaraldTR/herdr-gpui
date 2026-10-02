@@ -7,6 +7,7 @@ use gpui::{Modifiers, point, px};
 
 use crate::{
     config::{Config, FONT_SIZE_STEP},
+    settings_panel::Tab,
     sidebar::layout_tests::fixture_window,
 };
 
@@ -78,7 +79,10 @@ fn clicking_font_size_rows_changes_size(cx: &mut gpui::TestAppContext) {
 fn preferences_render_font_size_controls(cx: &mut gpui::TestAppContext) {
     let (view, cx) = cx.add_window_view(fixture_window);
     cx.update(|window, cx| {
-        view.update(cx, |view, cx| view.open_preferences(window, cx));
+        view.update(cx, |view, cx| {
+            view.open_preferences_fixture(window, cx);
+            view.select_settings_tab(Tab::Font, window, cx);
+        });
         window.draw(cx).clear(cx);
     });
     for selector in [
@@ -100,10 +104,8 @@ fn editable_font_size_cancels_on_escape_and_rejects_invalid_input(cx: &mut gpui:
     let (view, cx) = cx.add_window_view(fixture_window);
     cx.update(|window, cx| {
         view.update(cx, |view, cx| {
-            view.open_preferences(window, cx);
-            view.menu
-                .preferences_scroll
-                .set_offset(point(px(0.), px(-120.)));
+            view.open_preferences_fixture(window, cx);
+            view.select_settings_tab(Tab::Font, window, cx);
         });
         window.draw(cx).clear(cx);
     });
@@ -156,10 +158,8 @@ fn leaving_font_size_field_restores_menu_keyboard_focus(cx: &mut gpui::TestAppCo
     let (view, cx) = cx.add_window_view(fixture_window);
     cx.update(|window, cx| {
         view.update(cx, |view, cx| {
-            view.open_preferences(window, cx);
-            view.menu
-                .preferences_scroll
-                .set_offset(point(px(0.), px(-120.)));
+            view.open_preferences_fixture(window, cx);
+            view.select_settings_tab(Tab::Font, window, cx);
         });
         window.draw(cx).clear(cx);
     });
@@ -195,10 +195,8 @@ fn a_font_at_the_limit_cannot_be_increased_or_start_a_save(cx: &mut gpui::TestAp
     cx.update(|window, cx| {
         view.update(cx, |view, cx| {
             view.config.sidebar.size = *crate::config::FONT_SIZE_RANGE.end();
-            view.open_preferences(window, cx);
-            view.menu
-                .preferences_scroll
-                .set_offset(point(px(0.), px(-120.)));
+            view.open_preferences_fixture(window, cx);
+            view.select_settings_tab(Tab::Font, window, cx);
         });
         window.draw(cx).clear(cx);
     });

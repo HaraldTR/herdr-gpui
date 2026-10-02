@@ -8,7 +8,7 @@
 //! with an explicit width, so nothing can push past the row's edge.
 
 use super::super::{
-    cell::RowState,
+    cell::{RowContext, RowState},
     glyph_width, label_text,
     row::{PrBadge, RowLift, removing_dot},
     status_indicator,
@@ -240,11 +240,16 @@ pub(super) fn icon(path: impl Into<SharedString>, size: f32, color: u32) -> Svg 
 
 /// The status dot, or the pulse that replaces it while a checkout is deleted.
 /// Unlike the Herdr row's, it carries no offset: a line centers it.
-pub(super) fn status(status: AgentStatus, removing: bool, theme: &Theme, font: &FontConfig) -> Div {
+pub(super) fn status(status: AgentStatus, removing: bool, cx: &RowContext<'_>) -> Div {
     if removing {
-        removing_dot("worktree-removing", theme)
+        div()
+            .w(px(cx.indicators.width(cx.font)))
+            .flex_none()
+            .flex()
+            .justify_center()
+            .child(removing_dot("worktree-removing", cx.theme))
     } else {
-        status_indicator(status, font, theme).mt_0()
+        status_indicator(status, cx.font, cx.indicators).mt_0()
     }
 }
 

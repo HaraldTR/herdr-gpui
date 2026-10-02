@@ -8,6 +8,7 @@ use crate::{
     error::ThemeParseError,
     keymap::{Binding, DaemonKeys, Keymap},
 };
+pub(crate) mod preferences;
 pub(crate) mod watch;
 use gpui::{Font, FontFallbacks};
 use serde::Deserialize;
@@ -19,6 +20,7 @@ use std::{
 };
 
 const DEFAULT_CONFIG: &str = include_str!("../config-gpui.example.toml");
+const FOLLOW_HERDR: &str = "Follow Herdr";
 // Compare the first line so Windows checkouts and editors can use CRLF.
 const MANAGED_HEADER: &str = "# DO NOT EDIT -- WILL BE OVERWRITTEN";
 /// Seeds the overrides file on first launch only. Existing overrides and
@@ -99,6 +101,7 @@ pub struct Config {
     pub github: GitHubConfig,
     pub features: Features,
     pub notifications: NotificationConfig,
+    pub(crate) notification_overrides: NotificationSettings,
     pub clipboard_toast: ClipboardToast,
     pub layout: Layout,
     pub keybindings: Keymap,
@@ -214,6 +217,32 @@ impl Default for NotificationConfig {
             position: herdr_client::protocol::ToastHerdrPosition::BottomRight,
         }
     }
+}
+
+/// Only explicitly configured GUI keys override the shared Herdr preferences.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct NotificationSettings {
+    enabled: Option<bool>,
+    #[serde(deserialize_with = "optional_notification_delay")]
+    delay_seconds: Option<u64>,
+    position: Option<herdr_client::protocol::ToastHerdrPosition>,
+}
+
+impl NotificationSettings {
+    fn resolve(self, base: NotificationConfig) -> NotificationConfig {
+        NotificationConfig {
+            enabled: self.enabled.unwrap_or(base.enabled),
+            delay_seconds: self.delay_seconds.unwrap_or(base.delay_seconds),
+            position: self.position.unwrap_or(base.position),
+        }
+    }
+}
+
+fn optional_notification_delay<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<u64>, D::Error> {
+    notification_delay(d).map(Some)
 }
 
 fn notification_delay<'de, D: serde::Deserializer<'de>>(
@@ -590,6 +619,7 @@ impl Default for Config {
             open_links_in: LinkTarget::default(),
             features: Features::default(),
             notifications: NotificationConfig::default(),
+            notification_overrides: NotificationSettings::default(),
             clipboard_toast: ClipboardToast::default(),
             layout: Layout::default(),
             keybindings: Keymap::default(),
@@ -619,7 +649,7 @@ struct Settings {
     ui: FontSettings,
     github: GitHubConfig,
     features: Features,
-    notifications: NotificationConfig,
+    notifications: NotificationSettings,
     clipboard_toast: ClipboardToastSettings,
     layout: Layout,
     keybindings: std::collections::BTreeMap<String, Binding>,
@@ -700,6 +730,18 @@ pub(crate) fn daemon_config_path(get: impl Fn(&str) -> Option<std::ffi::OsString
     let root = get("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
+            #[cfg(windows)]
+            {
+                if let Some(root) = get("APPDATA") {
+                    return PathBuf::from(root);
+                }
+                get("HOME")
+                    .or_else(|| get("USERPROFILE"))
+                    .map(PathBuf::from)
+                    .map(|home| home.join("AppData/Roaming"))
+                    .unwrap_or_else(env::temp_dir)
+            }
+            #[cfg(not(windows))]
             get("HOME")
                 .map(PathBuf::from)
                 .map(|home| home.join(".config"))
@@ -865,6 +907,16 @@ fn theme_directories() -> Result<Vec<PathBuf>> {
 }
 
 impl Config {
+    /// Pure application of a prepared shared snapshot. Native explicit keys win;
+    /// terminal/system delivery does not implicitly enable this GUI's in-app toasts.
+    pub(crate) fn apply_shared_notifications(&mut self, shared: &crate::herdr_settings::Settings) {
+        self.notifications = self.notification_overrides.resolve(NotificationConfig {
+            enabled: shared.toast_delivery == crate::herdr_settings::ToastDelivery::Herdr,
+            delay_seconds: shared.toast_delay_seconds,
+            position: shared.toast_position,
+        });
+    }
+
     pub fn path() -> Result<PathBuf> {
         Ok(config_root()?.join("herdr/config-gpui.toml"))
     }
@@ -1042,7 +1094,10 @@ impl Config {
         settings.github.client_id_with_override(None)?;
         config.github = settings.github;
         config.features = settings.features;
-        config.notifications = settings.notifications;
+        config.notification_overrides = settings.notifications;
+        config.notifications = settings
+            .notifications
+            .resolve(NotificationConfig::default());
         config.clipboard_toast = settings.clipboard_toast.resolve(base.clipboard_toast);
         config.agent_status_text = base.agent_status_text.clone();
         if !settings.layout.sidebar_gap.is_finite()
@@ -1105,7 +1160,9 @@ impl Config {
     fn available_themes_in(&self, directories: &[PathBuf]) -> Result<Vec<String>> {
         let mut names: Vec<String> = Theme::BUILTIN_NAMES
             .iter()
-            .map(|name| (*name).into())
+            .copied()
+            .chain([FOLLOW_HERDR])
+            .map(str::to_owned)
             .collect();
         for directory in directories {
             let entries = match fs::read_dir(directory) {
@@ -1392,6 +1449,9 @@ impl Config {
         directories: impl FnOnce() -> Result<Vec<PathBuf>>,
     ) -> Result<Theme> {
         let name = self.theme.trim();
+        if name == FOLLOW_HERDR {
+            return crate::herdr_settings::Settings::load()?.theme(false);
+        }
         if let Some(theme) = Theme::builtin(name) {
             return Ok(theme);
         }
@@ -1686,6 +1746,173 @@ mod tests {
     use super::*;
     use anyhow::Context as _;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn shared_notifications_inherit_without_resetting_session() -> anyhow::Result<()> {
+        use crate::herdr_settings::Settings as Shared;
+        use herdr_client::protocol::ToastHerdrPosition;
+
+        for mut config in [
+            Config::default(),
+            Config::parse("")?,
+            Config::parse("[notifications]")?,
+            Config::parse(DEFAULT_CONFIG)?,
+        ] {
+            assert_eq!(config.notifications, NotificationConfig::default());
+            config.terminal.size = 27.5;
+            config.ui.size = 18.;
+            config.terminal.fallbacks = Some(vec!["Session Fallback".into()]);
+            config.clipboard_toast.enabled = false;
+            config.contrast = Contrast::High;
+            let session = config.clone();
+            for (delivery, enabled) in [
+                ("herdr", true),
+                ("off", false),
+                ("system", false),
+                ("terminal", false),
+                ("herdr", true),
+            ] {
+                let shared = Shared::parse_text(&format!(
+                    "[ui.toast]\ndelivery = '{delivery}'\ndelay_seconds = 7\n[ui.toast.herdr]\nposition = 'top-left'\n"
+                ))?;
+                config.apply_shared_notifications(&shared);
+                assert_eq!(
+                    config.notifications,
+                    NotificationConfig {
+                        enabled,
+                        delay_seconds: 7,
+                        position: ToastHerdrPosition::TopLeft
+                    }
+                );
+                for (font, original) in [
+                    (&config.sidebar, &session.sidebar),
+                    (&config.tabs, &session.tabs),
+                    (&config.terminal, &session.terminal),
+                    (&config.ui, &session.ui),
+                ] {
+                    assert_eq!(font.family, original.family);
+                    assert_eq!(font.size, original.size);
+                    assert_eq!(font.fallbacks, original.fallbacks);
+                }
+                assert_eq!(config.clipboard_toast, session.clipboard_toast);
+                assert_eq!(config.layout, session.layout);
+                assert_eq!(config.theme, session.theme);
+                assert_eq!(config.contrast, session.contrast);
+                assert_eq!(
+                    config.keybindings.bindings().collect::<Vec<_>>(),
+                    session.keybindings.bindings().collect::<Vec<_>>()
+                );
+            }
+            config.apply_shared_notifications(&Shared::parse_text("")?);
+            assert_eq!(config.notifications, NotificationConfig::default());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn shared_notifications_respect_each_explicit_native_override() -> anyhow::Result<()> {
+        use crate::herdr_settings::Settings as Shared;
+        use herdr_client::protocol::ToastHerdrPosition::{BottomLeft, TopRight};
+        let shared = Shared::parse_text(
+            "[ui.toast]\ndelivery = 'herdr'\ndelay_seconds = 7\n[ui.toast.herdr]\nposition = 'top-right'",
+        )?;
+        for (text, enabled, delay_seconds, position) in [
+            ("enabled = false", false, 7, TopRight),
+            ("delay_seconds = 0", true, 0, TopRight),
+            ("position = 'bottom-left'", true, 7, BottomLeft),
+            (
+                "enabled = false\ndelay_seconds = 0\nposition = 'bottom-left'",
+                false,
+                0,
+                BottomLeft,
+            ),
+        ] {
+            let mut config = Config::parse_layers(
+                [DEFAULT_CONFIG, &format!("[notifications]\n{text}")],
+                &Daemon::default(),
+            )?;
+            for _ in 0..2 {
+                config.apply_shared_notifications(&shared);
+                assert_eq!(
+                    config.notifications,
+                    NotificationConfig {
+                        enabled,
+                        delay_seconds,
+                        position
+                    },
+                    "{text}"
+                );
+            }
+        }
+        let mut config = Config::parse("[notifications]\nenabled = true")?;
+        for delivery in ["off", "terminal", "system"] {
+            config.apply_shared_notifications(&Shared::parse_text(&format!(
+                "[ui.toast]\ndelivery = '{delivery}'"
+            ))?);
+            assert!(config.notifications.enabled);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn managed_notifications_defer_but_local_and_legacy_keys_win() -> anyhow::Result<()> {
+        use crate::herdr_settings::Settings as Shared;
+        let shared = Shared::parse_text("[ui.toast]\ndelivery = 'herdr'\ndelay_seconds = 9")?;
+        for legacy in [false, true] {
+            let temp = TempDirectory::new()?;
+            let path = temp.0.join("config-gpui.toml");
+            let daemon = temp.0.join("absent.toml");
+            if legacy {
+                fs::write(&path, "[notifications]\nenabled = false\n")?;
+            }
+            for mut config in [
+                Config::load_startup_path(&path, &daemon)?,
+                Config::load_path(&path, &daemon)?,
+            ] {
+                config.apply_shared_notifications(&shared);
+                assert_eq!(config.notifications.enabled, !legacy);
+                assert_eq!(config.notifications.delay_seconds, 9);
+            }
+            fs::write(
+                path.with_extension("local.toml"),
+                "[notifications]\nenabled = false\ndelay_seconds = 1\nposition = 'bottom-right'\n",
+            )?;
+            for mut config in [
+                Config::load_startup_path(&path, &daemon)?,
+                Config::load_path(&path, &daemon)?,
+            ] {
+                config.apply_shared_notifications(&shared);
+                assert_eq!(config.notifications, NotificationConfig::default());
+            }
+            assert_eq!(fs::read_to_string(&path)?, DEFAULT_CONFIG);
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shared_windows_config_path_matches_upstream_roaming_layout() {
+        let vars = [
+            ("USERPROFILE", r"C:\Users\test"),
+            ("APPDATA", r"C:\Roaming"),
+            ("XDG_CONFIG_HOME", r"C:\xdg"),
+            ("HERDR_CONFIG_PATH", r"C:\explicit.toml"),
+        ];
+        for (count, expected) in [
+            (1, r"C:\Users\test\AppData\Roaming\herdr\config.toml"),
+            (2, r"C:\Roaming\herdr\config.toml"),
+            (3, r"C:\xdg\herdr\config.toml"),
+            (4, r"C:\explicit.toml"),
+        ] {
+            assert_eq!(
+                daemon_config_path(|key| vars[..count]
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| (*value).into())),
+                PathBuf::from(expected)
+            );
+        }
+    }
 
     /// The daemon's own answer is the starting point, each GUI key overrides
     /// it alone, and the file this GUI writes for a new user pins neither.
@@ -2106,6 +2333,7 @@ mod tests {
                 "Catppuccin Mocha",
                 "Default",
                 "Dracula",
+                "Follow Herdr",
                 "Nord",
                 "zebra",
             ]
