@@ -26,6 +26,8 @@ pub(crate) use transfers::tests::Peer as MockPeer;
 
 #[cfg(test)]
 mod font_size_tests;
+#[cfg(test)]
+mod key_action_tests;
 #[cfg(all(test, feature = "integration-test"))]
 mod resize_tests;
 #[cfg(test)]
@@ -166,6 +168,9 @@ pub(crate) struct HerdrWindow {
     pub(crate) _browser_tabs: Subscription,
     /// The daemon's prefix was typed, so the next keystroke completes a chord.
     pub(crate) prefix_armed: bool,
+    /// Herdr's resize mode: direction keys resize the focused pane until
+    /// Escape, Enter, or the mode's own shortcut ends it.
+    pub(crate) resize_mode: bool,
     pub(crate) _prefix_interceptor: Subscription,
 }
 
@@ -493,6 +498,7 @@ impl HerdrWindow {
             // Another window, or an agent, may open or close a tab.
             _browser_tabs: cx.observe_global::<crate::browser::Store>(|_, cx| cx.notify()),
             prefix_armed: false,
+            resize_mode: false,
             _prefix_interceptor: Self::intercept_prefix(window, cx),
             _activation: cx.observe_window_activation(window, |this, window, cx| {
                 this.active = window.is_window_active();

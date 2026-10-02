@@ -318,6 +318,28 @@ impl HerdrWindow {
         }
     }
 
+    /// Opens the focused workspace's rename or close dialog, as its menu's
+    /// row would. Closing confirms here as it does from the menu.
+    pub(crate) fn open_focused_workspace_dialog(
+        &mut self,
+        action: WorkspaceAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = self
+            .live
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.focused_workspace_id.clone())
+        else {
+            return;
+        };
+        self.open_workspace_menu(&id, Point::default(), window, cx);
+        if self.menu.page == Some(Page::Workspace) {
+            self.open_workspace_dialog(action, window, cx);
+        }
+    }
+
     pub(super) fn workspace_items(&self) -> Vec<(WorkspaceMenuAction, &'static str)> {
         use WorkspaceMenuAction::Dialog;
         let Some(target) = &self.menu.target else {

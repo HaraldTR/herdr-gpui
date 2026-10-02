@@ -20,8 +20,10 @@ pub enum Method {
     PaneFocus,
     PaneFocusDirection,
     PaneRename,
+    PaneResize,
     PaneScroll,
     PaneSplit,
+    PaneSwap,
     PaneZoom,
     ServerReloadConfig,
     TabClose,
@@ -54,8 +56,10 @@ impl Method {
             Self::PaneFocus => "pane.focus",
             Self::PaneFocusDirection => "pane.focus_direction",
             Self::PaneRename => "pane.rename",
+            Self::PaneResize => "pane.resize",
             Self::PaneScroll => "pane.scroll",
             Self::PaneSplit => "pane.split",
+            Self::PaneSwap => "pane.swap",
             Self::PaneZoom => "pane.zoom",
             Self::ServerReloadConfig => "server.reload_config",
             Self::TabClose => "tab.close",
@@ -122,6 +126,12 @@ mod tests {
         assert!(Method::PaneClear.advertised_in(&["pane.close".into(), "pane.clear".into()]));
         // Advertisement is an exact match: a method sharing the prefix is not clearing.
         assert!(!Method::PaneClear.advertised_in(&["pane.clear_agent_authority".into()]));
+    }
+
+    #[test]
+    fn layout_key_action_wire_names() {
+        assert_eq!(Method::PaneResize.as_str(), "pane.resize");
+        assert_eq!(Method::PaneSwap.as_str(), "pane.swap");
     }
 
     #[test]

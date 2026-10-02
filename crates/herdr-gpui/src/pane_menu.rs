@@ -56,6 +56,18 @@ mod tests {
                 json!({"pane_id":"inactive", "mode":"toggle"})
             )
         );
+        // The focused pane takes the menu's pane's place.
+        assert_eq!(
+            Action::Swap.request(&target).unwrap(),
+            (
+                Method::PaneSwap,
+                json!({"source_pane_id": original.focused_pane_id, "target_pane_id":"inactive"})
+            )
+        );
+        let focused =
+            Target::capture(&original, original.focused_pane_id.as_deref().unwrap()).unwrap();
+        assert!(focused.focused.is_none());
+        assert!(Action::Swap.request(&focused).is_none());
         for case in 0..7 {
             let mut snapshot = original.clone();
             match case {
@@ -99,10 +111,11 @@ mod tests {
             "pane-menu-2",
             "pane-menu-3",
             "pane-menu-4",
+            "pane-menu-5",
         ] {
             assert!(cx.debug_bounds(selector).is_some());
         }
-        assert!(cx.debug_bounds("pane-menu-5").is_none());
+        assert!(cx.debug_bounds("pane-menu-6").is_none());
         cx.simulate_keystrokes("enter cmd-t cmd-w cmd-b");
         view.read_with(cx, |v, _| {
             assert_eq!(v.menu.page, Some(Page::Pane));
@@ -430,17 +443,29 @@ struct Target {
     tab: String,
     pane: String,
     label: String,
+    /// The focused pane when it is another one in the same tab, which "Swap
+    /// with focused pane" trades places with.
+    focused: Option<String>,
 }
 
 impl Target {
     fn capture(snapshot: &ClientShellSnapshot, id: &str) -> Option<Self> {
         let pane = snapshot.panes.iter().find(|pane| pane.pane_id == id)?;
+        let focused = snapshot.focused_pane_id.as_ref().filter(|focused| {
+            **focused != pane.pane_id
+                && snapshot.panes.iter().any(|p| {
+                    p.pane_id == **focused
+                        && p.tab_id == pane.tab_id
+                        && p.workspace_id == pane.workspace_id
+                })
+        });
         let target = Self {
             boot: snapshot.boot_id.clone(),
             workspace: pane.workspace_id.clone(),
             tab: pane.tab_id.clone(),
             pane: pane.pane_id.clone(),
             label: pane.label.clone().unwrap_or_default(),
+            focused: focused.cloned(),
         };
         target.validate(snapshot).ok()?;
         Some(target)
@@ -475,6 +500,7 @@ enum Action {
     Rename,
     SplitRight,
     SplitDown,
+    Swap,
     Zoom,
     Close,
 }
@@ -490,6 +516,12 @@ impl Action {
                     "focus": true,
                 }),
             ),
+            // The focused pane moves to this one's place and keeps focus,
+            // as Herdr's directional swaps move it.
+            Self::Swap => (
+                Method::PaneSwap,
+                json!({"source_pane_id": target.focused.as_ref()?, "target_pane_id": target.pane}),
+            ),
             Self::Zoom => (
                 Method::PaneZoom,
                 json!({"pane_id": target.pane, "mode": "toggle"}),
@@ -499,13 +531,24 @@ impl Action {
     }
 }
 
-const ACTIONS: [(Action, &str); 5] = [
+const ACTIONS: [(Action, &str); 6] = [
     (Action::Rename, "Rename"),
     (Action::SplitRight, "Split Right"),
     (Action::SplitDown, "Split Down"),
+    (Action::Swap, "Swap with Focused Pane"),
     (Action::Zoom, "Toggle Zoom"),
     (Action::Close, "Close"),
 ];
+
+impl PaneMenu {
+    /// The rows this menu offers: a swap needs another pane to trade with.
+    fn actions(&self) -> Vec<(Action, &'static str)> {
+        ACTIONS
+            .into_iter()
+            .filter(|(action, _)| !matches!(action, Action::Swap) || self.target.focused.is_some())
+            .collect()
+    }
+}
 
 pub(super) struct PaneMenu {
     target: Target,
@@ -569,6 +612,35 @@ impl HerdrWindow {
             pending: None,
             error: None,
         });
+    }
+
+    /// Opens the focused pane's rename dialog, as its menu's "Rename" row
+    /// would, at the pane's top-left corner.
+    pub(super) fn rename_focused_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .live
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.focused_pane_id.clone())
+        else {
+            return;
+        };
+        let origin = self.bounds.origin;
+        let anchor = self
+            .live
+            .surface
+            .as_ref()
+            .and_then(|surface| surface.panes.iter().find(|pane| pane.pane_id == id))
+            .map_or(origin, |pane| {
+                point(
+                    origin.x + px(f32::from(pane.rect.x) * self.cell_width),
+                    origin.y + px(f32::from(pane.rect.y) * self.config.terminal.line_height()),
+                )
+            });
+        self.open_pane_menu(&id, anchor, window, cx);
+        if self.menu.page == Some(Page::Pane) {
+            self.activate_pane_menu(Action::Rename, window, cx);
+        }
     }
 
     fn validate_pane_target(&self) -> crate::Result<&Target> {
@@ -780,17 +852,21 @@ impl HerdrWindow {
                 self.submit_pane_rename(window, cx)
             }
             "up" | "down" if self.menu.page == Some(Page::Pane) => {
+                let count = pane.actions().len();
                 pane.selected = Some(match (pane.selected, key) {
-                    (None, "up") => ACTIONS.len() - 1,
+                    (None, "up") => count - 1,
                     (None, _) => 0,
-                    (Some(i), "up") => (i + ACTIONS.len() - 1) % ACTIONS.len(),
-                    (Some(i), _) => (i + 1) % ACTIONS.len(),
+                    (Some(i), "up") => (i + count - 1) % count,
+                    (Some(i), _) => (i + 1) % count,
                 });
                 cx.notify();
             }
             "enter" => {
-                if let Some(index) = pane.selected {
-                    self.activate_pane_menu(ACTIONS[index].0, window, cx);
+                if let Some((action, _)) = pane
+                    .selected
+                    .and_then(|index| pane.actions().get(index).copied())
+                {
+                    self.activate_pane_menu(action, window, cx);
                 }
             }
             _ => {}
@@ -803,7 +879,7 @@ impl HerdrWindow {
         };
         let mut body = div().flex().flex_col();
         if self.menu.page == Some(Page::Pane) {
-            for (index, (action, label)) in ACTIONS.into_iter().enumerate() {
+            for (index, (action, label)) in pane.actions().into_iter().enumerate() {
                 body = body.child(
                     div()
                         .id(("pane-menu-action", index))

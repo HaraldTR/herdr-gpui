@@ -560,6 +560,21 @@ impl Render for HerdrWindow {
                                 .child(prefix),
                         ),
                     )
+                    // The mode has no control on screen, so it says how it works.
+                    .when(self.resize_mode, |bar| bar.child(
+                        div()
+                            .debug_selector(|| "resize-mode".into())
+                            .flex_none()
+                            .px(px(6.))
+                            .rounded(px(crate::config::corners::SMALL))
+                            .bg(rgb(self.theme.active))
+                            .child("Resize"),
+                    ).child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(self.theme.muted))
+                            .child("h j k l or arrows resize, Esc ends"),
+                    ))
                     .when(!self.live.status.is_connected(), |bar| bar.child(
                         if matches!(self.live.status, ConnectionStatus::StartingDaemon) {
                             div()

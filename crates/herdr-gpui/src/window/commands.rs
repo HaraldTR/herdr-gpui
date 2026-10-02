@@ -8,6 +8,7 @@ use crate::{
     config::{Config, FONT_SIZE_RANGE, FONT_SIZE_STEP, LayoutMode},
     controls::{self, Command},
     log_window,
+    menu::WorkspaceAction,
     navigation::{NavigationTarget, OwnedNavigationTarget},
     open_additional_window, state,
 };
@@ -297,6 +298,65 @@ impl HerdrWindow {
                 cx.quit();
                 return;
             }
+            Command::RenameTab => {
+                self.rename_focused_tab(window, cx);
+                return;
+            }
+            Command::RenamePane => {
+                self.rename_focused_pane(window, cx);
+                return;
+            }
+            Command::RenameWorkspace | Command::CloseWorkspace => {
+                let action = if command == Command::RenameWorkspace {
+                    WorkspaceAction::Rename
+                } else {
+                    WorkspaceAction::Close
+                };
+                self.open_focused_workspace_dialog(action, window, cx);
+                return;
+            }
+            // As Herdr's binding does: the daemon rereads its file, and this
+            // client its own, which holds the daemon's `[keys]` too.
+            Command::ReloadConfig => {
+                self.reload_daemon_config();
+                self.load_gui_config(cx);
+                cx.notify();
+                return;
+            }
+            Command::ResizeMode => {
+                self.prefix_armed = false;
+                self.resize_mode = true;
+                cx.notify();
+                return;
+            }
+            Command::LastPane => {
+                // Herdr's check: the pane must still exist and not be focused.
+                if let Some(snapshot) = &self.live.snapshot
+                    && let Some(pane) = self.live.previous_pane.clone().filter(|pane| {
+                        snapshot.focused_pane_id.as_ref() != Some(pane)
+                            && snapshot.panes.iter().any(|p| p.pane_id == *pane)
+                    })
+                {
+                    self.navigate(NavigationTarget::Pane(&pane), cx);
+                }
+                window.focus(&self.focus, cx);
+                return;
+            }
+            Command::PreviousWorkspace
+            | Command::NextWorkspace
+            | Command::WorkspaceNumber(_)
+            | Command::PreviousAgent
+            | Command::NextAgent
+            | Command::AgentNumber(_) => {
+                self.step_sidebar(command, cx);
+                window.focus(&self.focus, cx);
+                return;
+            }
+            Command::MoveTabPrevious | Command::MoveTabNext if !self.live.supports_tab_move => {
+                self.local_error = Some("Moving tabs needs a newer Herdr daemon.".into());
+                cx.notify();
+                return;
+            }
             _ => {}
         }
         if self.activation_deadline.is_some()
@@ -314,6 +374,48 @@ impl HerdrWindow {
         }
         window.focus(&self.focus, cx);
         cx.notify();
+    }
+
+    /// Focuses the workspace or agent a sidebar step lands on, selecting its
+    /// host first when that is another one.
+    fn step_sidebar(&mut self, command: Command, cx: &mut Context<Self>) {
+        let agents = matches!(
+            command,
+            Command::PreviousAgent | Command::NextAgent | Command::AgentNumber(_)
+        );
+        let rows = if agents {
+            self.sidebar_agents()
+        } else {
+            self.sidebar_workspaces()
+        };
+        let selected = self.selected_endpoint;
+        let focused = self.live.snapshot.as_ref().and_then(|snapshot| {
+            if agents {
+                snapshot.focused_pane_id.as_deref()
+            } else {
+                snapshot.focused_workspace_id.as_deref()
+            }
+        });
+        let current = rows
+            .iter()
+            .position(|&(host, id)| host == selected && Some(id) == focused);
+        let Some(&(host, id)) = crate::sidebar::sidebar_step(&rows, current, selected, command)
+            .and_then(|index| rows.get(index))
+        else {
+            return;
+        };
+        let id = id.to_owned();
+        let target = if agents {
+            NavigationTarget::Pane(id.as_str())
+        } else {
+            NavigationTarget::Workspace(id.as_str())
+        };
+        if host == selected {
+            self.navigate(target, cx);
+        } else {
+            let endpoint = self.endpoints[host].id.clone();
+            self.navigate_endpoint(&endpoint, target, cx);
+        }
     }
 
     /// Installs the agent skill for browser tabs where Claude Code and other
