@@ -100,6 +100,7 @@ pub(crate) struct HerdrWindow {
     pub(crate) split_cursor: Option<CursorStyle>,
     pub(crate) pending_images: Vec<images::PendingImage>,
     pub(crate) pending_input: pending_input::PendingInput,
+    pub(crate) held_keys: crate::terminal::HeldKeys,
     pub(crate) file_transfer: Option<transfers::FileTransfer>,
     /// The terminal cells the pointer is choosing. A release copies them and
     /// clears this, so a highlight only ever belongs to a drag in progress.
@@ -449,6 +450,7 @@ impl HerdrWindow {
             split_cursor: None,
             pending_images: Vec::new(),
             pending_input: Default::default(),
+            held_keys: Default::default(),
             file_transfer: None,
             selection: None,
             flash: None,

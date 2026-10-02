@@ -3960,3 +3960,76 @@ fn input_held_across_gap_is_bounded_and_dropped_on_reset(cx: &mut gpui::TestAppC
         assert_eq!(view.pending_input.len(), 0);
     });
 }
+
+/// While Herdr reports that the focused pane wants every key, a key sent as a
+/// key event is released on key-up, even after its modifier was let go first.
+/// Without the report, nothing is held and no release is sent.
+#[gpui::test]
+fn keyboard_report_all_releases_sent_keys(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (endpoint, mut server) = connected_endpoint("report-all");
+    let down = |keystroke: &str| gpui::KeyDownEvent {
+        keystroke: gpui::Keystroke::parse(keystroke).unwrap(),
+        is_held: false,
+        prefer_character_input: false,
+    };
+    let up = |keystroke: &str| gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse(keystroke).unwrap(),
+    };
+    let key = |code, modifiers, kind, tracks_release| ClientMessage::ClientShellPaneInput {
+        pane_id: "w1:p1".into(),
+        events: vec![ClientPaneInputEvent::Key {
+            code,
+            modifiers,
+            kind,
+            repeat_count: 1,
+            shifted_codepoint: None,
+            generated_text: None,
+            tracks_release,
+            physical_key_id: None,
+            windows_record: None,
+        }],
+    };
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            prepare_mouse(view, endpoint);
+            view.live.activation = Some(crate::state::SurfaceActivation {
+                request: "activate-1".into(),
+                boot: view.live.snapshot.as_ref().unwrap().boot_id.clone(),
+                revision: Some(view.live.surface.as_ref().unwrap().projection_revision),
+                failed: false,
+                focus: None,
+                active: true,
+            });
+            view.live.keyboard_report_all = true;
+            view.key_down(&down("ctrl-c"), window, cx);
+            view.key_up(&up("c"), window, cx);
+            // A second key-up has nothing left to release.
+            view.key_up(&up("c"), window, cx);
+            view.live.keyboard_report_all = false;
+            view.key_down(&down("left"), window, cx);
+            view.key_up(&up("left"), window, cx);
+            view.send(ClientPaneInputEvent::TextCommit("sentinel".into()), cx);
+        });
+    });
+    use ClientKeyKind::{Press, Release};
+    assert_eq!(
+        server.receive(),
+        key(ClientKeyCode::Char('c'), 2, Press, true)
+    );
+    assert_eq!(
+        server.receive(),
+        key(ClientKeyCode::Char('c'), 2, Release, true)
+    );
+    assert_eq!(server.receive(), key(ClientKeyCode::Left, 0, Press, false));
+    assert_eq!(
+        server.receive(),
+        ClientMessage::ClientShellPaneInput {
+            pane_id: "w1:p1".into(),
+            events: vec![ClientPaneInputEvent::TextCommit("sentinel".into())],
+        }
+    );
+}
