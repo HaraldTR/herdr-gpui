@@ -70,6 +70,7 @@ impl HerdrWindow {
         self.hover = None;
         self.hover_menu = None;
         self.update_preview = None;
+        self.dismiss_release_notes();
         // Closing the offer without an answer is a "not now": it asks once.
         if self.menu.page == Some(Page::AgentSkill)
             && crate::agent_skill::AgentSkill::choice(cx).is_none()
@@ -115,14 +116,7 @@ impl HerdrWindow {
         if self.live.status.is_connected() {
             items.push("reload daemon config");
         }
-        if self
-            .live
-            .snapshot
-            .as_ref()
-            .is_some_and(|s| s.update_available.is_some())
-        {
-            items.push("update ready");
-        }
+        items.extend(self.release_notes_item());
         items.push(
             if self.endpoints[self.selected_endpoint]
                 .connection
@@ -162,7 +156,7 @@ impl HerdrWindow {
             }
             "commands" => self.open_palette(false, window, cx),
             "workspaces" => self.open_palette(true, window, cx),
-            "update ready" => self.menu.page = Some(Page::Update),
+            "update ready" | "what's new" => self.menu.page = Some(Page::Update),
             "app updates" => self.open_app_update(false, window, cx),
             "preview app update" => self.open_app_update(true, window, cx),
             "reload GUI config" => self.reload_gui_config(window, cx),
@@ -704,41 +698,7 @@ impl HerdrWindow {
                         ),
                 );
         } else {
-            let (title, rows) = {
-                let snapshot = self.live.snapshot.as_ref();
-                (
-                    "Update ready",
-                    vec![
-                        format!(
-                            "Version: {}",
-                            snapshot
-                                .and_then(|s| s.update_available.as_deref())
-                                .unwrap_or("unavailable")
-                        ),
-                        "Suggested command (review and run yourself):".into(),
-                        snapshot
-                            .map(|s| s.update_install_command.clone())
-                            .filter(|s| !s.trim().is_empty())
-                            .unwrap_or("No install command provided by daemon.".into()),
-                        "Nothing is installed or executed by this panel.".into(),
-                    ],
-                )
-            };
-            panel = panel.child(div().p(px(8.)).child(title));
-            for text in rows {
-                panel = panel.child(div().p(px(8.)).child(text));
-            }
-            panel = panel.child(
-                div()
-                    .id("menu-close")
-                    .p(px(8.))
-                    .cursor_pointer()
-                    .child("Close")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.dismiss_menu(window, cx);
-                    })),
-            );
+            panel = panel.child(self.render_release_notes(cx));
         }
         // Pages sit above everything GPUI draws, so the menu says what it
         // covers: a dimmed dialog covers the window, a popover its panel.

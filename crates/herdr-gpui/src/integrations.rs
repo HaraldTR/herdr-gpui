@@ -159,6 +159,15 @@ impl Integrations {
 }
 
 impl HerdrWindow {
+    /// Whether the selected daemon reports integration assets that need an
+    /// update. The daemon's own flag, so it holds before the list is loaded.
+    pub(crate) fn integration_updates_available(&self) -> bool {
+        self.live
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.integration_updates_available)
+    }
+
     fn integration_scope_current(&self, scope: &Scope) -> bool {
         self.endpoints
             .get(self.selected_endpoint)

@@ -51,6 +51,7 @@ mod preferences;
 mod presentation;
 mod progress;
 mod pull_request;
+mod release_notes;
 mod reorder;
 mod repo_items;
 mod search_input;

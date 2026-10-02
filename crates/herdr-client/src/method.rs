@@ -23,6 +23,8 @@ pub enum Method {
     PaneScroll,
     PaneSplit,
     PaneZoom,
+    ProductAnnouncementDismiss,
+    ReleaseNotesDismiss,
     ServerReloadConfig,
     TabClose,
     TabCreate,
@@ -57,6 +59,8 @@ impl Method {
             Self::PaneScroll => "pane.scroll",
             Self::PaneSplit => "pane.split",
             Self::PaneZoom => "pane.zoom",
+            Self::ProductAnnouncementDismiss => "product_announcement.dismiss",
+            Self::ReleaseNotesDismiss => "release_notes.dismiss",
             Self::ServerReloadConfig => "server.reload_config",
             Self::TabClose => "tab.close",
             Self::TabCreate => "tab.create",
@@ -122,6 +126,21 @@ mod tests {
         assert!(Method::PaneClear.advertised_in(&["pane.close".into(), "pane.clear".into()]));
         // Advertisement is an exact match: a method sharing the prefix is not clearing.
         assert!(!Method::PaneClear.advertised_in(&["pane.clear_agent_authority".into()]));
+    }
+
+    #[test]
+    fn dismiss_methods_match_the_daemon_spelling() {
+        assert_eq!(
+            Method::ProductAnnouncementDismiss.as_str(),
+            "product_announcement.dismiss"
+        );
+        assert_eq!(
+            Method::ReleaseNotesDismiss.as_str(),
+            "release_notes.dismiss"
+        );
+        assert!(
+            !Method::ReleaseNotesDismiss.advertised_in(&["product_announcement.dismiss".into()])
+        );
     }
 
     #[test]
