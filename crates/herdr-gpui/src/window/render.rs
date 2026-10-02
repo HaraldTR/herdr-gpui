@@ -12,6 +12,7 @@ use crate::{
     fonts::StyledFont,
     state::ConnectionStatus,
     terminal::*,
+    terminal_painter::{ImageTarget, PlacedImages},
     worktree_banner,
 };
 use gpui::{prelude::*, *};
@@ -47,9 +48,11 @@ impl Render for HerdrWindow {
         // Paints the frame on screen, which during a focus change is the one
         // presented before it: the terminal area never blanks between two
         // projections. What the client knows to be current stays in `live`.
-        let surface = self.presentation.frame(&self.live);
+        let picture = self.presentation.picture(&self.live);
+        let surface = picture.as_ref().map(|picture| picture.frame.clone());
+        let images = picture.as_ref().map(|picture| picture.images.clone());
         // A group picking the tab another shows paints this same frame.
-        let window_frame = surface.clone();
+        let window_frame = picture;
         let entity = cx.entity();
         let paint_entity = entity.clone();
         let focus = self.focus.clone();
@@ -312,6 +315,11 @@ impl Render for HerdrWindow {
                                 &font,
                                 &panes,
                                 &surface.panes,
+                                images.as_deref().map(|images| PlacedImages {
+                                    placements: &surface.graphics.placements,
+                                    images,
+                                    target: ImageTarget::Main,
+                                }),
                                 window,
                                 cx,
                             );
@@ -334,6 +342,11 @@ impl Render for HerdrWindow {
                                     &font,
                                     &rows,
                                     &[],
+                                    images.as_deref().map(|images| PlacedImages {
+                                        placements: &surface.graphics.placements,
+                                        images,
+                                        target: ImageTarget::Popup(&popup.terminal_id),
+                                    }),
                                     window,
                                     cx,
                                 );

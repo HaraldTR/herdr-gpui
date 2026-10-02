@@ -19,6 +19,7 @@ mod script;
 mod session;
 mod sessions;
 mod ssh;
+mod surface_images;
 mod transport;
 mod upload;
 
@@ -54,6 +55,10 @@ pub use sessions::{
 pub use ssh::script_command;
 pub use ssh::{
     Destination, HostProbe, probe_host, remote_config_value, remote_origin_url, resolve_destination,
+};
+pub use surface_images::{
+    MAX_IMAGE_BYTES, MAX_IMAGE_SIDE, MAX_IMAGES, MAX_PLACEMENTS, SurfaceImage, SurfaceImages,
+    valid_asset,
 };
 pub use transport::Stream;
 pub use upload::{remove_uploaded_files, upload_files};

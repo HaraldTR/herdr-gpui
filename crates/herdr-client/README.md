@@ -249,6 +249,7 @@ unsupported there. Ordinary Windows commands retain their existing behavior.
 Connected(EndpointServerWelcome)
 Snapshot(Arc<ClientShellSnapshot>)
 Surface(Arc<PaneSurfaceFrame>)
+SurfaceImages(Arc<SurfaceImages>)
 Response { request_id: String, response: serde_json::Value }
 CommandRejected { request_id: Option<String>, reason: Error }
 Message(ServerMessage)
@@ -322,10 +323,23 @@ whose `(boot_id, projection_revision)` differs from `(boot_id, revision)` and
 wait for matching content. Snapshot metadata and cells must not be mixed across
 focus changes. Full surfaces can skip surface revisions; patches cannot.
 
-This is a complete **text** baseline. Images retain their wire scene semantics:
-assets contain newly required bytes, not necessarily every live image's bytes.
-Rendering/caching images, optional delta codecs, local server spawning, discovery
-of all running sessions, and automatic reconnect are out of scope. No existing Herdr server or session is modified or started by discovery.
+Herdr sends an image's bytes only in the first surface that places it, so the
+worker, which sees every surface, keeps them: each received surface's
+`graphics.assets` moves into a per-connection store and the emitted surface
+carries placements and retained keys only. Whenever the stored set changes,
+`SurfaceImages` (bytes by asset key, each with a process-unique serial) is
+emitted before the `Surface` that needs it. The store keeps the keys the newest
+received and newest emitted surfaces reference, so a surface waiting for its
+snapshot cannot drop pixels from the one on screen. Assets are untrusted: bytes
+must match their key's length and raw RGB/RGBA size, sides are at most
+`MAX_IMAGE_SIDE`, and placements, images and total bytes are capped
+(`MAX_PLACEMENTS`, `MAX_IMAGES`, `MAX_IMAGE_BYTES`). Over-limit or invalid
+assets are dropped, not fatal. Direct graphics stay disabled and
+`ServerMessage::GraphicsFile` paths are never read. Decoding and painting belong
+to the GUI.
+
+Optional delta codecs, local server spawning, discovery of all running sessions,
+and automatic reconnect are out of scope. No existing Herdr server or session is modified or started by discovery.
 
 ## Saved SSH Hosts
 

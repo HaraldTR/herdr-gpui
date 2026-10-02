@@ -12,6 +12,7 @@ use crate::{
     options::ConnectOptions,
     protocol::{endpoint::*, *},
     queue::CommandReceiver,
+    surface_images::ImageStore,
     transport::Stream,
 };
 use crossbeam_channel::{Sender, TryRecvError};
@@ -72,6 +73,7 @@ pub(crate) struct Session {
     pub(crate) welcome: Option<EndpointServerWelcome>,
     pub(crate) snapshot: Option<Arc<ClientShellSnapshot>>,
     pub(crate) surface: Option<Arc<PaneSurfaceFrame>>,
+    pub(crate) images: ImageStore,
     pub(crate) pending: Option<Pending>,
 }
 
@@ -85,6 +87,7 @@ impl Session {
             welcome: None,
             snapshot: None,
             surface: None,
+            images: ImageStore::default(),
             pending: None,
         }
     }
@@ -313,6 +316,7 @@ impl Session {
             welcome,
             snapshot,
             surface,
+            images,
             pending,
             ..
         } = self;
@@ -379,11 +383,14 @@ impl Session {
                         .as_ref()
                         .filter(|current| current.projection_revision == next.revision)
                 {
+                    if images.show() {
+                        emit(ClientEvent::SurfaceImages(images.published()))?;
+                    }
                     emit(ClientEvent::Surface(current.clone()))?;
                 }
             }
             ServerMessage::EndpointControl { .. } => {} // Unknown optional named controls are ignored.
-            ServerMessage::PaneSurface(next) => {
+            ServerMessage::PaneSurface(mut next) => {
                 let s = snapshot.as_ref().ok_or(Error::SurfaceBeforeSnapshot)?;
                 if next.boot_id != s.boot_id
                     || surface
@@ -396,8 +403,17 @@ impl Session {
                 if let Some(popup) = &next.popup {
                     popup.frame.validate()?;
                 }
+                let mut changed = images.receive(&mut next);
                 let next = Arc::new(next);
-                if next.projection_revision == s.revision {
+                let shown = next.projection_revision == s.revision;
+                if shown {
+                    changed |= images.show();
+                }
+                // Pixels precede the surface that places them.
+                if changed {
+                    emit(ClientEvent::SurfaceImages(images.published()))?;
+                }
+                if shown {
                     emit(ClientEvent::Surface(next.clone()))?;
                 }
                 *surface = Some(next);

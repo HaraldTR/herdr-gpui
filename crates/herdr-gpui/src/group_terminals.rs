@@ -18,17 +18,15 @@ use crate::{
     HerdrWindow,
     browser::{GroupId, Pick, Scope, Shown, Slot},
     connection::ConnectionBridge,
-    presentation::Presentation,
+    presentation::{Picture, Presentation},
     state::{ConnectionStatus, LiveState},
     terminal::{popup_origin, viewport},
+    terminal_painter::{ImageTarget, PlacedImages},
 };
 use gpui::{prelude::*, *};
-use herdr_client::{ConnectOptions, Method, protocol::PaneSurfaceFrame};
+use herdr_client::{ConnectOptions, Method};
 use serde_json::json;
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 /// How long a parked connection waits for its tab before asking again.
 const REFOCUS_AFTER: Duration = Duration::from_secs(1);
@@ -455,14 +453,14 @@ impl HerdrWindow {
     }
 
     /// The frame a parked group paints.
-    pub(crate) fn parked_frame(&mut self, group: GroupId) -> Option<Arc<PaneSurfaceFrame>> {
+    pub(crate) fn parked_frame(&mut self, group: GroupId) -> Option<Picture> {
         let parked = self
             .browser
             .terminals
             .parked
             .iter_mut()
             .find(|parked| parked.group == group)?;
-        parked.presentation.frame(&parked.live)
+        parked.presentation.picture(&parked.live)
     }
 
     /// Whether `group` shows a terminal through a parked connection.
@@ -507,8 +505,8 @@ impl HerdrWindow {
     pub(crate) fn live_frame_of(
         &mut self,
         tab: &str,
-        window_frame: Option<Arc<PaneSurfaceFrame>>,
-    ) -> Option<Arc<PaneSurfaceFrame>> {
+        window_frame: Option<Picture>,
+    ) -> Option<Picture> {
         if self.focused_herdr_tab() == Some(tab) {
             return window_frame;
         }
@@ -518,7 +516,7 @@ impl HerdrWindow {
             .parked
             .iter_mut()
             .find(|parked| parked.focused_tab() == Some(tab))?;
-        parked.presentation.frame(&parked.live)
+        parked.presentation.picture(&parked.live)
     }
 
     /// A group picking a tab another group shows paints a picture of it,
@@ -529,7 +527,7 @@ impl HerdrWindow {
         &mut self,
         slot: Slot,
         gap: f32,
-        surface: Option<Arc<PaneSurfaceFrame>>,
+        surface: Option<Picture>,
         font: Font,
         cell_height: f32,
         cx: &mut Context<Self>,
@@ -554,7 +552,7 @@ impl HerdrWindow {
         slot: Slot,
         name: &'static str,
         gap: f32,
-        surface: Option<Arc<PaneSurfaceFrame>>,
+        surface: Option<Picture>,
         place: bool,
         font: Font,
         cell_height: f32,
@@ -583,7 +581,11 @@ impl HerdrWindow {
                         }
                     },
                     move |bounds, _, window, cx| {
-                        let Some(surface) = &surface else {
+                        let Some(Picture {
+                            frame: surface,
+                            images,
+                        }) = &surface
+                        else {
                             return;
                         };
                         // A frame wider than the group stays inside it.
@@ -596,6 +598,11 @@ impl HerdrWindow {
                                 &font,
                                 &[],
                                 &surface.panes,
+                                Some(PlacedImages {
+                                    placements: &surface.graphics.placements,
+                                    images,
+                                    target: ImageTarget::Main,
+                                }),
                                 window,
                                 cx,
                             );
@@ -614,6 +621,11 @@ impl HerdrWindow {
                                     &font,
                                     &[],
                                     &[],
+                                    Some(PlacedImages {
+                                        placements: &surface.graphics.placements,
+                                        images,
+                                        target: ImageTarget::Popup(&popup.terminal_id),
+                                    }),
                                     window,
                                     cx,
                                 );

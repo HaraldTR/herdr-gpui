@@ -94,6 +94,10 @@ pub enum Error {
     ImageReadTimeout,
     #[error("SVG clipboard images are not supported. Use PNG, JPEG, GIF, WebP, BMP, or TIFF.")]
     ImageFormat,
+    #[error("Could not decode an image a pane placed.")]
+    PaneImageDecode(#[source] image::ImageError),
+    #[error("An image a pane placed exceeds the decoded size limit.")]
+    PaneImageLimit,
     #[error("Clipboard content exceeds the {limit}-byte limit.")]
     ClipboardSize { limit: usize },
     #[error("Clipboard text is not valid UTF-8.")]
