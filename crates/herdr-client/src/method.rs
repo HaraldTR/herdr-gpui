@@ -19,6 +19,8 @@ pub enum Method {
     PaneClose,
     PaneFocus,
     PaneFocusDirection,
+    PaneLinkActivate,
+    PaneLinkResolve,
     PaneRename,
     PaneScroll,
     PaneSplit,
@@ -53,6 +55,8 @@ impl Method {
             Self::PaneClose => "pane.close",
             Self::PaneFocus => "pane.focus",
             Self::PaneFocusDirection => "pane.focus_direction",
+            Self::PaneLinkActivate => "pane.link.activate",
+            Self::PaneLinkResolve => "pane.link.resolve",
             Self::PaneRename => "pane.rename",
             Self::PaneScroll => "pane.scroll",
             Self::PaneSplit => "pane.split",
@@ -122,6 +126,15 @@ mod tests {
         assert!(Method::PaneClear.advertised_in(&["pane.close".into(), "pane.clear".into()]));
         // Advertisement is an exact match: a method sharing the prefix is not clearing.
         assert!(!Method::PaneClear.advertised_in(&["pane.clear_agent_authority".into()]));
+    }
+
+    #[test]
+    fn link_methods_are_separate_advertisements() {
+        assert_eq!(Method::PaneLinkResolve.as_str(), "pane.link.resolve");
+        assert_eq!(Method::PaneLinkActivate.as_str(), "pane.link.activate");
+        // A daemon may resolve hover regions without activating, or the reverse.
+        assert!(Method::PaneLinkResolve.advertised_in(&["pane.link.resolve".into()]));
+        assert!(!Method::PaneLinkActivate.advertised_in(&["pane.link.resolve".into()]));
     }
 
     #[test]

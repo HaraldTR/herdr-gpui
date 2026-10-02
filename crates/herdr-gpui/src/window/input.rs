@@ -27,20 +27,13 @@ impl HerdrWindow {
         {
             return;
         }
-        if let Some(url) = self.terminal_link_at(event.up.position)
-            && pressed
-                .as_ref()
-                .is_some_and(|(destination, _)| destination == &url)
-        {
+        let Some(pressed) = pressed else {
+            return;
+        };
+        let in_tab = (self.config.open_links_in == crate::config::LinkTarget::BrowserTab)
+            != event.down.modifiers.alt;
+        if self.activate_terminal_link(&pressed, event.up.position, in_tab, window, cx) {
             cx.stop_propagation();
-            let in_tab = (self.config.open_links_in == crate::config::LinkTarget::BrowserTab)
-                != event.down.modifiers.alt;
-            match crate::browser::WebUrl::try_from(url.as_str()) {
-                Ok(url) if in_tab && crate::browser::EMBEDDED => {
-                    self.open_browser_tab(Some(url), window, cx);
-                }
-                _ => cx.open_url(&url),
-            }
         }
     }
 
@@ -53,7 +46,10 @@ impl HerdrWindow {
         position: gpui::Point<gpui::Pixels>,
         modifiers: gpui::Modifiers,
     ) -> bool {
-        modifiers.shift || (modifiers.secondary() && self.terminal_link_at(position).is_some())
+        modifiers.shift
+            || (modifiers.secondary()
+                && (self.terminal_link_at(position).is_some()
+                    || self.daemon_link_at(position).is_some()))
     }
 
     /// Whether a left click here would open a link, which the pointer shows.
@@ -62,7 +58,7 @@ impl HerdrWindow {
         position: gpui::Point<gpui::Pixels>,
         modifiers: gpui::Modifiers,
     ) -> bool {
-        self.terminal_link_at(position).is_some()
+        (self.terminal_link_at(position).is_some() || self.daemon_link_at(position).is_some())
             && (modifiers.secondary()
                 || modifiers.shift
                 || self

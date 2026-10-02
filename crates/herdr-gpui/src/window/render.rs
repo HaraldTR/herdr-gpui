@@ -2,7 +2,7 @@
 //! the latest projection only: it never queries the daemon, touches disk, or
 //! starts a process.
 
-use super::HerdrWindow;
+use super::{HerdrWindow, PressedLink};
 use crate::{
     APP_VERSION, CheckForUpdates, Minimize, PlaySound, RunCommand, ShowHerdrNotDetected,
     ShowUpdatePreview,
@@ -59,6 +59,15 @@ impl Render for HerdrWindow {
         // The highlight is grid coordinates, so it paints with the frame that
         // owns the cells rather than being recomputed from the pointer here.
         let selection = self.selection.clone();
+        // Like the highlight, the link underline paints with the frame that
+        // owns its cells, and only while that frame shows the content the
+        // daemon resolved it from.
+        let link_rows: Vec<_> = surface
+            .as_deref()
+            .zip(self.hovered_daemon_link())
+            .filter(|(surface, link)| link.cell.current(surface))
+            .map(|(_, link)| link.frame_rows().collect())
+            .unwrap_or_default();
         // The IME composition paints inline at the input cursor; a menu's
         // text field shows its own.
         // It anchors to the live surface, as the IME's candidate window does,
@@ -125,6 +134,7 @@ impl Render for HerdrWindow {
             // application changes what a click does, so the pointer follows.
             .on_modifiers_changed(
                 cx.listener(|this, event: &ModifiersChangedEvent, window, cx| {
+                    this.hover_link(window.mouse_position(), event.modifiers, cx);
                     let hovered =
                         this.terminal_link_hovered(window.mouse_position(), event.modifiers);
                     if hovered != this.hovered_terminal_link {
@@ -173,9 +183,7 @@ impl Render for HerdrWindow {
                     {
                         return;
                     }
-                    this.pressed_terminal_link = this
-                        .terminal_link_at(event.position)
-                        .map(|url| (url, event.position));
+                    this.pressed_terminal_link = this.terminal_link_press(event.position);
                     if this.menu.page.is_some() {
                         return;
                     }
@@ -230,6 +238,9 @@ impl Render for HerdrWindow {
                         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
                                 entity.update(cx, |this, cx| {
+                                    // Window-wide, so leaving the terminal
+                                    // drops the underline too.
+                                    this.hover_link(event.position, event.modifiers, cx);
                                     if this.scrollbar_mouse_move(event, cx)
                                         || this.split_mouse_move(event, cx)
                                         || this.terminal_mouse_move(event, cx)
@@ -238,7 +249,7 @@ impl Render for HerdrWindow {
                                         return;
                                     }
                                     if this.pressed_terminal_link.as_ref().is_some_and(
-                                        |(_, position)| {
+                                        |PressedLink { position, .. }| {
                                             (event.position.x - position.x).abs() > px(4.)
                                                 || (event.position.y - position.y).abs() > px(4.)
                                         },
@@ -314,6 +325,13 @@ impl Render for HerdrWindow {
                                 &surface.panes,
                                 window,
                                 cx,
+                            );
+                            painter.borrow().paint_link(
+                                &surface.frame,
+                                bounds.origin,
+                                cell_width,
+                                &link_rows,
+                                window,
                             );
                             if let Some(popup) = &surface.popup {
                                 let offset = popup_origin(

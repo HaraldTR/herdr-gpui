@@ -118,6 +118,32 @@ impl Default for TerminalPainter {
     }
 }
 
+/// The cell rectangle covering every in-frame cell of `rows`, if any.
+fn link_bounds(frame: &FrameData, rows: &[(u16, std::ops::Range<u16>)]) -> Option<SurfaceRect> {
+    let mut cells = rows.iter().filter_map(|(row, columns)| {
+        let end = columns.end.min(frame.width);
+        (*row < frame.height && columns.start < end).then_some((*row, columns.start, end))
+    });
+    let (row, start, end) = cells.next()?;
+    let (top, bottom, left, right) = cells.fold(
+        (row, row, start, end),
+        |(top, bottom, left, right), (row, start, end)| {
+            (
+                top.min(row),
+                bottom.max(row),
+                left.min(start),
+                right.max(end),
+            )
+        },
+    );
+    Some(SurfaceRect {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top + 1,
+    })
+}
+
 fn decoration_offsets(cell: &CellData, cell_height: f32) -> impl Iterator<Item = f32> + '_ {
     [
         (UNDERLINE, cell_height - 2.),
@@ -319,6 +345,55 @@ impl TerminalPainter {
         let _ = cx;
         self.cell_width = Some(width);
         width
+    }
+
+    /// Underlines the cells of a hovered link, painted after `paint_frame`
+    /// for the same frame and origin. Each cell takes its own text color, as
+    /// an SGR underline would, and spaces along the link are underlined too.
+    pub fn paint_link(
+        &self,
+        frame: &FrameData,
+        origin: Point<Pixels>,
+        cell_width: f32,
+        rows: &[(u16, std::ops::Range<u16>)],
+        window: &mut Window,
+    ) {
+        let Some(bounds) = link_bounds(frame, rows) else {
+            return;
+        };
+        let layer = Bounds::new(
+            origin
+                + point(
+                    px(f32::from(bounds.x) * cell_width),
+                    px(f32::from(bounds.y) * self.cell_height),
+                ),
+            size(
+                px(f32::from(bounds.width) * cell_width),
+                px(f32::from(bounds.height) * self.cell_height),
+            ),
+        );
+        window.paint_layer(layer, |window| {
+            for (row, columns) in rows {
+                if *row >= frame.height {
+                    continue;
+                }
+                for column in columns.start..columns.end.min(frame.width) {
+                    let index = usize::from(*row) * usize::from(frame.width) + usize::from(column);
+                    let Some(data) = frame.cells.get(index) else {
+                        continue;
+                    };
+                    let position = origin
+                        + point(
+                            px(f32::from(column) * cell_width),
+                            px(f32::from(*row) * self.cell_height + self.cell_height - 2.),
+                        );
+                    window.paint_quad(fill(
+                        Bounds::new(position, size(px(cell_width), px(1.))),
+                        rgb(cell_colors(data, &self.theme).0),
+                    ));
+                }
+            }
+        });
     }
 
     /// Paints one frame, tinting the cells `selection` names in that frame's
@@ -693,6 +768,33 @@ impl TerminalPainter {
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[test]
+    fn link_underlines_stay_inside_the_frame() {
+        let frame = FrameData {
+            width: 10,
+            height: 3,
+            cells: vec![cell("a"); 30],
+            cursor: None,
+            hyperlinks: vec![],
+            graphics: vec![],
+        };
+        let rect = |x, y, width, height| SurfaceRect {
+            x,
+            y,
+            width,
+            height,
+        };
+        // A wrapped link's two rows, the second past the frame's right edge.
+        assert_eq!(
+            link_bounds(&frame, &[(1, 4..10), (2, 0..14)]),
+            Some(rect(0, 1, 10, 2))
+        );
+        // Rows a resize has already removed, and empty ranges, paint nothing.
+        assert_eq!(link_bounds(&frame, &[(3, 0..4), (0, 5..5)]), None);
+        assert_eq!(link_bounds(&frame, &[(0, 12..14)]), None);
+        assert_eq!(link_bounds(&frame, &[]), None);
+    }
 
     #[gpui::test]
     fn edge_backgrounds_reach_the_canvas_without_stretching_popups(cx: &mut TestAppContext) {

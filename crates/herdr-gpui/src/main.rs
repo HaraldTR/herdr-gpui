@@ -36,6 +36,7 @@ mod icons;
 mod input;
 mod integrations;
 mod keymap;
+mod links;
 mod log_window;
 mod menu;
 mod menus;

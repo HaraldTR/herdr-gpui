@@ -518,6 +518,37 @@ pub(crate) mod tests {
             read_message(&mut self.stream, MAX_FRAME_SIZE).unwrap()
         }
 
+        /// The next endpoint API request, skipping the resize and focus
+        /// traffic a drawn window sends on its own.
+        pub(crate) fn request(&mut self) -> serde_json::Value {
+            loop {
+                if let ClientMessage::ClientShellEndpointRequest { request, .. } = self.receive() {
+                    return serde_json::from_str(&request).unwrap();
+                }
+            }
+        }
+
+        /// Answers `request` with `result`, as the daemon's API would.
+        pub(crate) fn respond(&mut self, request: &serde_json::Value, result: serde_json::Value) {
+            let id = request["id"].as_str().unwrap();
+            let snapshot: ClientShellSnapshot = serde_json::from_str(include_str!(
+                "../../../herdr-protocol/tests/fixtures/endpoint-snapshot-v1.json"
+            ))
+            .unwrap();
+            write_message(
+                &mut self.stream,
+                &ServerMessage::ClientShellEndpointResponseChunk {
+                    boot_id: snapshot.boot_id,
+                    request_id: id.into(),
+                    final_chunk: true,
+                    data: serde_json::to_vec(&serde_json::json!({"id": id, "result": result}))
+                        .unwrap(),
+                },
+                MAX_FRAME_SIZE,
+            )
+            .unwrap();
+        }
+
         fn prepare(&self, view: &mut HerdrWindow) {
             // Only the fixture's explicit nonexistent local socket is used to
             // initialize endpoint lifecycle flags. Replace its handle before
