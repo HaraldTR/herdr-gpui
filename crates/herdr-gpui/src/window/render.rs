@@ -63,7 +63,11 @@ impl Render for HerdrWindow {
         // panes, so their matches stay under it.
         let matches = surface
             .as_deref()
-            .map(|surface| self.find_highlights(surface))
+            .map(|surface| {
+                let mut highlights = self.find_highlights(surface);
+                highlights.extend(self.copy_mode_highlights(surface));
+                highlights
+            })
             .unwrap_or_default();
         // The IME composition paints inline at the input cursor; a menu's
         // text field shows its own.
@@ -102,6 +106,7 @@ impl Render for HerdrWindow {
             .map(|(slot, _)| *slot);
         let terminal_gap = terminal_slot.map_or(sidebar_gap, slot_gap);
         let find_bar = self.render_find_bar(surface.as_deref(), terminal_gap, cx);
+        let copy_badge = self.render_copy_mode_badge(surface.as_deref(), terminal_gap);
         let terminal = div()
             .id("terminal")
             .debug_selector(|| "terminal".into())
@@ -370,6 +375,7 @@ impl Render for HerdrWindow {
                 .size_full(),
             )
             .when_some(find_bar, |terminal, bar| terminal.child(bar))
+            .when_some(copy_badge, |terminal, badge| terminal.child(badge))
             // Direct feedback for the user's own gesture, not a daemon notice:
             // it sits over the cells it copied and needs no dismissing.
             .when_some(self.flash.as_ref(), |terminal, (flash, _)| {

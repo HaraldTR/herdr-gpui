@@ -10,7 +10,8 @@
 
 use super::HerdrWindow;
 use crate::{
-    find::{Inbox, Search, Step, reveal_offset},
+    find::{Search, Step},
+    scrollback::{Inbox, reveal_offset},
     search_input::{self, SearchInput},
     terminal_painter::Highlight,
 };
@@ -18,7 +19,7 @@ use gpui::{prelude::*, *};
 use herdr_client::{
     Method,
     protocol::{PaneSurfaceFrame, PaneSurfacePane},
-    scrollback::TextRange,
+    scrollback::{ScrollbackResponse, TextRange},
 };
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -81,7 +82,7 @@ impl HerdrWindow {
             boot_id,
             inbox: self.endpoints[self.selected_endpoint]
                 .connection
-                .find
+                .scrollback
                 .clone(),
             _changed: changed,
         });
@@ -89,11 +90,16 @@ impl HerdrWindow {
     }
 
     /// Closes the bar and hands the keyboard back to the terminal. A search
-    /// still in flight is answered into a mailbox nobody reads again.
+    /// still in flight is answered into nothing.
     pub(crate) fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(bar) = self.find.take() else {
             return;
         };
+        if let Some(request) = bar.search.in_flight()
+            && let Ok(mut inbox) = bar.inbox.lock()
+        {
+            inbox.discard(request);
+        }
         if bar.input.read(cx).focus.is_focused(window) {
             window.focus(&self.focus, cx);
         }
@@ -124,7 +130,7 @@ impl HerdrWindow {
             return;
         };
         let connection = &self.endpoints[self.selected_endpoint].connection;
-        let current = Arc::ptr_eq(&bar.inbox, &connection.find)
+        let current = Arc::ptr_eq(&bar.inbox, &connection.scrollback)
             && self.live.snapshot.as_ref().is_some_and(|snapshot| {
                 snapshot.boot_id == bar.boot_id
                     && snapshot
@@ -138,12 +144,15 @@ impl HerdrWindow {
         }
         // The reader holds this lock only to deliver; a busy mailbox is read
         // on the next tick rather than waited on.
-        let answer = bar
-            .inbox
-            .try_lock()
-            .ok()
-            .and_then(|mut inbox| inbox.take_answer());
+        let answer = bar.search.in_flight().and_then(|request| {
+            let answer = bar.inbox.try_lock().ok()?.take(request)?;
+            Some((request.to_owned(), answer))
+        });
         if let Some((request, answer)) = answer {
+            let answer = answer.and_then(|answer| match answer {
+                ScrollbackResponse::PaneCopySearch(result) => Ok(result),
+                _ => Err(herdr_client::Error::ResponseType),
+            });
             if let Some(range) = bar.search.answer(&request, answer) {
                 self.reveal_find_match(range, cx);
             }
@@ -233,7 +242,7 @@ impl HerdrWindow {
     }
 
     /// The focused pane as the live surface paints it.
-    fn focused_surface_pane(&self) -> Option<&PaneSurfacePane> {
+    pub(super) fn focused_surface_pane(&self) -> Option<&PaneSurfacePane> {
         if !self.live.surface_ready() {
             return None;
         }
@@ -441,10 +450,12 @@ mod tests {
         let id = request["id"].as_str().unwrap();
         let event = peer.respond("boot-v1", id, &json!({"id": id, "result": result}));
         assert!(matches!(&event, ClientEvent::Response { request_id, .. } if request_id == id));
-        let inbox = view.read_with(cx, |view, _| view.endpoints[0].connection.find.clone());
+        let inbox = view.read_with(cx, |view, _| {
+            view.endpoints[0].connection.scrollback.clone()
+        });
         assert!(
             inbox.lock().unwrap().apply(event).is_none(),
-            "the find inbox claims it"
+            "the scrollback inbox claims it"
         );
         cx.update(|window, cx| view.update(cx, |view, cx| view.poll_find(window, cx)));
     }
@@ -620,7 +631,7 @@ mod tests {
         assert!(view.read_with(cx, |view, _| view.find.is_some()));
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.endpoints[0].connection.find = Arc::default();
+                view.endpoints[0].connection.scrollback = Arc::default();
                 view.poll_find(window, cx);
                 assert!(view.find.is_none());
                 assert!(view.focus.is_focused(window));

@@ -6,13 +6,15 @@
 //! waits in a single slot and is sent, against the newest content revision,
 //! once the answer arrives. Nothing here touches the window or the socket.
 
-use crate::terminal_painter::{Highlight, Tint};
+use crate::{
+    scrollback::{push_range, viewport_top},
+    terminal_painter::{Highlight, Tint},
+};
 use herdr_client::{
-    ClientEvent,
     protocol::PaneSurfacePane,
     scrollback::{
         CopySearchParams, CopySearchResult, EndpointErrorCode, SearchDirection, TextPoint,
-        TextRange, decode_copy_search,
+        TextRange,
     },
 };
 use std::time::{Duration, Instant};
@@ -279,8 +281,7 @@ impl Search {
         reveal
     }
 
-    /// Whether a search is waiting for its answer.
-    #[cfg(test)]
+    /// The search waiting for its answer, if any.
     pub(crate) fn in_flight(&self) -> Option<&str> {
         self.in_flight.as_ref().map(|sent| sent.request.as_str())
     }
@@ -316,77 +317,17 @@ impl Search {
         else {
             return Vec::new();
         };
-        let inner = pane.inner_rect;
-        let top = viewport_top(pane);
-        let bottom = top.saturating_add(u32::from(inner.height));
         let mut highlights = Vec::new();
         for (index, range) in results.matches.iter().enumerate() {
-            if range.end.row < top || range.start.row >= bottom {
-                continue;
-            }
             let tint = if results.current == Some(index) {
                 Tint::CurrentMatch
             } else {
                 Tint::Match
             };
-            for row in range.start.row.max(top)..=range.end.row.min(bottom.saturating_sub(1)) {
-                let start = if row == range.start.row {
-                    range.start.col
-                } else {
-                    0
-                };
-                let end = if row == range.end.row {
-                    range.end.col.saturating_add(1)
-                } else {
-                    inner.width
-                }
-                .min(inner.width);
-                let Ok(offset) = u16::try_from(row - top) else {
-                    continue;
-                };
-                if start >= end {
-                    continue;
-                }
-                highlights.push(Highlight {
-                    row: inner.y.saturating_add(offset),
-                    columns: inner.x.saturating_add(start)..inner.x.saturating_add(end),
-                    tint,
-                });
-            }
+            push_range(pane, *range, tint, &mut highlights);
         }
         highlights
     }
-}
-
-/// The scroll offset that centers `range` in `pane`, or `None` when it is
-/// already in view or the pane cannot scroll (an alternate screen has no
-/// history to move through).
-pub(crate) fn reveal_offset(pane: &PaneSurfacePane, range: TextRange) -> Option<u64> {
-    let scroll = pane.scroll?;
-    let top = viewport_top(pane);
-    let height = u32::from(pane.inner_rect.height);
-    if range.start.row >= top && range.end.row < top.saturating_add(height) {
-        return None;
-    }
-    let wanted_top = u64::from(range.start.row.saturating_sub(height / 2));
-    Some(
-        scroll
-            .max_offset_from_bottom
-            .saturating_sub(wanted_top)
-            .min(scroll.max_offset_from_bottom),
-    )
-}
-
-/// The absolute row painted at the top of `pane`.
-fn viewport_top(pane: &PaneSurfacePane) -> u32 {
-    pane.scroll.map_or(0, |scroll| {
-        u32::try_from(
-            scroll
-                .max_offset_from_bottom
-                .saturating_sub(scroll.offset_from_bottom),
-        )
-        .unwrap_or(u32::MAX)
-    })
 }
 
 /// The cell just before `point` in reading order. The daemon only compares
@@ -402,71 +343,12 @@ fn before(point: TextPoint) -> TextPoint {
     }
 }
 
-/// The connection's mailbox for find answers, kept apart from the modal
-/// dialog slot so a search never overwrites or steals a dialog's response.
-#[derive(Default)]
-pub(crate) struct Inbox {
-    pending: Option<String>,
-    answer: Option<(String, herdr_client::Result<CopySearchResult>)>,
-}
-
-impl Inbox {
-    /// Claims the events that answer the pending search and passes on the
-    /// rest. Runs on the event reader, under the same lock `send` takes.
-    pub(crate) fn apply(&mut self, event: ClientEvent) -> Option<ClientEvent> {
-        if matches!(event, ClientEvent::Disconnected { .. })
-            && let Some(request) = self.pending.take()
-        {
-            self.answer = Some((request, Err(herdr_client::Error::Disconnected)));
-        }
-        let Some(pending) = &self.pending else {
-            return Some(event);
-        };
-        match event {
-            ClientEvent::Response {
-                request_id,
-                response,
-            } if request_id == *pending => {
-                self.answer = Some((request_id, decode_copy_search(&response)));
-                self.pending = None;
-                None
-            }
-            ClientEvent::CommandRejected {
-                request_id: Some(request_id),
-                reason,
-            } if request_id == *pending => {
-                self.answer = Some((request_id, Err(reason)));
-                self.pending = None;
-                None
-            }
-            event => Some(event),
-        }
-    }
-
-    /// Registers the request `send` queues while holding the mailbox, so even
-    /// an immediate rejection finds it pending.
-    pub(crate) fn send(
-        &mut self,
-        send: impl FnOnce() -> herdr_client::Result<String>,
-    ) -> herdr_client::Result<String> {
-        let request = send()?;
-        self.pending = Some(request.clone());
-        Ok(request)
-    }
-
-    pub(crate) fn take_answer(
-        &mut self,
-    ) -> Option<(String, herdr_client::Result<CopySearchResult>)> {
-        self.answer.take()
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::scrollback::reveal_offset;
     use herdr_client::protocol::{PaneSurfaceScrollMetrics, SurfaceRect};
-    use serde_json::json;
 
     fn pane(content_revision: u64, offset: u64, max: u64) -> PaneSurfacePane {
         let rect = SurfaceRect {
@@ -777,58 +659,5 @@ mod tests {
         let params = search.next_request(&shown).unwrap().1;
         assert_eq!(params.previous, None);
         assert_eq!(params.direction, SearchDirection::Backward);
-    }
-
-    #[test]
-    fn inbox_claims_only_its_answer_and_fails_it_on_disconnect() {
-        let mut inbox = Inbox::default();
-        assert_eq!(inbox.send(|| Ok("gpui-1".into())).unwrap(), "gpui-1");
-        let other = ClientEvent::Response {
-            request_id: "gpui-0".into(),
-            response: json!({}),
-        };
-        assert!(
-            inbox.apply(other).is_some(),
-            "someone else's answer passes on"
-        );
-        let answer = ClientEvent::Response {
-            request_id: "gpui-1".into(),
-            response: json!({"id": "gpui-1", "result": {"type": "pane_copy_search",
-                "pane_id": "p", "content_revision": 2, "matches": [], "total": 0}}),
-        };
-        assert!(inbox.apply(answer).is_none());
-        let (id, answer) = inbox.take_answer().unwrap();
-        assert_eq!(id, "gpui-1");
-        assert_eq!(answer.unwrap().total, 0);
-        assert!(inbox.take_answer().is_none(), "an answer moves out once");
-
-        inbox.send(|| Ok("gpui-2".into())).unwrap();
-        assert!(
-            inbox
-                .apply(ClientEvent::CommandRejected {
-                    request_id: Some("gpui-2".into()),
-                    reason: herdr_client::Error::Full,
-                })
-                .is_none()
-        );
-        assert!(matches!(
-            inbox.take_answer(),
-            Some((_, Err(herdr_client::Error::Full)))
-        ));
-
-        inbox.send(|| Ok("gpui-3".into())).unwrap();
-        let disconnect = ClientEvent::Disconnected {
-            reason: "gone".into(),
-        };
-        assert!(
-            inbox.apply(disconnect).is_some(),
-            "the window still sees it"
-        );
-        assert!(matches!(
-            inbox.take_answer(),
-            Some((id, Err(herdr_client::Error::Disconnected))) if id == "gpui-3"
-        ));
-        assert!(inbox.send(|| Err(herdr_client::Error::Full)).is_err());
-        assert!(inbox.take_answer().is_none());
     }
 }

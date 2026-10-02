@@ -124,6 +124,9 @@ impl HerdrWindow {
 
     /// Cmd-V and Edit > Paste into the focused pane or popup.
     pub(crate) fn paste(&mut self, cx: &mut Context<Self>) {
+        if self.copy_mode_active() {
+            return;
+        }
         // GPUI has no text-only Linux clipboard API. Preserve its native
         // ordinary paste (which needs no helper executable); explicit Ctrl-V
         // image acquisition still uses the bounded background reader.
@@ -143,6 +146,15 @@ impl HerdrWindow {
         // A keystroke bubbling out of the find field is the field's: an
         // unhandled one is still on its way to the field's IME.
         if self.find_focused(window, cx) {
+            return;
+        }
+        // Copy mode owns the keyboard: its keys run and nothing else is typed.
+        if self.copy_mode_active() {
+            self.copy_mode_key(event, cx);
+            if !event.keystroke.modifiers.platform {
+                cx.stop_propagation();
+                window.prevent_default();
+            }
             return;
         }
         #[cfg(feature = "integration-test")]

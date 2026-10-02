@@ -3224,8 +3224,11 @@ fn every_focus_changing_command_fences_immediate_input_until_ack_and_surface(
                     }
                     Command::WorkspacePicker => view.palette_key(&key("enter"), window, cx),
                     Command::Palette => {
-                        // The configured entry follows all native entries except Palette.
-                        for _ in 0..crate::controls::COMMANDS.len() - 1 {
+                        // The configured entry follows all native entries
+                        // except Palette and those the daemon does not offer.
+                        let hidden = usize::from(!view.live.supports_pane_clear)
+                            + usize::from(!view.live.supports_edit_scrollback);
+                        for _ in 0..crate::controls::COMMANDS.len() - 1 - hidden {
                             view.palette_key(&key("down"), window, cx);
                         }
                         view.palette_key(&key("enter"), window, cx);
