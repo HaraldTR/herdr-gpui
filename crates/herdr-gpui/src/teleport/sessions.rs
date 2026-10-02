@@ -71,11 +71,14 @@ pub(crate) fn move_session(
     }
 }
 
-/// Session ids become globs and file names; accept only plain id text.
+/// Session ids are spliced unquoted into source scripts as globs, file
+/// names and command arguments; accept only plain id text that no command
+/// can read as an option.
 fn plain_id(session: &AgentSession) -> Option<&str> {
     let id = session.value.as_str();
     (!id.is_empty()
         && id.len() <= 128
+        && !id.starts_with('-')
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))

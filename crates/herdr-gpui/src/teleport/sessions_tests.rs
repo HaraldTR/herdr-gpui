@@ -264,6 +264,33 @@ fn missing_sessions_and_unsafe_ids_are_typed() {
         result,
         Err(Error::SessionMissing { agent: "copilot" })
     ));
+    // An id that a command could read as an option never reaches a script,
+    // even when a session file of that name exists.
+    let planted = [
+        homes
+            .source_home
+            .join(".claude/projects/p/--remove-files.jsonl"),
+        homes
+            .source_home
+            .join(".copilot/session-state/--remove-files/events.jsonl"),
+    ];
+    for file in &planted {
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, "{}\n").unwrap();
+    }
+    for agent in [AgentKind::Claude, AgentKind::Codex, AgentKind::Copilot] {
+        let result = move_session(
+            agent,
+            &session(agent.name(), SessionKind::Id, "--remove-files"),
+            &route(&homes, TO),
+            &cancelled,
+        );
+        assert!(
+            matches!(result, Err(Error::SessionMissing { .. })),
+            "{result:?}"
+        );
+    }
+    assert!(planted.iter().all(|file| file.exists()));
     // Agents whose storage is unconfirmed never move a session.
     let result = move_session(
         AgentKind::Droid,
