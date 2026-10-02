@@ -166,7 +166,12 @@ impl Endpoint {
 
     /// Refreshes state derived from `live` after it is replaced.
     pub(crate) fn sync_live(&mut self) {
-        self.config_diagnostic.sync(self.live.snapshot.as_deref());
+        self.config_diagnostic.sync(
+            self.live
+                .snapshot
+                .as_deref()
+                .and_then(|snapshot| snapshot.config_diagnostic.as_deref()),
+        );
     }
     pub fn new(id: String, label: String, target: ConnectTarget, enabled: bool) -> Self {
         Self {

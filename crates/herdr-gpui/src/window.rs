@@ -59,6 +59,8 @@ pub(crate) struct HerdrWindow {
     /// write straight to `config.terminal.size`, so this is what Reset Font
     /// Size restores; a session adjustment never reaches disk.
     pub(crate) configured_terminal_size: f32,
+    /// Unknown keys in the GUI config, ignored but reported; follows `config`.
+    pub(crate) gui_config_diagnostic: crate::config_diagnostic::ConfigDiagnostic,
     pub(crate) theme: config::Theme,
     pub(crate) config_load: Option<Task<()>>,
     pub(crate) settings: crate::settings_panel::SettingsPanel,
@@ -407,6 +409,11 @@ impl HerdrWindow {
             updater: updater::Updater::default(),
             update_preview: None,
             configured_terminal_size: config.terminal.size,
+            gui_config_diagnostic: {
+                let mut diagnostic = crate::config_diagnostic::ConfigDiagnostic::default();
+                diagnostic.sync(config.diagnostic().as_deref());
+                diagnostic
+            },
             config,
             theme,
             config_load: None,

@@ -1,12 +1,12 @@
-//! The daemon's `config.toml` diagnostic, prepared for display per endpoint.
+//! A config diagnostic prepared for display: each endpoint's daemon
+//! `config.toml` diagnostic, and this app's own GUI config warnings.
 //!
 //! Herdr shows `snapshot.config_diagnostic` for as long as the snapshot carries
 //! it and clears it with the first snapshot that does not. This mirrors that,
 //! adding only a dismissal that holds for the exact text the user dismissed.
-use herdr_client::protocol::ClientShellSnapshot;
 use std::sync::Arc;
 
-/// Bounds the scan as well as the output: the text is daemon data.
+/// Bounds the scan as well as the output: daemon text is untrusted.
 const MAX_CHARS: usize = 1024;
 /// Herdr clips the diagnostic to the rows it has; a banner keeps a few.
 const MAX_LINES: usize = 4;
@@ -14,7 +14,7 @@ const MAX_LINE_CHARS: usize = 240;
 
 #[derive(Debug, Default)]
 pub(crate) struct ConfigDiagnostic {
-    /// The raw text last seen, so an unchanged snapshot is not reprocessed.
+    /// The raw text last seen, so unchanged text is not reprocessed.
     source: Option<String>,
     /// Display lines prepared from `source`, sanitized and bounded.
     lines: Option<Arc<[String]>>,
@@ -22,8 +22,8 @@ pub(crate) struct ConfigDiagnostic {
 }
 
 impl ConfigDiagnostic {
-    pub(crate) fn sync(&mut self, snapshot: Option<&ClientShellSnapshot>) {
-        let text = snapshot.and_then(|snapshot| snapshot.config_diagnostic.as_deref());
+    /// Follows the current diagnostic text, `None` once it is gone.
+    pub(crate) fn sync(&mut self, text: Option<&str>) {
         if self.source.as_deref() == text {
             return;
         }
@@ -64,15 +64,6 @@ fn display_lines(text: &str) -> Option<Arc<[String]>> {
 mod tests {
     use super::*;
 
-    fn snapshot(diagnostic: Option<&str>) -> ClientShellSnapshot {
-        let mut snapshot: ClientShellSnapshot = serde_json::from_str(include_str!(
-            "../../herdr-protocol/tests/fixtures/endpoint-snapshot-v1.json"
-        ))
-        .unwrap();
-        snapshot.config_diagnostic = diagnostic.map(str::to_owned);
-        snapshot
-    }
-
     fn shown(state: &ConfigDiagnostic) -> Option<Vec<String>> {
         state.visible().map(|lines| lines.to_vec())
     }
@@ -82,14 +73,14 @@ mod tests {
         let mut state = ConfigDiagnostic::default();
         state.sync(None);
         assert_eq!(shown(&state), None);
-        state.sync(Some(&snapshot(Some("config.toml invalid; using defaults"))));
+        state.sync(Some("config.toml invalid; using defaults"));
         assert_eq!(
             shown(&state),
             Some(vec!["config.toml invalid; using defaults".into()])
         );
-        state.sync(Some(&snapshot(None)));
+        state.sync(None);
         assert_eq!(shown(&state), None);
-        state.sync(Some(&snapshot(Some("again"))));
+        state.sync(Some("again"));
         state.sync(None);
         assert_eq!(shown(&state), None);
     }
@@ -97,31 +88,31 @@ mod tests {
     #[test]
     fn dismissal_holds_for_the_same_text_only() {
         let mut state = ConfigDiagnostic::default();
-        state.sync(Some(&snapshot(Some("first"))));
+        state.sync(Some("first"));
         let lines = state.visible().unwrap().clone();
         assert!(state.dismiss(&lines));
         assert_eq!(shown(&state), None);
         // Later snapshots repeating the text stay dismissed.
-        state.sync(Some(&snapshot(Some("first"))));
+        state.sync(Some("first"));
         assert_eq!(shown(&state), None);
         // New text reappears, and a stale dismissal cannot hide it.
-        state.sync(Some(&snapshot(Some("second"))));
+        state.sync(Some("second"));
         assert_eq!(shown(&state), Some(vec!["second".into()]));
         assert!(!state.dismiss(&lines));
         assert_eq!(shown(&state), Some(vec!["second".into()]));
         // Returning to the dismissed text is a change too: it shows again.
-        state.sync(Some(&snapshot(Some("first"))));
+        state.sync(Some("first"));
         assert_eq!(shown(&state), Some(vec!["first".into()]));
     }
 
     #[test]
     fn reappears_after_clearing_even_with_the_dismissed_text() {
         let mut state = ConfigDiagnostic::default();
-        state.sync(Some(&snapshot(Some("broken"))));
+        state.sync(Some("broken"));
         let lines = state.visible().unwrap().clone();
         state.dismiss(&lines);
-        state.sync(Some(&snapshot(None)));
-        state.sync(Some(&snapshot(Some("broken"))));
+        state.sync(None);
+        state.sync(Some("broken"));
         assert_eq!(shown(&state), Some(vec!["broken".into()]));
     }
 
@@ -132,7 +123,7 @@ mod tests {
             "  client: bad\u{1b}[31m key \u{202e}x\n\n   \nendpoint: {}\n3\n4\n5\n6",
             "y".repeat(10_000)
         );
-        state.sync(Some(&snapshot(Some(&text))));
+        state.sync(Some(&text));
         let lines = shown(&state).unwrap();
         assert_eq!(lines[0], "client: bad[31m key x");
         assert!(lines.iter().all(|line| !line.chars().any(char::is_control)));
@@ -141,7 +132,7 @@ mod tests {
         // The oversized line consumed the scan budget, so nothing follows it.
         assert_eq!(lines.len(), 2);
 
-        state.sync(Some(&snapshot(Some("\u{7}\n \t \n"))));
+        state.sync(Some("\u{7}\n \t \n"));
         assert_eq!(shown(&state), None);
     }
 }
