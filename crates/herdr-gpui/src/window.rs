@@ -142,7 +142,9 @@ pub(crate) struct HerdrWindow {
     pub(crate) sidebar_preferences: Option<preferences::Preferences>,
     pub(crate) sidebar_modified: bool,
     pub(crate) agent_sort: preferences::AgentSort,
-    /// Keeps a toggle made before the stored chrome arrives from being undone.
+    /// Whether the user chose the sort with the panel toggle, now or in a
+    /// stored session. Until then the daemon's `ui.agent_panel_sort` decides,
+    /// including after a config reload, as upstream's manual override does.
     pub(crate) agent_sort_modified: bool,
     pub(crate) avatars: Option<avatars::Avatars>,
     #[cfg(feature = "integration-test")]
@@ -219,6 +221,23 @@ impl HerdrWindow {
         });
     }
 
+    /// Stored chrome yields to anything changed before it arrived. A stored
+    /// sort is a past toggle, so it overrides the daemon's from then on.
+    pub(crate) fn apply_stored_chrome(&mut self, chrome: preferences::Chrome) {
+        if !self.sidebar_modified {
+            self.sidebar_width = chrome.sidebar_width;
+        }
+        if !self.sidebar_split_modified {
+            self.sidebar_split = chrome.sidebar_split;
+        }
+        if !self.agent_sort_modified
+            && let Some(sort) = chrome.agent_sort
+        {
+            self.agent_sort = sort;
+            self.agent_sort_modified = true;
+        }
+    }
+
     fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.updater.poll() {
             match self.updater.commit_restart() {
@@ -235,15 +254,7 @@ impl HerdrWindow {
             cx.notify();
         }
         if let Some(chrome) = self.sidebar_preferences.as_mut().and_then(|p| p.loaded()) {
-            if !self.sidebar_modified {
-                self.sidebar_width = chrome.sidebar_width;
-            }
-            if !self.sidebar_split_modified {
-                self.sidebar_split = chrome.sidebar_split;
-            }
-            if !self.agent_sort_modified {
-                self.agent_sort = chrome.agent_sort;
-            }
+            self.apply_stored_chrome(chrome);
             cx.notify();
         }
         let old_pane = self

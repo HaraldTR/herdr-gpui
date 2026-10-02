@@ -148,6 +148,8 @@ pub(crate) struct Settings {
     pub toast_delay_seconds: u64,
     pub toast_position: ToastPosition,
     pub clipboard: ClipboardToast,
+    /// The agents panel's starting order until the user toggles it.
+    pub agent_sort: crate::preferences::AgentSort,
     palettes: [palette::Palette; 2],
     original: persistence::Snapshot,
 }
@@ -165,6 +167,7 @@ impl std::fmt::Debug for Settings {
             .field("toast_delay_seconds", &self.toast_delay_seconds)
             .field("toast_position", &self.toast_position)
             .field("clipboard", &self.clipboard)
+            .field("agent_sort", &self.agent_sort)
             .finish_non_exhaustive()
     }
 }
@@ -179,6 +182,7 @@ struct Parsed {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct Ui {
+    agent_panel_sort: crate::preferences::AgentSort,
     status_indicators: IndicatorStyle,
     sound: Sound,
     toast: RawToast,
@@ -294,6 +298,7 @@ impl Settings {
             toast_delay_seconds: delay,
             toast_position: toast.herdr.position,
             clipboard: toast.clipboard,
+            agent_sort: parsed.ui.agent_panel_sort,
             palettes,
             original,
         })

@@ -515,32 +515,24 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// saves without waiting; process exit may interrupt pending writes.
 /// How the agents panel orders its rows, as in the terminal client: grouped
 /// keeps the daemon's workspace order, priority floats the agents that want
-/// attention. Client-local, like the sidebar width beside it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// attention. Herdr's `ui.agent_panel_sort` seeds it until the user toggles
+/// it, which deserializes upstream's spellings ("spaces", alias "workspaces").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 pub enum AgentSort {
     #[default]
+    #[serde(rename = "spaces", alias = "workspaces")]
     Grouped,
+    #[serde(rename = "priority")]
     Priority,
 }
 
 impl std::fmt::Display for AgentSort {
-    /// Also the stored spelling, which `From<&str>` reads back.
+    /// Also the stored spelling, which `AgentSort::parse` reads back.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Grouped => "grouped",
             Self::Priority => "priority",
         })
-    }
-}
-
-/// An unreadable or unknown preference falls back to the default rather than
-/// failing the load, so this is infallible and not `FromStr`.
-impl From<&str> for AgentSort {
-    fn from(value: &str) -> Self {
-        match value {
-            "priority" => Self::Priority,
-            _ => Self::Grouped,
-        }
     }
 }
 
@@ -552,10 +544,14 @@ impl AgentSort {
         }
     }
 
-    fn parse(value: Option<&serde_json::Value>) -> Self {
-        value
-            .and_then(serde_json::Value::as_str)
-            .map_or_else(Self::default, Self::from)
+    /// An unreadable or unknown stored value is no override at all, so the
+    /// daemon's setting applies rather than a guessed sort.
+    fn parse(value: Option<&serde_json::Value>) -> Option<Self> {
+        match value.and_then(serde_json::Value::as_str)? {
+            "grouped" => Some(Self::Grouped),
+            "priority" => Some(Self::Priority),
+            _ => None,
+        }
     }
 }
 
@@ -564,7 +560,9 @@ impl AgentSort {
 pub struct Chrome {
     pub sidebar_width: Option<f32>,
     pub sidebar_split: Option<f32>,
-    pub agent_sort: AgentSort,
+    /// The sort the user picked with the panel toggle, like upstream's
+    /// `agent_panel_sort` preference. `None` follows the daemon's config.
+    pub agent_sort: Option<AgentSort>,
 }
 
 pub struct Preferences {
@@ -699,8 +697,11 @@ fn read_chrome(path: &Path) -> crate::Result<Chrome> {
     let object = value
         .as_object()
         .ok_or(crate::Error::PreferencesNotObject)?;
-    // A file written before the sort existed simply keeps the default.
-    let agent_sort = AgentSort::parse(object.get("agent_sort"));
+    // Earlier builds always wrote `agent_sort`, so its default value cannot be
+    // told from a choice; only "priority" proves the user toggled it.
+    let agent_sort = AgentSort::parse(object.get("agent_sort_manual")).or_else(|| {
+        AgentSort::parse(object.get("agent_sort")).filter(|sort| *sort == AgentSort::Priority)
+    });
     let sidebar_width = match object.get("sidebar_width_px") {
         None | Some(serde_json::Value::Null) => None,
         Some(value) => {
@@ -754,7 +755,7 @@ fn write_chrome(path: &Path, chrome: Chrome) -> crate::Result<()> {
                 "sidebar_split": chrome.sidebar_split.filter(|split| {
                     split.is_finite() && (0.1..=0.9).contains(split)
                 }),
-                "agent_sort": chrome.agent_sort.to_string(),
+                "agent_sort_manual": chrome.agent_sort.map(|sort| sort.to_string()),
             }),
         )?;
         file.write_all(b"\n")?;
@@ -842,7 +843,7 @@ mod tests {
             preferences.save(Chrome {
                 sidebar_width: Some(width as f32),
                 sidebar_split: Some(0.4),
-                agent_sort: AgentSort::Priority,
+                agent_sort: Some(AgentSort::Priority),
             });
         }
         let worker = preferences.worker.take().unwrap();
@@ -855,7 +856,7 @@ mod tests {
             Chrome {
                 sidebar_width: Some(100.0),
                 sidebar_split: Some(0.4),
-                agent_sort: AgentSort::Priority,
+                agent_sort: Some(AgentSort::Priority),
             }
         );
         preferences.save(Chrome::default());
@@ -868,44 +869,60 @@ mod tests {
     }
 
     #[core::prelude::v1::test]
-    fn stored_sorts_and_older_files_both_load() {
+    fn only_a_toggled_sort_is_stored_and_older_files_migrate() {
         let directory = TestDirectory::new();
         let path = endpoint_path(&directory.0, Path::new("/tmp/sort.sock"));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        // A file from before the sort existed, then an unknown value.
+        let chrome = |agent_sort| Chrome {
+            sidebar_width: Some(240.0),
+            sidebar_split: None,
+            agent_sort,
+        };
         for (json, expected) in [
+            // A file from before the sort existed follows the daemon.
+            (r#"{"sidebar_width_px": 240.0}"#, None),
+            // Earlier builds wrote their default whether or not it was chosen,
+            // so only a stored "priority" is known to be a toggle.
             (
-                r#"{"sidebar_width_px": 240.0}"#,
-                Chrome {
-                    sidebar_width: Some(240.0),
-                    sidebar_split: None,
-                    agent_sort: AgentSort::Grouped,
-                },
+                r#"{"sidebar_width_px": 240.0, "agent_sort": "grouped"}"#,
+                None,
             ),
             (
-                r#"{"sidebar_width_px": null, "agent_sort": "sideways"}"#,
-                Chrome::default(),
+                r#"{"sidebar_width_px": 240.0, "agent_sort": "priority"}"#,
+                Some(AgentSort::Priority),
             ),
             (
-                r#"{"sidebar_width_px": 200.0, "agent_sort": "priority"}"#,
-                Chrome {
-                    sidebar_width: Some(200.0),
-                    sidebar_split: None,
-                    agent_sort: AgentSort::Priority,
-                },
+                r#"{"sidebar_width_px": 240.0, "agent_sort": "sideways"}"#,
+                None,
+            ),
+            (
+                r#"{"sidebar_width_px": 240.0, "agent_sort_manual": null}"#,
+                None,
+            ),
+            (
+                r#"{"sidebar_width_px": 240.0, "agent_sort_manual": "grouped"}"#,
+                Some(AgentSort::Grouped),
+            ),
+            (
+                r#"{"sidebar_width_px": 240.0, "agent_sort_manual": "spaces"}"#,
+                None,
+            ),
+            (
+                r#"{"sidebar_width_px": 240.0, "agent_sort_manual": 1}"#,
+                None,
             ),
         ] {
             fs::write(&path, json).unwrap();
-            assert_eq!(read_chrome(&path).unwrap(), expected, "{json}");
+            assert_eq!(read_chrome(&path).unwrap(), chrome(expected), "{json}");
         }
-        // Whatever was read survives a write and read of the same value.
-        let chrome = Chrome {
-            sidebar_width: Some(321.0),
-            sidebar_split: None,
-            agent_sort: AgentSort::Priority,
-        };
-        write_chrome(&path, chrome).unwrap();
-        assert_eq!(read_chrome(&path).unwrap(), chrome);
+        for agent_sort in [None, Some(AgentSort::Grouped), Some(AgentSort::Priority)] {
+            write_chrome(&path, chrome(agent_sort)).unwrap();
+            let stored: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            // The legacy key is no longer written, so it cannot pin a default.
+            assert!(stored.get("agent_sort").is_none(), "{stored}");
+            assert_eq!(read_chrome(&path).unwrap(), chrome(agent_sort));
+        }
     }
 
     #[core::prelude::v1::test]
@@ -930,12 +947,12 @@ mod tests {
             Chrome {
                 sidebar_width: Some(160.),
                 sidebar_split: None,
-                agent_sort: AgentSort::Grouped,
+                agent_sort: Some(AgentSort::Grouped),
             },
             Chrome {
                 sidebar_width: Some(400.),
                 sidebar_split: Some(0.6),
-                agent_sort: AgentSort::Priority,
+                agent_sort: Some(AgentSort::Priority),
             },
             Chrome::default(),
         ];
@@ -989,7 +1006,7 @@ mod tests {
                     Chrome {
                         sidebar_width: Some(width),
                         sidebar_split: None,
-                        agent_sort: AgentSort::default(),
+                        agent_sort: None,
                     }
                 )
                 .is_err()
@@ -998,7 +1015,7 @@ mod tests {
         let chrome = Chrome {
             sidebar_width: Some(237.5),
             sidebar_split: None,
-            agent_sort: AgentSort::default(),
+            agent_sort: None,
         };
         write_chrome(&path, chrome).unwrap();
         assert_eq!(read_chrome(&path).unwrap(), chrome);
@@ -1012,7 +1029,7 @@ mod tests {
         let expected = Chrome {
             sidebar_width: Some(240.0),
             sidebar_split: None,
-            agent_sort: AgentSort::Priority,
+            agent_sort: Some(AgentSort::Priority),
         };
         for split in [
             "null", "0", "-1", "0.099", "0.901", "1e100", "1e-100", "\"0.5\"", "true", "[]", "{}",
@@ -1054,7 +1071,7 @@ mod tests {
             let chrome = Chrome {
                 sidebar_width: Some(240.0),
                 sidebar_split,
-                agent_sort: AgentSort::Priority,
+                agent_sort: Some(AgentSort::Priority),
             };
             write_chrome(&path, chrome).unwrap();
             let stored: serde_json::Value =

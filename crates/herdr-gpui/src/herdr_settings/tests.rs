@@ -114,6 +114,7 @@ position = "top-center"
 fn strict_known_fields_and_typed_sources() -> anyhow::Result<()> {
     for text in [
         "[ui]\nstatus_indicators = 'bad'",
+        "[ui]\nagent_panel_sort = 'grouped'",
         "[ui.sound]\nenabled = 'true'",
         "[theme]\nauto_switch = 1",
         "[theme.custom]\nred = 123",
@@ -139,6 +140,20 @@ fn strict_known_fields_and_typed_sources() -> anyhow::Result<()> {
             .and_then(|error| error.source())
             .is_some_and(|source| source.is::<toml::de::Error>())
     );
+    Ok(())
+}
+
+#[test]
+fn agent_panel_sort_reads_upstream_spellings() -> anyhow::Result<()> {
+    use crate::preferences::AgentSort;
+    for (text, expected) in [
+        ("", AgentSort::Grouped),
+        ("[ui]\nagent_panel_sort = 'spaces'", AgentSort::Grouped),
+        ("[ui]\nagent_panel_sort = 'workspaces'", AgentSort::Grouped),
+        ("[ui]\nagent_panel_sort = 'priority'", AgentSort::Priority),
+    ] {
+        assert_eq!(parsed(text)?.agent_sort, expected, "{text}");
+    }
     Ok(())
 }
 
