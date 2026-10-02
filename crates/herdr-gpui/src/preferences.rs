@@ -195,11 +195,18 @@ impl HerdrWindow {
             .px(px(16.))
             .py(px(8.))
             .child(section("APPEARANCE"))
-            .child(row(
-                "preferences-show-agents",
-                "Show agents",
-                self.config.show_agents.to_string(),
-            ))
+            .child(
+                toggle(
+                    "preferences-show-agents",
+                    "Show agents",
+                    self.config.show_agents,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    let show = !this.config.show_agents;
+                    this.save_preference(move || Config::save_show_agents(show), cx);
+                })),
+            )
             .child(
                 toggle(
                     "preferences-show-usage",
