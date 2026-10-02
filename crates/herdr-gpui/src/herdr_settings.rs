@@ -117,6 +117,16 @@ pub(crate) enum ToastDelivery {
     System,
 }
 
+/// What collapsing the sidebar leaves, as Herdr's `ui.sidebar_collapsed_mode`
+/// chooses it: a narrow rail of status marks, or nothing.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum SidebarCollapsedMode {
+    #[default]
+    Compact,
+    Hidden,
+}
+
 // Playback paths and per-agent policy are parsed by the sound backend, not this editor.
 #[derive(Deserialize)]
 #[serde(default)]
@@ -148,6 +158,8 @@ pub(crate) struct Settings {
     pub toast_delay_seconds: u64,
     pub toast_position: ToastPosition,
     pub clipboard: ClipboardToast,
+    pub sidebar_collapsed_mode: SidebarCollapsedMode,
+    pub sidebar_start_collapsed: bool,
     palettes: [palette::Palette; 2],
     original: persistence::Snapshot,
 }
@@ -165,6 +177,8 @@ impl std::fmt::Debug for Settings {
             .field("toast_delay_seconds", &self.toast_delay_seconds)
             .field("toast_position", &self.toast_position)
             .field("clipboard", &self.clipboard)
+            .field("sidebar_collapsed_mode", &self.sidebar_collapsed_mode)
+            .field("sidebar_start_collapsed", &self.sidebar_start_collapsed)
             .finish_non_exhaustive()
     }
 }
@@ -183,6 +197,8 @@ struct Ui {
     sound: Sound,
     toast: RawToast,
     accent: Option<String>,
+    sidebar_collapsed_mode: SidebarCollapsedMode,
+    sidebar_start_collapsed: bool,
 }
 
 #[derive(Default, Deserialize)]
@@ -294,6 +310,8 @@ impl Settings {
             toast_delay_seconds: delay,
             toast_position: toast.herdr.position,
             clipboard: toast.clipboard,
+            sidebar_collapsed_mode: parsed.ui.sidebar_collapsed_mode,
+            sidebar_start_collapsed: parsed.ui.sidebar_start_collapsed,
             palettes,
             original,
         })

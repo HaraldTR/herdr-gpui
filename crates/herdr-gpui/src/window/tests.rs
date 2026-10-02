@@ -130,7 +130,28 @@ fn the_sidebar_gap_narrows_the_terminal_only_while_the_sidebar_shows(
     assert_eq!(padded.size.height, flush.size.height);
     assert_eq!(cx.debug_bounds("sidebar").unwrap(), sidebar);
 
+    // The compact rail keeps the gap beside its narrower column.
+    set_gap(cx, 16., false);
+    draw(cx);
+    let rail = cx.debug_bounds("sidebar-rail").unwrap();
+    let railed = view.read_with(cx, |view, _| view.bounds);
+    assert_eq!(railed.origin.x, rail.right() + px(16.));
+    assert_eq!(
+        railed.size.width,
+        flush.size.width + sidebar.size.width - rail.size.width - px(16.)
+    );
+
     // Hiding the sidebar leaves nothing to separate the terminal from.
+    cx.update(|_, cx| {
+        view.update(cx, |view, _| {
+            view.settings.shared = Some(
+                crate::herdr_settings::Settings::parse_text(
+                    "[ui]\nsidebar_collapsed_mode = 'hidden'\n",
+                )
+                .unwrap(),
+            );
+        });
+    });
     set_gap(cx, 16., false);
     draw(cx);
     let hidden = view.read_with(cx, |view, _| view.bounds);

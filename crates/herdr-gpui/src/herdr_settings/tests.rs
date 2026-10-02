@@ -111,6 +111,24 @@ position = "top-center"
 }
 
 #[test]
+fn sidebar_collapse_defaults_compact_expanded_and_parses_upstream_values() -> anyhow::Result<()> {
+    let defaults = parsed("")?;
+    assert_eq!(
+        defaults.sidebar_collapsed_mode,
+        SidebarCollapsedMode::Compact
+    );
+    assert!(!defaults.sidebar_start_collapsed);
+    let set = parsed("[ui]\nsidebar_collapsed_mode = 'hidden'\nsidebar_start_collapsed = true\n")?;
+    assert_eq!(set.sidebar_collapsed_mode, SidebarCollapsedMode::Hidden);
+    assert!(set.sidebar_start_collapsed);
+    assert_eq!(
+        parsed("[ui]\nsidebar_collapsed_mode = 'compact'")?.sidebar_collapsed_mode,
+        SidebarCollapsedMode::Compact
+    );
+    Ok(())
+}
+
+#[test]
 fn strict_known_fields_and_typed_sources() -> anyhow::Result<()> {
     for text in [
         "[ui]\nstatus_indicators = 'bad'",
@@ -119,6 +137,8 @@ fn strict_known_fields_and_typed_sources() -> anyhow::Result<()> {
         "[theme.custom]\nred = 123",
         "[ui.toast]\ndelay_seconds = -1",
         "[ui.toast.herdr]\nposition = 'top-center'",
+        "[ui]\nsidebar_collapsed_mode = 'rail'",
+        "[ui]\nsidebar_start_collapsed = 'yes'",
     ] {
         assert!(matches!(parsed(text), Err(Error::Parse(_))), "{text}");
     }

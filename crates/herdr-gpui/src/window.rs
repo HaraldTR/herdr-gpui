@@ -128,7 +128,12 @@ pub(crate) struct HerdrWindow {
     pub(crate) usage: crate::usage::Usage,
     pub(crate) install_warning_shown: bool,
     pub(crate) collapsed_repos: std::collections::HashSet<String>,
+    /// Expanded; collapsed leaves the rail or nothing, as Herdr's
+    /// `ui.sidebar_collapsed_mode` chooses (see `sidebar_mode`).
     pub(crate) sidebar_visible: bool,
+    /// Herdr's `ui.sidebar_start_collapsed` still applies: no shared settings
+    /// have loaded yet and the user has not toggled the sidebar since startup.
+    pub(crate) sidebar_start_pending: bool,
     pub(crate) device_filter: Option<String>,
     pub(crate) wheel: WheelAccumulator,
     pub(crate) sidebar_width: Option<f32>,
@@ -468,6 +473,7 @@ impl HerdrWindow {
             install_warning_shown: false,
             collapsed_repos: Default::default(),
             sidebar_visible: true,
+            sidebar_start_pending: true,
             device_filter: None,
             wheel: WheelAccumulator::default(),
             sidebar_width: None,

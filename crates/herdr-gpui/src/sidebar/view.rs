@@ -10,7 +10,7 @@
 //! The rows still come from `HerdrWindow::render_sidebar`, so their listeners
 //! and state stay where they were.
 
-use super::{agents::Indicators, metrics::sidebar_width};
+use super::{SidebarMode, agents::Indicators};
 use crate::window::HerdrWindow;
 use gpui::{
     AnyView, Context, Empty, Entity, IntoElement, Render, StyleRefinement, Styled, ViewElement,
@@ -55,22 +55,22 @@ impl Render for SidebarView {
         }
         // A closed window leaves nothing to draw.
         self.window
-            .update(cx, |view, cx| {
-                view.render_sidebar(self.indicators, window, cx)
-                    .into_any_element()
+            .update(cx, |view, cx| match view.sidebar_mode() {
+                SidebarMode::Rail => view
+                    .render_rail(self.indicators, window, cx)
+                    .into_any_element(),
+                _ => view
+                    .render_sidebar(self.indicators, window, cx)
+                    .into_any_element(),
             })
             .unwrap_or_else(|_| Empty.into_any_element())
     }
 }
 
-/// The sidebar in the window body. The outer style repeats the sidebar's own
-/// root, which GPUI lays out without rendering while the cache holds.
-pub(crate) fn cached(
-    view: &Entity<SidebarView>,
-    preferred: Option<f32>,
-    window_width: f32,
-) -> ViewElement<AnyView> {
-    let width = sidebar_width(preferred, window_width);
+/// The sidebar in the window body, `width` wide as its mode lays it out. The
+/// outer style repeats the sidebar's own root, which GPUI lays out without
+/// rendering while the cache holds.
+pub(crate) fn cached(view: &Entity<SidebarView>, width: f32) -> ViewElement<AnyView> {
     AnyView::from(view.clone()).cached(
         StyleRefinement::default()
             .w(px(width))
