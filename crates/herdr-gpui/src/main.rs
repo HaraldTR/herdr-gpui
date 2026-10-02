@@ -24,6 +24,7 @@ mod diagnostics;
 mod dialog_input;
 mod endpoint;
 mod error;
+mod find;
 mod font_picker;
 mod font_sizes;
 mod fonts;

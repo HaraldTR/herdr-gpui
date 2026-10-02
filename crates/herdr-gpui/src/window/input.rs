@@ -140,6 +140,11 @@ impl HerdrWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A keystroke bubbling out of the find field is the field's: an
+        // unhandled one is still on its way to the field's IME.
+        if self.find_focused(window, cx) {
+            return;
+        }
         #[cfg(feature = "integration-test")]
         {
             self.input_probe.keys += 1;

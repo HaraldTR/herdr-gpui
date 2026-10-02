@@ -1437,6 +1437,16 @@ Windows setup) nothing is saved and the window says so.
   screen and scrollback through the daemon's `pane.clear`, without sending input
   to the running program; daemons that do not advertise it (Herdr 0.9.1 and
   older) leave it out of the palette and report why instead.
+- Cmd-F (`find`, also in Terminal and the command palette) opens a find bar
+  over the focused pane that searches its whole scrollback through the
+  daemon's `pane.copy_search`. Matches are tinted, the current one more
+  strongly, and shown as "3 of 17". Enter or Up moves to the next older match
+  and Shift-Enter or Down to the next newer one (Cmd-G and Cmd-Shift-G work
+  too), scrolling the pane to it.
+  Escape closes the bar. Lowercase queries ignore case; any uppercase letter
+  makes the search case-sensitive, as Herdr's copy mode does. Text typed in
+  the bar, IME composition included, never reaches the terminal. Daemons that
+  do not advertise the method report why instead of opening the bar.
 - Cmd-W closes the focused pane and Cmd-Shift-W closes the focused tab only after
   a confirmation dialog (a tab asks only while an agent in it is working or
   blocked, and never with `confirm_close_tab = false`). **Cancel is selected by default**: Enter alone cancels;

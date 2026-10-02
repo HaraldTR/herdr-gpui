@@ -213,6 +213,12 @@ pub(crate) fn menus(layout: Layout) -> Vec<Menu> {
                     },
                 ),
                 MenuItem::action(
+                    "Find",
+                    RunCommand {
+                        command: Command::Find,
+                    },
+                ),
+                MenuItem::action(
                     "Open Notification Target",
                     RunCommand {
                         command: Command::OpenNotificationTarget,

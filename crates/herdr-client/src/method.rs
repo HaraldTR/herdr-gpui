@@ -17,6 +17,7 @@ pub enum Method {
     LayoutSetSplitRatio,
     PaneClear,
     PaneClose,
+    PaneCopySearch,
     PaneFocus,
     PaneFocusDirection,
     PaneRename,
@@ -51,6 +52,7 @@ impl Method {
             Self::LayoutSetSplitRatio => "layout.set_split_ratio",
             Self::PaneClear => "pane.clear",
             Self::PaneClose => "pane.close",
+            Self::PaneCopySearch => "pane.copy_search",
             Self::PaneFocus => "pane.focus",
             Self::PaneFocusDirection => "pane.focus_direction",
             Self::PaneRename => "pane.rename",
@@ -122,6 +124,13 @@ mod tests {
         assert!(Method::PaneClear.advertised_in(&["pane.close".into(), "pane.clear".into()]));
         // Advertisement is an exact match: a method sharing the prefix is not clearing.
         assert!(!Method::PaneClear.advertised_in(&["pane.clear_agent_authority".into()]));
+    }
+
+    #[test]
+    fn copy_search_wire_name_and_advertisement() {
+        assert_eq!(Method::PaneCopySearch.as_str(), "pane.copy_search");
+        assert!(Method::PaneCopySearch.advertised_in(&["pane.copy_search".into()]));
+        assert!(!Method::PaneCopySearch.advertised_in(&["pane.copy_motion".into()]));
     }
 
     #[test]

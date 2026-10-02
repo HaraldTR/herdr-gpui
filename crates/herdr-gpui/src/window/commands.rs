@@ -273,6 +273,10 @@ impl HerdrWindow {
                 self.open_about(window, cx);
                 return;
             }
+            Command::Find => {
+                self.open_find(window, cx);
+                return;
+            }
             Command::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
             Command::IncreaseFontSize | Command::DecreaseFontSize => {
                 let step = if command == Command::IncreaseFontSize {

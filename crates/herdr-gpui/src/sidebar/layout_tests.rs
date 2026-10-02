@@ -1113,6 +1113,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         teleport_marks: crate::teleport::Marks::detached(),
         teleport_follow: None,
         selection: None,
+        find: None,
         flash: None,
         configured_terminal_size: crate::config::Config::default().terminal.size,
         // Keep the original geometry fixture explicit; density-switching tests

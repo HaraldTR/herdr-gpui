@@ -303,6 +303,7 @@ impl HerdrWindow {
                 | Command::SplitDown
                 | Command::Zoom
                 | Command::ClearPane
+                | Command::Find
                 | Command::ClosePane
                 | Command::CloseTab
                 | Command::NewBrowserTab

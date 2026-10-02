@@ -19,6 +19,7 @@ pub enum Command {
     PreviousPane,
     Zoom,
     ClearPane,
+    Find,
     ClosePane,
     CloseTab,
     TabNumber(u8),
@@ -159,6 +160,12 @@ pub const COMMANDS: &[CommandInfo] = &[
         name: "clear_pane",
         label: "Clear Pane",
         shortcuts: &["cmd-k"],
+    },
+    CommandInfo {
+        command: Command::Find,
+        name: "find",
+        label: "Find",
+        shortcuts: &["cmd-f"],
     },
     CommandInfo {
         command: Command::ClosePane,
@@ -423,6 +430,7 @@ pub fn request(command: Command, snapshot: &ClientShellSnapshot) -> Option<(Meth
         }
         Command::NewWindow
         | Command::NewWorktree
+        | Command::Find
         | Command::ToggleSidebar
         | Command::IncreaseFontSize
         | Command::DecreaseFontSize
@@ -459,7 +467,7 @@ mod tests {
     #[test]
     fn catalog_has_all_native_commands_and_gpui_shortcuts() {
         use Command::*;
-        let expected: [(Command, &[&str]); 45] = [
+        let expected: [(Command, &[&str]); 46] = [
             (OpenNotificationTarget, &["cmd-alt-n"]),
             (Logs, &[]),
             (NewWindow, &["cmd-alt-shift-n"]),
@@ -478,6 +486,7 @@ mod tests {
             (PreviousPane, &["cmd-alt-["]),
             (Zoom, &["cmd-shift-enter"]),
             (ClearPane, &["cmd-k"]),
+            (Find, &["cmd-f"]),
             (ClosePane, &["cmd-w"]),
             (CloseTab, &["cmd-shift-w"]),
             (TabNumber(1), &["cmd-1"]),
@@ -554,6 +563,7 @@ mod tests {
             Command::Logs,
             Command::NewWindow,
             Command::NewWorktree,
+            Command::Find,
             Command::ToggleSidebar,
             Command::IncreaseFontSize,
             Command::DecreaseFontSize,

@@ -62,6 +62,8 @@ pub struct LiveState {
     /// `tab.move` reorders a workspace's tabs; daemons that do not offer it
     /// to clients keep their tabs where they are.
     pub(crate) supports_tab_move: bool,
+    /// `pane.copy_search` drives the find bar; without it Find says so.
+    pub(crate) supports_copy_search: bool,
     pub dirty: bool,
     pub(crate) dialog_response: Option<(String, Option<DialogResponse>)>,
     pub(crate) notifications: std::collections::VecDeque<crate::notifications::Notice>,
@@ -113,6 +115,7 @@ impl Default for LiveState {
             supports_workspace_get: false,
             supports_pane_clear: false,
             supports_tab_move: false,
+            supports_copy_search: false,
             dirty: true,
             dialog_response: None,
             notifications: Default::default(),
@@ -148,6 +151,7 @@ impl LiveState {
             supports_workspace_get,
             supports_pane_clear,
             supports_tab_move,
+            supports_copy_search,
             dirty: _,
             dialog_response,
             notifications,
@@ -183,6 +187,7 @@ impl LiveState {
             && *supports_workspace_get == self.supports_workspace_get
             && *supports_pane_clear == self.supports_pane_clear
             && *supports_tab_move == self.supports_tab_move
+            && *supports_copy_search == self.supports_copy_search
             && match (dialog_response, &self.dialog_response) {
                 (Some((a, None)), Some((b, None))) => a == b,
                 (a, b) => a.is_none() && b.is_none(),
@@ -286,6 +291,7 @@ impl LiveState {
                 self.supports_workspace_get = Method::WorkspaceGet.advertised_in(&welcome.methods);
                 self.supports_pane_clear = Method::PaneClear.advertised_in(&welcome.methods);
                 self.supports_tab_move = Method::TabMove.advertised_in(&welcome.methods);
+                self.supports_copy_search = Method::PaneCopySearch.advertised_in(&welcome.methods);
                 self.supports_surface = Method::ClientShellSurfaceSet
                     .advertised_in(&welcome.methods)
                     && ["surface_interest", "presentation_effects_fence"]
