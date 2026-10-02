@@ -51,9 +51,18 @@ mod tests {
         }
         assert_eq!(
             Action::Zoom.request(&target).unwrap(),
+            (Method::PaneZoom, json!({"pane_id":"inactive", "mode":"on"}))
+        );
+        assert_eq!(Action::Zoom.label(&target), "Zoom");
+        let mut zoomed = original.clone();
+        zoomed.tabs[0].zoomed = true;
+        let target_zoomed = Target::capture(&zoomed, "inactive").unwrap();
+        assert_eq!(Action::Zoom.label(&target_zoomed), "Unzoom");
+        assert_eq!(
+            Action::Zoom.request(&target_zoomed).unwrap(),
             (
                 Method::PaneZoom,
-                json!({"pane_id":"inactive", "mode":"toggle"})
+                json!({"pane_id":"inactive", "mode":"off"})
             )
         );
         for case in 0..7 {
@@ -159,7 +168,7 @@ mod tests {
                     } else {
                         v.selection_epoch += 1;
                     }
-                    for (action, _) in ACTIONS {
+                    for action in ACTIONS {
                         v.activate_pane_menu(action, window, cx);
                         assert_eq!(v.menu.page, Some(Page::Pane));
                         assert!(v.menu.pane.as_ref().unwrap().error.is_some());
@@ -430,17 +439,25 @@ struct Target {
     tab: String,
     pane: String,
     label: String,
+    /// Whether the pane's tab was zoomed when the menu opened, so the zoom
+    /// row says what it will do and asks Herdr for exactly that.
+    zoomed: bool,
 }
 
 impl Target {
     fn capture(snapshot: &ClientShellSnapshot, id: &str) -> Option<Self> {
         let pane = snapshot.panes.iter().find(|pane| pane.pane_id == id)?;
+        let zoomed = snapshot
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == pane.tab_id && tab.zoomed);
         let target = Self {
             boot: snapshot.boot_id.clone(),
             workspace: pane.workspace_id.clone(),
             tab: pane.tab_id.clone(),
             pane: pane.pane_id.clone(),
             label: pane.label.clone().unwrap_or_default(),
+            zoomed,
         };
         target.validate(snapshot).ok()?;
         Some(target)
@@ -490,21 +507,34 @@ impl Action {
                     "focus": true,
                 }),
             ),
+            // An explicit mode, so a zoom another client changed meanwhile
+            // leaves the pane as the row promised rather than flipping it.
             Self::Zoom => (
                 Method::PaneZoom,
-                json!({"pane_id": target.pane, "mode": "toggle"}),
+                json!({"pane_id": target.pane, "mode": if target.zoomed { "off" } else { "on" }}),
             ),
             Self::Rename | Self::Close => return None,
         })
     }
+
+    fn label(self, target: &Target) -> &'static str {
+        match self {
+            Self::Rename => "Rename",
+            Self::SplitRight => "Split Right",
+            Self::SplitDown => "Split Down",
+            Self::Zoom if target.zoomed => "Unzoom",
+            Self::Zoom => "Zoom",
+            Self::Close => "Close",
+        }
+    }
 }
 
-const ACTIONS: [(Action, &str); 5] = [
-    (Action::Rename, "Rename"),
-    (Action::SplitRight, "Split Right"),
-    (Action::SplitDown, "Split Down"),
-    (Action::Zoom, "Toggle Zoom"),
-    (Action::Close, "Close"),
+const ACTIONS: [Action; 5] = [
+    Action::Rename,
+    Action::SplitRight,
+    Action::SplitDown,
+    Action::Zoom,
+    Action::Close,
 ];
 
 pub(super) struct PaneMenu {
@@ -790,7 +820,7 @@ impl HerdrWindow {
             }
             "enter" => {
                 if let Some(index) = pane.selected {
-                    self.activate_pane_menu(ACTIONS[index].0, window, cx);
+                    self.activate_pane_menu(ACTIONS[index], window, cx);
                 }
             }
             _ => {}
@@ -803,7 +833,7 @@ impl HerdrWindow {
         };
         let mut body = div().flex().flex_col();
         if self.menu.page == Some(Page::Pane) {
-            for (index, (action, label)) in ACTIONS.into_iter().enumerate() {
+            for (index, action) in ACTIONS.into_iter().enumerate() {
                 body = body.child(
                     div()
                         .id(("pane-menu-action", index))
@@ -817,7 +847,7 @@ impl HerdrWindow {
                             row.bg(rgb(self.theme.active))
                         })
                         .hover(|row| row.bg(rgb(self.theme.active)))
-                        .child(label)
+                        .child(action.label(&pane.target))
                         .on_hover(cx.listener(move |this, hovered, _, cx| {
                             if *hovered && let Some(pane) = &mut this.menu.pane {
                                 pane.selected = Some(index);

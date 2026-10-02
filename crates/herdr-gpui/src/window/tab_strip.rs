@@ -16,6 +16,9 @@ use herdr_client::protocol::AgentStatus;
 /// The gap between a Herdr tab's status indicator and its title.
 const DOT_GAP: f32 = 6.;
 
+/// How large the mark after a zoomed tab's title draws, `DOT_GAP` after it.
+const ZOOM_ICON: f32 = 11.;
+
 /// How tall the thumb along a scrolling strip's foot draws.
 const THUMB_HEIGHT: f32 = 4.;
 
@@ -74,6 +77,7 @@ impl HerdrWindow {
         &self,
         label: &SharedString,
         lead: Lead,
+        zoomed: bool,
         indicators: Indicators,
         window: &Window,
     ) -> f32 {
@@ -98,8 +102,9 @@ impl HerdrWindow {
             Lead::Status => 12. + indicators.width(&self.config.tabs) + DOT_GAP + 10.,
             Lead::Globe => 10. + 12. + 6. + 6.,
         };
+        let zoom = if zoomed { DOT_GAP + ZOOM_ICON } else { 0. };
         // GPUI rounds the text element's intrinsic width up during layout.
-        (chrome + text.ceil() + 18. + 3. + 1.).max(TAB_WIDTH)
+        (chrome + zoom + text.ceil() + 18. + 3. + 1.).max(TAB_WIDTH)
     }
 
     /// A closed tab where it stood, narrowing and fading out.
@@ -137,7 +142,7 @@ impl HerdrWindow {
         // What the strip lists, measured, so the ones that just opened grow
         // in and the ones that just closed shrink out where they stood.
         let now = std::time::Instant::now();
-        let herdr: Vec<((Pick, SharedString), Lead)> = self
+        let herdr: Vec<((Pick, SharedString), Lead, bool)> = self
             .live
             .snapshot
             .as_ref()
@@ -153,6 +158,7 @@ impl HerdrWindow {
                                 SharedString::from(t.label.clone()),
                             ),
                             Lead::of(t.agent_status),
+                            t.zoomed,
                         )
                     })
                     .collect()
@@ -163,11 +169,11 @@ impl HerdrWindow {
             .chain(
                 self.browser_tab_labels(cx)
                     .into_iter()
-                    .map(|entry| (entry, Lead::Globe)),
+                    .map(|entry| (entry, Lead::Globe, false)),
             )
-            .filter(|((pick, _), _)| self.group_lists(slot.id, pick))
-            .map(|((pick, label), lead)| Listed {
-                width: self.tab_width(&label, lead, indicators, window),
+            .filter(|((pick, _), _, _)| self.group_lists(slot.id, pick))
+            .map(|((pick, label), lead, zoomed)| Listed {
+                width: self.tab_width(&label, lead, zoomed, indicators, window),
                 pick,
                 label,
             })
@@ -244,7 +250,22 @@ impl HerdrWindow {
                                         }),
                                     )
                                 })
-                                .child(tab.label.clone()),
+                                .child(tab.label.clone())
+                                // Herdr's " Z": one pane fills the tab, the
+                                // rest are hidden behind it.
+                                .when(tab.zoomed, |title| {
+                                    title.child(
+                                        svg()
+                                            .path("icons/zoom.svg")
+                                            .debug_selector({
+                                                let id = id.clone();
+                                                move || slot.selector(&format!("tab-zoom-{id}"))
+                                            })
+                                            .flex_none()
+                                            .size(px(ZOOM_ICON))
+                                            .text_color(rgb(text)),
+                                    )
+                                }),
                         )
                         .child(
                             div()
@@ -291,7 +312,13 @@ impl HerdrWindow {
                             MouseButton::Right,
                             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                                 cx.stop_propagation();
-                                this.open_tab_menu(&context_id, event.position, window, cx);
+                                this.open_tab_menu(
+                                    &context_id,
+                                    Some(slot.id),
+                                    event.position,
+                                    window,
+                                    cx,
+                                );
                                 this.menu.opening_right_click =
                                     this.menu.page == Some(crate::menu::Page::Tab);
                             }),
@@ -848,6 +875,52 @@ mod tests {
         );
     }
 
+    /// A zoomed tab carries its mark after the title, inside the width
+    /// measured for it, and a tab that is not zoomed carries none.
+    #[gpui::test]
+    fn zoomed_tab_shows_its_mark_within_its_width(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = crate::sidebar::layout_tests::fixture_window(window, cx);
+            let mut snapshot: herdr_client::protocol::ClientShellSnapshot = serde_json::from_str(
+                include_str!("../../../herdr-protocol/tests/fixtures/endpoint-snapshot-v1.json"),
+            )
+            .unwrap();
+            snapshot.tabs[0].zoomed = true;
+            // Long enough that neither width is the narrowest tab's.
+            snapshot.tabs[0].label = "a title long enough to outgrow the narrowest tab".into();
+            let mut plain = snapshot.tabs[0].clone();
+            plain.tab_id = "plain".into();
+            plain.focused = false;
+            plain.zoomed = false;
+            snapshot.tabs.push(plain);
+            view.live.snapshot = Some(Arc::new(snapshot));
+            view
+        });
+        cx.simulate_resize(size(px(1600.), px(600.)));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        assert!(cx.debug_bounds("tab-zoom-plain").is_none());
+        let tab = cx.debug_bounds("tab-w1:t1").unwrap();
+        let mark = cx.debug_bounds("tab-zoom-w1:t1").unwrap();
+        let close = cx.debug_bounds("close-tab-w1:t1").unwrap();
+        assert_eq!(mark.size, size(px(ZOOM_ICON), px(ZOOM_ICON)));
+        assert!(mark.right() <= close.left(), "{mark:?} before {close:?}");
+        assert!((mark.center().y - tab.center().y).abs() <= px(0.5));
+        let (zoomed, unzoomed) = cx.update(|window, cx| {
+            let view = view.read(cx);
+            let indicators = Indicators::new(None, false, &view.theme);
+            let label = view.live.snapshot.as_ref().unwrap().tabs[0].label.clone();
+            let lead = Lead::of(view.live.snapshot.as_ref().unwrap().tabs[0].agent_status);
+            (
+                view.tab_width(&label.clone().into(), lead, true, indicators, window),
+                view.tab_width(&label.into(), lead, false, indicators, window),
+            )
+        });
+        assert_eq!(zoomed - unzoomed, DOT_GAP + ZOOM_ICON);
+        assert!((tab.size.width - px(zoomed)).abs() <= px(0.5), "{tab:?}");
+    }
+
     fn status_layout(cx: &mut TestAppContext, settings: Option<&str>, font_size: f32) {
         let label = "a title long enough to outgrow the narrowest tab";
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -890,7 +963,7 @@ mod tests {
             );
             (
                 indicators.width(&view.config.tabs),
-                view.tab_width(&label.into(), Lead::Status, indicators, window),
+                view.tab_width(&label.into(), Lead::Status, false, indicators, window),
             )
         });
         assert_eq!(dot.size.width, px(width));

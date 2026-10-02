@@ -398,6 +398,11 @@ impl HerdrWindow {
         self.browser.new_tab_group = self.browser_key().map(|key| (key, group));
     }
 
+    #[cfg(test)]
+    pub(crate) fn expected_new_tab_group(&self) -> Option<GroupId> {
+        self.browser.new_tab_group.as_ref().map(|(_, group)| *group)
+    }
+
     /// Follows the window's connection moving its focus, from a shortcut, an
     /// agent, a closed tab, or a group's "+". The group holding the
     /// connection shows the new tab, unless a "+" asked for it in another
