@@ -254,11 +254,11 @@ mod groups {
             return;
         };
         click(cx, selector(format!("g1-tab-{other}")));
-        // Until the daemon focuses it, the group stands in for it.
-        assert_eq!(
-            shown(&view, cx)[1],
-            Shown::Elsewhere(Pick::Herdr(other.clone()))
-        );
+        // Until the daemon focuses it, the group keeps drawing the
+        // terminal's frame rather than flashing a stand-in.
+        assert_eq!(shown(&view, cx)[1], Shown::Terminal);
+        assert!(cx.debug_bounds("g1-stand-in").is_none());
+        assert!(cx.debug_bounds("terminal").is_some());
         // Once it does, the group shows it and the other keeps its tab.
         cx.update(|_, cx| {
             view.update(cx, |view, cx| {
@@ -271,6 +271,27 @@ mod groups {
             shown(&view, cx),
             [Shown::Elsewhere(herdr("t0")), Shown::Terminal]
         );
+    }
+
+    #[gpui::test]
+    fn switching_tabs_keeps_the_terminal_until_the_daemon_focuses(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = window(cx);
+        draw(cx);
+        let other = view.read_with(cx, |view, _| {
+            let snapshot = view.live.snapshot.as_ref().unwrap();
+            snapshot
+                .tabs
+                .iter()
+                .find(|tab| tab.workspace_id == "w0" && tab.tab_id != "t0")
+                .map(|tab| tab.tab_id.clone())
+        });
+        let Some(other) = other else {
+            return;
+        };
+        click(cx, selector(format!("tab-{other}")));
+        assert_eq!(shown(&view, cx), [Shown::Terminal]);
+        assert!(cx.debug_bounds("stand-in").is_none());
+        assert!(cx.debug_bounds("terminal").is_some());
     }
 
     #[gpui::test]
