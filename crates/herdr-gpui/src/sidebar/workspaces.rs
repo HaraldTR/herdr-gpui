@@ -1,6 +1,12 @@
 //! Which workspaces the tree shows and how each one is named. A repository and
 //! its linked worktrees form one group, folded or unfolded locally: collapsing
 //! changes this client's view only, never the daemon's state.
+//!
+//! Grouping follows the TUI: every checkout that is not a linked worktree is a
+//! parent, never another parent's child, and a repository only forms a group
+//! once it has both a parent and at least one linked worktree open. Membership
+//! comes from the daemon alone, so a checkout the daemon restored while it was
+//! unavailable keeps its group.
 
 use super::{
     RowBadge,
@@ -10,52 +16,79 @@ use crate::config::Theme;
 use herdr_client::protocol::ClientShellWorkspace;
 use std::collections::{HashMap, HashSet};
 
+/// The repositories that form a group: those with at least one parent and at
+/// least one linked worktree among `workspaces`.
+pub(super) fn grouped_keys(workspaces: &[ClientShellWorkspace]) -> HashSet<&str> {
+    let mut kinds = HashMap::<&str, (bool, bool)>::new();
+    for tree in workspaces.iter().filter_map(|w| w.worktree.as_ref()) {
+        let (parent, linked) = kinds.entry(&tree.key).or_default();
+        *parent |= !tree.is_linked_worktree;
+        *linked |= tree.is_linked_worktree;
+    }
+    kinds
+        .into_iter()
+        .filter(|&(_, (parent, linked))| parent && linked)
+        .map(|(key, _)| key)
+        .collect()
+}
+
+/// Display order as `(index, child)`. A group shows where its earliest member
+/// sits: all its parents first, in daemon order, then its linked worktrees.
 pub(super) fn workspace_entries(workspaces: &[ClientShellWorkspace]) -> Vec<(usize, bool)> {
-    let mut groups = HashMap::<&str, (Option<usize>, Vec<usize>)>::new();
+    let grouped = grouped_keys(workspaces);
+    let mut members = HashMap::<&str, (Vec<usize>, Vec<usize>)>::new();
     for (index, workspace) in workspaces.iter().enumerate() {
-        if let Some(worktree) = &workspace.worktree {
-            let (parent, members) = groups.entry(&worktree.key).or_default();
-            if !worktree.is_linked_worktree && parent.is_none() {
-                *parent = Some(index);
+        if let Some(tree) = workspace
+            .worktree
+            .as_ref()
+            .filter(|tree| grouped.contains(tree.key.as_str()))
+        {
+            let (parents, children) = members.entry(&tree.key).or_default();
+            if tree.is_linked_worktree {
+                children.push(index);
+            } else {
+                parents.push(index);
             }
-            members.push(index);
         }
     }
-    let mut emitted = HashSet::new();
     let mut entries = Vec::with_capacity(workspaces.len());
     for (index, workspace) in workspaces.iter().enumerate() {
-        let group = workspace.worktree.as_ref().and_then(|tree| {
-            let (parent, members) = groups.get(tree.key.as_str())?;
-            Some((tree.key.as_str(), (*parent)?, members))
-        });
-        if let Some((key, parent, members)) = group {
-            if emitted.insert(key) {
-                entries.push((parent, false));
-                entries.extend(members.iter().filter(|&&i| i != parent).map(|&i| (i, true)));
-            }
-        } else {
+        let Some(tree) = workspace.worktree.as_ref() else {
             entries.push((index, false));
+            continue;
+        };
+        if !grouped.contains(tree.key.as_str()) {
+            entries.push((index, false));
+            continue;
+        }
+        // Emitted once, at the group's earliest member; later members skip.
+        if let Some((parents, children)) = members.remove(tree.key.as_str()) {
+            entries.extend(parents.into_iter().map(|i| (i, false)));
+            entries.extend(children.into_iter().map(|i| (i, true)));
         }
     }
     entries
 }
 
+/// Visible rows as `(index, child, group)`: `group` names the repository a
+/// parent row folds, on every parent of a group.
 pub(super) fn visible_workspace_entries(
     workspaces: &[ClientShellWorkspace],
     collapsed: &HashSet<String>,
 ) -> Vec<(usize, bool, Option<String>)> {
-    let entries = workspace_entries(workspaces);
-    entries
-        .iter()
-        .enumerate()
-        .filter_map(|(position, &(index, child))| {
-            let key = workspaces[index].worktree.as_ref().map(|tree| &tree.key);
+    let grouped = grouped_keys(workspaces);
+    workspace_entries(workspaces)
+        .into_iter()
+        .filter_map(|(index, child)| {
+            let key = workspaces[index]
+                .worktree
+                .as_ref()
+                .map(|tree| tree.key.as_str())
+                .filter(|key| grouped.contains(key));
             if child && key.is_some_and(|key| collapsed.contains(key)) {
                 return None;
             }
-            let group = (!child && entries.get(position + 1).is_some_and(|entry| entry.1))
-                .then(|| key.cloned())
-                .flatten();
+            let group = key.filter(|_| !child).map(str::to_owned);
             Some((index, child, group))
         })
         .collect()
