@@ -26,8 +26,6 @@ pub enum Error {
     SettingsSave(#[source] std::sync::Arc<Error>),
     #[error("Invalid saved window geometry or too many saved windows")]
     InvalidWindowState,
-    #[error("ui.toast.delay_seconds must be between 0 and 3600")]
-    SoundDelay,
     #[error("Sound configuration exceeds 1 MiB")]
     SoundConfigSize,
     #[error("Unknown sidebar layout {0:?}")]
