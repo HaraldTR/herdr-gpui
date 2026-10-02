@@ -11,7 +11,7 @@ use crate::{
     method::Method,
     options::validate_options,
     protocol::{endpoint::*, *},
-    session::{Health, Pending, Session, run_connection},
+    session::{Health, Pending, Session, SurfaceEncodings, run_connection},
     transport::Stream,
 };
 use crossbeam_channel::bounded;
@@ -31,6 +31,8 @@ const WELCOME: &str = include_str!("../../herdr-protocol/tests/fixtures/endpoint
 
 #[path = "clipboard_tests.rs"]
 mod clipboard_tests;
+#[path = "surface_encoding_tests.rs"]
+mod surface_encoding_tests;
 
 fn send(stream: &mut Stream, message: ServerMessage) {
     write_message(stream, &message, MAX_GRAPHICS_FRAME_SIZE).unwrap();
@@ -56,7 +58,8 @@ fn handshake(stream: &mut Stream) {
     let hello: EndpointClientHello = serde_json::from_str(&data).unwrap();
     assert_eq!(hello.generation, 1);
     assert!(hello.surface_active);
-    assert!(!hello.surface_reuse && !hello.surface_delta && !hello.direct_graphics);
+    assert!(hello.surface_reuse && hello.surface_delta && hello.surface_scroll);
+    assert!(!hello.direct_graphics);
     send(
         stream,
         ServerMessage::EndpointControl {

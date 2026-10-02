@@ -37,6 +37,27 @@ fn supports_surface_interest(welcome: &EndpointServerWelcome) -> bool {
         && Method::ClientShellSurfaceSet.advertised_in(&welcome.methods)
 }
 
+/// Optional surface encodings this connection may receive. The hello requests
+/// all of them because it precedes the welcome, as upstream's own client does;
+/// only the ones the welcome advertises are accepted afterwards.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SurfaceEncodings {
+    pub(crate) reuse: bool,
+    pub(crate) delta: bool,
+    pub(crate) scroll: bool,
+}
+
+impl From<&EndpointServerWelcome> for SurfaceEncodings {
+    fn from(welcome: &EndpointServerWelcome) -> Self {
+        let advertised = |capability| welcome.capabilities.iter().any(|c| c == capability);
+        Self {
+            reuse: advertised(surface_reuse::CAPABILITY),
+            delta: advertised(surface_delta::CAPABILITY),
+            scroll: advertised(surface_scroll::CAPABILITY),
+        }
+    }
+}
+
 pub(crate) struct Health {
     pub(crate) received: Instant,
     pub(crate) ping: Option<Instant>,
@@ -70,6 +91,7 @@ pub(crate) struct Session {
     pub(crate) remote: bool,
     pub(crate) health: Option<Health>,
     pub(crate) welcome: Option<EndpointServerWelcome>,
+    pub(crate) encodings: SurfaceEncodings,
     pub(crate) snapshot: Option<Arc<ClientShellSnapshot>>,
     pub(crate) surface: Option<Arc<PaneSurfaceFrame>>,
     pub(crate) pending: Option<Pending>,
@@ -83,6 +105,7 @@ impl Session {
             remote,
             health: None,
             welcome: None,
+            encodings: SurfaceEncodings::default(),
             snapshot: None,
             surface: None,
             pending: None,
@@ -154,8 +177,9 @@ pub(crate) fn run_connection(
         endpoint_keybindings: false,
         mouse_capture: false,
         surface_active,
-        surface_reuse: false,
-        surface_delta: false,
+        surface_reuse: true,
+        surface_delta: true,
+        surface_scroll: true,
         snapshot_codecs: vec![SNAPSHOT_CODEC_V1.into()],
         surface_codecs: vec![SURFACE_CODEC_V1.into()],
         input_codecs: vec![INPUT_CODEC_V1.into()],
@@ -311,6 +335,7 @@ impl Session {
             remote,
             health,
             welcome,
+            encodings,
             snapshot,
             surface,
             pending,
@@ -350,8 +375,9 @@ impl Session {
                     ping: None,
                 });
             }
+            *encodings = SurfaceEncodings::from(&w);
             emit(ClientEvent::Connected(w.clone()))?;
-            tracing::info!("endpoint handshake accepted");
+            tracing::info!(?encodings, "endpoint handshake accepted");
             *welcome = Some(w);
             return Ok(());
         }
@@ -382,35 +408,53 @@ impl Session {
                     emit(ClientEvent::Surface(current.clone()))?;
                 }
             }
+            // Optional encodings expand into the same atomic surface and patch
+            // paths, so revision fencing and validation stay in one place.
+            ServerMessage::EndpointControl { kind, data }
+                if kind == surface_scroll::MESSAGE_KIND =>
+            {
+                if !encodings.scroll {
+                    return Err(Error::SurfaceEncodingNotNegotiated);
+                }
+                let scroll = surface_scroll::decode(&data)?;
+                let current = surface.as_mut().ok_or(Error::PatchBeforeBaseline)?;
+                Arc::make_mut(current).apply_scroll_patch(scroll)?;
+                emit_patched(snapshot.as_deref(), current, &mut emit)?;
+            }
+            ServerMessage::EndpointControl { kind, data }
+                if kind == surface_delta::MESSAGE_KIND =>
+            {
+                if !encodings.delta {
+                    return Err(Error::SurfaceEncodingNotNegotiated);
+                }
+                let delta = surface_delta::decode(&data)?;
+                let base = surface
+                    .as_deref()
+                    .ok_or(Error::EncodedSurfaceBeforeBaseline)?;
+                let next = delta.reconstruct(base)?;
+                accept_surface(next, snapshot.as_deref(), surface, &mut emit)?;
+            }
+            ServerMessage::EndpointControl { kind, data }
+                if kind == surface_reuse::MESSAGE_KIND =>
+            {
+                if !encodings.reuse {
+                    return Err(Error::SurfaceEncodingNotNegotiated);
+                }
+                let reuse = surface_reuse::decode(&data)?;
+                let base = surface
+                    .as_deref()
+                    .ok_or(Error::EncodedSurfaceBeforeBaseline)?;
+                let next = reuse.reconstruct(base)?;
+                accept_surface(next, snapshot.as_deref(), surface, &mut emit)?;
+            }
             ServerMessage::EndpointControl { .. } => {} // Unknown optional named controls are ignored.
             ServerMessage::PaneSurface(next) => {
-                let s = snapshot.as_ref().ok_or(Error::SurfaceBeforeSnapshot)?;
-                if next.boot_id != s.boot_id
-                    || surface
-                        .as_ref()
-                        .is_some_and(|old| next.surface_revision <= old.surface_revision)
-                {
-                    return Err(Error::SurfaceIdentity);
-                }
-                next.frame.validate()?;
-                if let Some(popup) = &next.popup {
-                    popup.frame.validate()?;
-                }
-                let next = Arc::new(next);
-                if next.projection_revision == s.revision {
-                    emit(ClientEvent::Surface(next.clone()))?;
-                }
-                *surface = Some(next);
+                accept_surface(next, snapshot.as_deref(), surface, &mut emit)?;
             }
             ServerMessage::PaneSurfacePatch(patch) => {
                 let current = surface.as_mut().ok_or(Error::PatchBeforeBaseline)?;
                 Arc::make_mut(current).apply_patch(patch)?;
-                if snapshot
-                    .as_ref()
-                    .is_some_and(|s| s.revision == current.projection_revision)
-                {
-                    emit(ClientEvent::Surface(current.clone()))?;
-                }
+                emit_patched(snapshot.as_deref(), current, &mut emit)?;
             }
             ServerMessage::ClientShellEndpointResponseChunk {
                 boot_id,
@@ -461,4 +505,43 @@ impl Session {
         }
         Ok(())
     }
+}
+
+/// Fences a complete surface on boot and revision, validates it, and retains it
+/// as the baseline whether or not its projection is current.
+fn accept_surface(
+    next: PaneSurfaceFrame,
+    snapshot: Option<&ClientShellSnapshot>,
+    surface: &mut Option<Arc<PaneSurfaceFrame>>,
+    emit: &mut impl FnMut(ClientEvent) -> Result<()>,
+) -> Result<()> {
+    let s = snapshot.ok_or(Error::SurfaceBeforeSnapshot)?;
+    if next.boot_id != s.boot_id
+        || surface
+            .as_ref()
+            .is_some_and(|old| next.surface_revision <= old.surface_revision)
+    {
+        return Err(Error::SurfaceIdentity);
+    }
+    next.frame.validate()?;
+    if let Some(popup) = &next.popup {
+        popup.frame.validate()?;
+    }
+    let next = Arc::new(next);
+    if next.projection_revision == s.revision {
+        emit(ClientEvent::Surface(next.clone()))?;
+    }
+    *surface = Some(next);
+    Ok(())
+}
+
+fn emit_patched(
+    snapshot: Option<&ClientShellSnapshot>,
+    current: &Arc<PaneSurfaceFrame>,
+    emit: &mut impl FnMut(ClientEvent) -> Result<()>,
+) -> Result<()> {
+    if snapshot.is_some_and(|s| s.revision == current.projection_revision) {
+        emit(ClientEvent::Surface(current.clone()))?;
+    }
+    Ok(())
 }
