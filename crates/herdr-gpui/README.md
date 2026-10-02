@@ -830,15 +830,24 @@ Agent sessions move in each agent's own format, so the full history resumes:
 | Claude Code | transcript into the new cwd's `~/.claude/projects` directory | `claude --resume <id>` |
 | Codex | rollout under `~/.codex/sessions` | `codex resume <id>` |
 | opencode | `opencode export`, then `opencode import` | `opencode --session <id>` |
-| pi, omp | session file into the new cwd's session directory | `pi --session <file>` |
+| pi, omp | session file into the new cwd's session directory | `pi --session <file>`, `omp --resume=<file>` |
+| GitHub Copilot CLI | session directory under `~/.copilot/session-state` (`$COPILOT_HOME`) | `copilot --resume=<id>` |
+| Letta Code | nothing: conversations stay on the Letta server, which the destination must be signed in to | `letta --conversation <id>` |
 
 The checkout path is rewritten inside each moved session. Model and permission
-flags from the original command line are kept. Initial prompts are dropped. An
-agent the destination lacks, or one with no reported session, is asked first to
-write a handoff note to `.herdr/teleport/handoff-N.md`. The note travels with the
-changes, even where `.herdr` is ignored. The same agent, or else the first
-installed of Claude Code, Codex, opencode and pi, then starts with that note.
-Anything nothing can continue is listed as skipped.
+flags from the original command line are kept for the agents above except Letta.
+Initial prompts are dropped. An agent the destination lacks, or one with no
+reported session, is asked first to write a handoff note to
+`.herdr/teleport/handoff-N.md`. The note travels with the changes, even where
+`.herdr` is ignored. The same agent, or else the first installed of Claude Code,
+Codex, opencode and pi, then starts with that note. Anything nothing can continue
+is listed as skipped.
+
+Herdr can resume Devin, Droid, Kimi, Mastra Code, Hermes, Qoder, Qwen Code, Kilo,
+Cursor Agent, Antigravity and Grok sessions too, but only on the host that
+stores them. Teleport does not yet know where these agents store their
+sessions, so a destination that has the agent runs its original command line again
+without a handoff note.
 
 Once the destination worktree, changes and tabs exist, the source workspace's
 programs stop: its tabs are replaced by one idle `teleported` shell tab, and the
