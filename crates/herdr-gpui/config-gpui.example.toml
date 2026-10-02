@@ -70,6 +70,14 @@ layout = "normal"
 # The position also places the note saying why New Worktree opened no dialog.
 # position = "bottom-center"
 
+# What a pane's terminal bell (BEL) does. Herdr has no bell setting of its own:
+# it forwards each bell to the focused client, as an outer terminal would see it.
+# [bell]
+# Bounce the Dock icon while the window is in the background.
+# attention = true
+# Play the system alert sound.
+# sound = false
+
 # To customize spacing too, REPLACE the top-level layout above with this table:
 # [layout]
 # mode = "normal"

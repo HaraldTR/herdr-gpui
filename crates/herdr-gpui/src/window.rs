@@ -51,6 +51,7 @@ use std::time::Duration;
 
 pub(crate) struct HerdrWindow {
     pub(crate) sound: crate::sound::Service,
+    pub(crate) bell: crate::bell::Bell,
     pub(crate) updater: updater::Updater,
     pub(crate) update_preview: Option<updater::State>,
     pub(crate) config: config::Config,
@@ -258,6 +259,7 @@ impl HerdrWindow {
         };
         let old_tab = focused_tab(&self.live);
         self.poll_endpoints(cx);
+        self.ring_bell(window);
         self.poll_integrations(cx);
         if self.settings.task.is_none() {
             let mut reload = false;
@@ -403,6 +405,7 @@ impl HerdrWindow {
         } = appearance;
         let mut this = Self {
             sound: crate::sound::Service::default(),
+            bell: crate::bell::Bell::default(),
             updater: updater::Updater::default(),
             update_preview: None,
             configured_terminal_size: config.terminal.size,

@@ -103,6 +103,7 @@ pub struct Config {
     pub notifications: NotificationConfig,
     pub(crate) notification_overrides: NotificationSettings,
     pub clipboard_toast: ClipboardToast,
+    pub bell: BellConfig,
     pub layout: Layout,
     pub keybindings: Keymap,
 }
@@ -198,6 +199,27 @@ pub enum ClipboardToastPosition {
     #[default]
     BottomCenter,
     BottomRight,
+}
+
+/// What a pane's terminal bell does. Herdr forwards each bell to its
+/// foreground client and leaves the reaction to it, as an outer terminal's
+/// own bell settings would, so this is the GUI's `[bell]` alone.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct BellConfig {
+    /// Ask for attention (bounce the Dock icon) while the window is inactive.
+    pub attention: bool,
+    /// Play the system alert sound.
+    pub sound: bool,
+}
+
+impl Default for BellConfig {
+    fn default() -> Self {
+        Self {
+            attention: true,
+            sound: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -621,6 +643,7 @@ impl Default for Config {
             notifications: NotificationConfig::default(),
             notification_overrides: NotificationSettings::default(),
             clipboard_toast: ClipboardToast::default(),
+            bell: BellConfig::default(),
             layout: Layout::default(),
             keybindings: Keymap::default(),
             sidebar: font(monospace, 12.0),
@@ -651,6 +674,7 @@ struct Settings {
     features: Features,
     notifications: NotificationSettings,
     clipboard_toast: ClipboardToastSettings,
+    bell: BellConfig,
     layout: Layout,
     keybindings: std::collections::BTreeMap<String, Binding>,
 }
@@ -1099,6 +1123,7 @@ impl Config {
             .notifications
             .resolve(NotificationConfig::default());
         config.clipboard_toast = settings.clipboard_toast.resolve(base.clipboard_toast);
+        config.bell = settings.bell;
         config.agent_status_text = base.agent_status_text.clone();
         if !settings.layout.sidebar_gap.is_finite()
             || !(0.0..=MAX_SIDEBAR_GAP).contains(&settings.layout.sidebar_gap)
@@ -1912,6 +1937,35 @@ mod tests {
                 PathBuf::from(expected)
             );
         }
+    }
+
+    #[test]
+    fn bell_defaults_to_attention_and_rejects_unknown_keys() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let gui = temp.0.join("config-gpui.toml");
+        let local = gui.with_extension("local.toml");
+        let daemon = temp.0.join("config.toml");
+        fs::write(&gui, "")?;
+        assert_eq!(
+            Config::load_path(&gui, &daemon)?.bell,
+            BellConfig {
+                attention: true,
+                sound: false
+            }
+        );
+        fs::write(&local, "[bell]\nsound = true\n")?;
+        assert_eq!(
+            Config::load_path(&gui, &daemon)?.bell,
+            BellConfig {
+                attention: true,
+                sound: true
+            }
+        );
+        fs::write(&local, "[bell]\nattention = false\n")?;
+        assert!(!Config::load_path(&gui, &daemon)?.bell.attention);
+        fs::write(&local, "[bell]\nvisual = true\n")?;
+        assert!(Config::load_path(&gui, &daemon).is_err());
+        Ok(())
     }
 
     /// The daemon's own answer is the starting point, each GUI key overrides

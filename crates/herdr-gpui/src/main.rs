@@ -9,6 +9,7 @@ mod app;
 mod app_badge;
 mod app_icon;
 mod avatars;
+mod bell;
 mod browser;
 mod caffeine;
 mod cli;
