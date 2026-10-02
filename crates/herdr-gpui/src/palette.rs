@@ -321,7 +321,7 @@ impl HerdrWindow {
                     })
                     .map(|info| Entry {
                         label: info.label.into(),
-                        detail: self.config.keybindings.primary(info.command).into(),
+                        detail: self.keymap().primary(info.command).into(),
                         badge: "",
                         action: Action::Native(info.command),
                         parent: None,

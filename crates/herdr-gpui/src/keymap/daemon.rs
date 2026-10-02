@@ -4,7 +4,7 @@
 //! unparseable entry, a `hyper` modifier, an action with no GUI command) is
 //! skipped rather than turned into a GUI config error.
 
-use crate::controls::Command;
+use crate::{Error, Result, controls::Command};
 use gpui::{Keystroke, Modifiers};
 
 /// Herdr's own fallback when `prefix` is missing or unparseable.
@@ -12,6 +12,10 @@ const DEFAULT_PREFIX: &str = "ctrl+b";
 
 /// A daemon `[keys]` entry can hold a list, but never an unbounded one.
 const MAX_ENTRIES: usize = 16;
+
+/// A host's published profile is daemon data. Herdr's normalized `[keys]` is a
+/// few kilobytes, so anything far larger is refused before it is parsed.
+const MAX_PROFILE_BYTES: usize = 64 * 1024;
 
 /// What a daemon action runs here.
 #[derive(Clone, Copy)]
@@ -143,6 +147,27 @@ impl Default for DaemonKeys {
 }
 
 impl DaemonKeys {
+    /// Reads a host's `server_keybindings_toml`: the normalized `[keys]`
+    /// profile Herdr publishes for `--remote-keybindings server`. It is read
+    /// with the same rules as the local `[keys]` table, so prefixes, actions,
+    /// and indexed keys mean the same thing on either side. Like Herdr, a
+    /// profile that is missing or unreadable as a whole is an error, which
+    /// leaves the caller on its local keybindings.
+    pub(crate) fn from_profile(profile: Option<&str>) -> Result<Self> {
+        let profile = profile.ok_or(Error::ServerKeybindingsMissing)?;
+        if profile.len() > MAX_PROFILE_BYTES {
+            return Err(Error::ServerKeybindingsTooLarge {
+                max: MAX_PROFILE_BYTES,
+            });
+        }
+        let table: toml::Table = profile.parse().map_err(Error::ServerKeybindingsParse)?;
+        let keys = table
+            .get("keys")
+            .and_then(toml::Value::as_table)
+            .ok_or(Error::ServerKeybindingsNoKeys)?;
+        Ok(Self::from_table(Some(keys)))
+    }
+
     /// Reads the daemon config's `[keys]` table; each action it leaves out,
     /// or gives a value of the wrong type, keeps Herdr's default.
     pub(crate) fn from_table(keys: Option<&toml::Table>) -> Self {
@@ -398,6 +423,58 @@ mod tests {
         );
         // Actions the file leaves alone keep Herdr's defaults.
         assert_eq!(bound(&keys, Command::Tab), [Trigger::Prefixed(parsed("c"))]);
+    }
+
+    #[test]
+    fn a_server_profile_reads_like_the_local_table() {
+        let profile = r#"
+            [keys]
+            prefix = "ctrl+a"
+            split_vertical = ["prefix+v", "prefix+\\"]
+            switch_tab = "alt+1..9"
+            "#;
+        let keys = DaemonKeys::from_profile(Some(profile)).unwrap();
+        assert_eq!(keys, self::keys(profile));
+        assert_eq!(keys.prefix, parsed("ctrl-a"));
+        assert_eq!(
+            bound(&keys, Command::TabNumber(2)),
+            [Trigger::Direct(parsed("alt-2"))]
+        );
+        // An empty published table is Herdr's defaults, not a failure.
+        assert_eq!(
+            DaemonKeys::from_profile(Some("[keys]\n")).unwrap(),
+            DaemonKeys::default()
+        );
+    }
+
+    #[test]
+    fn an_unusable_server_profile_is_an_error() {
+        assert!(matches!(
+            DaemonKeys::from_profile(None),
+            Err(Error::ServerKeybindingsMissing)
+        ));
+        assert!(matches!(
+            DaemonKeys::from_profile(Some("[keys\n")),
+            Err(Error::ServerKeybindingsParse(_))
+        ));
+        for profile in ["", "prefix = 'ctrl+a'", "keys = 'ctrl+a'"] {
+            assert!(
+                matches!(
+                    DaemonKeys::from_profile(Some(profile)),
+                    Err(Error::ServerKeybindingsNoKeys)
+                ),
+                "{profile:?}"
+            );
+        }
+        let oversized = format!("[keys]\n{}", "# pad\n".repeat(MAX_PROFILE_BYTES / 6 + 1));
+        assert!(matches!(
+            DaemonKeys::from_profile(Some(&oversized)),
+            Err(Error::ServerKeybindingsTooLarge {
+                max: MAX_PROFILE_BYTES
+            })
+        ));
+        let error = DaemonKeys::from_profile(Some("[keys\n")).unwrap_err();
+        assert!(std::error::Error::source(&error).is_some());
     }
 
     #[test]

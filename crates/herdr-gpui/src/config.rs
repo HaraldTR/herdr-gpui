@@ -13,6 +13,7 @@ pub(crate) mod watch;
 use gpui::{Font, FontFallbacks};
 use serde::Deserialize;
 use std::{
+    collections::BTreeMap,
     env, fs,
     io::{ErrorKind, Write},
     ops::RangeInclusive,
@@ -105,6 +106,45 @@ pub struct Config {
     pub clipboard_toast: ClipboardToast,
     pub layout: Layout,
     pub keybindings: Keymap,
+    /// The `[keybindings]` table `keybindings` was built from, kept so a
+    /// device's server keys can be layered under the same GUI overrides.
+    pub(crate) keybinding_overrides: BTreeMap<String, Binding>,
+    /// Per saved device, by catalog profile ID.
+    pub(crate) devices: BTreeMap<String, DeviceSettings>,
+}
+
+/// A device list larger than any real catalog is a config mistake.
+const MAX_DEVICES: usize = 256;
+
+/// Whose `[keys]` a saved device answers to, as `herdr --remote-keybindings`
+/// chooses for the TUI. Local is upstream's default: muscle memory stays the
+/// same on every host. Only keybindings follow the server; themes, sidebar,
+/// and toasts stay local either way.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum KeybindingSource {
+    #[default]
+    Local,
+    /// The host's published `server_keybindings_toml`.
+    Server,
+}
+
+/// One `[devices.<profile-id>]` table.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct DeviceSettings {
+    pub(crate) keybindings: KeybindingSource,
+}
+
+impl Config {
+    /// Whose keybindings the endpoint uses. Local and explicit sockets are not
+    /// saved devices, so they always use the local ones.
+    pub(crate) fn keybinding_source(&self, endpoint_id: &str) -> KeybindingSource {
+        crate::endpoint::saved_profile_id(endpoint_id)
+            .and_then(|profile| self.devices.get(profile))
+            .map(|device| device.keybindings)
+            .unwrap_or_default()
+    }
 }
 
 /// Where a clicked terminal link opens. Alt-click (Option on macOS) opens it
@@ -623,6 +663,8 @@ impl Default for Config {
             clipboard_toast: ClipboardToast::default(),
             layout: Layout::default(),
             keybindings: Keymap::default(),
+            keybinding_overrides: BTreeMap::new(),
+            devices: BTreeMap::new(),
             sidebar: font(monospace, 12.0),
             // Tabs are terminal chrome, so they read in the monospace face the
             // sidebar and terminal use, as they do in the reference UI.
@@ -652,7 +694,8 @@ struct Settings {
     notifications: NotificationSettings,
     clipboard_toast: ClipboardToastSettings,
     layout: Layout,
-    keybindings: std::collections::BTreeMap<String, Binding>,
+    keybindings: BTreeMap<String, Binding>,
+    devices: BTreeMap<String, DeviceSettings>,
 }
 
 /// Each key overrides the daemon's answer on its own, so naming one of them
@@ -768,7 +811,7 @@ pub struct AgentStatusText {
     /// Whether `rows` names the token: agents without their own entry.
     rows: bool,
     /// Per canonical agent id, whether its `rows_by_agent` entry names it.
-    by_agent: std::collections::BTreeMap<String, bool>,
+    by_agent: BTreeMap<String, bool>,
 }
 
 impl AgentStatusText {
@@ -1107,6 +1150,18 @@ impl Config {
         }
         config.layout = settings.layout;
         config.keybindings = Keymap::with_overrides(&settings.keybindings, &base.keys)?;
+        config.keybinding_overrides = settings.keybindings;
+        if settings.devices.len() > MAX_DEVICES {
+            return Err(Error::TooManyDevices(MAX_DEVICES));
+        }
+        if let Some(id) = settings
+            .devices
+            .keys()
+            .find(|id| !herdr_client::valid_profile_id(id))
+        {
+            return Err(Error::InvalidDeviceId(id.clone()));
+        }
+        config.devices = settings.devices;
         if let Some(theme) = settings.theme {
             if theme.trim().is_empty() {
                 return Err(Error::EmptyTheme);
@@ -1319,6 +1374,69 @@ impl Config {
                 *value.decor_mut() = previous.decor().clone();
             }
             document["contrast"] = toml_edit::Item::Value(value);
+            write_config(path, &document.to_string())
+        })();
+        result.map_err(|error| error.at_path(path))
+    }
+
+    /// Persist one device's keybinding source, keeping the rest of the local
+    /// file. Local is the default, so choosing it removes the entry.
+    pub(crate) fn save_device_keybindings(profile: &str, source: KeybindingSource) -> Result<()> {
+        let (_lock, local) = Self::prepare_files(&Self::path()?)?;
+        Self::save_device_keybindings_path(profile, source, &local)
+    }
+
+    fn save_device_keybindings_path(
+        profile: &str,
+        source: KeybindingSource,
+        path: &Path,
+    ) -> Result<()> {
+        if !herdr_client::valid_profile_id(profile) {
+            return Err(Error::InvalidDeviceId(profile.to_owned()));
+        }
+        let result = (|| -> Result<()> {
+            let text = match fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == ErrorKind::NotFound => LOCAL_CONFIG.into(),
+                Err(error) => return Err(error.into()),
+            };
+            let mut document = text.parse::<toml_edit::DocumentMut>()?;
+            match source {
+                KeybindingSource::Server => {
+                    let mut devices = toml_edit::Table::new();
+                    devices.set_implicit(true);
+                    let device = document
+                        .entry("devices")
+                        .or_insert(toml_edit::Item::Table(devices))
+                        .as_table_like_mut()
+                        .ok_or(Error::InvalidDevicesTable)?
+                        .entry(profile)
+                        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+                        .as_table_like_mut()
+                        .ok_or(Error::InvalidDevicesTable)?;
+                    device.insert("keybindings", toml_edit::value("server"));
+                }
+                KeybindingSource::Local => {
+                    let Some(devices) = document
+                        .get_mut("devices")
+                        .and_then(toml_edit::Item::as_table_like_mut)
+                    else {
+                        return Ok(());
+                    };
+                    if let Some(device) = devices
+                        .get_mut(profile)
+                        .and_then(toml_edit::Item::as_table_like_mut)
+                    {
+                        device.remove("keybindings");
+                        if device.is_empty() {
+                            devices.remove(profile);
+                        }
+                    }
+                    if devices.is_empty() {
+                        document.remove("devices");
+                    }
+                }
+            }
             write_config(path, &document.to_string())
         })();
         result.map_err(|error| error.at_path(path))
@@ -3023,6 +3141,120 @@ mod tests {
             assert!(Config::parse(text).is_err(), "accepted {text:?}");
         }
         assert!(Config::parse("[tabs]\nsize = 8\n[ui]\nsize = 48").is_ok());
+    }
+
+    #[test]
+    fn devices_opt_into_server_keybindings_one_by_one() -> anyhow::Result<()> {
+        const ID: &str = "0123456789abcdef0123456789abcdef";
+        const OTHER: &str = "fedcba9876543210fedcba9876543210";
+        let config = Config::parse(&format!(
+            "[keybindings]\nnew_tab = 'cmd-y'\n[devices.{ID}]\nkeybindings = 'server'\n[devices.{OTHER}]\nkeybindings = 'local'"
+        ))?;
+        assert_eq!(
+            config.keybinding_source(&format!("ssh:{ID}")),
+            KeybindingSource::Server
+        );
+        assert_eq!(
+            config.keybinding_source(&format!("ssh:{OTHER}")),
+            KeybindingSource::Local
+        );
+        // Local, explicit sockets, and unlisted devices keep local keys, and
+        // a bare profile ID is not an endpoint ID.
+        for endpoint in [
+            "local",
+            "socket",
+            ID,
+            "ssh:00000000000000000000000000000000",
+        ] {
+            assert_eq!(
+                config.keybinding_source(endpoint),
+                KeybindingSource::Local,
+                "{endpoint}"
+            );
+        }
+        assert_eq!(
+            Config::parse("")?.keybinding_source(&format!("ssh:{ID}")),
+            KeybindingSource::Local
+        );
+        // The overrides stay available to layer over a server profile.
+        assert_eq!(
+            config.keybinding_overrides.get("new_tab"),
+            Some(&Binding::One("cmd-y".into()))
+        );
+        assert!(matches!(
+            Config::parse("[devices.box]\nkeybindings = 'server'"),
+            Err(Error::InvalidDeviceId(id)) if id == "box"
+        ));
+        for text in [
+            format!("[devices.{ID}]\nkeybindings = 'remote'"),
+            format!("[devices.{ID}]\nkeybindings = true"),
+            format!("[devices.{ID}]\ntheme = 'Nord'"),
+            "devices = 'server'".into(),
+        ] {
+            assert!(Config::parse(&text).is_err(), "accepted {text:?}");
+        }
+        let many: String = (0..=MAX_DEVICES)
+            .map(|index| format!("[devices.{index:032x}]\n"))
+            .collect();
+        assert!(matches!(
+            Config::parse(&many),
+            Err(Error::TooManyDevices(MAX_DEVICES))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn device_keybindings_save_in_place_and_local_removes_them() -> anyhow::Result<()> {
+        const ID: &str = "0123456789abcdef0123456789abcdef";
+        let endpoint = format!("ssh:{ID}");
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config.toml");
+        let original = "theme = 'Nord' # keep\n[usage]\nshow = false\n";
+        fs::write(&path, original)?;
+        Config::save_device_keybindings_path(ID, KeybindingSource::Server, &path)?;
+        let saved = fs::read_to_string(&path)?;
+        assert!(saved.starts_with(original), "{saved}");
+        assert!(
+            saved.contains(&format!("[devices.{ID}]\nkeybindings = \"server\"")),
+            "{saved}"
+        );
+        let config = Config::parse(&saved)?;
+        assert_eq!(
+            config.keybinding_source(&endpoint),
+            KeybindingSource::Server
+        );
+        assert!(!config.usage.show);
+        // Saving it again is a no-op, and Local restores the original file.
+        Config::save_device_keybindings_path(ID, KeybindingSource::Server, &path)?;
+        assert_eq!(fs::read_to_string(&path)?, saved);
+        Config::save_device_keybindings_path(ID, KeybindingSource::Local, &path)?;
+        assert_eq!(fs::read_to_string(&path)?, original);
+        Config::save_device_keybindings_path(ID, KeybindingSource::Local, &path)?;
+        assert_eq!(fs::read_to_string(&path)?, original);
+        // Another device's entry, and unknown keys, survive.
+        let shared = format!(
+            "[devices.{ID}]\nkeybindings = 'server'\n[devices.fedcba9876543210fedcba9876543210]\nkeybindings = 'server'\n"
+        );
+        fs::write(&path, &shared)?;
+        Config::save_device_keybindings_path(ID, KeybindingSource::Local, &path)?;
+        let kept = fs::read_to_string(&path)?;
+        assert!(!kept.contains(ID), "{kept}");
+        assert!(kept.contains("fedcba9876543210fedcba9876543210"), "{kept}");
+        // An ID that is not a catalog profile never reaches the file.
+        assert!(matches!(
+            Config::save_device_keybindings_path("../x", KeybindingSource::Server, &path),
+            Err(Error::InvalidDeviceId(_))
+        ));
+        assert_eq!(fs::read_to_string(&path)?, kept);
+        fs::remove_file(&path)?;
+        Config::save_device_keybindings_path(ID, KeybindingSource::Server, &path)?;
+        let created = fs::read_to_string(&path)?;
+        assert!(created.starts_with(LOCAL_CONFIG), "{created}");
+        assert_eq!(
+            Config::parse(&created)?.keybinding_source(&endpoint),
+            KeybindingSource::Server
+        );
+        Ok(())
     }
 
     #[test]

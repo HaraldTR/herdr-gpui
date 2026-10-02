@@ -548,7 +548,7 @@ impl Render for HerdrWindow {
                     .children(self.render_usage(cx))
                     .when_some(
                         self.prefix_armed
-                            .then(|| self.config.keybindings.prefix_label())
+                            .then(|| self.keymap().prefix_label())
                             .flatten(),
                         |bar, prefix| bar.child(
                             div()

@@ -291,7 +291,7 @@ impl HerdrWindow {
             ("APPLICATION", vec![(vec!["cmd-v"], "Paste into terminal")]),
         ];
         for info in COMMANDS {
-            let keys: Vec<&str> = self.config.keybindings.shortcuts(info.command).collect();
+            let keys: Vec<&str> = self.keymap().shortcuts(info.command).collect();
             if keys.is_empty() {
                 continue;
             }
