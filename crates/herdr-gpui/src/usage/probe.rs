@@ -605,18 +605,8 @@ enum Place {
 
 /// Agents install into per-user directories an app launched from the Dock
 /// does not have on its PATH.
-fn local_path() -> String {
-    let home = crate::config::home()
-        .map(|home| home.display().to_string())
-        .unwrap_or_default();
-    let mut path = format!(
-        "{home}/.local/bin:{home}/.cargo/bin:{home}/.bun/bin:{home}/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin"
-    );
-    if let Some(inherited) = std::env::var_os("PATH") {
-        path.push(':');
-        path.push_str(&inherited.to_string_lossy());
-    }
-    path
+fn local_path() -> std::ffi::OsString {
+    crate::local_path::local_path()
 }
 
 fn read_local(path: &std::path::Path) -> Option<Zeroizing<Vec<u8>>> {
