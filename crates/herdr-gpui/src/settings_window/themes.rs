@@ -1166,12 +1166,12 @@ impl SettingsWindow {
                         })),
                     )
                     .child(
-                        button(
+                        self.control_switch(
                             "theme-contrast",
-                            "High contrast".into(),
+                            "High contrast",
                             self.config.contrast == Contrast::High,
+                            !self.busy(),
                         )
-                        .opacity(if self.busy() { 0.5 } else { 1. })
                         .on_click(cx.listener(|this, _, _, cx| {
                             if this.busy() {
                                 return;

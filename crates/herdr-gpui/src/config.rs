@@ -8,6 +8,7 @@ use crate::{
     error::ThemeParseError,
     keymap::{Binding, DaemonKeys, Keymap},
 };
+pub(crate) mod preferences;
 pub(crate) mod watch;
 use gpui::{Font, FontFallbacks};
 use serde::Deserialize;

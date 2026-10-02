@@ -958,8 +958,7 @@ impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = match self.section {
             Section::Appearance => self.render_appearance(window, cx),
-            Section::Integrations => self.source.update(cx, |source, cx| source.render_integrations(cx))
-                .unwrap_or_else(|_| div().child("Open a session window to manage agent integrations. Local preferences remain available.")),
+            Section::Integrations => self.render_integration_controls(cx),
             _ => self.render_controls(window, cx),
         };
         let navigation = self.navigation(cx);

@@ -1,5 +1,6 @@
 //! Prepared controls for the standalone window; persistence belongs to its serial save path.
 mod fonts;
+mod preferences;
 
 use super::{Section, SettingsWindow};
 use crate::{
@@ -19,8 +20,12 @@ const FACES: [(FontFace, &str); 4] = [
 ];
 
 pub(super) struct Controls {
+    #[cfg(test)]
+    preference_io: Option<preferences::PreferenceIo>,
     sidebar_preview: crate::sidebar::preview::Preview,
     search: Entity<SearchInput>,
+    integration_search: Entity<SearchInput>,
+    _integration_changed: Subscription,
     picker: Option<FontTarget>,
     active_face: FontFace,
     selected: usize,
@@ -66,7 +71,19 @@ impl Controls {
             this.controls.scroll.scroll_to_item(0, ScrollStrategy::Top);
             cx.notify();
         });
+        let integration_search = cx.new(SearchInput::new);
+        integration_search.update(cx, |input, cx| {
+            input.set_placeholder("Search integrations by name or ID...", cx)
+        });
+        let integration_changed = cx.subscribe(&integration_search, |this, _, _: &Changed, cx| {
+            this.body_scroll.set_offset(Point::default());
+            cx.notify();
+        });
         Self {
+            #[cfg(test)]
+            preference_io: None,
+            integration_search,
+            _integration_changed: integration_changed,
             sidebar_preview: Default::default(),
             search,
             picker: None,
@@ -162,6 +179,9 @@ impl SettingsWindow {
     }
 
     pub(super) fn refresh_control_appearance(&mut self, cx: &mut Context<Self>) {
+        self.controls.integration_search.update(cx, |input, cx| {
+            input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
+        });
         self.controls.search.update(cx, |input, cx| {
             input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
         });
@@ -337,7 +357,7 @@ impl SettingsWindow {
     fn control_choice(
         &self,
         id: impl Into<SharedString>,
-        label: impl Into<SharedString>,
+        label: impl IntoElement,
         selected: bool,
         enabled: bool,
     ) -> Stateful<Div> {
@@ -363,7 +383,7 @@ impl SettingsWindow {
                     .hover(|style| style.bg(rgb(self.theme.active)))
             })
             .when(!enabled, |item| item.opacity(0.5))
-            .child(label.into())
+            .child(label)
     }
 
     fn controls_shared_ready(&self) -> bool {
@@ -493,25 +513,17 @@ impl SettingsWindow {
 
     fn render_sound_controls(&self, cx: &mut Context<Self>) -> Div {
         let ready = self.controls_shared_ready();
-        let mut choices = div().flex().gap(px(8.));
-        for (label, enabled) in [("On", true), ("Off", false)] {
-            choices =
-                choices.child(
-                    self.control_choice(
-                        format!("settings-sound-{label}"),
-                        label,
-                        self.shared
-                            .as_ref()
-                            .is_some_and(|shared| shared.sound_enabled == enabled),
-                        ready,
-                    )
-                    .when(ready, |button| {
-                        button.on_click(cx.listener(move |this, _, _, cx| {
-                            this.save_shared(Edit::Sound(enabled), cx)
-                        }))
-                    }),
-                );
-        }
+        let enabled = self
+            .shared
+            .as_ref()
+            .is_some_and(|shared| shared.sound_enabled);
+        let choices = self
+            .control_switch("settings-sound", "Play agent sounds", enabled, ready)
+            .when(ready, |button| {
+                button.on_click(cx.listener(move |this, _, _, cx| {
+                    this.save_shared(Edit::Sound(!enabled), cx);
+                }))
+            });
         let source_alive = self.source.upgrade().is_some();
         self.control_card("Agent sounds").child(choices)
             .child(self.control_note("Uses shared sound paths and per-agent overrides. Missing custom sounds fall back to bundled sounds."))
@@ -546,33 +558,48 @@ impl SettingsWindow {
                 .as_ref()
                 .is_some_and(|shared| shared.toast_delivery == mode);
             delivery = delivery.child(
-                self.control_choice(format!("settings-delivery-{label}"), label, selected, ready)
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .child(
-                        div()
-                            .size(px(14.))
-                            .rounded_full()
-                            .border_1()
-                            .border_color(rgb(self.theme.muted))
-                            .when(selected, |radio| radio.bg(crate::menu::accent(&self.theme))),
+                self.control_choice(
+                    format!("settings-delivery-{label}"),
+                    div()
+                        .debug_selector(move || format!("delivery-label-{label}"))
+                        .w(px(self.config.ui.size * 5.))
+                        .flex_none()
+                        .child(label),
+                    selected,
+                    ready,
+                )
+                .debug_selector(move || format!("settings-delivery-{label}"))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .child(
+                    div()
+                        .debug_selector(move || format!("delivery-radio-{label}"))
+                        .size(px(14.))
+                        .flex_none()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(rgb(self.theme.muted))
+                        .when(selected, |radio| radio.bg(crate::menu::accent(&self.theme))),
+                )
+                .child(
+                    self.control_note(note)
+                        .flex_1()
+                        .debug_selector(move || format!("delivery-note-{label}")),
+                )
+                .when(ready, |button| {
+                    button.on_click(
+                        cx.listener(move |this, _, _, cx| this.save_shared(Edit::Toasts(mode), cx)),
                     )
-                    .child(self.control_note(note))
-                    .when(ready, |button| {
-                        button.on_click(cx.listener(move |this, _, _, cx| {
-                            this.save_shared(Edit::Toasts(mode), cx)
-                        }))
-                    }),
+                }),
             );
         }
-        let notifications = self.config.notifications;
-        div().flex().flex_col().gap(px(24.)).child(delivery)
-            .child(self.control_card("Native notification overrides")
-                .child(self.control_row("Effective in-app notifications", if notifications.enabled { "On" } else { "Off" }))
-                .child(self.control_row("Delay", format!("{} seconds", notifications.delay_seconds)))
-                .child(self.control_row("Position", format!("{:?}", notifications.position)))
-                .child(self.control_note("Local [notifications] overrides take precedence over shared delivery settings.")))
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(24.))
+            .child(delivery)
+            .child(self.native_notification_controls(cx))
     }
 
     fn save_skill(&mut self, choice: Choice, cx: &mut Context<Self>) {
@@ -638,37 +665,34 @@ impl SettingsWindow {
 
     fn render_general_controls(&self, cx: &mut Context<Self>) -> Div {
         let ready = !self.busy();
-        let general =
-            self.control_card("Interface")
-                .child(
-                    self.control_choice(
-                        "settings-usage",
-                        format!(
-                            "Show usage: {}",
-                            if self.config.usage.show { "On" } else { "Off" }
-                        ),
-                        self.config.usage.show,
-                        ready,
-                    )
-                    .when(ready, |button| {
-                        button.on_click(cx.listener(|this, _, _, cx| {
-                            let show = !this.config.usage.show;
-                            this.save_native(move || Config::save_usage_visibility(show), cx);
-                        }))
-                    }),
+        let general = self
+            .control_card("Interface")
+            .child(
+                self.control_switch(
+                    "settings-usage",
+                    "Show usage",
+                    self.config.usage.show,
+                    ready,
                 )
-                .child(self.control_row(
-                    "Confirm tab close",
-                    self.config.confirm_close_tab.to_string(),
-                ))
-                .child(self.control_note(
-                    "Tab-close confirmation is configured in the local override file.",
-                ));
+                .when(ready, |button| {
+                    button.on_click(cx.listener(|this, _, _, cx| {
+                        let show = !this.config.usage.show;
+                        this.save_native(move || Config::save_usage_visibility(show), cx);
+                    }))
+                }),
+            )
+            .child(self.preference_switch(
+                "settings-confirm-close",
+                "Confirm tab close",
+                self.config.confirm_close_tab,
+                crate::config::preferences::Preference::ConfirmClose(
+                    !self.config.confirm_close_tab,
+                ),
+                cx,
+            ));
         div().flex().flex_col().gap(px(24.)).child(general)
             .child(self.render_skill_controls(cx))
-            .child(self.control_card("Clipboard feedback")
-                .child(self.control_row("Copied notification", if self.config.clipboard_toast.enabled { "On" } else { "Off" }))
-                .child(self.control_row("Position", format!("{:?}", self.config.clipboard_toast.position))))
+            .child(self.clipboard_controls(cx))
             .child(self.control_card("Configuration")
                 .child(self.control_note("GUI local overrides"))
                 .child(div().min_w_0().child(self.controls.local_path.clone()))
@@ -779,12 +803,9 @@ impl SettingsWindow {
             })
             .child(chooser)
             .child(
-                self.control_choice(
+                self.control_switch(
                     "settings-show-agents",
-                    format!(
-                        "Show agents: {}",
-                        if self.config.show_agents { "On" } else { "Off" }
-                    ),
+                    "Show agents",
                     self.config.show_agents,
                     !self.busy(),
                 )
@@ -796,10 +817,7 @@ impl SettingsWindow {
                     }))
                 }),
             )
-            .child(self.control_row(
-                "Sidebar gap",
-                format!("{} px", self.config.layout.sidebar_gap),
-            ))
+            .child(self.sidebar_gap_control(cx))
     }
 }
 
@@ -809,20 +827,91 @@ mod tests {
     use super::*;
     use core::prelude::v1::test;
 
-    fn skill_fixture(window: &mut Window, cx: &mut Context<SettingsWindow>) -> SettingsWindow {
+    pub(super) fn skill_fixture(
+        window: &mut Window,
+        cx: &mut Context<SettingsWindow>,
+    ) -> SettingsWindow {
         let source = cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx));
         let mut view = SettingsWindow::new(source.downgrade(), cx);
         view.section = Section::General;
         view
     }
 
-    fn skill_load() -> crate::Result<super::super::Loaded> {
+    pub(super) fn skill_load() -> crate::Result<super::super::Loaded> {
         Ok(super::super::Loaded {
             config: Config::default(),
             theme: Default::default(),
             shared: None,
             error: None,
         })
+    }
+
+    #[gpui::test]
+    fn notification_delivery_columns_align_without_overflow(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(skill_fixture);
+        for font_size in [12., 24., 48.] {
+            for width in [680., 960.] {
+                cx.simulate_resize(size(px(width), px(2200.)));
+                view.update(cx, |view, cx| {
+                    view.section = Section::Notifications;
+                    view.config.ui.size = font_size;
+                    cx.notify();
+                });
+                cx.update(|window, cx| {
+                    crate::sidebar::layout_tests::full_draw(window, cx).clear(cx)
+                });
+                let body = cx.debug_bounds("settings-body").unwrap();
+                let mut columns = None;
+                let mut previous_bottom = body.top();
+                for selectors in [
+                    [
+                        "settings-delivery-Off",
+                        "delivery-label-Off",
+                        "delivery-radio-Off",
+                        "delivery-note-Off",
+                    ],
+                    [
+                        "settings-delivery-Herdr",
+                        "delivery-label-Herdr",
+                        "delivery-radio-Herdr",
+                        "delivery-note-Herdr",
+                    ],
+                    [
+                        "settings-delivery-Terminal",
+                        "delivery-label-Terminal",
+                        "delivery-radio-Terminal",
+                        "delivery-note-Terminal",
+                    ],
+                    [
+                        "settings-delivery-System",
+                        "delivery-label-System",
+                        "delivery-radio-System",
+                        "delivery-note-System",
+                    ],
+                ] {
+                    let [row, name, radio, note] =
+                        selectors.map(|selector| cx.debug_bounds(selector).unwrap());
+                    let current = (radio.left(), note.left());
+                    assert_eq!(*columns.get_or_insert(current), current);
+                    assert_eq!(name.size.width, px(font_size * 5.));
+                    assert_eq!(radio.size, size(px(14.), px(14.)));
+                    assert_eq!(radio.left() - name.right(), px(12.));
+                    assert_eq!(note.left() - radio.right(), px(12.));
+                    assert!(note.size.width > px(0.));
+                    assert!(row.left() >= body.left() && row.right() <= body.right());
+                    assert!(row.top() >= previous_bottom);
+                    for child in [name, radio, note] {
+                        assert!(child.left() >= row.left() && child.right() <= row.right());
+                        assert!(child.top() >= row.top() && child.bottom() <= row.bottom());
+                    }
+                    previous_bottom = row.bottom();
+                }
+                if width == 680. {
+                    let note = cx.debug_bounds("delivery-note-System").unwrap();
+                    assert!(note.size.height > px(18.), "narrow descriptions must wrap");
+                }
+            }
+        }
     }
 
     #[gpui::test]

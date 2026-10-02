@@ -313,6 +313,29 @@ Accepted saves survive closing Settings. Family and size edits preserve configur
 fallbacks and unrelated settings in `config-gpui.local.toml`. General retains
 browser-skill installation/removal and configuration paths.
 
+General provides switches for **Show usage**, **Confirm tab close**, and the
+clipboard copied notification, plus all six clipboard positions. Notifications
+provides a native in-app switch, a bounded delay stepper (0-3600 seconds), and
+four corner choices. Each notification and clipboard field has a **Follow shared**
+action that removes only its local override; effective values are shown after
+reload. Appearance provides switches for **Show agents** and **High contrast**,
+and a sidebar-gap stepper (0-64 logical pixels). Sound enablement uses a switch;
+custom sound paths and per-agent sound policies remain shared-file settings, not
+read-only preference rows in this window. Configuration paths and installation
+status are diagnostic facts rather than editable preference values.
+
+These native edits save automatically through the serial background save path,
+preserving unrelated TOML keys/comments and pending theme/layout selections.
+Controls are disabled while a save or reload is in progress. Shared settings
+retain their platform restrictions; Windows can edit native overrides but not
+shared Herdr settings. Terminal and OS notification delivery remain unsupported
+by this GUI.
+
+Integrations is sorted case-insensitively by name, with the original integration
+ID breaking ties. Its search field filters names and IDs without contacting the
+daemon. Install actions still use the original ID and selected source host;
+filtering never changes the action destination.
+
 Theme, indicator style, sound, and toast delivery are **shared with the local
 Herdr TUI**. They read `HERDR_CONFIG_PATH`, otherwise
 `$XDG_CONFIG_HOME/herdr/config.toml` or `~/.config/herdr/config.toml`. The GUI uses
@@ -393,7 +416,7 @@ previews remain available regardless of delivery settings.
 
 The sidebar button at the left of the titlebar hides or shows the sidebar.
 It stays available when the sidebar is hidden; the existing View menu command and shortcut still work.
-In **Settings > Appearance**, click **Show usage** to turn the bottom quota display on or off.
+In **Settings > General**, toggle **Show usage** to turn the bottom quota display on or off.
 The choice is saved to `config-gpui.local.toml` and follows the existing `[usage] show` setting.
 
 The app's own colored marks and labels (status dots and words, pull request

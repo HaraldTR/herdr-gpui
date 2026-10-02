@@ -35,6 +35,12 @@ struct Integration {
     state: State,
 }
 
+impl Integration {
+    fn matches(&self, query: &str) -> bool {
+        self.label.to_lowercase().contains(query) || self.target.to_lowercase().contains(query)
+    }
+}
+
 fn text(value: &Value, limit: usize) -> Result<&str, ResponseError> {
     let text = value.as_str().ok_or(ResponseError::Invalid)?;
     if text.len() > limit {
@@ -88,6 +94,7 @@ fn parse_list(response: &Value) -> Result<Vec<Integration>, ResponseError> {
             },
         });
     }
+    integrations.sort_by_cached_key(|row| (row.label.to_lowercase(), row.target.clone()));
     Ok(integrations)
 }
 
@@ -305,6 +312,11 @@ impl HerdrWindow {
     }
 
     pub(crate) fn render_integrations(&self, cx: &mut Context<Self>) -> Div {
+        self.render_filtered_integrations("", cx)
+    }
+
+    pub(crate) fn render_filtered_integrations(&self, query: &str, cx: &mut Context<Self>) -> Div {
+        let query = query.trim().to_lowercase();
         let state = &self.integrations;
         let theme = &self.theme;
         let current = state
@@ -358,7 +370,15 @@ impl HerdrWindow {
                         .child("No integrations reported by this daemon."),
                 );
             }
-            for row in &state.rows {
+            let rows: Vec<_> = state
+                .rows
+                .iter()
+                .filter(|row| row.matches(&query))
+                .collect();
+            if rows.is_empty() && !state.rows.is_empty() {
+                body = body.child(div().mt(px(12.)).child("No matching integrations."));
+            }
+            for row in rows {
                 let status = match row.state {
                     State::NotInstalled => "Not installed",
                     State::Current => "Current",
@@ -432,6 +452,32 @@ mod tests {
             "target":"antigravity_cli","label":"Antigravity CLI","command":"antigravity",
             "available":true,"state":"outdated"
         }]}})
+    }
+
+    #[test]
+    fn list_sort_and_search_keep_original_action_targets() {
+        let response = json!({"result":{"type":"integration_list","integrations":[
+            {"target":"zebra","label":"alpha","command":"z","available":true,"state":"current"},
+            {"target":"beta","label":"Beta","command":"b","available":true,"state":"current"},
+            {"target":"alpha","label":"ALPHA","command":"a","available":true,"state":"current"}
+        ]}});
+        let rows = parse_list(&response).unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.target.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "zebra", "beta"]
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.matches("alpha"))
+                .map(|row| row.target.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "zebra"]
+        );
+        assert!(rows[1].matches("zebra"));
+        assert!(!rows[1].matches("missing"));
+        assert!(rows.iter().all(|row| row.matches("")));
     }
 
     #[test]
