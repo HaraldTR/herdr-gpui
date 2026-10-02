@@ -19,6 +19,7 @@ pub enum Method {
     PaneClose,
     PaneFocus,
     PaneFocusDirection,
+    PaneInputSet,
     PaneRename,
     PaneScroll,
     PaneSplit,
@@ -53,6 +54,7 @@ impl Method {
             Self::PaneClose => "pane.close",
             Self::PaneFocus => "pane.focus",
             Self::PaneFocusDirection => "pane.focus_direction",
+            Self::PaneInputSet => "pane.input.set",
             Self::PaneRename => "pane.rename",
             Self::PaneScroll => "pane.scroll",
             Self::PaneSplit => "pane.split",
@@ -122,6 +124,13 @@ mod tests {
         assert!(Method::PaneClear.advertised_in(&["pane.close".into(), "pane.clear".into()]));
         // Advertisement is an exact match: a method sharing the prefix is not clearing.
         assert!(!Method::PaneClear.advertised_in(&["pane.clear_agent_authority".into()]));
+    }
+
+    #[test]
+    fn pane_input_set_wire_name() {
+        assert_eq!(Method::PaneInputSet.as_str(), "pane.input.set");
+        assert!(Method::PaneInputSet.advertised_in(&["pane.input.set".into()]));
+        assert!(!Method::PaneInputSet.advertised_in(&["pane.input".into()]));
     }
 
     #[test]
