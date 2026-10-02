@@ -276,8 +276,11 @@ The terminal stays usable while Settings is open. Cmd-W (or Ctrl-W) closes only
 Settings; reopening activates the existing window instead of creating a duplicate.
 Local preferences remain editable if the originating session window closes.
 
-Appearance provides a large live preview and a searchable, virtualized theme
-catalog, including every discovered Ghostty theme rather than a small shortlist.
+Appearance provides a large live preview and a searchable, virtualized grid of
+theme cards, including every discovered Ghostty theme rather than a small
+shortlist. Each card shows its own background, foreground, and palette swatches;
+search stays above the grid. Cards adapt to the window width, and their palettes
+load off-thread into a bounded cache.
 Typing filters the entire catalog without changing the applied theme. Clicking a
 result or navigating with the arrow keys applies it immediately to Settings,
 open app windows, and Logs. There is no Apply button. Theme selection is an
@@ -286,18 +289,26 @@ Uncached theme definition files load in the background; recent definitions are
 cached for quick switching.
 
 Closing Settings, through its native close button or Cmd-W/Ctrl-W, saves only the
-final theme selection. Quitting also flushes that selection. Closing waits for
+final theme and sidebar layout selections. Quitting also flushes those selections. Closing waits for
 accepted work without blocking the UI; a save failure keeps Settings open with
 the draft and an error so it can be retried. Other controls keep their existing
-automatic-save behavior without resetting the live theme.
+automatic-save behavior without resetting the live theme or layout. Reload also
+preserves these drafts. Theme, font, and layout writes from Settings are serialized.
 
-**This app** browses native themes; **Herdr** edits the shared theme selection,
+**Ghostty** and **Herdr** are independent library filters, both enabled initially.
+Turn either off to show only the other; search text is preserved, and changing a
+filter does not change the live theme or pending draft. Ghostty includes native
+built-ins and theme files. Every card identifies its source, including themes
+with the same name in both libraries. Herdr selections edit the shared theme,
 which changes the GUI only when it follows Herdr rather than a native override.
 Follow Herdr and high contrast remain available independently.
 
-Fonts supports searching installed families, setting all roles together, and
-editing roles independently. Size steppers coalesce repeated changes; click a
-size to type an integer from 8 through 48. Enter or blur saves, Escape cancels.
+Fonts uses compact rows for Terminal, Sidebar, Tabs, and Interface, with family
+and size together and a shared specimen of the selected role below. Click a
+family to open the searchable installed-font chooser; **Set all fonts...** changes
+families together without changing their sizes. The catalog stays hidden until
+requested. Size steppers coalesce repeated changes; click a size to type an
+integer from 8 through 48. Enter or blur saves, Escape cancels.
 Accepted saves survive closing Settings. Family and size edits preserve configured
 fallbacks and unrelated settings in `config-gpui.local.toml`. General retains
 browser-skill installation/removal and configuration paths.
@@ -403,6 +414,14 @@ top-level line there (before any table headers):
 ```toml
 layout = "compact"
 ```
+
+**Settings > Appearance > Sidebar layout**, below the theme grid, lists all nine
+choices beside a live preview using the current theme and sidebar font. Preview widths of 240,
+280, and 320 pixels, clicking workspace or agent rows to select them, and clicking
+the repository arrow to fold affect only the sample. Choosing a layout applies it
+live to the sample and app windows, like themes, without writing on each click.
+Only the final choice is saved when Settings closes or the app quits. The list and
+preview stack in narrow Settings windows; the Sidebar gap row remains below them.
 
 Three densities of Herdr's own rows are available:
 

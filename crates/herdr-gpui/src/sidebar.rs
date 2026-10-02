@@ -7,6 +7,7 @@ mod hover;
 mod layout;
 mod layouts;
 mod metrics;
+pub(crate) mod preview;
 mod render;
 mod reorder;
 mod row;

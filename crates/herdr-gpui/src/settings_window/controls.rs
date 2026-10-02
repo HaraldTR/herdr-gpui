@@ -1,24 +1,31 @@
 //! Prepared controls for the standalone window; persistence belongs to its serial save path.
+mod fonts;
+
 use super::{Section, SettingsWindow};
 use crate::{
     agent_skill::{AgentSkill, Choice},
     config::{Config, FONT_SIZE_RANGE, FontFace, LayoutMode, corners},
-    font_picker::{FontTarget, shared_family},
+    font_picker::FontTarget,
     herdr_settings::{Edit, IndicatorStyle, ToastDelivery},
     search_input::{Changed, SearchInput},
 };
 use gpui::{prelude::*, *};
 
 const FACES: [(FontFace, &str); 4] = [
+    (FontFace::Terminal, "Terminal"),
     (FontFace::Sidebar, "Sidebar"),
     (FontFace::Tabs, "Tabs"),
-    (FontFace::Terminal, "Terminal"),
-    (FontFace::Ui, "UI"),
+    (FontFace::Ui, "Interface"),
 ];
 
 pub(super) struct Controls {
+    sidebar_preview: crate::sidebar::preview::Preview,
     search: Entity<SearchInput>,
-    target: FontTarget,
+    picker: Option<FontTarget>,
+    active_face: FontFace,
+    selected: usize,
+    #[cfg(test)]
+    family_io: Option<fonts::FamilyIo>,
     names: Vec<String>,
     filtered: Vec<usize>,
     scroll: UniformListScrollHandle,
@@ -55,12 +62,18 @@ impl Controls {
         });
         let subscription = cx.subscribe(&search, |this, search, _: &Changed, cx| {
             this.controls.filtered = filter_fonts(&this.controls.names, search.read(cx).text());
+            this.controls.selected = 0;
             this.controls.scroll.scroll_to_item(0, ScrollStrategy::Top);
             cx.notify();
         });
         Self {
+            sidebar_preview: Default::default(),
             search,
-            target: FontTarget::All,
+            picker: None,
+            active_face: FontFace::Terminal,
+            selected: 0,
+            #[cfg(test)]
+            family_io: None,
             names: Vec::new(),
             filtered: Vec::new(),
             scroll: UniformListScrollHandle::new(),
@@ -141,6 +154,14 @@ impl SettingsWindow {
 
     /// Called after a root load/save completes, with its busy flag already cleared.
     pub(super) fn sync_controls(&mut self, cx: &mut Context<Self>) {
+        self.refresh_control_appearance(cx);
+        if !self.busy() {
+            self.controls.saving_sizes.clear();
+            self.flush_control_sizes(cx);
+        }
+    }
+
+    pub(super) fn refresh_control_appearance(&mut self, cx: &mut Context<Self>) {
         self.controls.search.update(cx, |input, cx| {
             input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
         });
@@ -148,10 +169,6 @@ impl SettingsWindow {
             editor.input.update(cx, |input, cx| {
                 input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
             });
-        }
-        if !self.busy() {
-            self.controls.saving_sizes.clear();
-            self.flush_control_sizes(cx);
         }
     }
 
@@ -171,6 +188,8 @@ impl SettingsWindow {
     }
 
     fn step_control_size(&mut self, face: FontFace, step: f32, cx: &mut Context<Self>) {
+        self.controls.active_face = face;
+        cx.notify();
         if self.quitting {
             return;
         }
@@ -188,6 +207,7 @@ impl SettingsWindow {
         size: f32,
         cx: &mut Context<Self>,
     ) {
+        self.controls.active_face = face;
         if self.quitting || !FONT_SIZE_RANGE.contains(&size) || size.fract() != 0. {
             return;
         }
@@ -205,6 +225,7 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.controls.active_face = face;
         if self.quitting {
             return;
         }
@@ -388,182 +409,6 @@ impl SettingsWindow {
                 },
             )
             .child(content)
-    }
-
-    fn render_font_controls(&self, cx: &mut Context<Self>) -> Div {
-        let mut roles = div().flex().flex_wrap().gap(px(8.));
-        for (target, label) in std::iter::once((FontTarget::All, "All"))
-            .chain(FACES.map(|(face, label)| (FontTarget::Face(face), label)))
-        {
-            roles = roles.child(
-                self.control_choice(
-                    format!("settings-font-role-{label}"),
-                    label,
-                    self.controls.target == target,
-                    true,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.controls.target = target;
-                    cx.notify();
-                })),
-            );
-        }
-        let family = match self.controls.target {
-            FontTarget::All => shared_family(&self.config).unwrap_or("Mixed"),
-            FontTarget::Face(FontFace::Sidebar) => &self.config.sidebar.family,
-            FontTarget::Face(FontFace::Tabs) => &self.config.tabs.family,
-            FontTarget::Face(FontFace::Terminal) => &self.config.terminal.family,
-            FontTarget::Face(FontFace::Ui) => &self.config.ui.family,
-        };
-        let ready = !self.busy();
-        let family_card = self
-            .control_card("Font family")
-            .child(roles)
-            .child(self.control_row("Current family", family.to_owned()))
-            .child(self.controls.search.clone())
-            .child(
-                self.control_choice(
-                    "settings-font-default",
-                    "Use platform default",
-                    false,
-                    ready,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    let target = this.controls.target;
-                    this.save_native(
-                        move || match target {
-                            FontTarget::All => Config::save_all_font_families(None),
-                            FontTarget::Face(face) => Config::save_font_family(face, None),
-                        },
-                        cx,
-                    );
-                })),
-            )
-            .child(self.control_note(if self.controls.discovering {
-                "Loading installed fonts...".into()
-            } else {
-                format!(
-                    "{} of {} installed families",
-                    self.controls.filtered.len(),
-                    self.controls.names.len()
-                )
-            }))
-            .when(!self.controls.filtered.is_empty(), |card| {
-                card.child(
-                    uniform_list(
-                        "settings-font-results",
-                        self.controls.filtered.len(),
-                        cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                            range
-                                .map(|index| {
-                                    let family =
-                                        this.controls.names[this.controls.filtered[index]].clone();
-                                    this.control_choice(
-                                        format!("settings-font-result-{index}"),
-                                        family.clone(),
-                                        false,
-                                        !this.busy(),
-                                    )
-                                    .w_full()
-                                    .h(px(this.config.ui.line_height() + 24.))
-                                    .overflow_hidden()
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            let target = this.controls.target;
-                                            let family = family.clone();
-                                            this.save_native(
-                                                move || match target {
-                                                    FontTarget::All => {
-                                                        Config::save_all_font_families(Some(
-                                                            &family,
-                                                        ))
-                                                    }
-                                                    FontTarget::Face(face) => {
-                                                        Config::save_font_family(
-                                                            face,
-                                                            Some(&family),
-                                                        )
-                                                    }
-                                                },
-                                                cx,
-                                            );
-                                        },
-                                    ))
-                                })
-                                .collect()
-                        }),
-                    )
-                    .h(px(240.))
-                    .track_scroll(&self.controls.scroll),
-                )
-            })
-            .when(
-                !self.controls.discovering && self.controls.filtered.is_empty(),
-                |card| card.child(self.control_note("No matching fonts.")),
-            );
-        let mut sizes = self.control_card("Text sizes");
-        for (face, label) in FACES {
-            let size = self.controls.size(face, &self.config);
-            let mut buttons = div().flex().items_center().gap(px(12.));
-            for (symbol, step, enabled) in [("-", -1., size > 8.), ("+", 1., size < 48.)] {
-                if step > 0. {
-                    buttons = buttons.child(match &self.controls.size_editor {
-                        Some(editor) if editor.face == face => div()
-                            .w(px(96.))
-                            .on_key_down(cx.listener(Self::control_size_key))
-                            .child(editor.input.clone())
-                            .when(editor.invalid, |field| {
-                                field.child(div().text_size(px(10.)).child("Whole size: 8-48"))
-                            })
-                            .into_any_element(),
-                        _ => div()
-                            .id(format!("settings-size-value-{}", face.name()))
-                            .debug_selector(move || format!("settings-size-value-{}", face.name()))
-                            .w(px(72.))
-                            .text_center()
-                            .cursor_pointer()
-                            .child(format!("{size} px"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.begin_control_size_edit(face, window, cx)
-                            }))
-                            .into_any_element(),
-                    });
-                }
-                buttons = buttons.child(
-                    self.control_choice(
-                        format!("settings-size-{}-{symbol}", face.name()),
-                        symbol,
-                        false,
-                        enabled,
-                    )
-                    .when(enabled, |button| {
-                        button.on_click(cx.listener(move |this, _, window, cx| {
-                            if !this.finish_control_size_edit(true, cx) {
-                                this.finish_control_size_edit(false, cx);
-                            }
-                            window.focus(&this.focus, cx);
-                            this.step_control_size(face, step, cx)
-                        }))
-                    }),
-                );
-            }
-            sizes = sizes.child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(12.))
-                    .child(label)
-                    .child(buttons),
-            );
-        }
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(24.))
-            .child(family_card)
-            .child(sizes)
     }
 
     fn render_indicator_controls(&self, cx: &mut Context<Self>) -> Div {
@@ -820,26 +665,8 @@ impl SettingsWindow {
             .child(self.control_note(
                 "Show agents and tab-close confirmation are configured in the local override file.",
             ));
-        let mut layouts = div().flex().flex_wrap().gap(px(8.));
-        for mode in LayoutMode::ALL {
-            layouts = layouts.child(
-                self.control_choice(
-                    format!("settings-layout-{}", mode.name()),
-                    mode.label(),
-                    self.config.layout.mode == mode,
-                    ready,
-                )
-                .when(ready, |button| {
-                    button.on_click(cx.listener(move |this, _, _, cx| {
-                        this.save_native(move || Config::save_layout(mode), cx)
-                    }))
-                }),
-            );
-        }
         div().flex().flex_col().gap(px(24.)).child(general)
             .child(self.render_skill_controls(cx))
-            .child(self.control_card("Sidebar layout").child(layouts)
-                .child(self.control_row("Sidebar gap", format!("{} px", self.config.layout.sidebar_gap))))
             .child(self.control_card("Clipboard feedback")
                 .child(self.control_row("Copied notification", if self.config.clipboard_toast.enabled { "On" } else { "Off" }))
                 .child(self.control_row("Position", format!("{:?}", self.config.clipboard_toast.position))))
@@ -853,6 +680,109 @@ impl SettingsWindow {
                         this.reload(cx);
                     }))))
                 .child(self.control_note("Saved file edits reload automatically. Reloading GUI settings does not reload the daemon.")))
+    }
+
+    pub(super) fn render_sidebar_layout_controls(&self, cx: &mut Context<Self>) -> Div {
+        let ready = !self.quitting && self.closing.is_none();
+        let mode = self.config.layout.mode;
+        let mut layouts = div().flex().flex_col().gap(px(4.));
+        for mode in LayoutMode::ALL {
+            layouts = layouts.child(
+                self.control_choice(
+                    format!("settings-layout-{}", mode.name()),
+                    mode.label(),
+                    self.config.layout.mode == mode,
+                    ready,
+                )
+                .debug_selector(move || format!("settings-layout-{}", mode.name()))
+                .py(px(5.))
+                .when(ready, |button| {
+                    button.on_click(cx.listener(move |this, _, _, cx| {
+                        this.accept_layout_choice(mode, cx);
+                    }))
+                }),
+            );
+        }
+        let widths = div().flex().gap_1().children(
+            crate::sidebar::preview::Preview::WIDTHS
+                .into_iter()
+                .map(|width| {
+                    self.control_choice(
+                        format!("preview-width-{width}"),
+                        width.to_string(),
+                        self.controls.sidebar_preview.width() == width,
+                        true,
+                    )
+                    .debug_selector(move || format!("preview-width-{width}"))
+                    .px_2()
+                    .py_1()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.controls.sidebar_preview.set_width(width);
+                        cx.notify();
+                    }))
+                }),
+        );
+        let mut font = self.config.sidebar.clone();
+        font.size = self.controls.size(FontFace::Sidebar, &self.config);
+        let light = matches!(
+            cx.window_appearance(),
+            WindowAppearance::Light | WindowAppearance::VibrantLight
+        );
+        let preview = self.controls.sidebar_preview.render(
+            mode,
+            &font,
+            &self.theme,
+            crate::sidebar::Indicators::new(self.shared.as_ref(), light, &self.theme),
+            cx.listener(|this, _, _, cx| {
+                this.controls.sidebar_preview.toggle_fold();
+                cx.notify();
+            }),
+            |target| {
+                Box::new(cx.listener(move |this, _, _, cx| {
+                    this.controls.sidebar_preview.select(target);
+                    cx.notify();
+                }))
+            },
+        );
+        let chooser = div()
+            .flex()
+            .flex_wrap()
+            .gap_4()
+            .child(
+                div()
+                    .w(px(174.))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(self.control_note("Choose a layout"))
+                    .child(layouts)
+                    .child(self.control_note("Preview width (px)"))
+                    .child(widths),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(mode.label())
+                    .child(preview),
+            );
+        self.control_card("Sidebar layout")
+            .mt(px(24.))
+            .relative()
+            .debug_selector(|| "settings-sidebar-layout".into())
+            .map(|card| {
+                #[cfg(all(feature = "integration-test", target_os = "macos"))]
+                let card = card.child(super::native::probe(7));
+                card
+            })
+            .child(chooser)
+            .child(self.control_row(
+                "Sidebar gap",
+                format!("{} px", self.config.layout.sidebar_gap),
+            ))
     }
 }
 
@@ -876,6 +806,133 @@ mod tests {
             shared: None,
             error: None,
         })
+    }
+
+    #[gpui::test]
+    fn sidebar_chooser_wraps_and_sample_controls_never_save(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(skill_fixture);
+        cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+        assert!(cx.debug_bounds("sidebar-preview").is_none());
+        view.update(cx, |view, cx| {
+            view.section = Section::Appearance;
+            cx.notify();
+        });
+        let original = view.read_with(cx, |view, _| view.config.layout.mode);
+        for width in [680., 960.] {
+            cx.simulate_resize(size(px(width), px(2200.)));
+            view.update(cx, |view, cx| {
+                view.controls.sidebar_preview = Default::default();
+                cx.notify();
+            });
+            cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+            let body = cx.debug_bounds("settings-body").unwrap();
+            let panel = cx.debug_bounds("sidebar-preview").unwrap();
+            assert!(panel.right() <= body.right());
+            let mut previous = None;
+            for selector in [
+                "settings-layout-normal",
+                "settings-layout-compact",
+                "settings-layout-comfortable",
+                "settings-layout-normal-rounded",
+                "settings-layout-compact-rounded",
+                "settings-layout-comfortable-rounded",
+                "settings-layout-superset",
+                "settings-layout-orca",
+                "settings-layout-minimal",
+            ] {
+                let bounds = cx.debug_bounds(selector).unwrap();
+                if let Some(bottom) = previous {
+                    assert!(bounds.top() >= bottom);
+                }
+                previous = Some(bounds.bottom());
+            }
+            for selector in [
+                "preview-width-320",
+                "row-Settings window",
+                "row-preview-agent-0",
+                "collapse-0",
+            ] {
+                let bounds = cx.debug_bounds(selector).unwrap();
+                cx.simulate_click(bounds.center(), Default::default());
+                cx.update(|window, cx| {
+                    crate::sidebar::layout_tests::full_draw(window, cx).clear(cx)
+                });
+                view.read_with(cx, |view, _| {
+                    assert!(!view.busy());
+                    assert!(view.save_completion.is_none());
+                    assert_eq!(view.config.layout.mode, original);
+                });
+            }
+            assert_eq!(
+                cx.debug_bounds("sidebar-preview").unwrap().size.width,
+                px(320.)
+            );
+        }
+        view.update(cx, |view, cx| {
+            view.saving = true;
+            view.error = Some("Existing error".into());
+            cx.notify();
+        });
+        cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+        let choice = cx.debug_bounds("settings-layout-orca").unwrap();
+        cx.simulate_click(choice.center(), Default::default());
+        view.update(cx, |view, _| {
+            assert_eq!(view.layout_intent, Some(LayoutMode::Orca));
+            assert!(view.save_completion.is_none());
+            assert_eq!(view.error.as_deref(), Some("Existing error"));
+            view.saving = false;
+        });
+    }
+
+    #[gpui::test]
+    fn appearance_scroll_reaches_sidebar_preview(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(skill_fixture);
+        for width in [680., 960.] {
+            cx.simulate_resize(size(px(width), px(560.)));
+            view.update(cx, |view, cx| {
+                view.section = Section::Appearance;
+                view.body_scroll.set_offset(Point::default());
+                cx.notify();
+            });
+            cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+            let panel = cx.debug_bounds("sidebar-preview").unwrap();
+            let body = cx.debug_bounds("settings-body").unwrap();
+            assert!(panel.top() > body.bottom());
+            view.update(cx, |view, cx| {
+                view.body_scroll
+                    .set_offset(point(px(0.), body.top() - panel.top()));
+                cx.notify();
+            });
+            cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+            let row = cx.debug_bounds("row-Settings window").unwrap();
+            assert!(row.top() >= body.top() && row.bottom() <= body.bottom());
+            cx.simulate_click(row.center(), Default::default());
+            view.read_with(cx, |view, _| {
+                assert!(!view.busy());
+                assert!(view.save_completion.is_none());
+                assert!(view.layout_intent.is_none());
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn sidebar_layout_draft_survives_other_save_failure(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(skill_fixture);
+        view.update(cx, |view, cx| {
+            view.accept_layout_choice(LayoutMode::Orca, cx);
+            view.save_with(|| Err(crate::Error::MissingHome), skill_load, false, cx);
+            assert_eq!(view.layout_intent, Some(LayoutMode::Orca));
+            assert!(view.busy());
+            view.sync_controls(cx);
+            assert_eq!(view.layout_intent, Some(LayoutMode::Orca));
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(!view.busy());
+            assert!(view.error.is_some());
+            assert_eq!(view.layout_intent, Some(LayoutMode::Orca));
+            assert_eq!(view.config.layout.mode, LayoutMode::Orca);
+        });
     }
 
     #[gpui::test]

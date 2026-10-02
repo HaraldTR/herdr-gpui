@@ -481,7 +481,8 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                 ("down enter", menu::WorkspaceAction::Rename),
                 ("down down enter", menu::WorkspaceAction::Close),
                 ("down down down enter", menu::WorkspaceAction::NewWorktree),
-                ("down down down enter", menu::WorkspaceAction::DeleteWorktree),
+                // Linked checkouts offer NewWorktree before DeleteWorktree too.
+                ("down down down down enter", menu::WorkspaceAction::DeleteWorktree),
             ] {
                 let point = handle.update(cx, |view, window, cx| {
                     view.live.status = ConnectionStatus::Connected;
@@ -551,7 +552,9 @@ pub fn start_sidebar(handle: WindowHandle<HerdrWindow>, cx: &mut App) {
                         window.dispatch_keystroke(Keystroke::parse(key)?, cx);
                     }
                     window.draw(cx).clear(cx);
-                    if view.read(cx).menu.page != Some(menu::Page::Dialog(action)) { bail!("workspace menu opened wrong dialog"); }
+                    if view.read(cx).menu.page != Some(menu::Page::Dialog(action)) {
+                        bail!("workspace menu opened wrong dialog at {width}x{height} after {keys:?}: expected {:?}, actual {:?}", menu::Page::Dialog(action), view.read(cx).menu.page);
+                    }
                     window.dispatch_action(Box::new(RunCommand { command: Command::Tab }), cx);
                     let branch = view.read(cx).menu.input.as_ref().map(|input| input.text.clone());
                     Ok((before, branch))

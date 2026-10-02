@@ -22,6 +22,8 @@ fn daemon_error_message(error: &serde_json::Value) -> &str {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("Could not finish saving Settings: {0}")]
+    SettingsSave(#[source] std::sync::Arc<Error>),
     #[error("Invalid saved window geometry or too many saved windows")]
     InvalidWindowState,
     #[error("ui.toast.delay_seconds must be between 0 and 3600")]

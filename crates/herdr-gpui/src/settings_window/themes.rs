@@ -8,10 +8,11 @@ use crate::{
     search_input::{Changed, SearchInput},
 };
 use gpui::{prelude::*, *};
+mod grid;
 
 const FOLLOW: &str = "Follow Herdr";
 const LIST_HEIGHT: f32 = 168.;
-const ROW_HEIGHT: f32 = 28.;
+const ROW_HEIGHT: f32 = 80.;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum Scope {
@@ -111,8 +112,9 @@ pub(super) struct ThemeBrowser {
     search: Entity<SearchInput>,
     _subscription: Subscription,
     names: Vec<String>,
-    filtered: Vec<String>,
-    scope: Scope,
+    filtered: Vec<Choice>,
+    ghostty_enabled: bool,
+    herdr_enabled: bool,
     query: String,
     selected: Option<usize>,
     scroll: UniformListScrollHandle,
@@ -127,6 +129,7 @@ pub(super) struct ThemeBrowser {
     preview_name: Option<String>,
     preview_error: Option<String>,
     contrast: Contrast,
+    grid: grid::Grid,
 }
 
 impl ThemeBrowser {
@@ -146,7 +149,8 @@ impl ThemeBrowser {
             _subscription: subscription,
             names: Vec::new(),
             filtered: Vec::new(),
-            scope: Scope::App,
+            ghostty_enabled: true,
+            herdr_enabled: true,
             query: String::new(),
             selected: None,
             scroll: UniformListScrollHandle::new(),
@@ -161,26 +165,51 @@ impl ThemeBrowser {
             preview_name: None,
             preview_error: None,
             contrast: Contrast::Standard,
+            grid: grid::Grid::default(),
         }
     }
 
     fn choice(&self) -> Option<Choice> {
-        Some(Choice {
-            scope: self.scope,
-            name: self.filtered.get(self.selected?)?.clone(),
-        })
+        self.filtered.get(self.selected?).cloned()
     }
 
-    fn filter(&mut self, preserve: Option<&str>) {
-        self.filtered = match self.scope {
-            Scope::App => filter_names(self.names.iter().map(String::as_str), &self.query),
-            Scope::Herdr => filter_names(herdr_settings::THEME_NAMES.iter().copied(), &self.query),
-        };
+    fn source_enabled(&self, scope: Scope) -> bool {
+        match scope {
+            Scope::App => self.ghostty_enabled,
+            Scope::Herdr => self.herdr_enabled,
+        }
+    }
+
+    fn filter(&mut self, preserve: Option<&Choice>) {
+        self.grid.invalidate();
+        self.filtered.clear();
+        for scope in [Scope::App, Scope::Herdr] {
+            if !self.source_enabled(scope) {
+                continue;
+            }
+            let names = match scope {
+                Scope::App => filter_names(self.names.iter().map(String::as_str), &self.query),
+                Scope::Herdr => {
+                    filter_names(herdr_settings::THEME_NAMES.iter().copied(), &self.query)
+                }
+            };
+            self.filtered
+                .extend(names.into_iter().map(|name| Choice { scope, name }));
+        }
+        self.filtered.sort_by_cached_key(|choice| {
+            (
+                choice.name.to_lowercase(),
+                choice.scope == Scope::Herdr,
+                choice.name.clone(),
+            )
+        });
         self.selected = preserve
-            .and_then(|name| self.filtered.iter().position(|item| item == name))
+            .and_then(|choice| self.filtered.iter().position(|item| item == choice))
             .or_else(|| (!self.filtered.is_empty()).then_some(0));
-        self.scroll
-            .scroll_to_item(self.selected.unwrap_or(0), ScrollStrategy::Top);
+        self.scroll.scroll_to_item(
+            self.selected.unwrap_or(0) / self.grid.columns,
+            ScrollStrategy::Top,
+        );
     }
 
     fn finish_preview(&mut self, revision: u64, name: String, result: crate::Result<Theme>) {
@@ -495,6 +524,7 @@ impl SettingsWindow {
         self.themes.search.update(cx, |input, cx| {
             input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx)
         });
+        self.refresh_control_appearance(cx);
         cx.notify();
     }
 
@@ -504,6 +534,10 @@ impl SettingsWindow {
             self.themes.search.read(cx).focus.clone(),
             self.themes.filtered.len(),
             self.themes.discovering
+                || self
+                    .native_theme_cards(cx)
+                    .iter()
+                    .any(|(_, _, settled)| !settled)
                 || self.themes.running.is_some()
                 || self.theme_loading
                 || self.theme_waiting
@@ -527,7 +561,10 @@ impl SettingsWindow {
         self.themes.names.retain(|name| name != FOLLOW);
         self.themes.names.sort();
         self.themes.names.dedup();
-        self.themes.filter(Some(&self.config.theme));
+        self.themes.filter(Some(&Choice {
+            scope: Scope::App,
+            name: self.config.theme.clone(),
+        }));
         self.themes.search.update(cx, |search, cx| {
             search.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
             window.focus(&search.focus, cx);
@@ -545,8 +582,7 @@ impl SettingsWindow {
                 .sort_by_cached_key(|name| (name.to_lowercase(), name.clone()));
         }
         let selected = self.themes.choice();
-        self.themes
-            .filter(selected.as_ref().map(|choice| choice.name.as_str()));
+        self.themes.filter(selected.as_ref());
         self.themes.search.update(cx, |search, cx| {
             search.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
         });
@@ -577,8 +613,7 @@ impl SettingsWindow {
                         names.dedup();
                         let selected = this.themes.choice();
                         this.themes.names = names;
-                        this.themes
-                            .filter(selected.as_ref().map(|choice| choice.name.as_str()));
+                        this.themes.filter(selected.as_ref());
                         this.request_theme_preview(cx);
                     }
                     Err(error) => this.themes.catalog_error = Some(error.to_string()),
@@ -596,6 +631,16 @@ impl SettingsWindow {
         self.themes.preview_error = None;
         self.drive_theme_preview(cx);
         cx.notify();
+    }
+
+    fn toggle_theme_source(&mut self, scope: Scope, cx: &mut Context<Self>) {
+        let selected = self.themes.choice();
+        match scope {
+            Scope::App => self.themes.ghostty_enabled = !self.themes.ghostty_enabled,
+            Scope::Herdr => self.themes.herdr_enabled = !self.themes.herdr_enabled,
+        }
+        self.themes.filter(selected.as_ref());
+        self.request_theme_preview(cx);
     }
 
     fn drive_theme_preview(&mut self, cx: &mut Context<Self>) {
@@ -651,7 +696,7 @@ impl SettingsWindow {
         self.themes.selected = Some(index);
         self.themes
             .scroll
-            .scroll_to_item(index, ScrollStrategy::Center);
+            .scroll_to_item(index / self.themes.grid.columns, ScrollStrategy::Center);
         self.request_theme_preview(cx);
         if let Some(choice) = self.themes.choice() {
             self.accept_theme_choice(choice, cx);
@@ -683,13 +728,12 @@ impl SettingsWindow {
                 let count = self.themes.filtered.len();
                 if count > 0 {
                     let index = self.themes.selected.unwrap_or(0);
-                    let next = (index
-                        + if event.keystroke.key == "up" {
-                            count - 1
-                        } else {
-                            1
-                        })
-                        % count;
+                    let next = grid::navigate(
+                        index,
+                        count,
+                        self.themes.grid.columns,
+                        event.keystroke.key == "up",
+                    );
                     self.select_settings_theme(next, cx);
                 }
             }
@@ -821,14 +865,21 @@ impl SettingsWindow {
             )
     }
 
-    pub(super) fn render_appearance(&self, cx: &mut Context<Self>) -> Div {
+    pub(super) fn render_appearance(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
+        #[cfg(all(feature = "integration-test", target_os = "macos"))]
+        grid::clear_native_bounds(cx);
+        let columns = grid::columns(f32::from(window.viewport_size().width) - 240.);
+        if self.themes.grid.columns != columns {
+            self.themes.grid.columns = columns;
+            self.themes.scroll.scroll_to_item(
+                self.themes.selected.unwrap_or(0) / columns,
+                ScrollStrategy::Center,
+            );
+        }
         let browser = &self.themes;
         let theme = &self.theme;
-        let count = if browser.scope == Scope::App {
-            browser.names.len()
-        } else {
-            herdr_settings::THEME_NAMES.len()
-        };
+        let count = usize::from(browser.ghostty_enabled) * browser.names.len()
+            + usize::from(browser.herdr_enabled) * herdr_settings::THEME_NAMES.len();
         let button = |id: &'static str, label: String, selected: bool| {
             div()
                 .id(id)
@@ -878,26 +929,15 @@ impl SettingsWindow {
             .child(
                 div().flex().flex_wrap().gap(px(8.)).children(
                     [
-                        (Scope::App, "This app", "theme-scope-app"),
-                        (Scope::Herdr, if Scope::Herdr.editable() { "Herdr" } else { "Herdr (read-only)" }, "theme-scope-herdr"),
+                        (Scope::App, "Ghostty", "theme-scope-app"),
+                        (Scope::Herdr, "Herdr", "theme-scope-herdr"),
                     ]
                     .map(|(scope, label, id)| {
-                        button(id, label.into(), browser.scope == scope).on_click(cx.listener(
+                        button(id, label.into(), browser.source_enabled(scope)).on_click(cx.listener(
                             move |this, _, window, cx| {
                                 let focus = this.themes.search.read(cx).focus.clone();
                                 window.focus(&focus, cx);
-                                if this.themes.scope == scope {
-                                    return;
-                                }
-                                this.themes.scope = scope;
-                                let saved = match scope {
-                                    Scope::App => Some(this.config.theme.clone()),
-                                    Scope::Herdr => {
-                                        this.shared.as_ref().map(|shared| shared.theme_name.clone())
-                                    }
-                                };
-                                this.themes.filter(saved.as_deref());
-                                this.request_theme_preview(cx);
+                                this.toggle_theme_source(scope, cx);
                             },
                         ))
                     }),
@@ -908,16 +948,10 @@ impl SettingsWindow {
                     .debug_selector(|| "settings-theme-scope-description".into())
                     .text_size(px(11.))
                     .text_color(rgb(theme.subtext()))
-                    .child(match browser.scope {
-                        Scope::App => {
-                            "THIS APP / Full installed library. Applies only to this app."
-                        }
-                        Scope::Herdr if !Scope::Herdr.editable() => {
-                            "HERDR / Read-only on this platform. Preview shared themes here; choose This app or Follow Herdr to change appearance."
-                        }
-                        Scope::Herdr => {
-                            "HERDR / Shared themes. This app changes only when following Herdr."
-                        }
+                    .child(if Scope::Herdr.editable() {
+                        "Ghostty includes native built-ins and files; applies only to this app. Herdr themes are shared."
+                    } else {
+                        "Ghostty includes native built-ins and files. Shared Herdr themes are read-only on this platform."
                     }),
             )
             .child(
@@ -958,32 +992,41 @@ impl SettingsWindow {
                             div()
                                 .debug_selector(|| "settings-theme-empty".into())
                                 .p(px(12.))
-                                .child("No matching themes. Try a shorter search."),
+                                .child(if !browser.ghostty_enabled && !browser.herdr_enabled {
+                                    "Select a theme library"
+                                } else {
+                                    "No matching themes. Try a shorter search."
+                                }),
                         )
                     })
                     .when(!browser.filtered.is_empty(), |el| {
                         el.child(
                             uniform_list(
                                 "settings-theme-results",
-                                browser.filtered.len(),
+                                browser.filtered.len().div_ceil(columns),
                                 cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                                    this.schedule_grid_palettes(range.clone(), cx);
                                     range
-                                        .map(|index| {
-                                            let name = this.themes.filtered[index].clone();
+                                        .map(|row| div().h(px(ROW_HEIGHT)).w_full().flex().gap(px(6.)).children((0..this.themes.grid.columns).map(|column| {
+                                            let index = row * this.themes.grid.columns + column;
+                                            if index >= this.themes.filtered.len() {
+                                                return div().flex_1().min_w_0().into_any_element();
+                                            }
+                                             let choice = this.themes.filtered[index].clone();
+                                             let name = &choice.name;
                                             let draft =
                                                 this.theme_intent.as_ref().is_some_and(|intent| {
-                                                    intent.choice.scope == this.themes.scope
-                                                        && intent.choice.name == name
+                                                     intent.choice == choice
                                                 });
-                                            let saved = match this.themes.scope {
-                                                Scope::App => name == this.config.theme,
+                                             let saved = match choice.scope {
+                                                 Scope::App => *name == this.config.theme,
                                                 Scope::Herdr => {
                                                     this.shared.as_ref().is_some_and(|shared| {
-                                                        shared.theme_name == name
+                                                         shared.theme_name == *name
                                                     })
                                                 }
                                             };
-                                            let source = match this.themes.scope {
+                                             let source = match choice.scope {
                                                 Scope::Herdr => "Herdr",
                                                 Scope::App
                                                     if Theme::BUILTIN_NAMES
@@ -992,7 +1035,7 @@ impl SettingsWindow {
                                                     "Built-in"
                                                 }
                                                 Scope::App
-                                                    if std::path::Path::new(&name)
+                                                     if std::path::Path::new(name)
                                                         .is_absolute()
                                                         || name.starts_with("~/") =>
                                                 {
@@ -1002,46 +1045,38 @@ impl SettingsWindow {
                                             };
                                             div()
                                                 .id(index)
+                                                .relative()
+                                                .map(|card| {
+                                                    #[cfg(all(feature = "integration-test", target_os = "macos"))]
+                                                    let card = card.child(grid::native_probe(index));
+                                                    card
+                                                })
                                                 .debug_selector(move || {
                                                     format!("settings-theme-row-{index}")
                                                 })
-                                                .h(px(ROW_HEIGHT))
-                                                .w_full()
-                                                .px(px(10.))
+                                                .h(px(76.))
+                                                .flex_1()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .px(px(7.))
+                                                .py(px(4.))
                                                 .flex()
-                                                .items_center()
-                                                .gap(px(8.))
-                                                .cursor_pointer()
-                                                .when(this.themes.selected == Some(index), |el| {
-                                                    el.bg(rgb(this.theme.active))
-                                                })
+                                                .flex_col()
+                                                .rounded(px(corners::CONTROL))
+                                                .border_2()
+                                                .border_color(rgb(if this.themes.selected == Some(index) { this.theme.primary() } else { this.theme.active }))
+                                                 .when(choice.scope.editable(), |el| el.cursor_pointer())
                                                 .hover(|el| el.bg(rgb(this.theme.active)))
+                                                 .child(this.grid_thumbnail(&choice, index))
                                                 .child(
                                                     div()
                                                         .debug_selector(move || {
                                                             format!("settings-theme-name-{index}")
                                                         })
-                                                        .flex_1()
                                                         .min_w_0()
                                                         .truncate()
-                                                        .child(name),
+                                                         .child(name.clone()),
                                                 )
-                                                .when(saved || draft, |el| {
-                                                    el.child(
-                                                        div()
-                                                            .debug_selector(move || {
-                                                                format!(
-                                                                    "settings-theme-saved-{index}"
-                                                                )
-                                                            })
-                                                            .text_size(px(10.))
-                                                            .child(if draft {
-                                                                "Draft"
-                                                            } else {
-                                                                "Saved"
-                                                            }),
-                                                    )
-                                                })
                                                 .child(
                                                     div()
                                                         .debug_selector(move || {
@@ -1049,7 +1084,8 @@ impl SettingsWindow {
                                                         })
                                                         .text_size(px(10.))
                                                         .text_color(rgb(this.theme.subtext()))
-                                                        .child(source),
+                                                        .truncate()
+                                                        .child(format!("{source}{}", if draft { " / Draft" } else if saved { " / Saved" } else { "" })),
                                                 )
                                                 .on_click(cx.listener(
                                                     move |this, _, window, cx| {
@@ -1062,8 +1098,8 @@ impl SettingsWindow {
                                                         window.focus(&focus, cx);
                                                         this.select_settings_theme(index, cx);
                                                     },
-                                                ))
-                                        })
+                                                )).into_any_element()
+                                        })))
                                         .collect()
                                 }),
                             )
@@ -1149,6 +1185,7 @@ impl SettingsWindow {
                         })),
                     ),
             )
+            .child(self.render_sidebar_layout_controls(cx))
     }
 }
 
@@ -1164,7 +1201,7 @@ mod tests {
         assert_eq!(Scope::Herdr.editable(), cfg!(unix));
     }
 
-    fn fixture(window: &mut Window, cx: &mut Context<SettingsWindow>) -> SettingsWindow {
+    pub(super) fn fixture(window: &mut Window, cx: &mut Context<SettingsWindow>) -> SettingsWindow {
         let source = cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx));
         let mut view = SettingsWindow::new(source.downgrade(), cx);
         view.themes.names = (0..400)
@@ -1173,6 +1210,7 @@ mod tests {
         view.themes.filter(None);
         // Hold the worker slot so these tests never discover or read personal files.
         view.themes.running = Some(0);
+        view.themes.grid.running = true;
         view.theme_loading = true;
         view.theme_io = Some(ThemeIo {
             write: std::sync::Arc::new(|_, _| Ok(())),
@@ -1203,12 +1241,146 @@ mod tests {
     }
 
     #[gpui::test]
+    fn source_chips_preserve_search_identity_and_draft_without_writing(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(fixture);
+        view.update(cx, |view, cx| {
+            assert!(view.themes.ghostty_enabled && view.themes.herdr_enabled);
+            assert_eq!(
+                view.themes.filtered.len(),
+                400 + herdr_settings::THEME_NAMES.len()
+            );
+            view.themes.names = vec!["Nord".into(), "Nord Light".into(), "/native/file".into()];
+            view.themes
+                .search
+                .update(cx, |search, cx| search.set_text_selected("nord", cx));
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            assert_eq!(
+                view.themes.filtered,
+                [
+                    Choice {
+                        scope: Scope::App,
+                        name: "Nord".into()
+                    },
+                    Choice {
+                        scope: Scope::Herdr,
+                        name: "nord".into()
+                    },
+                    Choice {
+                        scope: Scope::App,
+                        name: "Nord Light".into()
+                    },
+                ]
+            );
+            view.select_settings_theme(0, cx);
+        });
+        let (intent, theme, config_theme, revision) = view.read_with(cx, |view, _| {
+            (
+                view.theme_intent.as_ref().unwrap().choice.clone(),
+                view.theme.clone(),
+                view.config.theme.clone(),
+                view.theme_revision,
+            )
+        });
+        // Each click is an independent toggle, including the all-disabled state.
+        for (id, ghostty, herdr, selected) in [
+            ("theme-scope-herdr", true, false, Some(Scope::App)),
+            ("theme-scope-herdr", true, true, Some(Scope::App)),
+            ("theme-scope-app", false, true, Some(Scope::Herdr)),
+            ("theme-scope-app", true, true, Some(Scope::Herdr)),
+            ("theme-scope-herdr", true, false, Some(Scope::App)),
+            ("theme-scope-app", false, false, None),
+            ("theme-scope-herdr", false, true, Some(Scope::Herdr)),
+        ] {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let bounds = cx.debug_bounds(id).unwrap();
+            cx.simulate_click(bounds.center(), Modifiers::default());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            view.read_with(cx, |view, cx| {
+                assert_eq!(view.themes.ghostty_enabled, ghostty);
+                assert_eq!(view.themes.herdr_enabled, herdr);
+                assert_eq!(view.themes.choice().map(|choice| choice.scope), selected);
+                assert_eq!(view.themes.query, "nord");
+                assert_eq!(view.themes.search.read(cx).text(), "nord");
+                assert_eq!(view.theme_intent.as_ref().unwrap().choice, intent);
+                assert_eq!(view.theme_revision, revision);
+                assert_eq!(view.theme, theme);
+                assert_eq!(view.config.theme, config_theme);
+                assert!(!view.saving && !view.theme_saving);
+                if selected.is_none() {
+                    assert!(view.themes.filtered.is_empty());
+                }
+            });
+            assert!(cx.debug_bounds("theme-scope-app").is_some());
+            assert!(cx.debug_bounds("theme-scope-herdr").is_some());
+            if selected.is_none() {
+                assert!(cx.debug_bounds("settings-theme-empty").is_some());
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn combined_cards_save_only_on_close_to_their_own_destination(cx: &mut TestAppContext) {
+        use std::sync::{Arc, Mutex};
+        for scope in [Scope::App, Scope::Herdr] {
+            let writes = Arc::new(Mutex::new(Vec::new()));
+            let recorded = writes.clone();
+            let (view, visual) = cx.add_window_view(fixture);
+            visual.update(|window, cx| {
+                view.update(cx, |view, cx| {
+                    view.shared = herdr_settings::Settings::parse_text("").ok();
+                    view.theme_loading = false;
+                    view.theme_io.as_mut().unwrap().write = Arc::new(move |name, shared| {
+                        recorded.lock().unwrap().push((name, shared.is_some()));
+                        Ok(())
+                    });
+                    view.themes.names = vec!["Nord".into()];
+                    view.themes.query = "nord".into();
+                    view.themes.filter(None);
+                    let index = view
+                        .themes
+                        .filtered
+                        .iter()
+                        .position(|choice| choice.scope == scope)
+                        .unwrap();
+                    view.select_settings_theme(index, cx);
+                    if !scope.editable() {
+                        assert!(!view.theme_dirty());
+                        return;
+                    }
+                    assert_eq!(view.theme_intent.as_ref().unwrap().choice.scope, scope);
+                    view.toggle_theme_source(scope, cx);
+                    assert!(writes.lock().unwrap().is_empty());
+                    assert!(!view.should_close(window, cx));
+                });
+            });
+            visual.run_until_parked();
+            let expected = if scope.editable() {
+                vec![(
+                    if scope == Scope::App { "Nord" } else { "nord" }.to_owned(),
+                    scope == Scope::Herdr,
+                )]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(*writes.lock().unwrap(), expected);
+        }
+    }
+
+    #[gpui::test]
     fn selection_filter_and_contrast_fence_old_preview(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(fixture);
         view.update(cx, |view, cx| {
             let original = view.theme.clone();
             view.themes.preview = Some(original.clone());
-            view.select_settings_theme(399, cx);
+            let index = view
+                .themes
+                .filtered
+                .iter()
+                .position(|choice| choice.name == "Catalog 399")
+                .unwrap();
+            view.select_settings_theme(index, cx);
             assert_eq!(view.themes.choice().unwrap().name, "Catalog 399");
             assert_eq!(view.themes.running, Some(0));
             view.themes.query = "398 catalog".into();
@@ -1273,7 +1445,7 @@ mod tests {
             view.shared = Some(
                 herdr_settings::Settings::parse_text("[theme.custom]\naccent='#123456'\n").unwrap(),
             );
-            view.themes.scope = Scope::Herdr;
+            view.themes.ghostty_enabled = false;
             view.themes.query = "nord".into();
             view.themes.filter(None);
             view.request_theme_preview(cx);
@@ -1298,6 +1470,10 @@ mod tests {
     #[gpui::test]
     fn row_click_and_keyboard_accept_intent_while_validation_is_held(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(fixture);
+        view.update(cx, |view, _| {
+            view.themes.herdr_enabled = false;
+            view.themes.filter(None);
+        });
         cx.simulate_resize(size(px(960.), px(1000.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let row = cx.debug_bounds("settings-theme-row-1").unwrap();
@@ -1310,12 +1486,12 @@ mod tests {
         });
         cx.simulate_keystrokes("down enter");
         view.read_with(cx, |view, _| {
-            assert_eq!(view.themes.selected, Some(2));
+            assert_eq!(view.themes.selected, Some(5));
             assert!(!view.saving);
             assert_eq!(view.config.theme, Config::default().theme);
             assert_eq!(
                 view.theme_intent.as_ref().unwrap().choice.name,
-                "Catalog 002"
+                "Catalog 005"
             );
         });
         cx.simulate_keystrokes("escape");
@@ -1327,6 +1503,7 @@ mod tests {
         let (view, cx) = cx.add_window_view(fixture);
         view.update(cx, |view, cx| {
             view.themes.names = vec!["Nord".into(), "Dracula".into()];
+            view.themes.herdr_enabled = false;
             view.themes.filter(None);
             view.themes.selected = Some(0);
             view.request_theme_preview(cx);
@@ -1340,8 +1517,8 @@ mod tests {
         });
         cx.run_until_parked();
         view.read_with(cx, |view, _| {
-            assert_eq!(view.themes.preview_name.as_deref(), Some("Dracula"));
-            assert_eq!(view.themes.preview, Theme::builtin("Dracula"));
+            assert_eq!(view.themes.preview_name.as_deref(), Some("Nord"));
+            assert_eq!(view.themes.preview, Theme::builtin("Nord"));
             assert_eq!(view.themes.loaded, Some(view.themes.revision));
             assert!(view.themes.running.is_none());
             assert_eq!(view.config.theme, Config::default().theme);
@@ -1378,26 +1555,38 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(cx.debug_bounds("settings-theme-row-399").is_some());
         assert!(cx.debug_bounds("settings-theme-row-0").is_none());
-        assert!(cx.debug_bounds("settings-theme-row-389").is_none());
-        let visible = [
-            "settings-theme-row-390",
-            "settings-theme-row-391",
-            "settings-theme-row-392",
-            "settings-theme-row-393",
-            "settings-theme-row-394",
-            "settings-theme-row-395",
-            "settings-theme-row-396",
-            "settings-theme-row-397",
-            "settings-theme-row-398",
-            "settings-theme-row-399",
-        ]
-        .into_iter()
-        .filter(|selector| cx.debug_bounds(selector).is_some())
-        .count();
+        let visible = (0..400)
+            .filter(|index| {
+                cx.debug_bounds(Box::leak(
+                    format!("settings-theme-row-{index}").into_boxed_str(),
+                ))
+                .is_some()
+            })
+            .count();
         assert!(
-            visible <= (LIST_HEIGHT / ROW_HEIGHT).ceil() as usize + 2,
+            visible <= ((LIST_HEIGHT / ROW_HEIGHT).ceil() as usize + 2) * 4,
             "{visible} materialized rows"
         );
+        cx.simulate_resize(size(px(680.), px(1000.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("settings-theme-row-399").is_some());
+        view.read_with(cx, |view, _| assert_eq!(view.themes.grid.columns, 2));
+        view.update(cx, |view, cx| {
+            view.themes.query = "399".into();
+            view.themes.filter(None);
+            view.request_theme_preview(cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("settings-theme-row-0").is_some());
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.themes.filtered,
+                [Choice {
+                    scope: Scope::App,
+                    name: "Catalog 399".into()
+                }]
+            )
+        });
     }
 
     #[gpui::test]

@@ -1,5 +1,7 @@
 //! Independent native preferences window. Disk work never owns a window or a socket.
 mod controls;
+mod layouts;
+pub(crate) use layouts::{apply_loaded_layout, layout_load_revision};
 #[cfg(all(feature = "integration-test", target_os = "macos"))]
 mod native;
 mod themes;
@@ -179,7 +181,7 @@ struct SettingsWindow {
     loading: bool,
     saving: bool,
     quitting: bool,
-    save_completion: Option<std::sync::mpsc::Receiver<Option<herdr_settings::Settings>>>,
+    save_completion: Option<std::sync::mpsc::Receiver<SaveCompletion>>,
     _quit: Subscription,
     new_window_target: Option<herdr_client::ConnectTarget>,
     #[cfg(test)]
@@ -191,6 +193,10 @@ struct SettingsWindow {
     theme_revision: u64,
     theme_intent: Option<themes::ThemeIntent>,
     theme_saving: bool,
+    layout_intent: Option<crate::config::LayoutMode>,
+    layout_saving: bool,
+    #[cfg(test)]
+    layout_io: Option<layouts::LayoutIo>,
     theme_loading: bool,
     theme_waiting: bool,
     theme_light: bool,
@@ -208,6 +214,9 @@ struct Loaded {
     shared: Option<herdr_settings::Settings>,
     error: Option<String>,
 }
+
+type SaveCompletion =
+    std::result::Result<Option<herdr_settings::Settings>, std::sync::Arc<crate::Error>>;
 
 #[cfg(test)]
 type SizeWriter = dyn Fn(Vec<(FontFace, f32)>) -> crate::Result<()> + Send + Sync;
@@ -285,6 +294,10 @@ impl SettingsWindow {
             theme_revision: 0,
             theme_intent: None,
             theme_saving: false,
+            layout_intent: None,
+            layout_saving: false,
+            #[cfg(test)]
+            layout_io: None,
             theme_loading: false,
             theme_waiting: false,
             theme_light: false,
@@ -303,6 +316,15 @@ impl SettingsWindow {
                         })
                 {
                     this.drive_theme_intent(cx);
+                }
+                if this.layout_intent.is_some()
+                    && cx
+                        .try_global::<crate::app::InitialAppearance>()
+                        .is_some_and(|appearance| {
+                            appearance.config.layout.mode != this.config.layout.mode
+                        })
+                {
+                    this.broadcast_layout(cx);
                 }
             }),
             #[cfg(test)]
@@ -465,7 +487,7 @@ impl SettingsWindow {
         if !self.finish_control_size_edit(true, cx) {
             return false;
         }
-        if !self.theme_dirty() && !self.busy() {
+        if !self.theme_dirty() && self.layout_intent.is_none() && !self.busy() {
             return true;
         }
         self.closing = Some(window.window_handle());
@@ -484,6 +506,15 @@ impl SettingsWindow {
     fn finish_close(&mut self, cx: &mut Context<Self>) {
         if !self.busy()
             && !self.theme_dirty()
+            && self.closing.is_some()
+            && self.layout_intent.is_some()
+        {
+            self.save_layout_draft(cx);
+            return;
+        }
+        if !self.busy()
+            && !self.theme_dirty()
+            && self.layout_intent.is_none()
             && let Some(handle) = self.closing.take()
         {
             cx.defer(move |cx| {
@@ -522,17 +553,26 @@ impl SettingsWindow {
         self._watch = None;
         let pending = self.take_pending_control_sizes();
         let theme = self.take_shutdown_theme();
+        let layout = self
+            .layout_intent
+            .take()
+            .filter(|_| !self.layout_saving)
+            .map(|mode| self.layout_operation(mode));
         let completion = self.save_completion.take();
         let executor = cx.background_executor().clone();
         cx.background_executor().spawn(async move {
             let mut shared = None;
+            let mut preceding = Ok(());
             if let Some(completion) = completion {
                 // Yield rather than occupying the executor thread needed by
                 // the preceding save, including single-threaded test workers.
                 loop {
                     match completion.try_recv() {
-                        Ok(snapshot) => {
-                            shared = snapshot;
+                        Ok(result) => {
+                            match result {
+                                Ok(snapshot) => shared = snapshot,
+                                Err(error) => preceding = Err(crate::Error::SettingsSave(error)),
+                            }
                             break;
                         }
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
@@ -548,7 +588,8 @@ impl SettingsWindow {
                 write(pending)
             };
             let theme = theme.map_or(Ok(()), |theme| theme(shared));
-            sizes.and(theme)
+            let layout = layout.map_or(Ok(()), |write| write());
+            preceding.and(sizes).and(theme).and(layout)
         })
     }
 
@@ -574,6 +615,7 @@ impl SettingsWindow {
         if !self.finish_control_size_edit(true, cx) {
             self.finish_control_size_edit(false, cx);
         }
+        self.dismiss_control_font_picker(window, cx);
         self.section = section;
         self.body_scroll.set_offset(Point::default());
         window.focus(&self.focus, cx);
@@ -630,6 +672,9 @@ impl SettingsWindow {
                     .as_ref()
                     .map(|_| (self.config.theme.clone(), self.theme.clone()));
                 self.config = loaded.config;
+                if let Some(mode) = self.layout_intent {
+                    self.config.layout.mode = mode;
+                }
                 self.theme = loaded.theme;
                 if let Some((name, theme)) = live {
                     self.config.theme = name;
@@ -735,7 +780,7 @@ impl SettingsWindow {
         let (finished, completion) = std::sync::mpsc::sync_channel(1);
         self.save_completion = Some(completion);
         let work = cx.background_executor().spawn(async move {
-            let saved = operation();
+            let saved = operation().map_err(std::sync::Arc::new);
             // A persistence error can occur after replacement. Always reconcile.
             let loaded = load();
             // Only our successful, reconciled write may advance the queued
@@ -748,7 +793,7 @@ impl SettingsWindow {
             } else {
                 None
             };
-            let _ = finished.send(shared);
+            let _ = finished.send(saved.clone().map(|()| shared));
             (saved, loaded)
         });
         cx.spawn(async move |_, cx| {
@@ -764,6 +809,7 @@ impl SettingsWindow {
                 }
                 let reloaded = loaded.is_ok();
                 let theme_save = std::mem::take(&mut this.theme_saving);
+                let layout_save = std::mem::take(&mut this.layout_saving);
                 if saved.is_err() {
                     this.closing = None;
                 }
@@ -771,9 +817,16 @@ impl SettingsWindow {
                     this.theme_intent = None;
                     themes::clear_theme_draft(cx);
                 }
+                if layout_save && saved.is_ok() {
+                    this.layout_intent = None;
+                    layouts::clear_layout_draft(cx);
+                }
                 this.apply_loaded(loaded, cx);
                 if theme_save && saved.is_ok() {
                     this.broadcast_theme(cx);
+                }
+                if layout_save && saved.is_ok() {
+                    this.broadcast_layout(cx);
                 }
                 this.finish_close(cx);
                 if !this.saving {
@@ -904,15 +957,17 @@ impl SettingsWindow {
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = match self.section {
-            Section::Appearance => self.render_appearance(cx),
+            Section::Appearance => self.render_appearance(window, cx),
             Section::Integrations => self.source.update(cx, |source, cx| source.render_integrations(cx))
                 .unwrap_or_else(|_| div().child("Open a session window to manage agent integrations. Local preferences remain available.")),
             _ => self.render_controls(window, cx),
         };
         let navigation = self.navigation(cx);
+        let font_picker = self.render_control_font_picker(window, cx);
         let theme = &self.theme;
         div()
             .key_context("SettingsWindow")
+            .relative()
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, action: &crate::RunCommand, window, cx| {
                 match action.command {
@@ -999,7 +1054,7 @@ impl Render for SettingsWindow {
                                 })
                                 .unwrap_or_else(|| {
                                     if self.section == Section::Appearance {
-                                        "Themes change live and are saved when Settings closes."
+                                        "Themes and layouts change live; saved on Settings close or app quit."
                                     } else {
                                         "Changes are saved automatically."
                                     }
@@ -1015,6 +1070,7 @@ impl Render for SettingsWindow {
                             .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
                     ),
             )
+            .children(font_picker)
     }
 }
 

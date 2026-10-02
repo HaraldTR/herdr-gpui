@@ -167,6 +167,7 @@ impl HerdrWindow {
             return;
         }
         let theme_revision = crate::settings_window::theme_load_revision(cx);
+        let layout_revision = crate::settings_window::layout_load_revision(cx);
         let load = cx.background_executor().spawn(async move { load() });
         self.config_load = Some(cx.spawn(async move |this, cx| {
             let loaded = load.await;
@@ -177,6 +178,7 @@ impl HerdrWindow {
                 // Apply a coherent pair only after both have loaded successfully.
                 match loaded {
                     Ok((mut config, mut theme)) => {
+                        crate::settings_window::apply_loaded_layout(&mut config, layout_revision, cx);
                         crate::settings_window::apply_loaded_theme(&mut config, &mut theme, theme_revision, cx);
                         if let Some(shared) = &this.settings.shared {
                             config.apply_shared_notifications(shared);
