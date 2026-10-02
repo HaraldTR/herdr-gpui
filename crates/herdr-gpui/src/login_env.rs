@@ -66,7 +66,7 @@ mod unix {
         if tty || term {
             return None;
         }
-        match capture(shell, timeout) {
+        match capture(shell, timeout, LIMIT) {
             Ok(environment) => Some(environment),
             Err(error) => {
                 tracing::warn!(%error, "Could not resolve login-shell environment; using fallback PATH");
@@ -75,7 +75,7 @@ mod unix {
         }
     }
 
-    fn capture(shell: &OsStr, timeout: Duration) -> Result<Environment, ProbeError> {
+    fn capture(shell: &OsStr, timeout: Duration, limit: usize) -> Result<Environment, ProbeError> {
         let id = format!(
             "herdr-login-{}-{}",
             std::process::id(),
@@ -105,7 +105,7 @@ mod unix {
                 match reader.read(&mut buffer) {
                     Ok(len) => {
                         output.extend_from_slice(&buffer[..len]);
-                        if output.len() > LIMIT {
+                        if output.len() > limit {
                             return Err(ProbeError::Output);
                         }
                         if len > 0 {
@@ -126,7 +126,7 @@ mod unix {
                             Ok(0) => break,
                             Ok(len) => {
                                 output.extend_from_slice(&buffer[..len]);
-                                if output.len() > LIMIT {
+                                if output.len() > limit {
                                     return Err(ProbeError::Output);
                                 }
                             }
@@ -297,11 +297,12 @@ mod unix {
         #[test]
         fn output_is_bounded_and_io_causes_are_preserved() {
             // macOS 15's head has no -c option; dd supports byte-sized fixtures there.
-            let (_dir, path) = shell("/bin/dd if=/dev/zero bs=1024 count=1025");
-            let error = capture(path.as_os_str(), Duration::from_secs(2)).unwrap_err();
+            let (_dir, path) = shell("/bin/dd if=/dev/zero bs=1024 count=2");
+            // Exercise the size bound independently of CI's bulk-output throughput.
+            let error = capture(path.as_os_str(), Duration::from_secs(2), 1024).unwrap_err();
             assert!(matches!(error, ProbeError::Output), "{error:?}");
             assert!(
-                matches!(capture(OsStr::new("/nonexistent/herdr-login-shell"), Duration::from_secs(2)), Err(ProbeError::Io(error)) if error.kind() == io::ErrorKind::NotFound)
+                matches!(capture(OsStr::new("/nonexistent/herdr-login-shell"), Duration::from_secs(2), LIMIT), Err(ProbeError::Io(error)) if error.kind() == io::ErrorKind::NotFound)
             );
         }
 
