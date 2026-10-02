@@ -550,7 +550,7 @@ impl SettingsWindow {
             (
                 "System",
                 ToastDelivery::System,
-                "Other clients only; OS notifications are not supported by this GUI",
+                "OS notifications; clicking one opens its pane",
             ),
         ] {
             let selected = self

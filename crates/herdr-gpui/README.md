@@ -328,8 +328,9 @@ These native edits save automatically through the serial background save path,
 preserving unrelated TOML keys/comments and pending theme/layout selections.
 Controls are disabled while a save or reload is in progress. Shared settings
 retain their platform restrictions; Windows can edit native overrides but not
-shared Herdr settings. Terminal and OS notification delivery remain unsupported
-by this GUI.
+shared Herdr settings. System delivery posts OS notifications (see
+[System notifications](#system-notifications)); terminal delivery remains
+unsupported by this GUI.
 
 Integrations is sorted case-insensitively by name, with the original integration
 ID breaking ties. Its search field filters names and IDs without contacting the
@@ -364,8 +365,9 @@ reset colors are projected to opaque native colors.
 
 Sound uses the dedicated Rodio backend, shared global/per-agent settings and
 custom local paths, with Herdr's bundled sounds as fallbacks. The Sound tab offers
-an explicit QA preview. Shared Herdr toast delivery enables in-app notifications;
-Terminal and System delivery are not executed by this native client. Per-field
+an explicit QA preview. Shared Herdr toast delivery enables in-app notifications
+and System delivery posts OS notifications; Terminal delivery is not executed by
+this native client, which has no outer terminal. Per-field
 `[notifications]` settings in the native local override file take precedence.
 Semantic events are bounded, target-validated, and fenced by connection/boot.
 Clipboard feedback has its own shared defaults and native overrides and does not
@@ -393,7 +395,9 @@ closures still ask for confirmation. Saved edits apply automatically. The
 `show_agents` immediately, independently of the layout draft saved on close.
 
 `[notifications]` in `config-gpui.local.toml` overrides shared toast preferences
-for GUI-local in-app delivery, independently per key:
+for GUI-local in-app delivery, independently per key. `enabled = true` shows
+in-app toasts even when shared delivery is `system`; `enabled = false` leaves
+shared `system` delivery posting OS notifications:
 
 ```toml
 [notifications]
@@ -1143,6 +1147,48 @@ elsewhere:
 mkdir -p ~/.claude/skills/herdr-gpui-browser
 herdr-gpui browser skill > ~/.claude/skills/herdr-gpui-browser/SKILL.md
 ```
+
+## System Notifications
+
+With shared `[ui.toast] delivery = "system"`, daemon notifications (agent
+finished and needs attention, plus custom and update notices) go to the OS
+notification center instead of in-app toasts. They use the same delay, Done and
+Blocked evidence, and connection/boot fencing as toasts. As in the Herdr TUI, a
+notification for the active tab of the selected host is skipped only while the
+window is focused; background tabs, other hosts, and unfocused windows always
+post. Notifications are silent: sounds still follow the Sound settings and
+per-agent overrides. Text is the same bounded, control-stripped plain text as a
+toast. When the window has more than one host, the body's first line names the
+host. A newer event for the same host, daemon boot, and pane replaces the older
+notification where the platform allows. When several windows are attached to the
+same host, an event is posted once.
+
+Clicking a notification brings the app and its window forward and opens the
+target pane, tab, or workspace through the same validation as a toast click. It
+only focuses the window when that connection has since reconnected, the daemon
+restarted, the target is gone, or a menu page is open. Clicks are handled only
+while the GUI runs: a click cannot reopen a closed window.
+
+- **macOS** uses `UNUserNotificationCenter`, which works only from an app bundle
+  with a bundle identifier: the release `Herdr.app` (`so.pen.herdr-gpui`) or the
+  `just run`/`just run-debug` bundles (`so.pen.herdr-gpui.dev`). A bare
+  `target/*/herdr-gpui` binary logs that notifications are disabled and posts
+  nothing. The first notification asks for permission. macOS remembers the
+  answer per bundle identifier, so development bundles ask separately. If
+  permission is denied, notifications are dropped; allow them again in
+  **System Settings > Notifications > Herdr**. Banners also appear while Herdr is
+  frontmost, for events outside the active tab.
+- **Linux** uses the freedesktop notification service on the session D-Bus;
+  without a notification daemon nothing appears. Clicking requires a server that
+  supports the default action, and raising the window depends on the
+  compositor's focus policy. Notifications are neither replaced nor retracted, so
+  each event shows separately, and each keeps a small waiting thread until the
+  server closes it.
+- **Windows** uses WinRT toasts. The first notification sets the process
+  AppUserModelID to `so.pen.herdr-gpui` and registers its display name under
+  `HKCU\Software\Classes\AppUserModelId`. Because this changes taskbar grouping,
+  it happens only once system delivery posts. Native Windows behavior has not been
+  verified.
 
 ## macOS Dock Badge
 

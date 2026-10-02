@@ -17,6 +17,7 @@ mod pending_input;
 mod prefix;
 mod render;
 mod selection;
+pub(crate) mod system_notifications;
 mod tab_drag;
 mod tab_strip;
 mod toasts;
@@ -258,6 +259,7 @@ impl HerdrWindow {
         };
         let old_tab = focused_tab(&self.live);
         self.poll_endpoints(cx);
+        self.post_system_notifications(window, cx);
         self.poll_integrations(cx);
         if self.settings.task.is_none() {
             let mut reload = false;
