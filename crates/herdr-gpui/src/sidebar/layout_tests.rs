@@ -1093,6 +1093,82 @@ fn multi_host_rows_scope_duplicate_ids_and_keep_agents_when_host_collapses(
     assert!(cx.debug_bounds("agent-ssh:test-p0").is_some());
 }
 
+/// A second main checkout of the fixture repository stays a top-level parent
+/// in every row layout and on every host: both parents lead the group, each
+/// with its own fold arrow, ahead of the linked worktrees.
+#[gpui::test]
+fn duplicate_repository_parents_lead_one_group_in_every_layout_and_host(
+    cx: &mut gpui::TestAppContext,
+) {
+    for mode in crate::config::LayoutMode::ALL {
+        let (_view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = fixture_window(window, cx);
+            view.config.layout.mode = mode;
+            let mut local = snapshot(7);
+            let mut duplicate = local.workspaces[3].clone();
+            duplicate.workspace_id = "w7".into();
+            duplicate.label = "agent-launcher-copy".into();
+            duplicate.focused = false;
+            local.workspaces.push(duplicate);
+            let mut remote = crate::endpoint::Endpoint::new(
+                "ssh:test".into(),
+                "Remote".into(),
+                ConnectTarget::Ssh {
+                    target: "unused".into(),
+                    session: "default".into(),
+                },
+                true,
+            );
+            remote.live.snapshot = Some(Arc::new(local.clone()));
+            view.live.snapshot = Some(Arc::new(local));
+            view.endpoints.push(remote);
+            view
+        });
+        cx.simulate_resize(size(px(800.), px(1600.)));
+        cx.run_until_parked();
+        cx.update(|window, cx| full_draw(window, cx).clear(cx));
+        // Debug selectors must be static, so each host's rows are spelled out.
+        for (host, rows) in [
+            (
+                "local",
+                [
+                    "workspace-local-w3",
+                    "workspace-local-w7",
+                    "workspace-local-w4",
+                    "workspace-local-w5",
+                    "workspace-local-w6",
+                ],
+            ),
+            (
+                "ssh:test",
+                [
+                    "workspace-ssh:test-w3",
+                    "workspace-ssh:test-w7",
+                    "workspace-ssh:test-w4",
+                    "workspace-ssh:test-w5",
+                    "workspace-ssh:test-w6",
+                ],
+            ),
+        ] {
+            let order = rows.map(|row| {
+                cx.debug_bounds(row)
+                    .unwrap_or_else(|| panic!("{mode:?} {host}: missing {row}"))
+                    .top()
+            });
+            assert!(
+                order.windows(2).all(|pair| pair[0] < pair[1]),
+                "{mode:?} {host}: {order:?}"
+            );
+        }
+        for arrow in ["collapse-3", "collapse-7"] {
+            assert!(
+                cx.debug_bounds(arrow).is_some(),
+                "{mode:?}: missing {arrow}"
+            );
+        }
+    }
+}
+
 /// A frame that renders every view. The sidebar is a cached view, which GPUI
 /// replays without recording debug bounds; these tests measure layout, so each
 /// of their frames is a full one, as every frame was before the cache.
