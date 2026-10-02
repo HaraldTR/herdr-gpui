@@ -148,6 +148,20 @@ impl HerdrWindow {
             .config
             .option_as_alt
             .sends_alt(cx.keyboard_layout().id());
+        let modifiers = event.keystroke.modifiers;
+        if event.keystroke.key.eq_ignore_ascii_case("c")
+            && (modifiers.platform != modifiers.control)
+            && !modifiers.alt
+            && !modifiers.shift
+            && self.copy_retained_selection(cx)
+        {
+            // Herdr's retained-selection copy: Ctrl-C copies instead of
+            // interrupting the pane while a kept selection is showing.
+            cx.stop_propagation();
+            window.prevent_default();
+            return;
+        }
+        self.clear_retained_selection(cx);
         if event.keystroke.key == "escape"
             && (self.cancel_workspace_drag(cx) | self.cancel_tab_drag(cx))
         {

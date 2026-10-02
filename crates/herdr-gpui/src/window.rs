@@ -499,7 +499,11 @@ impl HerdrWindow {
                 if !this.active {
                     this.disarm_prefix();
                     this.cancel_terminal_mouse(cx);
-                    this.selection = None;
+                    // A drag cut short is dropped; a selection kept for an
+                    // explicit copy outlives a trip to another window.
+                    if this.selection.as_ref().is_some_and(Selection::dragging) {
+                        this.selection = None;
+                    }
                     this.pressed_terminal_link = None;
                 }
                 this.report_focus();

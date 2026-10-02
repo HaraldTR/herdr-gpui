@@ -57,10 +57,19 @@ impl HerdrWindow {
         true
     }
 
+    /// Herdr's shared `ui.copy_on_select`, on until the shared config loads.
+    fn copy_on_select(&self) -> bool {
+        self.settings
+            .shared
+            .as_ref()
+            .is_none_or(|shared| shared.copy_on_select)
+    }
+
     /// Ends a drag: what it chose goes to the clipboard, the highlight goes
-    /// away, and the flash says so. Returns whether the release belonged to
-    /// the selection, since a press that chose no cells is still the click
-    /// that opens a link under the pointer.
+    /// away, and the flash says so. With Herdr's `copy_on_select` off, the
+    /// highlight stays instead, for [`Self::copy_retained_selection`]. Returns
+    /// whether the release belonged to the selection, since a press that
+    /// chose no cells is still the click that opens a link under the pointer.
     pub(crate) fn release_selection(&mut self, cx: &mut Context<Self>) -> bool {
         if !self
             .selection
@@ -70,6 +79,45 @@ impl HerdrWindow {
             return false;
         }
         let selected = !self.selection_is_empty();
+        if selected && !self.copy_on_select() {
+            cx.notify();
+            return true;
+        }
+        self.finish_copy(selected, cx);
+        selected
+    }
+
+    /// Whether a released selection is waiting for an explicit copy.
+    pub(crate) fn selection_retained(&self) -> bool {
+        self.selection
+            .as_ref()
+            .is_some_and(|selection| !selection.dragging())
+            && !self.selection_is_empty()
+    }
+
+    /// Copies a selection kept on release and clears it, as Herdr's Ctrl-C
+    /// or Cmd-C does. `false` when no released selection is waiting.
+    pub(crate) fn copy_retained_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.selection_retained() {
+            return false;
+        }
+        self.finish_copy(true, cx);
+        true
+    }
+
+    /// Drops a selection kept on release, as any other key does in Herdr.
+    pub(crate) fn clear_retained_selection(&mut self, cx: &mut Context<Self>) {
+        if self
+            .selection
+            .as_ref()
+            .is_some_and(|selection| !selection.dragging())
+        {
+            self.selection = None;
+            cx.notify();
+        }
+    }
+
+    fn finish_copy(&mut self, selected: bool, cx: &mut Context<Self>) {
         let copied = selected && self.copy_selection(cx);
         // The gesture is over either way: nothing stays highlighted behind it.
         self.selection = None;
@@ -77,7 +125,6 @@ impl HerdrWindow {
             self.show_flash(super::Flash::success("copied to clipboard"), cx);
         }
         cx.notify();
-        selected
     }
 
     /// Writes the current selection to the clipboard, reporting whether the
@@ -282,6 +329,93 @@ mod tests {
             assert!(view.flash.is_none());
             assert!(!view.tick_flash(expires));
         });
+    }
+
+    /// With Herdr's `copy_on_select` off, a release keeps the highlight and
+    /// leaves the clipboard alone until Cmd-C or Ctrl-C, as in Herdr's TUI;
+    /// any other key drops it.
+    #[gpui::test]
+    fn without_copy_on_select_a_release_keeps_the_selection_for_an_explicit_copy(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = fixture_window(window, cx);
+            let mut frame = surface(&["hello there", "second row"], 12);
+            let snapshot = view.live.snapshot.as_ref().unwrap();
+            frame.boot_id = snapshot.boot_id.clone();
+            frame.projection_revision = snapshot.revision;
+            view.live.surface = Some(Arc::new(frame));
+            view.settings.shared = Some(
+                crate::herdr_settings::Settings::parse_text("[ui]\ncopy_on_select = false")
+                    .unwrap(),
+            );
+            view
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        let (origin, cell) = view.read_with(cx, |view, _| {
+            (
+                view.bounds.origin,
+                (view.cell_width, view.config.terminal.line_height()),
+            )
+        });
+        let at = |column: f32, row: f32| -> Point<Pixels> {
+            origin + point(px(column * cell.0), px(row * cell.1))
+        };
+        let clipboard = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+        };
+        let select = |cx: &mut gpui::VisualTestContext| {
+            cx.simulate_mouse_down(at(0., 0.), MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_move(at(5., 0.), MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(at(5., 0.), MouseButton::Left, Modifiers::default());
+        };
+        let copy_available = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+                window.is_action_available(&crate::actions::Copy, cx)
+            })
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string("before".into()));
+
+        select(cx);
+        assert_eq!(clipboard(cx).as_deref(), Some("before"));
+        view.read_with(cx, |view, _| {
+            assert!(view.selection_retained());
+            assert!(view.flash.is_none());
+        });
+        assert!(copy_available(cx));
+
+        // Another key drops the highlight without copying.
+        cx.simulate_keystrokes("x");
+        view.read_with(cx, |view, _| assert!(view.selection.is_none()));
+        assert_eq!(clipboard(cx).as_deref(), Some("before"));
+        assert!(!copy_available(cx));
+
+        for keystroke in ["cmd-c", "ctrl-c"] {
+            cx.write_to_clipboard(ClipboardItem::new_string("before".into()));
+            select(cx);
+            cx.simulate_keystrokes(keystroke);
+            assert_eq!(clipboard(cx).as_deref(), Some("hello"), "{keystroke}");
+            view.read_with(cx, |view, _| {
+                assert!(view.selection.is_none(), "{keystroke}");
+                assert!(view.flash.is_some(), "{keystroke}");
+            });
+        }
+
+        // The Edit menu's Copy takes a kept selection too.
+        cx.write_to_clipboard(ClipboardItem::new_string("before".into()));
+        select(cx);
+        cx.update(|window, cx| window.dispatch_action(Box::new(crate::actions::Copy), cx));
+        assert_eq!(clipboard(cx).as_deref(), Some("hello"));
+        view.read_with(cx, |view, _| assert!(view.selection.is_none()));
+
+        // A press with no drag keeps nothing.
+        cx.simulate_click(at(2., 0.), Modifiers::default());
+        view.read_with(cx, |view, _| assert!(view.selection.is_none()));
     }
 
     #[gpui::test]

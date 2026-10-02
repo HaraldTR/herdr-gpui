@@ -143,8 +143,14 @@ impl Render for HerdrWindow {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
             // A selection is copied when it is released, so the terminal has
-            // nothing for Cut, Copy, or Select All to act on.
+            // nothing for Cut or Select All to act on, and Copy only while
+            // Herdr's `copy_on_select` is off and a released selection waits.
             .on_action(cx.listener(|this, _: &crate::actions::Paste, _, cx| this.paste(cx)))
+            .when(self.selection_retained(), |terminal| {
+                terminal.on_action(cx.listener(|this, _: &crate::actions::Copy, _, cx| {
+                    this.copy_retained_selection(cx);
+                }))
+            })
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_drop(cx.listener(Self::drop_terminal_files))
             .on_mouse_down(

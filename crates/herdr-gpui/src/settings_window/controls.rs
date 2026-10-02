@@ -7,7 +7,7 @@ use crate::{
     agent_skill::{AgentSkill, Choice},
     config::{Config, FONT_SIZE_RANGE, FontFace, LayoutMode, corners},
     font_picker::FontTarget,
-    herdr_settings::{Edit, IndicatorStyle, ToastDelivery},
+    herdr_settings::{Edit, IndicatorStyle, TabBarPosition, ToastDelivery},
     search_input::{Changed, SearchInput},
 };
 use gpui::{prelude::*, *};
@@ -691,6 +691,7 @@ impl SettingsWindow {
                 cx,
             ));
         div().flex().flex_col().gap(px(24.)).child(general)
+            .child(self.render_tab_bar_controls(cx))
             .child(self.render_skill_controls(cx))
             .child(self.clipboard_controls(cx))
             .child(self.control_card("Configuration")
@@ -703,6 +704,60 @@ impl SettingsWindow {
                         this.reload(cx);
                     }))))
                 .child(self.control_note("Saved file edits reload automatically. Reloading GUI settings does not reload the daemon.")))
+    }
+
+    /// Herdr's shared tab row and selection settings, which this GUI and
+    /// the TUI both follow.
+    fn render_tab_bar_controls(&self, cx: &mut Context<Self>) -> Div {
+        let ready = self.controls_shared_ready();
+        let shared = self.shared.as_ref();
+        let position = shared.map(|shared| shared.tab_bar_position);
+        let hide = shared.is_some_and(|shared| shared.hide_tab_bar_when_single_tab);
+        let copy = shared.is_none_or(|shared| shared.copy_on_select);
+        let mut positions = div().flex().flex_wrap().gap(px(8.));
+        for (id, label, choice) in [
+            ("settings-tab-bar-top", "Top", TabBarPosition::Top),
+            ("settings-tab-bar-bottom", "Bottom", TabBarPosition::Bottom),
+        ] {
+            positions = positions.child(
+                self.control_choice(id, label, position == Some(choice), ready)
+                    .debug_selector(move || id.into())
+                    .when(ready && position != Some(choice), |button| {
+                        button.on_click(cx.listener(move |this, _, _, cx| {
+                            this.save_shared(Edit::TabBarPosition(choice), cx);
+                        }))
+                    }),
+            );
+        }
+        self.control_card("Tabs and selection")
+            .child(self.control_note("Tab bar position"))
+            .child(positions)
+            .child(
+                self.control_switch(
+                    "settings-hide-single-tab-bar",
+                    "Hide tab bar with one tab",
+                    hide,
+                    ready,
+                )
+                .when(ready, |button| {
+                    button.on_click(cx.listener(move |this, _, _, cx| {
+                        this.save_shared(Edit::HideSingleTabBar(!hide), cx);
+                    }))
+                }),
+            )
+            .child(
+                self.control_switch("settings-copy-on-select", "Copy on select", copy, ready)
+                    .when(ready, |button| {
+                        button.on_click(cx.listener(move |this, _, _, cx| {
+                            this.save_shared(Edit::CopyOnSelect(!copy), cx);
+                        }))
+                    }),
+            )
+            .child(self.control_note(if cfg!(unix) {
+                "Shared with Herdr. With copy on select off, Cmd-C or Ctrl-C copies the highlighted selection."
+            } else {
+                "Shared with Herdr and read-only on this platform. With copy on select off, Ctrl-C copies the highlighted selection."
+            }))
     }
 
     pub(super) fn render_sidebar_layout_controls(&self, cx: &mut Context<Self>) -> Div {
@@ -911,6 +966,42 @@ mod tests {
                     assert!(note.size.height > px(18.), "narrow descriptions must wrap");
                 }
             }
+        }
+    }
+
+    #[gpui::test]
+    fn general_shows_shared_tab_bar_and_copy_controls_and_holds_them_while_busy(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(skill_fixture);
+        cx.simulate_resize(size(px(960.), px(2200.)));
+        view.update(cx, |view, cx| {
+            view.shared = Some(
+                crate::herdr_settings::Settings::parse_text(
+                    "[ui]\ncopy_on_select = false\ntab_bar_position = 'bottom'",
+                )
+                .unwrap(),
+            );
+            view.saving = true;
+            cx.notify();
+        });
+        cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+        for id in [
+            "settings-tab-bar-top",
+            "settings-tab-bar-bottom",
+            "settings-hide-single-tab-bar",
+            "settings-copy-on-select",
+        ] {
+            let control = cx.debug_bounds(id).unwrap();
+            // A save in flight owns the shared snapshot: clicks wait for it.
+            cx.simulate_click(control.center(), Default::default());
+            view.read_with(cx, |view, _| {
+                assert!(view.save_completion.is_none(), "{id}");
+                let shared = view.shared.as_ref().unwrap();
+                assert!(!shared.copy_on_select);
+                assert_eq!(shared.tab_bar_position, TabBarPosition::Bottom);
+                assert!(!shared.hide_tab_bar_when_single_tab);
+            });
         }
     }
 
