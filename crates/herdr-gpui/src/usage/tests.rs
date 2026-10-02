@@ -781,16 +781,21 @@ fn the_status_bar_shows_the_two_closest_to_a_limit() {
         )),
         error: None,
     });
-    let ids = |limit| {
+    let ids = |limit, chosen: Option<&str>| {
         entry
-            .headline(limit)
+            .headline(limit, chosen.map(provider))
             .iter()
             .map(|reading| reading.provider.id())
             .collect::<Vec<_>>()
     };
-    assert_eq!(ids(super::HEADLINE), ["claude", "codex"]);
+    assert_eq!(ids(super::HEADLINE, None), ["claude", "codex"]);
     // Ties keep the registry order.
-    assert_eq!(ids(10), ["claude", "codex", "zed", "copilot"]);
+    assert_eq!(ids(10, None), ["claude", "codex", "zed", "copilot"]);
+    // A provider picked in the panel leads, then the closest to a limit.
+    assert_eq!(ids(super::HEADLINE, Some("copilot")), ["copilot", "claude"]);
+    assert_eq!(ids(super::HEADLINE, Some("codex")), ["codex", "claude"]);
+    // One with nothing to show on this host leaves the bar as it was.
+    assert_eq!(ids(super::HEADLINE, Some("gemini")), ["claude", "codex"]);
 }
 
 #[test]
