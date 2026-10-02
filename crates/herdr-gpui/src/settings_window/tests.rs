@@ -9,6 +9,52 @@ fn fixture_load() -> crate::Result<Loaded> {
     Ok(fixture())
 }
 
+#[gpui::test]
+fn footer_reload_stays_compact_and_ignores_busy_clicks(cx: &mut TestAppContext) {
+    let main = cx.add_window(crate::sidebar::layout_tests::fixture_window);
+    let weak = cx.update(|cx| main.update(cx, |_, _, cx| cx.weak_entity()).unwrap());
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        let mut view = SettingsWindow::new(weak, cx);
+        view.section = Section::General;
+        view.error = Some(
+            "A long settings error that must wrap without squeezing the Reload button. ".repeat(4),
+        );
+        view
+    });
+    let mut button_size = None;
+    for width in [960., 680., 480.] {
+        cx.simulate_resize(size(px(width), px(560.)));
+        cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+        let button = cx.debug_bounds("settings-footer-reload").unwrap();
+        let status = cx.debug_bounds("settings-footer-status").unwrap();
+        assert!(button.size.width >= px(50.));
+        assert!(button.size.height >= px(24.) && button.size.height <= px(28.));
+        assert!(button.right() <= px(width - 16.));
+        assert!(button.bottom() <= px(560. - 8.));
+        assert!(status.right() + px(12.) <= button.left());
+        assert!(status.size.width > px(0.));
+        assert_eq!(*button_size.get_or_insert(button.size), button.size);
+    }
+    for busy in 0..3 {
+        view.update(cx, |view, cx| {
+            view.loading = busy == 0;
+            view.saving = busy == 1;
+            view.quitting = busy == 2;
+            cx.notify();
+        });
+        cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+        let button = cx.debug_bounds("settings-footer-reload").unwrap();
+        cx.simulate_click(button.center(), Default::default());
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.loading, busy == 0);
+            assert_eq!(view.saving, busy == 1);
+            assert_eq!(view.quitting, busy == 2);
+            assert!(view.error.is_some(), "busy reload must not clear the error");
+        });
+    }
+}
+
 type SizeWrites = Arc<Mutex<Vec<Vec<(FontFace, f32)>>>>;
 
 fn recording_sizes(writes: SizeWrites) -> SizeIo {

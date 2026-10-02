@@ -354,7 +354,7 @@ impl SettingsWindow {
             .child(div().min_w_0().child(value.into()))
     }
 
-    fn control_choice(
+    pub(super) fn control_choice(
         &self,
         id: impl Into<SharedString>,
         label: impl IntoElement,

@@ -1041,7 +1041,7 @@ impl Render for SettingsWindow {
                     .border_color(rgb(theme.active))
                     .text_size(px(11.))
                     .child(
-                        div().flex_1().min_w_0().child(
+                        div().debug_selector(|| "settings-footer-status".into()).flex_1().min_w_0().child(
                             self.error
                                 .clone()
                                 .or_else(|| {
@@ -1062,10 +1062,11 @@ impl Render for SettingsWindow {
                         ),
                     )
                     .child(
-                        div()
-                            .id("settings-reload")
-                            .cursor_pointer()
-                            .child("Reload")
+                        self.control_choice("settings-footer-reload", "Reload", false, !self.busy())
+                            .debug_selector(|| "settings-footer-reload".into())
+                            .flex_none()
+                            .px(px(10.))
+                            .py(px(3.))
                             .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
                     ),
             )
