@@ -164,6 +164,15 @@ impl HerdrWindow {
             .map(str::to_owned)
     }
 
+    /// Whether a parked connection already shows `tab`.
+    pub(crate) fn parked_focuses(&self, tab: &str) -> bool {
+        self.browser
+            .terminals
+            .parked
+            .iter()
+            .any(|parked| parked.focused_tab() == Some(tab))
+    }
+
     /// Whether `group` has a connection of its own on its way to its tab.
     pub(crate) fn group_connecting(&self, group: GroupId) -> bool {
         self.browser

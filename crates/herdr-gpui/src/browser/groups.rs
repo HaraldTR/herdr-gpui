@@ -274,7 +274,11 @@ impl Layout {
     }
 
     /// The group a tab is live in: the latest used of those that picked it.
-    fn holder(&self, pick: &Pick, focused: &impl Fn(GroupId) -> Option<String>) -> Option<GroupId> {
+    pub(crate) fn holder(
+        &self,
+        pick: &Pick,
+        focused: &impl Fn(GroupId) -> Option<String>,
+    ) -> Option<GroupId> {
         self.groups
             .iter()
             .filter(|group| {
