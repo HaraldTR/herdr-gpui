@@ -6,6 +6,7 @@ use crate::{
     Error, Result, SendError,
     clipboard::{ClipboardImageUpload, ImageLease, ImageSlot},
     event::ClientEvent,
+    host_theme::HostTheme,
     method::Method,
     options::{ConnectOptions, validate_options},
     protocol::*,
@@ -14,7 +15,7 @@ use crate::{
 use crossbeam_channel::Receiver;
 use serde_json::{Value, json};
 use std::sync::{
-    Arc,
+    Arc, Mutex, PoisonError,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
@@ -31,6 +32,9 @@ pub(crate) struct HandleInner {
     pub(crate) stop: Arc<AtomicBool>,
     pub(crate) next_request: AtomicU64,
     pub(crate) image_busy: Arc<AtomicBool>,
+    /// The theme this connection last queued in full. Queued, not acknowledged:
+    /// it only spares the daemon repeats and lets later changes go as diffs.
+    pub(crate) last_queued_theme: Mutex<Option<HostTheme>>,
 }
 impl Drop for HandleInner {
     fn drop(&mut self) {
@@ -195,6 +199,31 @@ impl ClientHandle {
             },
             None,
         )
+    }
+    /// Report the host terminal theme. The first call on a connection queues
+    /// all of it; later calls queue only what changed, and nothing when the
+    /// theme is unchanged. Each connection starts unknown to the daemon, so a
+    /// reconnect, being a new connection, reports the whole theme again.
+    pub fn set_host_theme(&self, boot_id: &str, theme: &HostTheme) -> Result<()> {
+        let mut last = self
+            .inner
+            .last_queued_theme
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if last.as_ref() == Some(theme) {
+            return Ok(());
+        }
+        let previous = last.take();
+        for update in theme.updates(previous.as_ref()) {
+            // `last` stays empty on failure, so the next call starts over in full.
+            self.enqueue(
+                boot_id,
+                ClientMessage::ClientShellHostTheme { update },
+                None,
+            )?;
+        }
+        *last = Some(theme.clone());
+        Ok(())
     }
     pub fn set_focus(&self, boot_id: &str, focused: bool) -> Result<()> {
         self.enqueue(boot_id, ClientMessage::ClientShellFocus { focused }, None)

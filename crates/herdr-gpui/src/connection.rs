@@ -1,10 +1,12 @@
 use crate::{
+    config::Theme,
     state::{ConnectionStatus, LiveState},
     terminal::InputTarget,
 };
 use herdr_client::{
-    ClientEvent, ClientHandle, ConnectOptions, ConnectTarget, Method, connect_with_connector,
-    protocol::ClientPaneInputEvent,
+    ClientEvent, ClientHandle, ConnectOptions, ConnectTarget, HostTheme, Method,
+    connect_with_connector,
+    protocol::{ClientHostAppearance, ClientHostColor, ClientPaneInputEvent},
 };
 use std::sync::{
     Arc, Mutex,
@@ -64,6 +66,27 @@ impl IntegrationInbox {
             }
             event => Some(event),
         }
+    }
+}
+
+/// What the daemon is told about this client's terminal: the colors cells are
+/// painted with, and the system appearance rather than the theme's lightness,
+/// so Herdr's light and dark theme overrides follow the OS as they would in a
+/// terminal that reports its color scheme.
+pub(crate) fn host_theme(theme: &Theme, light: bool) -> HostTheme {
+    let rgb = |color: u32| {
+        let [_, r, g, b] = color.to_be_bytes();
+        ClientHostColor { r, g, b }
+    };
+    HostTheme {
+        foreground: rgb(theme.foreground),
+        background: rgb(theme.background),
+        palette: theme.palette.map(rgb),
+        appearance: if light {
+            ClientHostAppearance::Light
+        } else {
+            ClientHostAppearance::Dark
+        },
     }
 }
 
@@ -301,6 +324,22 @@ impl ConnectionBridge {
         Ok(id)
     }
 
+    /// Report `theme` once this connection has a snapshot to address it to.
+    /// The handle skips repeats and starts over on every new connection, so
+    /// this is safe to call whenever the theme or appearance may have changed.
+    pub fn sync_host_theme(&self, live: &LiveState, theme: &HostTheme) {
+        let (Some(handle), Some(snapshot)) = (&self.handle, &live.snapshot) else {
+            return;
+        };
+        if !live.status.is_connected() {
+            return;
+        }
+        // A full queue leaves nothing recorded; the next sync resends it all.
+        if let Err(error) = handle.set_host_theme(&snapshot.boot_id, theme) {
+            tracing::debug!(%error, "Connection bridge host theme not queued");
+        }
+    }
+
     pub fn send_input(
         handle: &ClientHandle,
         boot_id: &str,
@@ -335,6 +374,39 @@ mod tests {
 
     fn bridge() -> ConnectionBridge {
         ConnectionBridge::new(ConnectTarget::Socket("/unused-connection-test.sock".into()))
+    }
+
+    #[test]
+    fn host_theme_paints_cell_colors_and_follows_system_appearance() {
+        let theme = Theme {
+            foreground: 0xabcdef,
+            background: 0x010203,
+            ..Theme::default()
+        };
+        let dark = host_theme(&theme, false);
+        assert_eq!(dark.appearance, ClientHostAppearance::Dark);
+        assert_eq!(
+            dark.foreground,
+            ClientHostColor {
+                r: 0xab,
+                g: 0xcd,
+                b: 0xef
+            }
+        );
+        assert_eq!(dark.background, ClientHostColor { r: 1, g: 2, b: 3 });
+        assert!(
+            dark.palette
+                .iter()
+                .zip(theme.palette)
+                .all(|(color, packed)| (u32::from(color.r) << 16
+                    | u32::from(color.g) << 8
+                    | u32::from(color.b))
+                    == packed)
+        );
+        // A dark background under a light system still reports light.
+        let light = host_theme(&theme, true);
+        assert_eq!(light.appearance, ClientHostAppearance::Light);
+        assert_eq!(light.palette, dark.palette);
     }
 
     #[test]
