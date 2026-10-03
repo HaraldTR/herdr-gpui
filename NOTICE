@@ -46,12 +46,20 @@ assets/social-preview-light-ui.svg, and assets/social-preview-dark.svg, and
 their PNG exports, embed the same adapted ram path alongside original layout,
 typography, and interface artwork.
 
-The sidebar agent icons agent-opencode.svg, agent-claude.svg, agent-codex.svg
-(OpenAI mark), agent-gemini.svg, agent-cursor.svg, and agent-copilot.svg in assets/icons are from
+The sidebar agent icons in assets/icons named agent-pi.svg, agent-claude.svg,
+agent-codex.svg (OpenAI mark), agent-gemini.svg, agent-cursor.svg,
+agent-devin.svg, agent-agy.svg (Antigravity), agent-cline.svg,
+agent-mastracode.svg (Mastra), agent-opencode.svg, agent-copilot.svg,
+agent-kimi.svg, agent-kiro.svg, agent-amp.svg, agent-grok.svg,
+agent-hermes.svg (Hermes Agent), agent-kilo.svg (Kilo Code),
+agent-qodercli.svg (Qoder), and agent-qwen.svg are from
 https://github.com/lobehub/lobe-icons/tree/master/packages/static-svg/icons
-(opencode.svg, claude.svg, openai.svg, gemini.svg, cursor.svg, githubcopilot.svg respectively).
+(the agents added later at revision 79b551cf26aab9ea4ac701fb807160950a5b860f);
+assets/icons/README.md lists the source file for each.
 SVG wrappers were simplified and dimensions set to 24px; paths are unchanged.
 Brand marks identify their respective products and remain their owners' trademarks.
+The lettermarks agent-omp.svg, agent-droid.svg, agent-letta.svg, agent-maki.svg,
+and agent-muse.svg are original artwork, not those products' logos.
 
 MIT License
 

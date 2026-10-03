@@ -353,11 +353,11 @@ pub(crate) fn plan_action(
             |to| Action::Handoff { note: note(), to },
         ),
         Work::Agent { name, argv } => match AgentKind::parse(name) {
-            Some(kind) if has(kind.binary()) => Action::Handoff {
+            Some(kind) if kind.takes_prompt() && has(kind.binary()) => Action::Handoff {
                 note: note(),
                 to: kind,
             },
-            None if work.program().is_some_and(has) => Action::Start(argv.clone()),
+            _ if work.program().is_some_and(has) => Action::Start(argv.clone()),
             _ => fallback().map_or_else(
                 || Action::Missing(name.clone()),
                 |to| Action::Handoff { note: note(), to },
@@ -986,9 +986,9 @@ mod tests {
         Work::Session {
             agent,
             session: AgentSession {
-                agent: agent.binary().into(),
+                agent: agent.name().into(),
                 kind: SessionKind::Id,
-                source: format!("herdr:{}", agent.binary()),
+                source: format!("herdr:{}", agent.name()),
                 value: "id".into(),
             },
             flags: vec![],
@@ -1032,6 +1032,30 @@ mod tests {
                 note: "note".into(),
                 to: AgentKind::Claude
             }
+        );
+        // A known agent that cannot take a first prompt starts afresh.
+        let droid = Work::Agent {
+            name: "droid".into(),
+            argv: vec!["droid".into(), "--auto".into(), "high".into()],
+        };
+        assert_eq!(
+            plan_action(&droid, &installed(&["droid", "claude"]), note),
+            Action::Start(vec!["droid".into(), "--auto".into(), "high".into()])
+        );
+        let copilot = Work::Agent {
+            name: "copilot".into(),
+            argv: vec!["copilot".into()],
+        };
+        assert_eq!(
+            plan_action(&copilot, &installed(&["copilot"]), note),
+            Action::Handoff {
+                note: "note".into(),
+                to: AgentKind::Copilot
+            }
+        );
+        assert_eq!(
+            plan_action(&session(AgentKind::Copilot), &installed(&["copilot"]), note),
+            Action::Resume(AgentKind::Copilot)
         );
         let unknown = Work::Agent {
             name: "gemini".into(),

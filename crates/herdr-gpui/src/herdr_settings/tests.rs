@@ -125,27 +125,78 @@ fn sidebar_collapse_defaults_compact_expanded_and_parses_upstream_values() -> an
         parsed("[ui]\nsidebar_collapsed_mode = 'compact'")?.sidebar_collapsed_mode,
         SidebarCollapsedMode::Compact
     );
+    // A mode from a newer Herdr falls back alone; its neighbour still applies.
+    let newer = parsed("[ui]\nsidebar_collapsed_mode = 'rail'\nsidebar_start_collapsed = true\n")?;
+    assert_eq!(newer.sidebar_collapsed_mode, SidebarCollapsedMode::Compact);
+    assert!(newer.sidebar_start_collapsed);
     Ok(())
 }
 
 #[test]
-fn strict_known_fields_and_typed_sources() -> anyhow::Result<()> {
+fn values_from_a_newer_herdr_fall_back_one_by_one() -> anyhow::Result<()> {
+    // Each value this build cannot read keeps its own default.
     for text in [
-        "[ui]\nstatus_indicators = 'bad'",
+        "[ui]\nstatus_indicators = 'bars'",
         "[ui.sound]\nenabled = 'true'",
         "[theme]\nauto_switch = 1",
         "[theme.custom]\nred = 123",
+        "[theme.custom]\naccent = 123",
         "[ui.toast]\ndelay_seconds = -1",
+        "[ui.toast]\ndelay_seconds = 3601",
+        "[ui.toast]\ndelivery = 'pager'",
         "[ui.toast.herdr]\nposition = 'top-center'",
         "[ui]\nsidebar_collapsed_mode = 'rail'",
         "[ui]\nsidebar_start_collapsed = 'yes'",
+        "[ui.toast.clipboard]\nposition = 'middle'\nenabled = 2",
+        "theme = 'catppuccin'",
+        "ui = 1",
     ] {
-        assert!(matches!(parsed(text), Err(Error::Parse(_))), "{text}");
+        let settings = parsed(text)?;
+        let defaults = parsed("")?;
+        assert_eq!(settings.indicators, defaults.indicators, "{text}");
+        assert_eq!(settings.sound_enabled, defaults.sound_enabled, "{text}");
+        assert_eq!(settings.toast_delivery, defaults.toast_delivery, "{text}");
+        assert_eq!(settings.toast_delay_seconds, 1, "{text}");
+        assert_eq!(settings.toast_position, defaults.toast_position, "{text}");
+        assert_eq!(
+            settings.clipboard.enabled, defaults.clipboard.enabled,
+            "{text}"
+        );
+        assert_eq!(
+            settings.clipboard.position, defaults.clipboard.position,
+            "{text}"
+        );
+        assert_eq!(settings.theme_name, defaults.theme_name, "{text}");
+        assert_eq!(settings.palettes, defaults.palettes, "{text}");
+        assert_eq!(
+            settings.sidebar_collapsed_mode, defaults.sidebar_collapsed_mode,
+            "{text}"
+        );
+        assert_eq!(
+            settings.sidebar_start_collapsed, defaults.sidebar_start_collapsed,
+            "{text}"
+        );
     }
-    assert!(matches!(
-        parsed("[ui.toast]\ndelay_seconds = 3601"),
-        Err(Error::ToastDelay)
-    ));
+    // Readable neighbours of an unreadable value still apply.
+    let settings = parsed(
+        "[theme]\nname = 'nord'\nauto_switch = 'sometimes'\n\
+         [ui]\nstatus_indicators = 'symbols'\nfuture = 1\n\
+         [ui.toast]\nenabled = true\ndelivery = 'pager'\ndelay_seconds = 9\n\
+         [ui.toast.herdr]\nposition = 'top-left'\n\
+         [ui.toast.clipboard]\nenabled = false\nposition = 'middle'",
+    )?;
+    assert_eq!(settings.theme_name, "nord");
+    assert_eq!(settings.indicators, IndicatorStyle::Symbols);
+    assert_eq!(settings.toast_delivery, ToastDelivery::Herdr);
+    assert_eq!(settings.toast_delay_seconds, 9);
+    assert_eq!(settings.toast_position, ToastPosition::TopLeft);
+    assert!(!settings.clipboard.enabled);
+    assert_eq!(settings.clipboard.position, ClipboardPosition::BottomCenter);
+    Ok(())
+}
+
+#[test]
+fn malformed_toml_keeps_typed_sources() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("config.toml");
     fs::write(&path, "[broken")?;

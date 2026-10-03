@@ -273,6 +273,21 @@ impl HerdrWindow {
                 self.open_about(window, cx);
                 return;
             }
+            Command::Find => {
+                self.open_find(window, cx);
+                return;
+            }
+            Command::CopyMode => {
+                self.enter_copy_mode(window, cx);
+                return;
+            }
+            Command::EditScrollback if !self.live.supports_edit_scrollback => {
+                self.show_flash(
+                    Flash::warning("Opening scrollback needs a newer Herdr daemon"),
+                    cx,
+                );
+                return;
+            }
             Command::ToggleSidebar => self.toggle_sidebar(),
             Command::IncreaseFontSize | Command::DecreaseFontSize => {
                 let step = if command == Command::IncreaseFontSize {
