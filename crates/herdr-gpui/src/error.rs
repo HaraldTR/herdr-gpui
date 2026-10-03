@@ -26,8 +26,6 @@ pub enum Error {
     SettingsSave(#[source] std::sync::Arc<Error>),
     #[error("Invalid saved window geometry or too many saved windows")]
     InvalidWindowState,
-    #[error("ui.toast.delay_seconds must be between 0 and 3600")]
-    SoundDelay,
     #[error("Sound configuration exceeds 1 MiB")]
     SoundConfigSize,
     #[error("Unknown sidebar layout {0:?}")]
@@ -296,6 +294,10 @@ pub enum Error {
         "{0} must be 1..256 ASCII letters, digits, '.', '_' or '-' (public client ID, not a secret)"
     )]
     InvalidClientId(&'static str),
+    #[error(
+        "[github] {0} must not be in the config. Sign in from the app, or use GH_TOKEN / GITHUB_TOKEN."
+    )]
+    GitHubSecretInConfig(&'static str),
     #[error("Could not {operation}.")]
     UsageProcess {
         operation: &'static str,
@@ -310,12 +312,6 @@ pub enum Error {
     UsageNetwork(#[source] ureq::Error),
     #[error("Could not reach the usage service from this host.")]
     UsageConnect,
-    #[error(
-        "[usage] names unknown provider {0:?}. See the provider list in config-gpui.example.toml."
-    )]
-    UnknownUsageProvider(String),
-    #[error("[usage.providers.{provider}] has no setting named {setting:?}.")]
-    UnknownUsageSetting { provider: String, setting: String },
     #[error("No sign-in found on this host. Set it up under [usage.providers] in the config.")]
     UsageNotSignedIn,
     #[error("This account has no plan with usage limits to show.")]
