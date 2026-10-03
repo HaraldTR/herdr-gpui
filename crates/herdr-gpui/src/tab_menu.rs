@@ -1,4 +1,10 @@
-use crate::{HerdrWindow, menu::Page, search_input::SearchInput};
+use crate::{
+    HerdrWindow,
+    browser::{GroupId, Pick},
+    controls::Command,
+    menu::Page,
+    search_input::SearchInput,
+};
 use gpui::{prelude::*, *};
 use herdr_client::{Method, protocol::ClientShellSnapshot};
 use serde_json::{Value, json};
@@ -16,6 +22,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use core::prelude::v1::test;
+    use gpui::VisualTestContext;
     use std::sync::Arc;
 
     #[test]
@@ -105,7 +112,7 @@ mod tests {
         });
         cx.simulate_keystrokes("enter");
         assert!(view.read_with(cx, |v, _| v.menu.page == Some(Page::Tab)));
-        cx.simulate_keystrokes("down enter");
+        cx.simulate_keystrokes("down down enter");
         let input = view.read_with(cx, |v, _| {
             assert!(v.menu.page == Some(Page::RenameTab));
             v.menu.tab.as_ref().unwrap().input.clone().unwrap()
@@ -155,13 +162,14 @@ mod tests {
 
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.open_tab_menu("inactive", tab_bounds.center(), window, cx)
+                view.open_tab_menu("inactive", None, tab_bounds.center(), window, cx)
             });
             window.draw(cx).clear(cx);
         });
-        assert!(cx.debug_bounds("tab-menu-1").is_none());
-        let rename_row = cx.debug_bounds("tab-menu-0").unwrap();
-        cx.simulate_mouse_move(rename_row.center(), None, Modifiers::default());
+        assert!(cx.debug_bounds("tab-menu-2").is_some());
+        assert!(cx.debug_bounds("tab-menu-3").is_none());
+        let new_tab_row = cx.debug_bounds("tab-menu-0").unwrap();
+        cx.simulate_mouse_move(new_tab_row.center(), None, Modifiers::default());
         assert_eq!(
             view.read_with(cx, |v, _| v.menu.tab.as_ref().unwrap().selected),
             Some(0)
@@ -174,7 +182,7 @@ mod tests {
         for generation in [false, true] {
             cx.update(|window, cx| {
                 view.update(cx, |view, cx| {
-                    view.open_tab_menu("inactive", point(px(799.), px(599.)), window, cx);
+                    view.open_tab_menu("inactive", None, point(px(799.), px(599.)), window, cx);
                     if generation {
                         view.endpoints[0].generation += 1;
                     } else {
@@ -194,7 +202,7 @@ mod tests {
         for button in [MouseButton::Left, MouseButton::Right] {
             cx.update(|window, cx| {
                 view.update(cx, |view, cx| {
-                    view.open_tab_menu("inactive", point(px(799.), px(599.)), window, cx)
+                    view.open_tab_menu("inactive", None, point(px(799.), px(599.)), window, cx)
                 });
                 window.draw(cx).clear(cx);
             });
@@ -206,6 +214,85 @@ mod tests {
             cx.simulate_mouse_down(point(px(5.), px(5.)), button, Modifiers::default());
             assert!(view.read_with(cx, |v, _| v.menu.page.is_none()));
         }
+    }
+
+    fn group_window(cx: &mut TestAppContext) -> (Entity<HerdrWindow>, &mut VisualTestContext) {
+        use crate::sidebar::layout_tests::{fixture_window, snapshot};
+        cx.add_window_view(|window, cx| {
+            let mut view = fixture_window(window, cx);
+            let mut shown = snapshot(1);
+            shown.focused_workspace_id = Some("w0".into());
+            shown.focused_tab_id = Some("t0".into());
+            view.live.snapshot = Some(Arc::new(shown));
+            view
+        })
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+    }
+
+    /// Right-clicks `tab`, then clicks the menu's `row`.
+    fn choose(cx: &mut VisualTestContext, tab: &'static str, row: &'static str) {
+        draw(cx);
+        let tab = cx.debug_bounds(tab).unwrap();
+        cx.simulate_mouse_down(tab.center(), MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(tab.center(), MouseButton::Right, Modifiers::default());
+        draw(cx);
+        let row = cx.debug_bounds(row).unwrap();
+        cx.simulate_click(row.center(), Modifiers::none());
+        draw(cx);
+    }
+
+    #[gpui::test]
+    fn close_tab_confirms_closing_that_tab_in_herdr(cx: &mut TestAppContext) {
+        let (view, cx) = group_window(cx);
+        choose(cx, "tab-t1", "tab-menu-2");
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.menu.page, Some(Page::ConfirmClose));
+            let snapshot = view.live.snapshot.as_ref().unwrap();
+            assert_eq!(
+                view.menu.close,
+                crate::close_modal::CloseConfirmation::capture_tab(snapshot, "t1")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn close_tab_in_a_split_lets_only_its_group_go(cx: &mut TestAppContext) {
+        let (view, cx) = group_window(cx);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.command(Command::SplitEditor, window, cx)
+            })
+        });
+        draw(cx);
+        let [left, right] = view.read_with(cx, |view, _| {
+            view.group_slots()
+                .into_iter()
+                .map(|slot| slot.id)
+                .collect::<Vec<_>>()
+        })[..] else {
+            panic!("two groups")
+        };
+        let tabs = |view: &Entity<HerdrWindow>, cx: &mut VisualTestContext, group| {
+            cx.update(|_, cx| view.read(cx).group_tabs(group, cx))
+        };
+        choose(cx, "g1-tab-t1", "tab-menu-2");
+        // No confirmation and nothing for Herdr: the tab left one strip.
+        view.read_with(cx, |view, _| {
+            assert!(view.menu.page.is_none() && view.menu.close.is_none());
+            assert_eq!(view.live.snapshot.as_ref().unwrap().tabs.len(), 2);
+        });
+        assert!(!tabs(&view, cx, right).contains(&Pick::Herdr("t1".into())));
+        assert!(tabs(&view, cx, left).contains(&Pick::Herdr("t1".into())));
+
+        // New Tab opens in the group whose strip asked for it.
+        choose(cx, "g1-tab-t0", "tab-menu-0");
+        view.read_with(cx, |view, _| {
+            assert!(view.menu.page.is_none());
+            assert_eq!(view.expected_new_tab_group(), Some(right));
+        });
     }
 
     #[gpui::test]
@@ -225,7 +312,7 @@ mod tests {
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
                 let id = view.live.snapshot.as_ref().unwrap().tabs[0].tab_id.clone();
-                view.open_tab_menu(&id, Point::default(), window, cx);
+                view.open_tab_menu(&id, None, Point::default(), window, cx);
                 view.activate_tab_menu(Action::Rename, window, cx);
                 view.menu.tab.as_mut().unwrap().pending = Some("rename-1".into());
                 view.live.tab_rename = Some(RenameResult {
@@ -328,13 +415,23 @@ impl Target {
 
 #[derive(Clone, Copy)]
 enum Action {
+    NewTab,
     Rename,
+    Close,
 }
 
-const ACTIONS: [(Action, &str); 1] = [(Action::Rename, "Rename")];
+/// Herdr's own tab menu, in its order.
+const ACTIONS: [(Action, &str); 3] = [
+    (Action::NewTab, "New Tab"),
+    (Action::Rename, "Rename"),
+    (Action::Close, "Close Tab"),
+];
 
 pub(super) struct TabMenu {
     target: Target,
+    /// The editor group whose strip opened the menu, if any. A new tab
+    /// opens in it, and while split, closing removes the tab from it alone.
+    group: Option<GroupId>,
     selected: Option<usize>,
     input: Option<Entity<SearchInput>>,
     pending: Option<String>,
@@ -345,6 +442,7 @@ impl HerdrWindow {
     pub(super) fn open_tab_menu(
         &mut self,
         id: &str,
+        group: Option<GroupId>,
         anchor: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -364,6 +462,7 @@ impl HerdrWindow {
         self.menu.page = Some(Page::Tab);
         self.menu.tab = Some(TabMenu {
             target,
+            group,
             selected: None,
             input: None,
             pending: None,
@@ -382,7 +481,7 @@ impl HerdrWindow {
         else {
             return;
         };
-        self.open_tab_menu(&id, self.bounds.origin, window, cx);
+        self.open_tab_menu(&id, None, self.bounds.origin, window, cx);
         if self.menu.page == Some(Page::Tab) {
             self.activate_tab_menu(Action::Rename, window, cx);
         }
@@ -417,7 +516,24 @@ impl HerdrWindow {
                 return;
             }
         };
+        let group = self.menu.tab.as_ref().and_then(|tab| tab.group);
         match action {
+            Action::NewTab => {
+                self.dismiss_menu(window, cx);
+                if let Some(group) = group {
+                    self.expect_new_tab_in(group);
+                }
+                self.command(Command::Tab, window, cx);
+            }
+            // As the tab's own close button: split, a group lets go of the
+            // tab and Herdr keeps it; otherwise the close confirmation decides.
+            Action::Close => match group {
+                Some(group) if self.is_split() => {
+                    self.dismiss_menu(window, cx);
+                    self.close_in_group(group, vec![Pick::Herdr(target.tab)], window, cx);
+                }
+                _ => self.open_tab_close(&target.tab, window, cx),
+            },
             Action::Rename => {
                 let input = cx.new(SearchInput::new);
                 input.update(cx, |input, cx| {

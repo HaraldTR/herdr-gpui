@@ -611,7 +611,7 @@ mod tests {
                         .unwrap();
                     let tab = snapshot.tabs[0].tab_id.clone();
                     view.live.snapshot = Some(std::sync::Arc::new(snapshot));
-                    view.open_tab_menu(&tab, Point::default(), window, cx);
+                    view.open_tab_menu(&tab, None, Point::default(), window, cx);
                     view.open_tab_close(&tab, window, cx);
                     view.open_close_confirmation(crate::controls::Command::CloseTab, window, cx);
                     view.reload_gui_config(window, cx);

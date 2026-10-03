@@ -51,9 +51,18 @@ mod tests {
         }
         assert_eq!(
             Action::Zoom.request(&target).unwrap(),
+            (Method::PaneZoom, json!({"pane_id":"inactive", "mode":"on"}))
+        );
+        assert_eq!(Action::Zoom.label(&target), "Zoom");
+        let mut zoomed = original.clone();
+        zoomed.tabs[0].zoomed = true;
+        let target_zoomed = Target::capture(&zoomed, "inactive").unwrap();
+        assert_eq!(Action::Zoom.label(&target_zoomed), "Unzoom");
+        assert_eq!(
+            Action::Zoom.request(&target_zoomed).unwrap(),
             (
                 Method::PaneZoom,
-                json!({"pane_id":"inactive", "mode":"toggle"})
+                json!({"pane_id":"inactive", "mode":"off"})
             )
         );
         // The focused pane takes the menu's pane's place.
@@ -76,7 +85,7 @@ mod tests {
             )
         );
         assert_eq!(
-            Action::RightClick.label("Send Right-Clicks to Pane", &target),
+            Action::RightClick.label(&target),
             "Send Right-Clicks to Pane"
         );
         let mut routed = original.clone();
@@ -90,7 +99,7 @@ mod tests {
             )
         );
         assert_eq!(
-            Action::RightClick.label("Send Right-Clicks to Pane", &routed),
+            Action::RightClick.label(&routed),
             "Open This Menu on Right-Click"
         );
         for case in 0..7 {
@@ -199,7 +208,7 @@ mod tests {
                     } else {
                         v.selection_epoch += 1;
                     }
-                    for (action, _) in ACTIONS {
+                    for action in ACTIONS {
                         v.activate_pane_menu(action, window, cx);
                         assert_eq!(v.menu.page, Some(Page::Pane));
                         assert!(v.menu.pane.as_ref().unwrap().error.is_some());
@@ -556,6 +565,9 @@ struct Target {
     tab: String,
     pane: String,
     label: String,
+    /// Whether the pane's tab was zoomed when the menu opened, so the zoom
+    /// row says what it will do and asks Herdr for exactly that.
+    zoomed: bool,
     /// The focused pane when it is another one in the same tab, which "Swap
     /// with focused pane" trades places with.
     focused: Option<String>,
@@ -567,6 +579,10 @@ struct Target {
 impl Target {
     fn capture(snapshot: &ClientShellSnapshot, id: &str) -> Option<Self> {
         let pane = snapshot.panes.iter().find(|pane| pane.pane_id == id)?;
+        let zoomed = snapshot
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == pane.tab_id && tab.zoomed);
         let focused = snapshot.focused_pane_id.as_ref().filter(|focused| {
             **focused != pane.pane_id
                 && snapshot.panes.iter().any(|p| {
@@ -581,6 +597,7 @@ impl Target {
             tab: pane.tab_id.clone(),
             pane: pane.pane_id.clone(),
             label: pane.label.clone().unwrap_or_default(),
+            zoomed,
             focused: focused.cloned(),
             right_click_passthrough: pane.right_click_passthrough,
         };
@@ -641,9 +658,11 @@ impl Action {
                 Method::PaneSwap,
                 json!({"source_pane_id": target.focused.as_ref()?, "target_pane_id": target.pane}),
             ),
+            // An explicit mode, so a zoom another client changed meanwhile
+            // leaves the pane as the row promised rather than flipping it.
             Self::Zoom => (
                 Method::PaneZoom,
-                json!({"pane_id": target.pane, "mode": "toggle"}),
+                json!({"pane_id": target.pane, "mode": if target.zoomed { "off" } else { "on" }}),
             ),
             Self::RightClick => (
                 Method::PaneInputSet,
@@ -656,31 +675,39 @@ impl Action {
         })
     }
 
-    fn label(self, label: &'static str, target: &Target) -> &'static str {
+    fn label(self, target: &Target) -> &'static str {
         match self {
+            Self::Rename => "Rename",
+            Self::SplitRight => "Split Right",
+            Self::SplitDown => "Split Down",
+            Self::Swap => "Swap with Focused Pane",
+            Self::Zoom if target.zoomed => "Unzoom",
+            Self::Zoom => "Zoom",
+            Self::EditScrollback => "Open Scrollback in Editor",
             Self::RightClick if target.right_click_passthrough => "Open This Menu on Right-Click",
-            _ => label,
+            Self::RightClick => "Send Right-Clicks to Pane",
+            Self::Close => "Close",
         }
     }
 }
 
-const ACTIONS: [(Action, &str); 8] = [
-    (Action::Rename, "Rename"),
-    (Action::SplitRight, "Split Right"),
-    (Action::SplitDown, "Split Down"),
-    (Action::Swap, "Swap with Focused Pane"),
-    (Action::Zoom, "Toggle Zoom"),
-    (Action::EditScrollback, "Open Scrollback in Editor"),
-    (Action::RightClick, "Send Right-Clicks to Pane"),
-    (Action::Close, "Close"),
+const ACTIONS: [Action; 8] = [
+    Action::Rename,
+    Action::SplitRight,
+    Action::SplitDown,
+    Action::Swap,
+    Action::Zoom,
+    Action::EditScrollback,
+    Action::RightClick,
+    Action::Close,
 ];
 
 impl PaneMenu {
     /// The rows this menu offers: a swap needs another pane to trade with.
-    fn actions(&self) -> Vec<(Action, &'static str)> {
+    fn actions(&self) -> Vec<Action> {
         ACTIONS
             .into_iter()
-            .filter(|(action, _)| !matches!(action, Action::Swap) || self.target.focused.is_some())
+            .filter(|action| !matches!(action, Action::Swap) || self.target.focused.is_some())
             .collect()
     }
 }
@@ -1031,7 +1058,7 @@ impl HerdrWindow {
                 cx.notify();
             }
             "enter" => {
-                if let Some((action, _)) = pane
+                if let Some(action) = pane
                     .selected
                     .and_then(|index| pane.actions().get(index).copied())
                 {
@@ -1048,7 +1075,7 @@ impl HerdrWindow {
         };
         let mut body = div().flex().flex_col();
         if self.menu.page == Some(Page::Pane) {
-            for (index, (action, label)) in pane.actions().into_iter().enumerate() {
+            for (index, action) in pane.actions().into_iter().enumerate() {
                 body = body.child(
                     div()
                         .id(("pane-menu-action", index))
@@ -1062,7 +1089,7 @@ impl HerdrWindow {
                             row.bg(rgb(self.theme.active))
                         })
                         .hover(|row| row.bg(rgb(self.theme.active)))
-                        .child(action.label(label, &pane.target))
+                        .child(action.label(&pane.target))
                         .on_hover(cx.listener(move |this, hovered, _, cx| {
                             if *hovered && let Some(pane) = &mut this.menu.pane {
                                 pane.selected = Some(index);

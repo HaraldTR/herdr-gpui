@@ -10,6 +10,7 @@ use herdr_client::{
 };
 use serde_json::{Value, json};
 
+#[derive(Debug, PartialEq, Eq)]
 pub(super) struct CloseConfirmation {
     boot: String,
     workspace: String,
