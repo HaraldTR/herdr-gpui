@@ -125,10 +125,11 @@ mod tests {
             "pane-menu-3",
             "pane-menu-4",
             "pane-menu-5",
+            "pane-menu-6",
         ] {
             assert!(cx.debug_bounds(selector).is_some());
         }
-        assert!(cx.debug_bounds("pane-menu-6").is_none());
+        assert!(cx.debug_bounds("pane-menu-7").is_none());
         cx.simulate_keystrokes("enter cmd-t cmd-w cmd-b");
         view.read_with(cx, |v, _| {
             assert_eq!(v.menu.page, Some(Page::Pane));
@@ -592,6 +593,7 @@ enum Action {
     SplitRight,
     SplitDown,
     Zoom,
+    EditScrollback,
     RightClick,
     Close,
 }
@@ -618,7 +620,7 @@ impl Action {
                     "right_click": if target.right_click_passthrough { "herdr" } else { "pane" },
                 }),
             ),
-            Self::Rename | Self::Close => return None,
+            Self::Rename | Self::EditScrollback | Self::Close => return None,
         })
     }
 
@@ -630,11 +632,12 @@ impl Action {
     }
 }
 
-const ACTIONS: [(Action, &str); 6] = [
+const ACTIONS: [(Action, &str); 7] = [
     (Action::Rename, "Rename"),
     (Action::SplitRight, "Split Right"),
     (Action::SplitDown, "Split Down"),
     (Action::Zoom, "Toggle Zoom"),
+    (Action::EditScrollback, "Open Scrollback in Editor"),
     (Action::RightClick, "Send Right-Clicks to Pane"),
     (Action::Close, "Close"),
 ];
@@ -763,6 +766,40 @@ impl HerdrWindow {
                     // Keep the original endpoint fence, rather than reopening the menu.
                     self.menu.page = Some(Page::ConfirmClose);
                     cx.notify();
+                }
+            }
+            Action::EditScrollback => {
+                let result = (|| {
+                    if !self.live.supports_edit_scrollback {
+                        return Err(herdr_client::Error::UnsupportedMethod.into());
+                    }
+                    if !self.input_ready() {
+                        return Err(crate::Error::ConnectionNotReady);
+                    }
+                    let handle = self.endpoints[self.selected_endpoint]
+                        .connection
+                        .handle
+                        .as_ref()
+                        .ok_or(crate::Error::NotConnected)?;
+                    // The daemon opens only its focused pane's history, and
+                    // runs requests in order, so focusing first is enough.
+                    let focused = self
+                        .live
+                        .snapshot
+                        .as_ref()
+                        .and_then(|s| s.focused_pane_id.as_deref());
+                    if focused != Some(target.pane.as_str()) {
+                        handle.focus_pane(&target.boot, &target.pane)?;
+                    }
+                    handle.edit_scrollback(&target.boot, &target.pane)?;
+                    Ok::<_, crate::Error>(())
+                })();
+                match result {
+                    Ok(()) => {
+                        self.fence_focus_change(None);
+                        self.dismiss_menu(window, cx);
+                    }
+                    Err(error) => self.pane_error(error, cx),
                 }
             }
             action => {

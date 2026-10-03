@@ -32,6 +32,8 @@ pub struct EndpointClientHello {
     #[serde(default)]
     pub surface_delta: bool,
     #[serde(default)]
+    pub surface_scroll: bool,
+    #[serde(default)]
     pub snapshot_codecs: Vec<String>,
     #[serde(default)]
     pub surface_codecs: Vec<String>,

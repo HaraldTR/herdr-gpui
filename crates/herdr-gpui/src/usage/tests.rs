@@ -281,26 +281,40 @@ fn every_provider_is_registered_once_with_its_icon() {
 }
 
 #[test]
-fn config_names_only_known_providers_and_settings() {
-    let parse = |text: &str| -> crate::Result<UsageConfig> {
-        let config: UsageConfig = toml::from_str(text)?;
-        config.validate()?;
-        Ok(config)
+fn config_ignores_unknown_providers_and_settings() {
+    let parse = |text: &str| {
+        let mut config: UsageConfig = toml::from_str(text).unwrap();
+        let unknown = config.retain_known();
+        (config, unknown)
     };
-    let config = parse("show_providers = [\"claude\"]\nhide_providers = [\"codex\"]").unwrap();
+    let (config, unknown) = parse("show_providers = [\"claude\"]\nhide_providers = [\"codex\"]");
     assert!(config.shown(provider("claude")));
     assert!(config.hidden(provider("codex")));
     assert!(config.show);
-    assert!(matches!(
-        parse("show_providers = [\"nope\"]"),
-        Err(Error::UnknownUsageProvider(id)) if id == "nope"
-    ));
-    assert!(matches!(
-        parse("[providers.claude]\napi_key = \"x\""),
-        Err(Error::UnknownUsageSetting { provider, setting })
-            if provider == "claude" && setting == "api_key"
-    ));
-    assert!(parse("unknown = 1").is_err());
+    assert!(unknown.is_empty());
+    // Names a newer build may know are dropped and reported, not fatal.
+    let (config, unknown) = parse(
+        "show_providers = [\"nope\", \"claude\"]\nhide_providers = [\"later\"]\n\
+         [providers.claude]\napi_key = \"x\"\n[providers.future]\ntoken = \"y\"",
+    );
+    assert!(config.shown(provider("claude")));
+    assert_eq!(config.show_providers, ["claude"]);
+    assert!(config.hide_providers.is_empty());
+    assert!(!config.providers.contains_key("future"));
+    assert!(
+        config
+            .settings(provider("claude"))
+            .is_none_or(|settings| settings.get("api_key").is_none())
+    );
+    assert_eq!(
+        unknown,
+        [
+            "usage.show_providers.nope",
+            "usage.hide_providers.later",
+            "usage.providers.claude.api_key",
+            "usage.providers.future",
+        ]
+    );
 }
 
 #[test]
@@ -781,16 +795,21 @@ fn the_status_bar_shows_the_two_closest_to_a_limit() {
         )),
         error: None,
     });
-    let ids = |limit| {
+    let ids = |limit, chosen: Option<&str>| {
         entry
-            .headline(limit)
+            .headline(limit, chosen.map(provider))
             .iter()
             .map(|reading| reading.provider.id())
             .collect::<Vec<_>>()
     };
-    assert_eq!(ids(super::HEADLINE), ["claude", "codex"]);
+    assert_eq!(ids(super::HEADLINE, None), ["claude", "codex"]);
     // Ties keep the registry order.
-    assert_eq!(ids(10), ["claude", "codex", "zed", "copilot"]);
+    assert_eq!(ids(10, None), ["claude", "codex", "zed", "copilot"]);
+    // A provider picked in the panel leads, then the closest to a limit.
+    assert_eq!(ids(super::HEADLINE, Some("copilot")), ["copilot", "claude"]);
+    assert_eq!(ids(super::HEADLINE, Some("codex")), ["codex", "claude"]);
+    // One with nothing to show on this host leaves the bar as it was.
+    assert_eq!(ids(super::HEADLINE, Some("gemini")), ["claude", "codex"]);
 }
 
 #[test]

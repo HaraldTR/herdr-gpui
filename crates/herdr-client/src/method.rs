@@ -17,11 +17,15 @@ pub enum Method {
     LayoutSetSplitRatio,
     PaneClear,
     PaneClose,
+    PaneCopyMotion,
+    PaneCopySearch,
+    PaneEditScrollback,
     PaneFocus,
     PaneFocusDirection,
     PaneInputSet,
     PaneRename,
     PaneScroll,
+    PaneSelectionRead,
     PaneSplit,
     PaneZoom,
     ServerReloadConfig,
@@ -52,11 +56,15 @@ impl Method {
             Self::LayoutSetSplitRatio => "layout.set_split_ratio",
             Self::PaneClear => "pane.clear",
             Self::PaneClose => "pane.close",
+            Self::PaneCopyMotion => "pane.copy_motion",
+            Self::PaneCopySearch => "pane.copy_search",
+            Self::PaneEditScrollback => "pane.edit_scrollback",
             Self::PaneFocus => "pane.focus",
             Self::PaneFocusDirection => "pane.focus_direction",
             Self::PaneInputSet => "pane.input.set",
             Self::PaneRename => "pane.rename",
             Self::PaneScroll => "pane.scroll",
+            Self::PaneSelectionRead => "pane.selection.read",
             Self::PaneSplit => "pane.split",
             Self::PaneZoom => "pane.zoom",
             Self::ServerReloadConfig => "server.reload_config",
@@ -131,6 +139,21 @@ mod tests {
         assert_eq!(Method::PaneInputSet.as_str(), "pane.input.set");
         assert!(Method::PaneInputSet.advertised_in(&["pane.input.set".into()]));
         assert!(!Method::PaneInputSet.advertised_in(&["pane.input".into()]));
+    }
+
+    #[test]
+    fn copy_search_wire_name_and_advertisement() {
+        for (method, name) in [
+            (Method::PaneCopyMotion, "pane.copy_motion"),
+            (Method::PaneEditScrollback, "pane.edit_scrollback"),
+            (Method::PaneSelectionRead, "pane.selection.read"),
+        ] {
+            assert_eq!(method.as_str(), name);
+            assert!(method.advertised_in(&[name.into()]));
+        }
+        assert_eq!(Method::PaneCopySearch.as_str(), "pane.copy_search");
+        assert!(Method::PaneCopySearch.advertised_in(&["pane.copy_search".into()]));
+        assert!(!Method::PaneCopySearch.advertised_in(&["pane.copy_motion".into()]));
     }
 
     #[test]

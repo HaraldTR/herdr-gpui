@@ -216,6 +216,7 @@ impl HerdrWindow {
                         });
                         this.font_size_saves.apply_pending(&mut config);
                         this.config = config;
+                        this.gui_config_diagnostic.sync(this.config.diagnostic().as_deref());
                         crate::settings_window::apply_loaded_theme(&mut this.config, &mut this.theme, theme_revision, cx);
                         this.tick_toasts(
                             this.menu.page.is_some() || this.toasts_hidden,
@@ -303,6 +304,9 @@ impl HerdrWindow {
                 | Command::SplitDown
                 | Command::Zoom
                 | Command::ClearPane
+                | Command::Find
+                | Command::CopyMode
+                | Command::EditScrollback
                 | Command::ClosePane
                 | Command::CloseTab
                 | Command::NewBrowserTab

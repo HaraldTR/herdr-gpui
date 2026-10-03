@@ -31,8 +31,15 @@ impl gpui::Render for Fixture {
 }
 
 impl Server {
+    /// The next lifecycle frame. Every connection reports the window's theme
+    /// once it has a snapshot; `window::tests` covers that, so skip it here.
     fn receive(&mut self) -> ClientMessage {
-        read_message(&mut self.stream, MAX_FRAME_SIZE).unwrap()
+        loop {
+            match read_message(&mut self.stream, MAX_FRAME_SIZE).unwrap() {
+                ClientMessage::ClientShellHostTheme { .. } => {}
+                message => return message,
+            }
+        }
     }
 
     fn respond(&mut self, request: &serde_json::Value) {
@@ -3243,8 +3250,11 @@ fn every_focus_changing_command_fences_immediate_input_until_ack_and_surface(
                     }
                     Command::WorkspacePicker => view.palette_key(&key("enter"), window, cx),
                     Command::Palette => {
-                        // The configured entry follows all native entries except Palette.
-                        for _ in 0..crate::controls::COMMANDS.len() - 1 {
+                        // The configured entry follows all native entries
+                        // except Palette and those the daemon does not offer.
+                        let hidden = usize::from(!view.live.supports_pane_clear)
+                            + usize::from(!view.live.supports_edit_scrollback);
+                        for _ in 0..crate::controls::COMMANDS.len() - 1 - hidden {
                             view.palette_key(&key("down"), window, cx);
                         }
                         view.palette_key(&key("enter"), window, cx);
@@ -3977,5 +3987,97 @@ fn input_held_across_gap_is_bounded_and_dropped_on_reset(cx: &mut gpui::TestAppC
         assert!(view.local_error.is_some());
         view.reset_selected();
         assert_eq!(view.pending_input.len(), 0);
+    });
+}
+
+/// Bells and daemon titles travel the authoritative event path of each
+/// connection, and only the selected endpoint's reach the window.
+#[gpui::test]
+fn bell_and_window_title_follow_the_selected_endpoint(cx: &mut gpui::TestAppContext) {
+    let (local, mut local_server) = connected_endpoint("local-title");
+    let (remote, mut remote_server) = connected_endpoint("ssh:title");
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.read_with(cx, |fixture, _| fixture.0.clone());
+    view.update(cx, |view, _| {
+        view.endpoints = vec![local, remote];
+        view.selected_endpoint = 0;
+        view.reset_selected();
+    });
+    let send = |server: &mut Server, message: ServerMessage| {
+        write_message(&mut server.stream, &message, MAX_GRAPHICS_FRAME_SIZE).unwrap();
+    };
+    send(
+        &mut remote_server,
+        ServerMessage::WindowTitle {
+            title: Some("remote\u{1b}]0;x\u{7} host".into()),
+        },
+    );
+    send(&mut remote_server, ServerMessage::TerminalBell { count: 3 });
+    send(
+        &mut local_server,
+        ServerMessage::WindowTitle {
+            title: Some("local".into()),
+        },
+    );
+    let ring_both = crate::config::BellConfig {
+        attention: true,
+        sound: true,
+    };
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            project_until(view, cx, "both titles", |view| {
+                view.live.window_title.as_deref() == Some("local")
+                    && view.endpoints[1].live.window_title.is_some()
+            });
+            // The remote bell was drained without ringing this window.
+            assert_eq!(view.endpoints[1].live.bells, 0);
+            assert_eq!(view.bell.take(ring_both, false, Instant::now()), None);
+            assert_eq!(
+                view.endpoints[1].live.window_title.as_deref(),
+                Some("remote]0;x host")
+            );
+            view.sync_window_title(window);
+            assert_eq!(view.title, "local");
+        });
+    });
+
+    send(&mut local_server, ServerMessage::TerminalBell { count: 1 });
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let ring = loop {
+                view.poll_endpoints(cx);
+                if let Some(ring) = view.bell.take(ring_both, false, Instant::now()) {
+                    break ring;
+                }
+                assert!(Instant::now() < deadline, "the local bell never rang");
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            assert!(ring.attention && ring.sound);
+
+            // Switching endpoints takes that endpoint's title with it.
+            view.selected_endpoint = 1;
+            view.reset_selected();
+            view.live = view.endpoints[1].live.clone();
+            view.sync_window_title(window);
+            assert_eq!(view.title, "remote]0;x host");
+        });
+    });
+
+    // Clearing restores the window's own title.
+    send(
+        &mut remote_server,
+        ServerMessage::WindowTitle { title: None },
+    );
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            project_until(view, cx, "cleared title", |view| {
+                view.live.window_title.is_none()
+            });
+            view.sync_window_title(window);
+            assert!(view.title.starts_with(crate::WINDOW_TITLE));
+        });
     });
 }
