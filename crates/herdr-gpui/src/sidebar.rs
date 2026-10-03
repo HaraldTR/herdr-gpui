@@ -8,6 +8,7 @@ mod layout;
 mod layouts;
 mod metrics;
 pub(crate) mod preview;
+mod rail;
 mod render;
 mod reorder;
 mod row;
@@ -27,6 +28,7 @@ pub(crate) use {
     agents::{Indicators, agent_name, state_label, status_indicator},
     hover::{HoverMenu, HoverRest},
     metrics::{ARROW_RESERVE, HOST_ARROW_WIDTH, HOST_GAP, ICON_RESERVE, LABEL_GAP, STATUS_WIDTH},
+    rail::SidebarMode,
     reorder::WorkspaceDrag,
     row::{compact, github_mark, label_text},
     view::SidebarView,
