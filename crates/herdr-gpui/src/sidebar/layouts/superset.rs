@@ -1,13 +1,19 @@
 //! Superset's single-line rows: one icon slot that reports the row's state,
 //! the name, and the pull request's change counts on the right. The focused
-//! row is filled and marked with a stripe down its leading edge.
+//! row is filled and marked with a stripe down its leading edge. Rows Herdr's
+//! sidebar config defines replace the name with its lines; the slot keeps its
+//! dot only when those lines lead with the status.
 
 use super::{
     super::{
-        agents::{status_indicator, status_style},
+        agents::{status_mark, status_style},
         cell::{AgentRow, RowContext, RowLayout, RowState, WorkspaceRow},
         line_height,
-        row::{RowIcon, RowLift, RowTree, left_behind, removing_dot},
+        row::{
+            RowIcon, RowKind, RowLift, RowTree, TokenLook, configured_status_style, leading_status,
+            left_behind, removing_dot, token_column,
+        },
+        tokens::ResolvedToken,
     },
     parts::{self, Line, glyph_at, wash},
 };
@@ -79,19 +85,19 @@ fn shell(key: &str, state: RowState, indent: f32, line: Line<'_>, cx: &RowContex
     .child(line.into_div())
 }
 
-/// The icon slot, with the status as a dot pinned to its top right corner.
-/// Unknown draws no dot: there is nothing to report.
+/// The icon slot, with the status as a dot pinned to its top right corner in
+/// `dot`'s color, bold where symbols allow. `None` draws no dot.
 fn slot(
     key: &str,
     glyph: impl IntoElement,
-    status: AgentStatus,
+    (status, dot): (AgentStatus, Option<(u32, bool)>),
     m: &Metrics,
     cx: &RowContext<'_>,
 ) -> Div {
     let theme = cx.theme;
-    let dot = (status != AgentStatus::Unknown).then(|| {
+    let dot = dot.map(|(color, bold)| {
         if cx.indicators.style == crate::herdr_settings::IndicatorStyle::Symbols {
-            return status_indicator(status, cx.font, cx.indicators)
+            return status_mark(status, cx.font, cx.indicators, color, bold)
                 .mt_0()
                 .absolute()
                 .top(px(-2.))
@@ -99,7 +105,6 @@ fn slot(
                 .bg(rgb(theme.sidebar_background()));
         }
         let (diameter, filled, _) = status_style(status, theme);
-        let color = cx.indicators.color(status);
         div()
             .absolute()
             .top(px(-2.))
@@ -125,6 +130,24 @@ fn slot(
         .children(dot)
 }
 
+/// The slot's dot: none for Unknown, which has nothing to report, or for a
+/// configured row that does not lead with the status, as Herdr's rows omit
+/// it; styled as that leading `state_icon` asks.
+fn dot(
+    lines: &[Vec<ResolvedToken>],
+    status: AgentStatus,
+    cx: &RowContext<'_>,
+) -> (AgentStatus, Option<(u32, bool)>) {
+    let dot = if status == AgentStatus::Unknown {
+        None
+    } else if lines.is_empty() {
+        Some((cx.indicators.color(status), false))
+    } else {
+        leading_status(lines).map(|token| configured_status_style(token, status, cx))
+    };
+    (status, dot)
+}
+
 fn text_color(state: RowState, theme: &Theme) -> u32 {
     if state.selected {
         theme.foreground
@@ -143,10 +166,12 @@ impl RowLayout for Superset {
             fold,
             badge,
             removing,
+            lines,
             ..
         } = row;
         let theme = cx.theme;
         let m = Metrics::new(cx);
+        let slot_dot = dot(&lines, status, cx);
         let indent = if tree == RowTree::None {
             0.
         } else {
@@ -177,21 +202,21 @@ impl RowLayout for Superset {
             slot(
                 label,
                 removing_dot("worktree-removing", theme),
-                AgentStatus::Unknown,
+                (status, None),
                 &m,
                 cx,
             )
         } else {
-            slot(label, glyph, status, &m, cx)
+            slot(label, glyph, slot_dot, &m, cx)
         };
         let counts = if state.selected {
             (theme.ink(theme.palette[2]), theme.ink(theme.palette[1]))
         } else {
             (theme.muted, theme.muted)
         };
-        let line = Line::new(cx.look.content_width(cx.width) - indent, m.gap)
-            .fixed(m.icon, slot)
-            .fill(
+        let line = Line::new(cx.look.content_width(cx.width) - indent, m.gap).fixed(m.icon, slot);
+        let line = if lines.is_empty() {
+            line.fill(
                 div()
                     .debug_selector(|| format!("name-{label}"))
                     .text_color(rgb(if teleported {
@@ -201,10 +226,28 @@ impl RowLayout for Superset {
                     })),
                 label,
             )
+            // Configured rows show the counts only through `git_status`.
             .when_some(upstream, |line, upstream| {
                 let glyph = glyph_at(cx.font, cx.font.size);
                 line.fixed(upstream.width(glyph), upstream.element(label, glyph, theme))
             })
+        } else {
+            line.fill_with(|width| {
+                token_column(
+                    label,
+                    &lines,
+                    TokenLook {
+                        kind: RowKind::Workspace,
+                        status,
+                        focused: state.selected,
+                        teleported,
+                    },
+                    width,
+                    cx,
+                )
+            })
+        };
+        let line = line
             .when(teleported, |line| {
                 line.fixed(dirty_size, parts::teleported(label, dirty_size, theme))
             })
@@ -228,9 +271,28 @@ impl RowLayout for Superset {
         let key = agent.key.as_str();
         let color = text_color(state, theme);
         let glyph = parts::icon(agent.icon.path(), m.icon * 0.7, color);
-        // Where the agent runs trails its name, never over half the row.
+        let slot_dot = dot(&agent.lines, agent.status, cx);
         let line = Line::new(cx.look.content_width(cx.width), m.gap)
-            .fixed(m.icon, slot(key, glyph, agent.status, &m, cx))
+            .fixed(m.icon, slot(key, glyph, slot_dot, &m, cx));
+        if !agent.lines.is_empty() {
+            let line = line.fill_with(|width| {
+                token_column(
+                    key,
+                    &agent.lines,
+                    TokenLook {
+                        kind: RowKind::Agent(agent.icon),
+                        status: agent.status,
+                        focused: state.selected,
+                        teleported: false,
+                    },
+                    width,
+                    cx,
+                )
+            });
+            return shell(key, state, 0., line, cx);
+        }
+        // Where the agent runs trails its name, never over half the row.
+        let line = line
             .fill(
                 div()
                     .debug_selector(|| format!("name-{key}"))
@@ -260,5 +322,73 @@ impl RowLayout for Superset {
                 )
             });
         shell(key, state, 0., line, cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        super::super::{
+            agents::Indicators,
+            cell::RowContext,
+            layout,
+            tokens::{ResolvedToken, TextRole, TokenKind},
+        },
+        dot,
+    };
+    use crate::config::{FontConfig, LayoutMode, Theme, TokenStyle};
+    use herdr_client::protocol::AgentStatus;
+
+    #[core::prelude::v1::test]
+    fn the_slot_dot_follows_a_configured_leading_state_icon() {
+        let font = FontConfig {
+            family: "Menlo".into(),
+            size: 12.,
+            fallbacks: None,
+        };
+        let theme = Theme::default();
+        let indicators = Indicators::new(None, false, &theme);
+        let cx = RowContext {
+            indicators,
+            font: &font,
+            theme: &theme,
+            look: layout::for_mode(LayoutMode::Superset),
+            width: 232.,
+            host: None,
+        };
+        let working = AgentStatus::Working;
+        let native = indicators.color(working);
+        let icon = |style| ResolvedToken {
+            kind: TokenKind::StateIcon,
+            style,
+        };
+        let name = ResolvedToken {
+            kind: TokenKind::Text("repo".into(), TextRole::Workspace),
+            style: TokenStyle::default(),
+        };
+        let red = TokenStyle {
+            fg: Some(0xff0000),
+            bold: Some(true),
+            dim: None,
+        };
+        assert_eq!(dot(&[], working, &cx), (working, Some((native, false))));
+        assert_eq!(
+            dot(
+                &[vec![icon(TokenStyle::default()), name.clone()]],
+                working,
+                &cx
+            ),
+            (working, Some((native, false)))
+        );
+        assert_eq!(
+            dot(&[vec![icon(red), name.clone()]], working, &cx),
+            (working, Some((0xff0000, true)))
+        );
+        // No leading status, or nothing to report, draws no dot.
+        assert_eq!(dot(&[vec![name.clone()]], working, &cx), (working, None));
+        assert_eq!(
+            dot(&[vec![icon(red), name]], AgentStatus::Unknown, &cx),
+            (AgentStatus::Unknown, None)
+        );
     }
 }

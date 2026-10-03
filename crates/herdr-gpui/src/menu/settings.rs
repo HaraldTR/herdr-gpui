@@ -29,7 +29,7 @@ impl HerdrWindow {
     }
 
     /// Reloads when the GUI overrides change, or the daemon's config whose
-    /// `[keys]` and clipboard toast the GUI also honors.
+    /// `[keys]`, clipboard toast, and `[ui.sidebar]` rows the GUI also honors.
     pub(crate) fn watch_gui_config(&mut self, cx: &mut Context<Self>) {
         let Ok(path) = Config::local_path() else {
             return;

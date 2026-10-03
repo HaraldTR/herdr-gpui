@@ -12,6 +12,7 @@ mod rail;
 mod render;
 mod reorder;
 mod row;
+mod tokens;
 mod view;
 mod workspaces;
 

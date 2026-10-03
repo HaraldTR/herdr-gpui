@@ -182,6 +182,8 @@ impl Preview {
                             teleported: false,
                         }),
                         removing: false,
+                        status: workspace.agent_status,
+                        lines: Vec::new(),
                     }),
                     &context,
                 )
@@ -209,6 +211,7 @@ impl Preview {
                         status,
                         place: Some((&self.workspaces[index % 3].label, None)),
                         status_text: None,
+                        lines: Vec::new(),
                     }),
                     &context,
                 )

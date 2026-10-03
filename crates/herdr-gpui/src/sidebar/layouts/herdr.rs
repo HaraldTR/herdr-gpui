@@ -16,7 +16,12 @@ pub(in super::super) struct Herdr;
 impl RowLayout for Herdr {
     fn workspace(&self, row: WorkspaceRow<'_>, state: RowState, cx: &RowContext<'_>) -> Div {
         let density = cx.look.density;
-        let lines = if density.workspace_details() { 2. } else { 1. };
+        let badge_lines = row.badge.as_ref().map_or(0, |badge| badge.lines(density));
+        let text_lines = if row.lines.is_empty() {
+            if density.workspace_details() { 2 } else { 1 }
+        } else {
+            row.lines.len().max(badge_lines).max(1)
+        };
         let (branch, status, upstream) = (row.branch().unwrap_or(""), row.status(), row.upstream());
         let WorkspaceRow {
             label,
@@ -26,12 +31,13 @@ impl RowLayout for Herdr {
             grouped,
             badge,
             removing,
+            lines,
             ..
         } = row;
         let arrow = fold.map(|fold| {
             fold.element(cx.theme)
                 .w(px(ARROW_RESERVE - density.gap()))
-                .h(px(line_height(cx.font) * lines))
+                .h(px(line_height(cx.font) * text_lines as f32))
                 .text_size(px(16.))
         });
         super::super::row::row(
@@ -45,14 +51,13 @@ impl RowLayout for Herdr {
             state,
             tree,
             grouped,
-            cx.width,
             icon,
             arrow,
             badge,
             upstream,
             None,
-            cx.look,
-            (cx.font, cx.theme),
+            &lines,
+            cx,
         )
     }
 
@@ -69,14 +74,13 @@ impl RowLayout for Herdr {
             state,
             RowTree::None,
             false,
-            cx.width,
             RowIcon::None,
             None,
             None,
             None,
             agent.status_text.as_deref(),
-            cx.look,
-            (cx.font, cx.theme),
+            &agent.lines,
+            cx,
         )
     }
 }

@@ -9,9 +9,14 @@ use crate::{
     keymap::{Binding, DaemonKeys, Keymap},
 };
 pub(crate) mod preferences;
+pub(crate) mod sidebar;
 pub(crate) mod watch;
+
 use gpui::{Font, FontFallbacks};
 use serde::Deserialize;
+pub(crate) use sidebar::{
+    AgentLayout, AgentToken, Rows, SidebarLayout, SpaceLayout, SpaceToken, TokenStyle,
+};
 use std::{
     collections::BTreeMap,
     env, fs,
@@ -90,10 +95,6 @@ pub struct Config {
     pub show_system_load: bool,
     /// How far the app's own marks and labels stand off its chrome.
     pub contrast: Contrast,
-    /// Show each agent's status word beside it, following the daemon's
-    /// `[ui.sidebar.agents]` rows when they name the `state_text` token.
-    pub agent_status_text: AgentStatusText,
-    /// Plan usage of the selected host's AI services in the status bar.
     pub usage: crate::usage::UsageConfig,
     pub option_as_alt: OptionAsAlt,
     pub open_links_in: LinkTarget,
@@ -108,6 +109,8 @@ pub struct Config {
     pub clipboard_toast: ClipboardToast,
     pub bell: BellConfig,
     pub layout: Layout,
+    /// Daemon sidebar rows, falling back to defaults when invalid.
+    pub sidebar_layout: SidebarLayout,
     pub keybindings: Keymap,
     /// The `[keybindings]` table `keybindings` was built from, kept so a
     /// device's server keys can be layered under the same GUI overrides.
@@ -731,7 +734,6 @@ impl Default for Config {
             show_agents: true,
             show_system_load: true,
             contrast: Contrast::default(),
-            agent_status_text: AgentStatusText::default(),
             usage: crate::usage::UsageConfig::default(),
             option_as_alt: OptionAsAlt::default(),
             open_links_in: LinkTarget::default(),
@@ -741,6 +743,7 @@ impl Default for Config {
             clipboard_toast: ClipboardToast::default(),
             bell: BellConfig::default(),
             layout: Layout::default(),
+            sidebar_layout: SidebarLayout::default(),
             keybindings: Keymap::default(),
             keybinding_overrides: BTreeMap::new(),
             devices: BTreeMap::new(),
@@ -881,45 +884,7 @@ pub(crate) fn daemon_config_path(get: impl Fn(&str) -> Option<std::ffi::OsString
 struct Daemon {
     clipboard_toast: ClipboardToast,
     keys: DaemonKeys,
-    /// Which agents' daemon rows name the `state_text` token.
-    agent_status_text: AgentStatusText,
-}
-
-/// Which agents the daemon's `[ui.sidebar.agents]` rows give a status word.
-/// The daemon uses an agent's `rows_by_agent` entry instead of `rows`, never
-/// both, so each agent is decided by the list it will actually draw.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct AgentStatusText {
-    /// Whether `rows` names the token: agents without their own entry.
-    rows: bool,
-    /// Per canonical agent id, whether its `rows_by_agent` entry names it.
-    by_agent: BTreeMap<String, bool>,
-}
-
-impl AgentStatusText {
-    /// Whether an agent, by the canonical id the daemon reports for it, shows
-    /// its status word.
-    pub fn shown_for(&self, agent: Option<&str>) -> bool {
-        agent
-            .and_then(|agent| self.by_agent.get(agent))
-            .copied()
-            .unwrap_or(self.rows)
-    }
-
-    /// The setting for `rows` plus the given `rows_by_agent` overrides.
-    #[cfg(test)]
-    pub(crate) fn from_rows<'a>(
-        rows: bool,
-        by_agent: impl IntoIterator<Item = (&'a str, bool)>,
-    ) -> Self {
-        Self {
-            rows,
-            by_agent: by_agent
-                .into_iter()
-                .map(|(agent, shown)| (agent.to_owned(), shown))
-                .collect(),
-        }
-    }
+    sidebar_layout: SidebarLayout,
 }
 
 /// A config file the GUI does not own can hold anything, including settings
@@ -938,7 +903,7 @@ fn daemon_settings(path: &Path) -> Daemon {
     Daemon {
         clipboard_toast: daemon_clipboard_toast(&table),
         keys: DaemonKeys::from_table(table.get("keys").and_then(toml::Value::as_table)),
-        agent_status_text: daemon_agent_status_text(&table),
+        sidebar_layout: SidebarLayout::from_daemon_config(&table).unwrap_or_default(),
     }
 }
 
@@ -961,52 +926,6 @@ fn daemon_clipboard_toast(table: &toml::Table) -> ClipboardToast {
         resolved.position = position;
     }
     resolved
-}
-
-/// Which agents the daemon's `[ui.sidebar.agents]` rows give the `state_text`
-/// token. That is the TUI's status word beside each agent, so the GUI shows the
-/// same text instead of only the dot. Rows without it, or a differently shaped
-/// table, leave it off, matching the daemon's default rows.
-fn daemon_agent_status_text(table: &toml::Table) -> AgentStatusText {
-    let Some(agents) = table
-        .get("ui")
-        .and_then(|ui| ui.get("sidebar")?.get("agents")?.as_table())
-    else {
-        return AgentStatusText::default();
-    };
-    AgentStatusText {
-        rows: agents.get("rows").is_some_and(rows_have_state_text),
-        by_agent: agents
-            .get("rows_by_agent")
-            .and_then(toml::Value::as_table)
-            .map(|by_agent| {
-                by_agent
-                    .iter()
-                    .filter(|(_, rows)| rows.is_array())
-                    .map(|(agent, rows)| (agent.clone(), rows_have_state_text(rows)))
-                    .collect()
-            })
-            .unwrap_or_default(),
-    }
-}
-
-/// One sidebar row list: arrays of tokens, each a plain name or an inline table
-/// with a `token` key. Unknown shapes are ignored rather than treated as a match.
-fn rows_have_state_text(rows: &toml::Value) -> bool {
-    rows.as_array().is_some_and(|rows| {
-        rows.iter().any(|row| {
-            row.as_array().is_some_and(|tokens| {
-                tokens.iter().any(|token| {
-                    token.as_str() == Some("state_text")
-                        || token
-                            .as_table()
-                            .and_then(|token| token.get("token"))
-                            .and_then(toml::Value::as_str)
-                            == Some("state_text")
-                })
-            })
-        })
-    })
 }
 
 fn theme_directories() -> Result<Vec<PathBuf>> {
@@ -1282,7 +1201,7 @@ impl Config {
             .resolve(NotificationConfig::default());
         config.clipboard_toast = settings.clipboard_toast.resolve(base.clipboard_toast);
         config.bell = settings.bell;
-        config.agent_status_text = base.agent_status_text.clone();
+        config.sidebar_layout = base.sidebar_layout.clone();
         if !settings.layout.sidebar_gap.is_finite()
             || !(0.0..=MAX_SIDEBAR_GAP).contains(&settings.layout.sidebar_gap)
         {
@@ -1844,6 +1763,11 @@ impl Theme {
         self.ink(mix(self.background, self.foreground, 78))
     }
 
+    /// A configured `dim = true` token: the color faded toward the panel.
+    pub fn dimmed(&self, color: u32) -> u32 {
+        mix(self.surface, color, 55)
+    }
+
     /// A wash of [`Self::primary`] over the chrome, for filled selections such
     /// as the current tab. Large areas of the full accent shout; this keeps the
     /// hue while staying quiet enough to sit behind text all day.
@@ -2384,28 +2308,34 @@ mod tests {
                  [ui.sidebar.agents.rows_by_agent]\nclaude = [[\"agent\"]]\n",
                 [false, true, true],
             ),
+            (
+                "[ui.sidebar.agents]\nrows = [[\"state_text\", \"bogus\"]]",
+                [false; 3],
+            ),
             ("not toml", [false; 3]),
         ] {
             fs::write(&daemon, text)?;
-            let settings = daemon_settings(&daemon).agent_status_text;
+            let settings = daemon_settings(&daemon).sidebar_layout.agents;
             assert_eq!(
                 [
-                    settings.shown_for(Some("claude")),
-                    settings.shown_for(Some("codex")),
-                    settings.shown_for(None),
+                    settings.shows_status_text(Some("claude")),
+                    settings.shows_status_text(Some("codex")),
+                    settings.shows_status_text(None),
                 ],
                 expected,
                 "{text}"
             );
         }
-        let off = AgentStatusText::default();
+        let off = AgentLayout::default();
         assert_eq!(
-            daemon_settings(&temp.0).agent_status_text,
+            daemon_settings(&temp.0).sidebar_layout.agents,
             off,
             "a directory is not a config"
         );
         assert_eq!(
-            daemon_settings(&temp.0.join("absent.toml")).agent_status_text,
+            daemon_settings(&temp.0.join("absent.toml"))
+                .sidebar_layout
+                .agents,
             off
         );
 
@@ -2414,7 +2344,45 @@ mod tests {
         oversized.push_str(&"# pad\n".repeat(MAX_DAEMON_CONFIG_BYTES as usize / 6));
         assert!(oversized.len() as u64 > MAX_DAEMON_CONFIG_BYTES);
         fs::write(&daemon, &oversized)?;
-        assert_eq!(daemon_settings(&daemon).agent_status_text, off);
+        assert_eq!(daemon_settings(&daemon).sidebar_layout.agents, off);
+        Ok(())
+    }
+
+    #[test]
+    fn sidebar_layout_comes_from_the_daemon_config() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let daemon = temp.0.join("config.toml");
+        let absent = daemon_settings(&temp.0.join("absent.toml"));
+        assert_eq!(absent.sidebar_layout, SidebarLayout::default());
+
+        fs::write(
+            &daemon,
+            "[ui.sidebar.agents]\nrows = [[\"agent\", \"$usage_ctx_ok\"]]\nrow_gap = 1\n[unrelated]\nx = 1\n[ui.toast.clipboard]\nenabled = false\n",
+        )?;
+        let settings = daemon_settings(&daemon);
+        assert_eq!(settings.sidebar_layout.agents.rows.len(), 1);
+        assert_eq!(settings.sidebar_layout.agents.row_gap, 1);
+        assert_eq!(settings.sidebar_layout.spaces, SpaceLayout::default());
+        assert!(!settings.clipboard_toast.enabled);
+        let config = Config::parse_layers(["\n"], &settings)?;
+        assert_eq!(config.sidebar_layout, settings.sidebar_layout);
+        assert_eq!(
+            Config::parse_layers(["[usage]\ninline = false"], &settings)?.sidebar_layout,
+            settings.sidebar_layout
+        );
+
+        fs::write(
+            &daemon,
+            "[ui.toast.clipboard]\nenabled = false\n[ui.sidebar.agents]\nrows = [[\"bogus\"]]\n",
+        )?;
+        let settings = daemon_settings(&daemon);
+        assert_eq!(settings.sidebar_layout, SidebarLayout::default());
+        assert!(!settings.clipboard_toast.enabled);
+        fs::write(&daemon, "not toml [")?;
+        let settings = daemon_settings(&daemon);
+        assert_eq!(settings.sidebar_layout, SidebarLayout::default());
+        assert_eq!(settings.clipboard_toast, ClipboardToast::default());
+
         Ok(())
     }
 
