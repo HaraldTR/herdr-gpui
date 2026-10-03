@@ -1182,6 +1182,7 @@ pub(crate) fn full_draw(window: &mut Window, cx: &mut App) -> ArenaClearNeeded {
 pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>) -> HerdrWindow {
     HerdrWindow {
         sound: Default::default(),
+        bell: Default::default(),
         updater: crate::updater::Updater::default(),
         update_preview: None,
         removal: None,
@@ -1208,6 +1209,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         config_load_revision: 0,
         git: Default::default(),
         usage: Default::default(),
+        system_load: Default::default(),
         sidebar_visible: true,
         device_filter: None,
         endpoints: vec![crate::endpoint::Endpoint::new(

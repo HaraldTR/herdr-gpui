@@ -6,7 +6,7 @@ use super::HerdrWindow;
 use crate::{
     APP_VERSION, CheckForUpdates, Minimize, PlaySound, RunCommand, ShowHerdrNotDetected,
     ShowUpdatePreview,
-    actions::ShowToastPreview,
+    actions::{RingBellPreview, ShowToastPreview},
     browser::{Pick, Shown, Slot},
     config::ClipboardToastPosition,
     fonts::StyledFont,
@@ -508,6 +508,9 @@ impl Render for HerdrWindow {
             .on_action(cx.listener(|this, _: &PlaySound, _, _| {
                 this.sound.preview();
             }))
+            .on_action(cx.listener(|this, _: &RingBellPreview, window, cx| {
+                this.preview_bell(window, cx);
+            }))
             .size_full()
             .relative()
             .flex()
@@ -603,6 +606,7 @@ impl Render for HerdrWindow {
                                 div().debug_selector(|| "connection-message".into()).child(status)
                             )),
                     )
+                    .children(self.render_system_load())
                     .when(crate::caffeine::SUPPORTED, |bar| {
                         let awake = crate::caffeine::active(cx);
                         let (foreground, surface) = (self.theme.foreground, self.theme.surface);

@@ -4,7 +4,11 @@ A GPUI 0.3.6 (`gpui-pre`) client for a Local daemon and saved SSH hosts, with ma
 support, experimental Linux x86_64/ARM64 builds, and an experimental Windows build with
 headless CI coverage. See [Windows](#windows) for what is unavailable there.
 It starts an installed local `herdr server` when absent; explicit socket and
-development targets remain attach-only. It does not link or install Herdr, stop
+development targets remain attach-only. On Unix, GUI launches resolve the login-shell
+environment once on the connection worker so daemon plugins can find tools such as
+`node`. Terminal launches skip the shell probe. Failed probes fall back to standard
+per-user and Homebrew bin directories; the probe has a five-second timeout.
+It does not link or install Herdr, stop
 daemons, spawn a local PTY, or emulate a terminal. Herdr's remote bridge may start
 the named remote session. SSH requires an installed POSIX Herdr, noninteractive authentication,
 and an already trusted host key. For hosts that need MFA or a password, configure
@@ -400,6 +404,17 @@ closures still ask for confirmation. Saved edits apply automatically. The
 **Show agents** control in **Settings > Appearance > Sidebar layout** saves
 `show_agents` immediately, independently of the layout draft saved on close.
 
+The status bar shows the selected host's CPU and memory: a sparkline of recent
+CPU use and a memory meter, each with its current share, and cores, load
+averages, and memory in gigabytes in its tooltip. With more than one host, each
+host row in the sidebar shows its own: right-aligned gauges after the name in
+compact layouts, and the sparkline and meter on a second line otherwise. This
+machine is read in process; each connected Linux or macOS remote host is read
+every two seconds over its own SSH shell, kept open while the host is connected
+(`/proc` on Linux; `vm_stat` and a one-second `iostat` on macOS). Other remote
+systems, and remote hosts from a Windows client, show it as unavailable. Set top-level `show_system_load = false`,
+or turn off **Show CPU and memory** in Settings, to hide it and stop sampling.
+
 `[notifications]` in `config-gpui.local.toml` overrides shared toast preferences
 for GUI-local in-app delivery, independently per key. `enabled = true` shows
 in-app toasts even when shared delivery is `system`; `enabled = false` leaves
@@ -554,6 +569,34 @@ following the daemon config. Only these two keys are read from that file, it is
 never written, and an unreadable, oversized, malformed, or unrecognized value
 leaves the defaults standing.
 
+The `[bell]` table decides what a pane's terminal bell (BEL) does. Herdr has no
+bell setting: it forwards each bell to its foreground client and leaves the
+reaction to it, as the TUI hands BEL to the outer terminal.
+
+```toml
+[bell]
+attention = true  # request attention (bounce the Dock) while the window is inactive
+sound = false     # play the system alert sound
+```
+
+Only bells from the selected endpoint's own connection ring; parked editor-group
+connections and other endpoints are dropped, as the TUI drops presentation
+effects from inactive endpoints. A burst rings at most once per 500 ms. On
+platforms where GPUI does not implement attention requests or the system bell,
+those settings do nothing.
+
+**QA > Ring Bell in 3 Seconds** (QA builds) previews both reactions after a
+delay, so there is time to switch to another app and watch the Dock: it plays the
+system alert and, if the window is then inactive, requests attention. It
+bypasses `[bell]` and the rate limit, and needs no daemon.
+
+The window title follows the daemon's `WindowTitle` message for the selected
+endpoint: a title an agent set with `client.window_title.set`, or Herdr's own
+rendering of `ui.window_title` (`{hostname}`, `{workspace}`, `{tab}`, `{pane}`,
+`{terminal_title}`) for this window's view. Control characters are stripped and
+the title is capped at 200 characters. Without one, after a disconnect, or once
+the daemon restarts, the window keeps its own `Herdr — <workspace>` title.
+
 The `src/config.rs` module exposes `Config::load()` and
 `Config::path()` (managed defaults) and `Config::local_path()` (user overrides),
 all returning the crate's typed `Result`. `Config::theme()` resolves
@@ -629,7 +672,8 @@ evidence may wait up to one second from receipt, rechecking every 50 ms. New
 notifications replace pending ones for the same endpoint/pane. Only Finished is
 suppressed for the selected endpoint's active tab while the native window is
 focused (workspace focus is the fallback for events without a tab).
-Legacy `Notify`, terminal BEL, and terminal escape sequences never play audio.
+Legacy `Notify`, terminal BEL, and terminal escape sequences never play Herdr
+sounds; BEL can play the system alert through `[bell]`.
 
 Built-in Done and Request MP3s are the upstream Herdr sounds, attributed in
 [SOUND-NOTICE.md](SOUND-NOTICE.md). Rodio 0.22 uses CPAL native output and

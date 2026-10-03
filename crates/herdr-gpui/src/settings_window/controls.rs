@@ -682,6 +682,15 @@ impl SettingsWindow {
                 }),
             )
             .child(self.preference_switch(
+                "settings-system-load",
+                "Show CPU and memory",
+                self.config.show_system_load,
+                crate::config::preferences::Preference::ShowSystemLoad(
+                    !self.config.show_system_load,
+                ),
+                cx,
+            ))
+            .child(self.preference_switch(
                 "settings-confirm-close",
                 "Confirm tab close",
                 self.config.confirm_close_tab,

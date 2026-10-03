@@ -16,6 +16,7 @@ actions!(
         ShowAll,
         Minimize,
         PlaySound,
+        RingBellPreview,
         ShowHerdrNotDetected,
         ShowLogs,
         CheckForUpdates,
