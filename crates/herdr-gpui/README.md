@@ -1603,7 +1603,9 @@ Windows setup) nothing is saved and the window says so.
 - Click workspace, tab, agent, or a visible split pane to focus through the API.
 - Right-click a visible pane, including an inactive split, for Rename, Split
   Right, Split Down, Toggle Zoom, right-click routing, and Close without first
-  focusing it. Actions
+  focusing it, and, on another pane of the focused tab, Swap with Focused
+  Pane, which moves the focused pane to the clicked one's place and keeps it
+  focused. Actions
   retain the clicked pane/tab/workspace and daemon boot, and reject stale
   membership or a changed connection. Rename uses an IME-aware native field,
   trims surrounding whitespace, and clears the custom label when blank. It
@@ -1692,14 +1694,28 @@ Windows setup) nothing is saved and the window says so.
   window, shown by a keycap in the status bar; the next keystroke runs its
   chord or, when nothing is bound to it, is dropped, as in the TUI. Typing the
   prefix twice sends it to the terminal, and Escape cancels. Chords work from
-  a menu's or dialog's text field too: the chord closes it and runs. Daemon actions
-  with a GUI command are `new_workspace`, `new_worktree`, `workspace_picker`
-  and `goto` (both Go To), `settings`, `help` (the shortcut reference),
-  `open_notification_target`, `new_tab`, `next_tab`, `previous_tab`,
-  `switch_tab`, `close_tab`, `split_vertical` (Split Right),
-  `split_horizontal` (Split Down), `focus_pane_*`, `cycle_pane_next`,
-  `cycle_pane_previous`, `zoom`, `close_pane`, `clear_pane`, and
-  `toggle_sidebar`; the rest stay TUI-only. Daemon keys add to the catalog
+  a menu's or dialog's text field too: the chord closes it and runs. Every
+  daemon action has a GUI command except `detach` (closing the window already
+  detaches), `open_worktree` and
+  `remove_worktree` (offered from the workspace menu), and the
+  `navigate_pane_*` keys (Go To has no pane cursor). `workspace_picker` and
+  `goto` open Go To, where `navigate_workspace_up`/`_down` move the selection
+  when the key cannot be typed into its search. `split_vertical` and
+  `split_horizontal` are Split Right and Split Down. As in the TUI,
+  `previous_workspace`/`next_workspace` and `previous_agent`/`next_agent` step
+  through the sidebar's rows on every listed host and wrap around,
+  `switch_workspace` counts the selected host's rows, `focus_agent` counts the
+  agent panel's, `last_pane` returns to the pane focused before this one,
+  `move_tab_previous`/`_next` wrap a tab at either end to the other, and
+  `[keys.indexed]` combos bind the digits 1-9. `resize_mode` (`prefix+r`)
+  makes h, j, k, l or the arrows resize the focused pane until Escape, Enter,
+  or the shortcut again; the status bar shows it. Renames and
+  `close_workspace` open the same dialogs as their menus, and `reload_config`
+  reloads both the daemon's config and this one. The daemon's
+  `[[keys.command]]` shortcuts, prefix chords or direct keys, run their
+  command through `command.invoke` on the focused pane, and the palette lists
+  them with these keys; like Herdr, a keystroke one of its actions already
+  holds keeps that action. Daemon keys add to the catalog
   defaults and take a keystroke from its default command. A command named in
   `[keybindings]` keeps exactly the keystrokes listed there, daemon chords
   included, and a keystroke listed there outranks the daemon's, even the

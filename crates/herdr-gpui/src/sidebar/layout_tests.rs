@@ -1598,6 +1598,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         browser: crate::browser::Browser::new(cx),
         _browser_tabs: cx.observe_global::<crate::browser::Store>(|_, cx| cx.notify()),
         prefix_armed: false,
+        resize_mode: false,
         server_keys: None,
         _prefix_interceptor: HerdrWindow::intercept_prefix(window, cx),
     }
