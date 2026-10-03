@@ -1313,6 +1313,98 @@ fn cancellation_does_not_flush_commands_behind_pending_request() {
     assert!(client.events.try_recv().is_err());
 }
 
+#[test]
+fn surface_images_precede_their_surface_and_survive_a_pending_projection() {
+    let key = |image_id| SurfaceGraphicsAssetKey {
+        source: SurfaceGraphicsSource::Terminal {
+            target: SurfaceGraphicsTarget::Pane {
+                pane_id: "p1".into(),
+            },
+            image_id,
+        },
+        image_width: 1,
+        image_height: 1,
+        format: SurfaceGraphicsFormat::Rgba,
+        data_len: 4,
+        data_fingerprint: u64::from(image_id),
+    };
+    let placing = |key: &SurfaceGraphicsAssetKey, revision, projection| {
+        let mut surface = baseline();
+        surface.surface_revision = revision;
+        surface.projection_revision = projection;
+        surface.graphics = SurfaceGraphicsScene {
+            assets: vec![SurfaceGraphicsAsset {
+                key: key.clone(),
+                data: vec![1, 2, 3, 255],
+            }],
+            placements: vec![SurfaceGraphicsPlacement {
+                asset: key.clone(),
+                logical_placement_id: 1,
+                x: 0,
+                y: 0,
+                cols: 1,
+                rows: 1,
+                source_x: 0,
+                source_y: 0,
+                source_width: 0,
+                source_height: 0,
+                x_offset: 0,
+                y_offset: 0,
+                z: 0,
+                scrollback_offset: 0,
+            }],
+            retained_assets: vec![],
+        };
+        ServerMessage::PaneSurface(surface)
+    };
+    let mut session = ready_session();
+    let mut handle = |message| {
+        let mut events = Vec::new();
+        session
+            .handle_message(message, |event| {
+                events.push(event);
+                Ok(())
+            })
+            .unwrap();
+        events
+    };
+    let (a, b) = (key(1), key(2));
+    let events = handle(placing(&a, 1, 7));
+    let [
+        ClientEvent::SurfaceImages(images),
+        ClientEvent::Surface(surface),
+    ] = events.as_slice()
+    else {
+        panic!("unexpected events {events:?}");
+    };
+    assert_eq!(images.get(&a).unwrap().data().as_ref(), [1, 2, 3, 255]);
+    assert!(surface.graphics.assets.is_empty());
+    assert_eq!(surface.graphics.placements.len(), 1);
+
+    // A surface ahead of its snapshot is held back, but its bytes are kept,
+    // and so are those the surface on screen still places.
+    let events = handle(placing(&b, 2, 8));
+    let [ClientEvent::SurfaceImages(images)] = events.as_slice() else {
+        panic!("unexpected events {events:?}");
+    };
+    assert!(images.get(&a).is_some() && images.get(&b).is_some());
+
+    let events = handle(ServerMessage::EndpointControl {
+        kind: ENDPOINT_SNAPSHOT_KIND.into(),
+        data: SNAPSHOT.replace("\"revision\": 7", "\"revision\": 8"),
+    });
+    let [
+        ClientEvent::Snapshot(_),
+        ClientEvent::SurfaceImages(images),
+        ClientEvent::Surface(surface),
+    ] = events.as_slice()
+    else {
+        panic!("unexpected events {events:?}");
+    };
+    assert!(images.get(&a).is_none() && images.get(&b).is_some());
+    assert_eq!(surface.graphics.placements[0].asset, b);
+}
+
 fn host_theme(appearance: ClientHostAppearance) -> HostTheme {
     let rgb = |value: u8| ClientHostColor {
         r: value,
