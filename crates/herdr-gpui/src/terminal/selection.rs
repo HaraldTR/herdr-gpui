@@ -44,10 +44,10 @@ struct Edge {
 /// The cells one target owns, in its own frame's grid, and where that grid is
 /// painted relative to the canvas origin. `top` is the content row painted on
 /// the grid's first row.
-struct Region {
-    columns: Range<u16>,
-    rows: Range<u16>,
-    origin: (f32, f32),
+pub(super) struct Region {
+    pub(super) columns: Range<u16>,
+    pub(super) rows: Range<u16>,
+    pub(super) origin: (f32, f32),
     top: u32,
 }
 
@@ -126,7 +126,7 @@ impl Region {
 }
 
 /// Share popup isolation and pane bounds with input and link resolution.
-fn region(
+pub(super) fn region(
     surface: &PaneSurfaceFrame,
     target: &InputTarget,
     cell_width: f32,
@@ -162,7 +162,10 @@ fn region(
 }
 
 /// The frame whose grid a target's cells are addressed in.
-fn frame<'a>(surface: &'a PaneSurfaceFrame, target: &InputTarget) -> Option<&'a FrameData> {
+pub(super) fn frame<'a>(
+    surface: &'a PaneSurfaceFrame,
+    target: &InputTarget,
+) -> Option<&'a FrameData> {
     match target {
         InputTarget::Popup(_) => surface.popup.as_ref().map(|popup| &popup.frame),
         InputTarget::Pane(_) => Some(&surface.frame),
@@ -245,6 +248,33 @@ fn separates(c: char) -> bool {
         || ('\u{2500}'..='\u{259f}').contains(&c)
 }
 
+/// What a cell reads as: concealed cells read as blanks, never their hidden
+/// text, and an empty cell as the blank a terminal paints.
+pub(super) fn shown(cell: &CellData) -> &str {
+    if cell.modifier & HIDDEN != 0 || cell.symbol.is_empty() {
+        " "
+    } else {
+        cell.symbol.as_str()
+    }
+}
+
+/// The cells of one row that read as text, each with its column, counted from
+/// the first cell, and the columns it spans. The wire skip flag is not a
+/// wide-cell marker: continuation cells can be ordinary blanks, so a wide
+/// grapheme covers the cells its width takes, and the scan starts at the
+/// row's first cell so a range starting on a continuation recognizes it too.
+pub(super) fn graphemes(cells: &[CellData]) -> impl Iterator<Item = (usize, usize, &CellData)> {
+    let mut covered = 0;
+    cells.iter().enumerate().filter_map(move |(column, cell)| {
+        if column < covered || cell.skip {
+            return None;
+        }
+        let span = cell.symbol.width().max(1).min(cells.len() - column);
+        covered = column + span;
+        Some((column, span, cell))
+    })
+}
+
 /// The columns of the word a double click at `column` chooses. An explicit
 /// hyperlink takes its whole run of cells and a plain web URL its whole
 /// destination; otherwise the word runs to the nearest separator, so paths
@@ -261,13 +291,6 @@ fn word(frame: &FrameData, region: &Region, row: u16, column: u16) -> Option<Ran
         .get(offset + usize::from(columns.start)..offset + usize::from(columns.end))?;
     // A wide character's continuation cells belong to the cell that drew it.
     let source = |index: usize| (0..=index).rev().find(|&i| !cells[i].skip).unwrap_or(index);
-    fn symbol(cell: &CellData) -> &str {
-        if cell.modifier & HIDDEN != 0 || cell.symbol.is_empty() {
-            " "
-        } else {
-            cell.symbol.as_str()
-        }
-    }
     let hit = source(usize::from(column - columns.start));
     if let Some(link) = cells[hit].hyperlink {
         return Some(run(columns.start, hit, cells.len(), &|i| {
@@ -283,7 +306,7 @@ fn word(frame: &FrameData, region: &Region, row: u16, column: u16) -> Option<Ran
         if cell.skip {
             continue;
         }
-        let symbol = symbol(cell);
+        let symbol = shown(cell);
         if text.len() + symbol.len() > super::links::MAX_ROW_BYTES {
             return None;
         }
@@ -295,7 +318,7 @@ fn word(frame: &FrameData, region: &Region, row: u16, column: u16) -> Option<Ran
         }));
     }
 
-    let first_char = |index: usize| symbol(&cells[source(index)]).chars().next().unwrap_or(' ');
+    let first_char = |index: usize| shown(&cells[source(index)]).chars().next().unwrap_or(' ');
     if separates(first_char(hit)) {
         return None;
     }
@@ -394,6 +417,11 @@ impl Selection {
     /// Ends the drag. `false` when the gesture had already finished.
     pub(crate) fn release(&mut self) -> bool {
         std::mem::replace(&mut self.dragging, false)
+    }
+
+    /// The pane or popup the selection is in.
+    pub(super) fn target(&self) -> &InputTarget {
+        &self.target
     }
 
     /// The pane a pane selection belongs to.
@@ -570,30 +598,14 @@ impl Selection {
                 text.push('\n');
             }
             line.clear();
-            let mut covered = 0;
-            for (column, cell) in cells.iter().enumerate() {
-                if column < covered {
-                    continue;
-                }
-                if cell.skip {
-                    continue;
-                }
-                // The wire skip flag is not a wide-cell marker: continuation
-                // cells can be ordinary blanks. Scan from the region's left
-                // edge so a drag starting on a continuation recognizes it too.
+            for (column, _, cell) in graphemes(cells) {
                 if cell.symbol.len() > MAX_SELECTION_BYTES {
                     return Err(Error::SelectionSize);
                 }
-                covered = column + cell.symbol.width().max(1).min(cells.len() - column);
                 if column < usize::from(columns.start - left) {
                     continue;
                 }
-                // Concealed cells copy as blanks, never their hidden text.
-                let symbol = if cell.modifier & HIDDEN != 0 || cell.symbol.is_empty() {
-                    " "
-                } else {
-                    &cell.symbol
-                };
+                let symbol = shown(cell);
                 if text.len() + line.len() + symbol.len() > MAX_SELECTION_BYTES {
                     return Err(Error::SelectionSize);
                 }

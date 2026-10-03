@@ -98,6 +98,9 @@ pub struct Config {
     pub usage: crate::usage::UsageConfig,
     pub option_as_alt: OptionAsAlt,
     pub open_links_in: LinkTarget,
+    /// Whether a terminal selection stays highlighted, and readable by
+    /// selection tools, after it is copied.
+    pub keep_selection_after_copy: bool,
     pub sidebar: FontConfig,
     pub tabs: FontConfig,
     pub terminal: FontConfig,
@@ -737,6 +740,7 @@ impl Default for Config {
             usage: crate::usage::UsageConfig::default(),
             option_as_alt: OptionAsAlt::default(),
             open_links_in: LinkTarget::default(),
+            keep_selection_after_copy: true,
             features: Features::default(),
             notifications: NotificationConfig::default(),
             notification_overrides: NotificationSettings::default(),
@@ -769,6 +773,7 @@ struct Settings {
     usage: crate::usage::UsageConfig,
     option_as_alt: OptionAsAlt,
     open_links_in: LinkTarget,
+    keep_selection_after_copy: Option<bool>,
     sidebar: FontSettings,
     tabs: FontSettings,
     terminal: FontSettings,
@@ -1227,6 +1232,7 @@ impl Config {
         config.usage = settings.usage;
         config.option_as_alt = settings.option_as_alt;
         config.open_links_in = settings.open_links_in;
+        config.keep_selection_after_copy = settings.keep_selection_after_copy.unwrap_or(true);
         for (name, font, settings) in [
             ("sidebar", &mut config.sidebar, settings.sidebar),
             ("tabs", &mut config.tabs, settings.tabs),
@@ -3081,6 +3087,15 @@ mod tests {
             LinkTarget::BrowserTab
         );
         assert!(Config::parse("open_links_in = \"tab\"").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn selections_stay_after_copy_unless_configured() -> anyhow::Result<()> {
+        assert!(Config::parse("")?.keep_selection_after_copy);
+        assert!(Config::parse(DEFAULT_CONFIG)?.keep_selection_after_copy);
+        assert!(!Config::parse("keep_selection_after_copy = false")?.keep_selection_after_copy);
+        assert!(Config::parse("keep_selection_after_copy = 'no'").is_err());
         Ok(())
     }
 
