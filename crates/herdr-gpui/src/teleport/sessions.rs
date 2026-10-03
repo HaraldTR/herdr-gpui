@@ -49,14 +49,36 @@ pub(crate) fn move_session(
         AgentKind::Codex => codex(session, route, cancelled),
         AgentKind::Opencode => opencode(session, route, cancelled),
         AgentKind::Pi | AgentKind::Omp => pi(agent, session, route, cancelled),
+        AgentKind::Copilot => copilot(session, route, cancelled),
+        // Letta keeps conversations on its server, which the destination
+        // reaches with its own login; nothing moves.
+        AgentKind::Letta => Ok(session.value.clone()),
+        // Their storage is unconfirmed, so `Work::classify` never makes
+        // their sessions movable.
+        AgentKind::Devin
+        | AgentKind::Droid
+        | AgentKind::Kimi
+        | AgentKind::Mastracode
+        | AgentKind::Hermes
+        | AgentKind::Qodercli
+        | AgentKind::Qwen
+        | AgentKind::Kilo
+        | AgentKind::Cursor
+        | AgentKind::Antigravity
+        | AgentKind::Grok => Err(Error::SessionMissing {
+            agent: agent.binary(),
+        }),
     }
 }
 
-/// Session ids become globs and file names; accept only plain id text.
+/// Session ids are spliced unquoted into source scripts as globs, file
+/// names and command arguments; accept only plain id text that no command
+/// can read as an option.
 fn plain_id(session: &AgentSession) -> Option<&str> {
     let id = session.value.as_str();
     (!id.is_empty()
         && id.len() <= 128
+        && !id.starts_with('-')
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
@@ -181,6 +203,26 @@ opencode import "$t" >/dev/null 2>&1
     Ok(id.to_owned())
 }
 
+fn copilot(session: &AgentSession, route: &Route<'_>, cancelled: &AtomicBool) -> Result<String> {
+    let id = plain_id(session).ok_or(Error::SessionMissing { agent: "copilot" })?;
+    // Each session is one directory named by its id: the event log, the
+    // workspace (with its cwd), checkpoints, and saved files.
+    let read = format!(
+        r#"cd -- "${{COPILOT_HOME:-$HOME/.copilot}}/session-state" 2>/dev/null || exit {MISSING}
+[ -d {id} ] || exit {MISSING}
+tar -cf - {id}
+"#
+    );
+    let archive = read_source(AgentKind::Copilot, route, &read, cancelled)?;
+    let archive = rewrite_archive(&archive, route.from, route.to)?;
+    let write = r#"d="${COPILOT_HOME:-$HOME/.copilot}/session-state"
+mkdir -p -- "$d"
+tar -xf - -C "$d"
+"#;
+    write_destination(route, write, &archive, cancelled)?;
+    Ok(id.to_owned())
+}
+
 fn pi(
     agent: AgentKind,
     session: &AgentSession,
@@ -286,7 +328,7 @@ fn rewrite_archive(archive: &[u8], from: &str, to: &str) -> Result<Vec<u8>> {
         } else if kind.is_file() {
             let mut bytes = Vec::new();
             entry.read_to_end(&mut bytes).map_err(io_error)?;
-            let text = [".jsonl", ".json", ".md", ".txt"]
+            let text = [".jsonl", ".json", ".yaml", ".md", ".txt"]
                 .iter()
                 .any(|extension| name.ends_with(extension));
             let bytes = if text {

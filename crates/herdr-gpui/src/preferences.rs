@@ -243,6 +243,25 @@ impl HerdrWindow {
             )
             .child(
                 toggle(
+                    "preferences-show-system-load",
+                    "Show CPU and memory",
+                    self.config.show_system_load,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    let show = !this.config.show_system_load;
+                    this.save_preference(
+                        move || {
+                            Config::save_preference(
+                                crate::config::preferences::Preference::ShowSystemLoad(show),
+                            )
+                        },
+                        cx,
+                    );
+                })),
+            )
+            .child(
+                toggle(
                     "preferences-high-contrast",
                     "High contrast",
                     self.config.contrast == Contrast::High,

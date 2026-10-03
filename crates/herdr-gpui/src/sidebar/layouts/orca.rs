@@ -90,7 +90,7 @@ fn status_column(child: impl IntoElement, cx: &RowContext<'_>) -> Div {
 
 impl RowLayout for Orca {
     fn workspace(&self, row: WorkspaceRow<'_>, state: RowState, cx: &RowContext<'_>) -> Div {
-        let (branch, status) = (row.branch(), row.status());
+        let (branch, status, upstream) = (row.branch(), row.status(), row.upstream());
         let WorkspaceRow {
             label,
             tree,
@@ -117,7 +117,7 @@ impl RowLayout for Orca {
         let dirty = badge.as_ref().is_some_and(|badge| badge.dirty);
         let teleported = badge.as_ref().is_some_and(|badge| badge.teleported);
         let dirty_size = (line * 0.7).round().min(14.);
-        let meta = branch.is_some() || cx.host.is_some() || badge.is_some();
+        let meta = branch.is_some() || cx.host.is_some() || badge.is_some() || upstream.is_some();
         // The repository's own checkout is the group's primary card.
         let primary = (grouped && tree == RowTree::None).then(|| {
             div()
@@ -202,6 +202,9 @@ impl RowLayout for Orca {
                     line.fill(div().debug_selector(|| format!("detail-{label}")), branch)
                 }
                 None => line.spacer(),
+            })
+            .when_some(upstream, |line, upstream| {
+                line.fixed(upstream.width(glyph), upstream.element(label, glyph, theme))
             })
             .when(teleported, |line| {
                 line.fixed(dirty_size, parts::teleported(label, dirty_size, theme))

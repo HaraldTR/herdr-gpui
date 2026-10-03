@@ -22,7 +22,7 @@ impl RowLayout for Herdr {
         } else {
             row.lines.len().max(badge_lines).max(1)
         };
-        let (branch, status) = (row.branch().unwrap_or(""), row.status());
+        let (branch, status, upstream) = (row.branch().unwrap_or(""), row.status(), row.upstream());
         let WorkspaceRow {
             label,
             tree,
@@ -54,6 +54,7 @@ impl RowLayout for Herdr {
             icon,
             arrow,
             badge,
+            upstream,
             None,
             &lines,
             cx,
@@ -74,6 +75,7 @@ impl RowLayout for Herdr {
             RowTree::None,
             false,
             RowIcon::None,
+            None,
             None,
             None,
             agent.status_text,

@@ -3,42 +3,72 @@ use std::borrow::Cow;
 
 pub(super) struct Icons;
 
-/// Canonical daemon identities, independent of editable display names.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AgentIcon {
-    OpenCode,
-    Claude,
-    Codex,
-    Gemini,
-    Cursor,
-    Copilot,
-    Generic,
+/// Declares each agent mark once: its variant, Herdr's canonical
+/// `agent_label` identity, and the embedded asset named after that identity.
+macro_rules! agent_icons {
+    ($($variant:ident => $label:literal,)+) => {
+        /// Canonical daemon identities, independent of editable display names.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub(crate) enum AgentIcon {
+            $($variant,)+
+            Generic,
+        }
+
+        impl AgentIcon {
+            const ALL: &[Self] = &[$(Self::$variant,)+ Self::Generic];
+
+            pub(crate) fn from_identity(identity: Option<&str>) -> Self {
+                match identity {
+                    $(Some($label) => Self::$variant,)+
+                    _ => Self::Generic,
+                }
+            }
+
+            pub(crate) fn path(self) -> &'static str {
+                match self {
+                    $(Self::$variant => concat!("icons/agent-", $label, ".svg"),)+
+                    Self::Generic => "icons/agent-generic.svg",
+                }
+            }
+
+            fn bytes(self) -> &'static [u8] {
+                match self {
+                    $(Self::$variant => include_bytes!(concat!(
+                        "../../../assets/icons/agent-", $label, ".svg"
+                    )),)+
+                    Self::Generic => include_bytes!("../../../assets/icons/agent-generic.svg"),
+                }
+            }
+        }
+    };
 }
 
-impl AgentIcon {
-    pub(crate) fn from_identity(identity: Option<&str>) -> Self {
-        match identity {
-            Some("opencode") => Self::OpenCode,
-            Some("claude") => Self::Claude,
-            Some("codex") => Self::Codex,
-            Some("gemini") => Self::Gemini,
-            Some("cursor") => Self::Cursor,
-            Some("copilot") => Self::Copilot,
-            _ => Self::Generic,
-        }
-    }
-
-    pub(crate) fn path(self) -> &'static str {
-        match self {
-            Self::OpenCode => "icons/agent-opencode.svg",
-            Self::Claude => "icons/agent-claude.svg",
-            Self::Codex => "icons/agent-codex.svg",
-            Self::Gemini => "icons/agent-gemini.svg",
-            Self::Cursor => "icons/agent-cursor.svg",
-            Self::Copilot => "icons/agent-copilot.svg",
-            Self::Generic => "icons/agent-generic.svg",
-        }
-    }
+// Keyed on Herdr's `src/detect/mod.rs` `agent_label`, in its declaration order.
+agent_icons! {
+    Pi => "pi",
+    Claude => "claude",
+    Codex => "codex",
+    Gemini => "gemini",
+    Cursor => "cursor",
+    Devin => "devin",
+    Antigravity => "agy",
+    Cline => "cline",
+    Omp => "omp",
+    Mastracode => "mastracode",
+    OpenCode => "opencode",
+    Copilot => "copilot",
+    Kimi => "kimi",
+    Kiro => "kiro",
+    Droid => "droid",
+    Amp => "amp",
+    Grok => "grok",
+    Hermes => "hermes",
+    Kilo => "kilo",
+    Qodercli => "qodercli",
+    Qwen => "qwen",
+    Letta => "letta",
+    Maki => "maki",
+    Muse => "muse",
 }
 
 /// Shared working-tree marker, distinct from the daemon's activity dots.
@@ -87,16 +117,10 @@ pub(super) fn teleported(theme: &crate::config::Theme, size: f32) -> gpui::Div {
 
 impl AssetSource for Icons {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        if let Some(icon) = AgentIcon::ALL.iter().find(|icon| icon.path() == path) {
+            return Ok(Some(Cow::Borrowed(icon.bytes())));
+        }
         let bytes: &'static [u8] = match path {
-            "icons/agent-opencode.svg" => {
-                include_bytes!("../../../assets/icons/agent-opencode.svg")
-            }
-            "icons/agent-claude.svg" => include_bytes!("../../../assets/icons/agent-claude.svg"),
-            "icons/agent-codex.svg" => include_bytes!("../../../assets/icons/agent-codex.svg"),
-            "icons/agent-gemini.svg" => include_bytes!("../../../assets/icons/agent-gemini.svg"),
-            "icons/agent-cursor.svg" => include_bytes!("../../../assets/icons/agent-cursor.svg"),
-            "icons/agent-copilot.svg" => include_bytes!("../../../assets/icons/agent-copilot.svg"),
-            "icons/agent-generic.svg" => include_bytes!("../../../assets/icons/agent-generic.svg"),
             "icons/devices.svg" => include_bytes!("../../../assets/icons/devices.svg"),
             "icons/sessions.svg" => include_bytes!("../../../assets/icons/sessions.svg"),
             "icons/settings.svg" => include_bytes!("../../../assets/icons/settings.svg"),
@@ -138,13 +162,6 @@ impl AssetSource for Icons {
 
     fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
         Ok([
-            "icons/agent-opencode.svg",
-            "icons/agent-claude.svg",
-            "icons/agent-codex.svg",
-            "icons/agent-gemini.svg",
-            "icons/agent-cursor.svg",
-            "icons/agent-copilot.svg",
-            "icons/agent-generic.svg",
             "icons/devices.svg",
             "icons/sessions.svg",
             "icons/settings.svg",
@@ -176,6 +193,7 @@ impl AssetSource for Icons {
             "icons/more.svg",
         ]
         .into_iter()
+        .chain(AgentIcon::ALL.iter().map(|icon| icon.path()))
         .chain(crate::usage::icon_paths())
         .filter(|name| name.starts_with(path))
         .map(Into::into)
@@ -210,34 +228,69 @@ mod tests {
         assert!(Icons.load("unknown.svg").unwrap().is_none());
         assert_eq!(
             Icons.list("icons/").unwrap().len(),
-            36 + crate::usage::icon_paths().count()
+            29 + AgentIcon::ALL.len() + crate::usage::icon_paths().count()
         );
     }
 
+    /// Herdr's `agent_label` values, copied from `src/detect/mod.rs` at
+    /// herdrdev/herdr 65e35a38. Update this list when Herdr adds an agent.
+    const HERDR_AGENT_LABELS: [&str; 24] = [
+        "pi",
+        "claude",
+        "codex",
+        "gemini",
+        "cursor",
+        "devin",
+        "agy",
+        "cline",
+        "omp",
+        "mastracode",
+        "opencode",
+        "copilot",
+        "kimi",
+        "kiro",
+        "droid",
+        "amp",
+        "grok",
+        "hermes",
+        "kilo",
+        "qodercli",
+        "qwen",
+        "letta",
+        "maki",
+        "muse",
+    ];
+
     #[test]
-    fn canonical_agent_identities_select_embedded_assets() {
-        for (identity, expected) in [
-            (Some("opencode"), AgentIcon::OpenCode),
-            (Some("claude"), AgentIcon::Claude),
-            (Some("codex"), AgentIcon::Codex),
-            (Some("gemini"), AgentIcon::Gemini),
-            (Some("cursor"), AgentIcon::Cursor),
-            (Some("copilot"), AgentIcon::Copilot),
-            (Some("future-agent"), AgentIcon::Generic),
-            (Some("Claude Code"), AgentIcon::Generic),
-            (Some(""), AgentIcon::Generic),
-            (None, AgentIcon::Generic),
-        ] {
-            let icon = AgentIcon::from_identity(identity);
-            assert_eq!(icon, expected);
-            assert!(Icons.load(icon.path()).unwrap().is_some());
-            assert!(
-                Icons
-                    .list("icons/agent-")
-                    .unwrap()
-                    .iter()
-                    .any(|path| path == icon.path())
-            );
+    fn every_herdr_agent_label_has_its_own_embedded_mark() {
+        let listed = Icons.list("icons/agent-").unwrap();
+        let mut seen = Vec::new();
+        for label in HERDR_AGENT_LABELS {
+            let icon = AgentIcon::from_identity(Some(label));
+            assert_ne!(icon, AgentIcon::Generic, "{label}");
+            assert_eq!(icon.path(), format!("icons/agent-{label}.svg"));
+            assert!(Icons.load(icon.path()).unwrap().is_some(), "{label}");
+            assert!(listed.iter().any(|path| path == icon.path()), "{label}");
+            assert!(!seen.contains(&icon), "{label}");
+            seen.push(icon);
         }
+        // No marks for labels Herdr does not emit, beyond the fallback.
+        assert_eq!(AgentIcon::ALL.len(), HERDR_AGENT_LABELS.len() + 1);
+        assert_eq!(listed.len(), AgentIcon::ALL.len());
+    }
+
+    #[test]
+    fn unknown_or_display_identities_use_the_generic_mark() {
+        for identity in [
+            Some("future-agent"),
+            Some("Claude Code"),
+            Some("kiro-cli"),
+            Some("antigravity"),
+            Some(""),
+            None,
+        ] {
+            assert_eq!(AgentIcon::from_identity(identity), AgentIcon::Generic);
+        }
+        assert!(Icons.load(AgentIcon::Generic.path()).unwrap().is_some());
     }
 }

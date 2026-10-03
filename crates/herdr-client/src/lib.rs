@@ -17,6 +17,7 @@ mod method;
 mod options;
 mod queue;
 mod script;
+pub mod scrollback;
 mod session;
 mod sessions;
 mod ssh;

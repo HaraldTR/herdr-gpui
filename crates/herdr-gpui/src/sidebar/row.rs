@@ -228,6 +228,60 @@ impl PrBadge {
     }
 }
 
+/// How far the checked-out branch has drifted from its upstream, as the
+/// daemon's `git_status` token reports it: `↑` commits to push in green, `↓`
+/// commits to pull in red, painted the way the TUI paints them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Upstream {
+    ahead: usize,
+    behind: usize,
+}
+
+impl Upstream {
+    /// Nothing while the branch is in sync, has no upstream, or the daemon's
+    /// sidebar config leaves `git_status` out and so never computes it.
+    pub(super) fn new(counts: Option<(usize, usize)>) -> Option<Self> {
+        let (ahead, behind) = counts?;
+        (ahead > 0 || behind > 0).then_some(Self { ahead, behind })
+    }
+
+    /// `↑ahead` and `↓behind`, each only when nonzero.
+    fn parts(self) -> impl Iterator<Item = (String, bool)> {
+        [
+            (self.ahead, '\u{2191}', true),
+            (self.behind, '\u{2193}', false),
+        ]
+        .into_iter()
+        .filter(|(count, _, _)| *count > 0)
+        .map(|(count, arrow, ahead)| (format!("{arrow}{count}"), ahead))
+    }
+
+    /// Width at `glyph`, the two counts a glyph apart as in `↑2 ↓18`.
+    pub(super) fn width(self, glyph: f32) -> f32 {
+        let (glyphs, parts) = self.parts().fold((0, 0), |(glyphs, parts), (text, _)| {
+            (glyphs + text.chars().count(), parts + 1)
+        });
+        ((glyphs + parts - 1) as f32 * glyph).ceil()
+    }
+
+    pub(super) fn element(self, key: &str, glyph: f32, theme: &Theme) -> Div {
+        let (ahead, behind) = (theme.ink(theme.palette[2]), theme.ink(theme.palette[1]));
+        div()
+            .debug_selector(|| format!("upstream-{key}"))
+            .w(px(self.width(glyph)))
+            .flex_none()
+            .flex()
+            .gap(px(glyph))
+            .overflow_hidden()
+            .children(self.parts().map(|(text, is_ahead)| {
+                div()
+                    .flex_none()
+                    .text_color(rgb(if is_ahead { ahead } else { behind }))
+                    .child(label_text(&text))
+            }))
+    }
+}
+
 /// Four digits of churn is already a big diff; abbreviate past that so the
 /// column stays narrow enough to leave the branch readable. The titlebar's Git
 /// badge reuses it so one PR reads the same in both places.
@@ -632,6 +686,7 @@ pub(super) fn row(
     workspace_icon: RowIcon,
     arrow: Option<Stateful<Div>>,
     badge: Option<RowBadge>,
+    upstream: Option<Upstream>,
     // The status word the daemon's `state_text` token asks to show, when its
     // sidebar config names it. Painted at the row's trailing edge in the dot's
     // color so a status reads at a glance, not only by hue.
@@ -711,7 +766,25 @@ pub(super) fn row(
         0.
     };
     let status_color = indicators.color(status);
-    let label_width = (available - pr_reserve - status_reserve).max(0.);
+    let glyph = glyph_width(font);
+    // A workspace's second line carries the counts after its branch, as the
+    // TUI does. A one-line row has no branch line, so a trailing column keeps
+    // them visible in compact densities and on worktree children.
+    // Configured rows show the counts only through their `git_status` token.
+    let upstream = upstream.filter(|_| !configured);
+    let upstream_inline = upstream.filter(|_| show_detail && kind == RowKind::Workspace);
+    let upstream_trailing = upstream.filter(|_| upstream_inline.is_none());
+    let upstream_width = upstream_trailing.map_or(0., |upstream| {
+        upstream
+            .width(glyph)
+            .min((available - pr_reserve - status_reserve - gap).max(0.))
+    });
+    let upstream_reserve = if upstream_trailing.is_some() {
+        upstream_width + gap
+    } else {
+        0.
+    };
+    let label_width = (available - pr_reserve - status_reserve - upstream_reserve).max(0.);
     let agent_icon = match kind {
         RowKind::Agent(icon) => Some(icon),
         RowKind::Workspace => None,
@@ -844,6 +917,21 @@ pub(super) fn row(
                                 ),
                         )
                         .when(show_detail, |column| {
+                            let detail_x =
+                                agent_detail.map_or(0., |_| agent_reserve.min(label_width));
+                            let room = (label_width - detail_x).max(0.);
+                            // The counts follow the branch and win the room it would
+                            // take, so a long branch ellipsizes before they do.
+                            let (detail_width, upstream_x) = match upstream_inline {
+                                None => (room, room),
+                                Some(_) if detail.is_empty() => (0., 0.),
+                                Some(upstream) => {
+                                    let natural = (detail.chars().count() as f32 * glyph).ceil();
+                                    let width =
+                                        natural.min((room - upstream.width(glyph) - glyph).max(0.));
+                                    (width, width + glyph)
+                                }
+                            };
                             column.child(
                                 div()
                                     .relative()
@@ -861,18 +949,23 @@ pub(super) fn row(
                                     .child(
                                         div()
                                             .debug_selector(|| format!("detail-{key}"))
-                                            .ml(px(if agent_detail.is_some() {
-                                                agent_reserve.min(label_width)
-                                            } else {
-                                                0.
-                                            }))
-                                            .w(px((label_width
-                                                - agent_detail.map_or(0., |_| agent_reserve))
-                                            .max(0.)))
+                                            .ml(px(detail_x))
+                                            .w(px(detail_width))
                                             .truncate()
                                             .text_color(rgb(detail_color))
                                             .child(label_text(detail)),
-                                    ),
+                                    )
+                                    .when_some(upstream_inline, |line, upstream| {
+                                        line.child(
+                                            div()
+                                                .absolute()
+                                                .top_0()
+                                                .left(px(detail_x + upstream_x))
+                                                .w(px((room - upstream_x).max(0.)))
+                                                .overflow_hidden()
+                                                .child(upstream.element(key, glyph, theme)),
+                                        )
+                                    }),
                             )
                         })
                 }),
@@ -889,6 +982,18 @@ pub(super) fn row(
                     .overflow_hidden()
                     .text_color(rgb(status_color))
                     .child(div().w(px(status_width)).truncate().child(label_text(text))),
+            )
+        })
+        .when_some(upstream_trailing, |row, upstream| {
+            row.child(
+                div()
+                    .w(px(upstream_width))
+                    .flex_none()
+                    .h(px(line_height(font)))
+                    .flex()
+                    .items_center()
+                    .overflow_hidden()
+                    .child(upstream.element(key, glyph, theme)),
             )
         })
         // The collapse column comes first so the badge can hug the row's edge;
