@@ -19,6 +19,8 @@ pub(crate) struct ConnectionBridge {
     pub inbox: Arc<Mutex<LiveState>>,
     pub drained: Arc<AtomicBool>,
     pub integrations: Arc<Mutex<IntegrationInbox>>,
+    /// Scrollback answers, fenced with the connection like the main inbox.
+    pub scrollback: Arc<Mutex<crate::scrollback::Inbox>>,
     sound_cancel: Arc<AtomicBool>,
 }
 
@@ -100,6 +102,7 @@ impl ConnectionBridge {
             inbox: Arc::new(Mutex::new(state)),
             drained: Arc::new(AtomicBool::new(true)),
             integrations: Arc::default(),
+            scrollback: Arc::default(),
         }
     }
 
@@ -121,6 +124,7 @@ impl ConnectionBridge {
         self.inbox = Arc::new(Mutex::new(state));
         self.drained = Arc::new(AtomicBool::new(true));
         self.integrations = Arc::default();
+        self.scrollback = Arc::default();
     }
 
     pub fn detach(&mut self, active: bool) {
@@ -190,6 +194,7 @@ impl ConnectionBridge {
                 let inbox = self.inbox.clone();
                 let drained = self.drained.clone();
                 let integrations = self.integrations.clone();
+                let scrollback = self.scrollback.clone();
                 // Drain ordered events even while GPUI is busy; retain only coherent state.
                 spawn(Box::new(move || {
                     while let Ok(event) = client.events.recv() {
@@ -202,6 +207,10 @@ impl ConnectionBridge {
                             Ok(mut integrations) => integrations.apply(event),
                             Err(_) => Some(event),
                         };
+                        let event = event.and_then(|event| match scrollback.lock() {
+                            Ok(mut scrollback) => scrollback.apply(event),
+                            Err(_) => Some(event),
+                        });
                         if let Some(event) = event
                             && let Ok(mut state) = inbox.lock() {
                             state.apply(event);
@@ -251,6 +260,7 @@ impl ConnectionBridge {
         let sounds = std::mem::take(&mut state.sound_events);
         let reload_sound = std::mem::take(&mut state.reload_sound);
         let clipboard_writes = std::mem::take(&mut state.clipboard_writes);
+        let bells = std::mem::take(&mut state.bells);
         let mut update = state.clone();
         update.settings_reload = false;
         update.notifications = notifications;
@@ -258,6 +268,7 @@ impl ConnectionBridge {
         update.sound_events = sounds;
         update.reload_sound = reload_sound;
         update.clipboard_writes = clipboard_writes;
+        update.bells = bells;
         if let Some((_, result)) = &mut update.dialog_response {
             *result = response;
         }
@@ -544,6 +555,48 @@ mod tests {
         assert!(!Arc::ptr_eq(&old, &bridge.integrations));
         let inbox = bridge.integrations.lock().unwrap();
         assert!(!inbox.list && !inbox.install && inbox.pending.is_none());
+    }
+
+    #[test]
+    fn bells_move_once_titles_persist_and_old_inboxes_are_fenced() {
+        use herdr_client::protocol::ServerMessage;
+        let mut bridge = bridge();
+        let old = bridge.inbox.clone();
+        {
+            let mut state = old.lock().unwrap();
+            state.status = ConnectionStatus::Connected;
+            state.apply(ClientEvent::Message(ServerMessage::TerminalBell {
+                count: 2,
+            }));
+            state.apply(ClientEvent::Message(ServerMessage::WindowTitle {
+                title: Some("agent".into()),
+            }));
+        }
+        let update = bridge.take_update().unwrap();
+        assert_eq!(update.bells, 2);
+        assert_eq!(update.window_title.as_deref(), Some("agent"));
+        old.lock().unwrap().set_outer_focus(true);
+        let next = bridge.take_update().unwrap();
+        assert_eq!(next.bells, 0, "a bell is delivered once");
+        assert_eq!(
+            next.window_title.as_deref(),
+            Some("agent"),
+            "a title is state"
+        );
+
+        bridge.reset(ConnectionStatus::Connected, false);
+        {
+            let mut state = old.lock().unwrap();
+            state.apply(ClientEvent::Message(ServerMessage::TerminalBell {
+                count: 1,
+            }));
+            state.apply(ClientEvent::Message(ServerMessage::WindowTitle {
+                title: Some("late".into()),
+            }));
+        }
+        let replacement = bridge.take_update().unwrap();
+        assert_eq!(replacement.bells, 0);
+        assert_eq!(replacement.window_title, None);
     }
 
     #[test]

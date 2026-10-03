@@ -58,6 +58,8 @@ pub enum Error {
     SelectionStale,
     #[error("Selection is too large to copy.")]
     SelectionSize,
+    #[error("The selection reaches rows the pane no longer shows.")]
+    SelectionOffscreen,
     #[error("File drop exceeds 256 paths or 64 KiB of quoted text.")]
     FileDropSize,
     #[error("Dropped paths must be UTF-8.")]
@@ -337,6 +339,13 @@ pub enum Error {
     UsageUnsupported,
     #[error("usage must be a TOML table")]
     InvalidUsageTable,
+    #[error("Could not read CPU and memory on this host.")]
+    SystemLoadRemote(#[source] Box<Error>),
+    /// The host's `uname -s`, bounded, so the message names what it is.
+    #[error("CPU and memory cannot be read on {0:?} hosts.")]
+    SystemLoadUnsupported(String),
+    #[error("CPU and memory output was not understood.")]
+    SystemLoadOutput,
     #[error("{0}")]
     Update(#[from] UpdateError),
     #[error("{0}")]

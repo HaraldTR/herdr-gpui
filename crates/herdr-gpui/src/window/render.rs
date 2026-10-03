@@ -6,13 +6,13 @@ use super::HerdrWindow;
 use crate::{
     APP_VERSION, CheckForUpdates, Minimize, PlaySound, RunCommand, ShowHerdrNotDetected,
     ShowUpdatePreview,
-    actions::ShowToastPreview,
+    actions::{RingBellPreview, ShowToastPreview},
     browser::{Pick, Shown, Slot},
     config::ClipboardToastPosition,
     fonts::StyledFont,
     state::ConnectionStatus,
     terminal::*,
-    worktree_banner,
+    terminal_painter, worktree_banner,
 };
 use gpui::{prelude::*, *};
 use herdr_client::ConnectOptions;
@@ -90,6 +90,16 @@ impl Render for HerdrWindow {
         // The highlight is grid coordinates, so it paints with the frame that
         // owns the cells rather than being recomputed from the pointer here.
         let selection = self.selection.clone();
+        // Search matches, mapped onto the frame on screen. A popup covers the
+        // panes, so their matches stay under it.
+        let matches = surface
+            .as_deref()
+            .map(|surface| {
+                let mut highlights = self.find_highlights(surface);
+                highlights.extend(self.copy_mode_highlights(surface));
+                highlights
+            })
+            .unwrap_or_default();
         // The IME composition paints inline at the input cursor; a menu's
         // text field shows its own.
         // It anchors to the live surface, as the IME's candidate window does,
@@ -126,6 +136,8 @@ impl Render for HerdrWindow {
             })
             .map(|(slot, _)| *slot);
         let terminal_gap = terminal_slot.map_or(sidebar_gap, slot_gap);
+        let find_bar = self.render_find_bar(surface.as_deref(), terminal_gap, cx);
+        let copy_badge = self.render_copy_mode_badge(surface.as_deref(), terminal_gap);
         let terminal = div()
             .id("terminal")
             .debug_selector(|| "terminal".into())
@@ -321,20 +333,29 @@ impl Render for HerdrWindow {
                         if let Some(surface) = &surface {
                             // The highlight belongs to the frame that owns the
                             // cells, so only one of the two paints it.
-                            let highlight = |owned: bool| {
+                            let highlight = |owned: bool| -> Vec<_> {
                                 selection
                                     .as_ref()
                                     .filter(|_| owned)
-                                    .map(|selection| {
-                                        selection.rows(surface, cell_width, cell_height).collect()
+                                    .into_iter()
+                                    .flat_map(|selection| {
+                                        selection.rows(surface, cell_width, cell_height)
                                     })
-                                    .unwrap_or_default()
+                                    .map(|(row, columns)| terminal_painter::Highlight {
+                                        row,
+                                        columns,
+                                        tint: terminal_painter::Tint::Selection,
+                                    })
+                                    .collect()
                             };
-                            let panes: Vec<_> = highlight(
+                            // Matches tint below the selection, which reads
+                            // as chosen over them.
+                            let mut panes = matches;
+                            panes.extend(highlight(
                                 selection
                                     .as_ref()
                                     .is_some_and(|selection| selection.in_panes()),
-                            );
+                            ));
                             painter.borrow_mut().paint_frame(
                                 &surface.frame,
                                 bounds.origin,
@@ -353,10 +374,9 @@ impl Render for HerdrWindow {
                                     cell_width,
                                     cell_height,
                                 );
-                                let rows: Vec<_> =
-                                    highlight(selection.as_ref().is_some_and(|selection| {
-                                        selection.in_popup(&popup.terminal_id)
-                                    }));
+                                let rows = highlight(selection.as_ref().is_some_and(|selection| {
+                                    selection.in_popup(&popup.terminal_id)
+                                }));
                                 painter.borrow_mut().paint_frame(
                                     &popup.frame,
                                     bounds.origin + offset,
@@ -385,6 +405,8 @@ impl Render for HerdrWindow {
                 )
                 .size_full(),
             )
+            .when_some(find_bar, |terminal, bar| terminal.child(bar))
+            .when_some(copy_badge, |terminal, badge| terminal.child(badge))
             // Direct feedback for the user's own gesture, not a daemon notice:
             // it sits over the cells it copied and needs no dismissing.
             .when_some(self.flash.as_ref(), |terminal, (flash, _)| {
@@ -534,6 +556,9 @@ impl Render for HerdrWindow {
             .on_action(cx.listener(|this, _: &PlaySound, _, _| {
                 this.sound.preview();
             }))
+            .on_action(cx.listener(|this, _: &RingBellPreview, window, cx| {
+                this.preview_bell(window, cx);
+            }))
             .size_full()
             .relative()
             .flex()
@@ -629,6 +654,7 @@ impl Render for HerdrWindow {
                                 div().debug_selector(|| "connection-message".into()).child(status)
                             )),
                     )
+                    .children(self.render_system_load())
                     .when(crate::caffeine::SUPPORTED, |bar| {
                         let awake = crate::caffeine::active(cx);
                         let (foreground, surface) = (self.theme.foreground, self.theme.surface);

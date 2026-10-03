@@ -23,6 +23,7 @@ fn homes() -> Homes {
             ("HOME".into(), home.to_string_lossy().into_owned()),
             ("CLAUDE_CONFIG_DIR".into(), String::new()),
             ("CODEX_HOME".into(), String::new()),
+            ("COPILOT_HOME".into(), String::new()),
         ];
         host
     };
@@ -166,13 +167,75 @@ fn pi_sessions_land_in_the_destination_cwd_directory() {
 }
 
 #[test]
+fn copilot_session_directories_move_whole() {
+    let homes = homes();
+    let id = "edf9d762-608a-4508-beb3-b3fd328cd493";
+    let dir = homes.source_home.join(".copilot/session-state").join(id);
+    fs::create_dir_all(dir.join("checkpoints")).unwrap();
+    fs::write(
+        dir.join("workspace.yaml"),
+        format!("id: {id}\ncwd: {FROM}\ngit_root: {FROM}\n"),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("events.jsonl"),
+        format!("{{\"type\":\"session.start\",\"cwd\":\"{FROM}\"}}\n"),
+    )
+    .unwrap();
+    fs::write(dir.join("checkpoints/index.md"), "# Checkpoints\n").unwrap();
+    let reference = move_session(
+        AgentKind::Copilot,
+        &session("copilot", SessionKind::Id, id),
+        &route(&homes, TO),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(reference, id);
+    let moved = homes
+        .destination_home
+        .join(".copilot/session-state")
+        .join(id);
+    assert_eq!(
+        fs::read_to_string(moved.join("workspace.yaml")).unwrap(),
+        format!("id: {id}\ncwd: {TO}\ngit_root: {TO}\n")
+    );
+    assert_eq!(
+        fs::read_to_string(moved.join("events.jsonl")).unwrap(),
+        format!("{{\"type\":\"session.start\",\"cwd\":\"{TO}\"}}\n")
+    );
+    assert_eq!(
+        fs::read_to_string(moved.join("checkpoints/index.md")).unwrap(),
+        "# Checkpoints\n"
+    );
+}
+
+#[test]
+fn letta_conversations_stay_on_their_server() {
+    let homes = homes();
+    let reference = move_session(
+        AgentKind::Letta,
+        &session("letta", SessionKind::Id, "default:agent-1"),
+        &route(&homes, TO),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(reference, "default:agent-1");
+    assert!(
+        fs::read_dir(&homes.destination_home)
+            .unwrap()
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
 fn missing_sessions_and_unsafe_ids_are_typed() {
     let homes = homes();
     let cancelled = AtomicBool::new(false);
-    for (agent, id) in [(AgentKind::Claude, "absent"), (AgentKind::Codex, "absent")] {
+    for agent in [AgentKind::Claude, AgentKind::Codex, AgentKind::Copilot] {
         let result = move_session(
             agent,
-            &session(agent.binary(), SessionKind::Id, id),
+            &session(agent.name(), SessionKind::Id, "absent"),
             &route(&homes, TO),
             &cancelled,
         );
@@ -190,6 +253,54 @@ fn missing_sessions_and_unsafe_ids_are_typed() {
     assert!(matches!(
         result,
         Err(Error::SessionMissing { agent: "claude" })
+    ));
+    let result = move_session(
+        AgentKind::Copilot,
+        &session("copilot", SessionKind::Id, "../config.json"),
+        &route(&homes, TO),
+        &cancelled,
+    );
+    assert!(matches!(
+        result,
+        Err(Error::SessionMissing { agent: "copilot" })
+    ));
+    // An id that a command could read as an option never reaches a script,
+    // even when a session file of that name exists.
+    let planted = [
+        homes
+            .source_home
+            .join(".claude/projects/p/--remove-files.jsonl"),
+        homes
+            .source_home
+            .join(".copilot/session-state/--remove-files/events.jsonl"),
+    ];
+    for file in &planted {
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, "{}\n").unwrap();
+    }
+    for agent in [AgentKind::Claude, AgentKind::Codex, AgentKind::Copilot] {
+        let result = move_session(
+            agent,
+            &session(agent.name(), SessionKind::Id, "--remove-files"),
+            &route(&homes, TO),
+            &cancelled,
+        );
+        assert!(
+            matches!(result, Err(Error::SessionMissing { .. })),
+            "{result:?}"
+        );
+    }
+    assert!(planted.iter().all(|file| file.exists()));
+    // Agents whose storage is unconfirmed never move a session.
+    let result = move_session(
+        AgentKind::Droid,
+        &session("droid", SessionKind::Id, "abc"),
+        &route(&homes, TO),
+        &cancelled,
+    );
+    assert!(matches!(
+        result,
+        Err(Error::SessionMissing { agent: "droid" })
     ));
 }
 

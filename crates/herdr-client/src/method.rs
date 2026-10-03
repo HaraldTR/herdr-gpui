@@ -17,10 +17,14 @@ pub enum Method {
     LayoutSetSplitRatio,
     PaneClear,
     PaneClose,
+    PaneCopyMotion,
+    PaneCopySearch,
+    PaneEditScrollback,
     PaneFocus,
     PaneFocusDirection,
     PaneRename,
     PaneScroll,
+    PaneSelectionRead,
     PaneSplit,
     PaneZoom,
     ProductAnnouncementDismiss,
@@ -53,10 +57,14 @@ impl Method {
             Self::LayoutSetSplitRatio => "layout.set_split_ratio",
             Self::PaneClear => "pane.clear",
             Self::PaneClose => "pane.close",
+            Self::PaneCopyMotion => "pane.copy_motion",
+            Self::PaneCopySearch => "pane.copy_search",
+            Self::PaneEditScrollback => "pane.edit_scrollback",
             Self::PaneFocus => "pane.focus",
             Self::PaneFocusDirection => "pane.focus_direction",
             Self::PaneRename => "pane.rename",
             Self::PaneScroll => "pane.scroll",
+            Self::PaneSelectionRead => "pane.selection.read",
             Self::PaneSplit => "pane.split",
             Self::PaneZoom => "pane.zoom",
             Self::ProductAnnouncementDismiss => "product_announcement.dismiss",
@@ -141,6 +149,21 @@ mod tests {
         assert!(
             !Method::ReleaseNotesDismiss.advertised_in(&["product_announcement.dismiss".into()])
         );
+    }
+
+    #[test]
+    fn copy_search_wire_name_and_advertisement() {
+        for (method, name) in [
+            (Method::PaneCopyMotion, "pane.copy_motion"),
+            (Method::PaneEditScrollback, "pane.edit_scrollback"),
+            (Method::PaneSelectionRead, "pane.selection.read"),
+        ] {
+            assert_eq!(method.as_str(), name);
+            assert!(method.advertised_in(&[name.into()]));
+        }
+        assert_eq!(Method::PaneCopySearch.as_str(), "pane.copy_search");
+        assert!(Method::PaneCopySearch.advertised_in(&["pane.copy_search".into()]));
+        assert!(!Method::PaneCopySearch.advertised_in(&["pane.copy_motion".into()]));
     }
 
     #[test]
