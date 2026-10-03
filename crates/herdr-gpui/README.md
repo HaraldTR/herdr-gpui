@@ -348,6 +348,18 @@ explicitly with `HERDR_CONFIG_PATH` when needed. These are local preferences,
 not a remote daemon's configuration: a socket does not expose the daemon's config
 path or effective settings. General displays the shared file and reload control.
 
+This follows Herdr's own client/server split, which `herdr --remote` uses too.
+Selecting a different device does not change which settings apply:
+
+| Scope | Settings | Source |
+| --- | --- | --- |
+| GUI-wide | Theme and palette overrides, indicator style, sound, toast delivery and clipboard toast, sidebar agent rows (`state_text`), and `[keys]` including the prefix | Local `config.toml`, under `config-gpui.toml` overrides |
+| Per host | Worktree directory and custom commands, plus pane defaults and integrations, which the daemon applies itself | That host's daemon, through its snapshot |
+
+Keybindings stay local on an SSH device, as with Herdr's default
+`--remote-keybindings local`. The GUI has no equivalent of
+`--remote-keybindings server`, and it never reads a remote host's `config.toml`.
+
 Shared saves preserve comments and unknown keys, reject conflicting external
 edits and unsafe paths, and run off the UI thread. Symlinked config files and
 user-controlled symlink ancestors are refused rather than replaced. Save success
