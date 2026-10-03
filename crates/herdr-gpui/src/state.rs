@@ -109,6 +109,10 @@ pub struct LiveState {
     /// does not offer one can only have it hidden for this connection.
     pub(crate) supports_announcement_dismiss: bool,
     pub(crate) supports_release_notes_dismiss: bool,
+    /// The daemon's `ClientShellKeyboardReportAll`: the focused pane asked for
+    /// every key, including releases, as escape codes. Keys the window already
+    /// sends as key events then also send their release.
+    pub(crate) keyboard_report_all: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -175,6 +179,7 @@ impl Default for LiveState {
             dialog_response: None,
             notifications: Default::default(),
             notifications_lost: false,
+            keyboard_report_all: false,
             outer_focused: None,
             activation: None,
             supports_surface: false,
@@ -231,6 +236,8 @@ impl LiveState {
             announcement_dismissal,
             supports_announcement_dismiss,
             supports_release_notes_dismiss,
+            // Shapes the next key events, not anything drawn.
+            keyboard_report_all: _,
         } = next;
         let same_arc = |a: &Option<Arc<_>>, b: &Option<Arc<_>>| match (a, b) {
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
@@ -414,6 +421,8 @@ impl LiveState {
                             welcome.capabilities.iter().any(|value| value == capability)
                         });
                 self.missing_installation = false;
+                // The daemon reports the mode to each new connection.
+                self.keyboard_report_all = false;
                 self.status = ConnectionStatus::AwaitingSnapshot;
                 self.error = None;
             }
@@ -479,6 +488,7 @@ impl LiveState {
                 self.settings_reload = false;
                 self.notifications.clear();
                 self.cancel_sounds();
+                self.keyboard_report_all = false;
                 self.bells = 0;
                 self.window_title = None;
                 self.status = ConnectionStatus::Disconnected;
@@ -633,7 +643,43 @@ impl LiveState {
                 }
                 self.window_title = title;
             }
-            _ => return,
+            ClientEvent::Message(ServerMessage::ClientShellKeyboardReportAll { enabled }) => {
+                if enabled == self.keyboard_report_all {
+                    return;
+                }
+                self.keyboard_report_all = enabled;
+            }
+            // Herdr's own TUI drops `Notify` in client-shell mode as well. A
+            // shell client is notified through `SemanticNotification`, which
+            // drives toasts and sounds here; `Notify` is the flat form for
+            // direct terminal clients.
+            ClientEvent::Message(ServerMessage::Notify { .. })
+            // Tells the TUI whether to turn on its outer terminal's mouse
+            // reporting. Every native mouse event already reaches this window,
+            // and each surface pane's `mouse_reporting` decides between local
+            // selection and forwarding for the pane under the pointer.
+            | ClientEvent::Message(ServerMessage::MouseCapture { .. })
+            // Sent only to direct `herdr attach` terminal clients, never to a
+            // client shell; the daemon encodes keys for each pane itself.
+            | ClientEvent::Message(ServerMessage::DirectTerminalKeyboardProtocol { .. })
+            // ANSI frames and kitty graphics for the TUI's `TerminalAnsi`
+            // renderer; this client asks for semantic surfaces instead.
+            | ClientEvent::Message(ServerMessage::Terminal(_))
+            | ClientEvent::Message(ServerMessage::Graphics { .. })
+            | ClientEvent::Message(ServerMessage::GraphicsTransmissionRetired { .. })
+            // Never read: a daemon-named path is untrusted (see AGENTS.md).
+            | ClientEvent::Message(ServerMessage::GraphicsFile { .. })
+            // Legacy terminal handshake and binary snapshot; generation-1
+            // endpoints use the `endpoint.*` controls, which the session
+            // handles before anything reaches this state.
+            | ClientEvent::Message(ServerMessage::Welcome { .. })
+            | ClientEvent::Message(ServerMessage::ClientShellSnapshot(_))
+            // Consumed by the session worker and never forwarded here.
+            | ClientEvent::Message(ServerMessage::ServerShutdown { .. })
+            | ClientEvent::Message(ServerMessage::PaneSurface(_))
+            | ClientEvent::Message(ServerMessage::PaneSurfacePatch(_))
+            | ClientEvent::Message(ServerMessage::ClientShellEndpointResponseChunk { .. })
+            | ClientEvent::Message(ServerMessage::EndpointControl { .. }) => return,
         }
         // Focus is evidence for completing one navigation, not a permanent
         // constraint on later server-driven focus changes. Settle in the inbox
@@ -1484,6 +1530,61 @@ mod tests {
             change(&mut changed);
             assert!(!old.only_surface_changed(&changed), "{what}");
         }
+    }
+
+    #[test]
+    fn keyboard_report_all_follows_the_daemon_and_ends_with_the_connection() {
+        let report =
+            |enabled| ClientEvent::Message(ServerMessage::ClientShellKeyboardReportAll { enabled });
+        let mut state = LiveState::default();
+        state.apply(ClientEvent::Snapshot(snapshot()));
+        state.dirty = false;
+        state.apply(report(true));
+        assert!(state.keyboard_report_all && state.dirty);
+        // A repeated report changes nothing to draw.
+        state.dirty = false;
+        state.apply(report(true));
+        assert!(!state.dirty);
+        // It only shapes later key events, so the chrome is spared.
+        let mut next = state.clone();
+        next.apply(report(false));
+        assert!(!next.keyboard_report_all);
+        assert!(state.only_surface_changed(&next));
+        state.apply(ClientEvent::Disconnected {
+            reason: "gone".into(),
+        });
+        assert!(!state.keyboard_report_all);
+    }
+
+    #[test]
+    fn messages_meant_for_the_tui_change_nothing() {
+        let mut state = LiveState::default();
+        state.apply(ClientEvent::Snapshot(snapshot()));
+        let before = state.clone();
+        state.dirty = false;
+        for message in [
+            // Shell clients are notified through SemanticNotification.
+            ServerMessage::Notify {
+                kind: herdr_client::protocol::NotifyKind::Toast,
+                message: "Agent finished".into(),
+                body: None,
+            },
+            // Each surface pane carries its own mouse_reporting.
+            ServerMessage::MouseCapture {
+                enabled: true,
+                sgr_pixels: true,
+            },
+            ServerMessage::DirectTerminalKeyboardProtocol {
+                flags: 31,
+                modify_other_keys_level: 2,
+            },
+        ] {
+            state.apply(ClientEvent::Message(message));
+        }
+        assert!(!state.dirty);
+        assert!(before.only_surface_changed(&state));
+        assert!(state.notifications.is_empty() && state.sound_events.is_empty());
+        assert!(!state.keyboard_report_all);
     }
 
     #[test]

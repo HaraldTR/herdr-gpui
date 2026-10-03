@@ -377,6 +377,59 @@ pub fn key_input(event: &KeyDownEvent, alt_keys: bool) -> Option<ClientPaneInput
     })
 }
 
+/// Key presses sent while the daemon reported `ClientShellKeyboardReportAll`,
+/// by GPUI key name, so a key-up releases exactly the key that was pressed even
+/// when its modifiers were let go first. Bounded: a key-up lost to a focus
+/// change must not grow it.
+#[derive(Default)]
+pub struct HeldKeys(Vec<(String, ClientPaneInputEvent)>);
+
+impl HeldKeys {
+    const LIMIT: usize = 16;
+
+    /// Records a press about to be sent and marks it as tracking its release.
+    /// Without report-all the press is returned unchanged and nothing is held.
+    pub fn press(
+        &mut self,
+        key: &str,
+        mut input: ClientPaneInputEvent,
+        report_all: bool,
+    ) -> ClientPaneInputEvent {
+        self.forget(key);
+        if !report_all {
+            return input;
+        }
+        let ClientPaneInputEvent::Key { tracks_release, .. } = &mut input else {
+            return input;
+        };
+        *tracks_release = true;
+        let mut release = input.clone();
+        if let ClientPaneInputEvent::Key {
+            kind, repeat_count, ..
+        } = &mut release
+        {
+            *kind = ClientKeyKind::Release;
+            *repeat_count = 1;
+        }
+        if self.0.len() == Self::LIMIT {
+            self.0.remove(0);
+        }
+        self.0.push((key.to_owned(), release));
+        input
+    }
+
+    /// Drops a held key whose latest press went somewhere other than the pane.
+    pub fn forget(&mut self, key: &str) {
+        self.0.retain(|(held, _)| held != key);
+    }
+
+    /// The release for a key-up, if its press was sent while held.
+    pub fn release(&mut self, key: &str) -> Option<ClientPaneInputEvent> {
+        let index = self.0.iter().position(|(held, _)| held == key)?;
+        Some(self.0.remove(index).1)
+    }
+}
+
 fn key_code(key: &Keystroke, alt_keys: bool) -> Option<ClientKeyCode> {
     use ClientKeyCode::*;
     if key.modifiers.platform {
@@ -959,6 +1012,59 @@ mod tests {
         assert_eq!(wheel.lines(&pane, &event, 30.), 1);
         event.delta = ScrollDelta::Lines(point(0., 2.));
         assert_eq!(wheel.lines(&pane, &event, 30.), 2);
+    }
+
+    #[test]
+    fn held_keys_release_what_was_pressed_only_under_report_all() {
+        let press = |s: &str| {
+            key_input(
+                &KeyDownEvent {
+                    keystroke: Keystroke::parse(s).unwrap(),
+                    is_held: true,
+                    prefer_character_input: false,
+                },
+                false,
+            )
+            .unwrap()
+        };
+        let mut held = HeldKeys::default();
+        assert_eq!(held.press("left", press("left"), false), press("left"));
+        assert_eq!(held.release("left"), None);
+
+        let sent = held.press("c", press("ctrl-c"), true);
+        let ClientPaneInputEvent::Key {
+            kind: ClientKeyKind::Repeat,
+            tracks_release: true,
+            ..
+        } = sent
+        else {
+            panic!("a held press keeps its kind and tracks its release: {sent:?}");
+        };
+        let Some(ClientPaneInputEvent::Key {
+            code: ClientKeyCode::Char('c'),
+            modifiers: 2,
+            kind: ClientKeyKind::Release,
+            repeat_count: 1,
+            tracks_release: true,
+            ..
+        }) = held.release("c")
+        else {
+            panic!("the release repeats the press's key and modifiers");
+        };
+        assert_eq!(held.release("c"), None);
+
+        held.press("up", press("up"), true);
+        held.forget("up");
+        assert_eq!(held.release("up"), None);
+
+        // Key-ups lost to a focus change cannot grow it without bound.
+        for n in 1..=24 {
+            let key = format!("f{n}");
+            held.press(&key, press(&key), true);
+        }
+        assert_eq!(held.0.len(), HeldKeys::LIMIT);
+        assert_eq!(held.release("f1"), None);
+        assert!(held.release("f24").is_some());
     }
 
     #[test]

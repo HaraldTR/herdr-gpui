@@ -195,6 +195,7 @@ impl Render for HerdrWindow {
             .bg(rgb(self.theme.background))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
+            .on_key_up(cx.listener(Self::key_up))
             // A selection is copied when it is released, so the terminal has
             // nothing for Cut or Select All to act on, and Copy only while
             // Herdr's `copy_on_select` is off and a released selection waits.
