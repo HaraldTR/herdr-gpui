@@ -1688,6 +1688,9 @@ pub struct Theme {
     pub surface: u32,
     pub active: u32,
     pub muted: u32,
+    /// Herdr's optional `sidebar_bg`, which colors only the sidebar. Unset,
+    /// the sidebar stays on [`Self::surface`].
+    pub sidebar: Option<u32>,
     pub palette: [u32; 256],
     /// Applied by [`Theme::with_contrast`]; every theme loads as `Standard`.
     pub contrast: Contrast,
@@ -1717,6 +1720,7 @@ impl Default for Theme {
             surface: 0x1c1c22,
             active: 0x2b2933,
             muted: 0x827e91,
+            sidebar: None,
             palette,
             contrast: Contrast::Standard,
         }
@@ -1746,6 +1750,11 @@ impl Theme {
     /// chosen rather than merely hovered.
     pub fn primary(&self) -> u32 {
         self.palette[5]
+    }
+
+    /// The sidebar's fill: Herdr's `sidebar_bg` when set, else the surface.
+    pub fn sidebar_background(&self) -> u32 {
+        self.sidebar.unwrap_or(self.surface)
     }
 
     /// Dimmed foreground for rows that are not the current one: upstream's

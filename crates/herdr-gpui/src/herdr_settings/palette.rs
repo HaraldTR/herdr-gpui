@@ -235,8 +235,9 @@ impl Palette {
     pub(super) fn theme(&self) -> crate::config::Theme {
         let mut theme = crate::config::Theme::default();
         // GPUI has no host-terminal "Reset" color. Resolve reset backgrounds to
-        // its opaque default; an unset sidebar follows the selected dim surface.
-        theme.background = self.rgb(18, self.rgb(6, theme.background));
+        // its opaque default. Herdr paints `sidebar_bg` on the sidebar alone.
+        theme.background = self.rgb(6, theme.background);
+        theme.sidebar = (self.0[18] != RESET).then_some(self.0[18]);
         theme.surface = self.rgb(1, theme.background);
         theme.active = self.rgb(2, theme.background);
         theme.muted = self.rgb(7, theme.muted);

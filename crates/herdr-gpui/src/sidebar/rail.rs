@@ -5,7 +5,7 @@
 
 use super::{
     agent_name,
-    agents::{Indicators, agent_place, status_indicator, status_text},
+    agents::{Indicators, agent_place, state_label, status_indicator, status_text},
     cell::RowState,
     label_text,
     layout::{self, SidebarLook},
@@ -19,7 +19,8 @@ use crate::{
     herdr_settings::SidebarCollapsedMode,
 };
 use gpui::{prelude::*, *};
-use herdr_client::protocol::AgentStatus;
+use herdr_client::protocol::{AgentStatus, ClientShellAgent};
+use std::borrow::Cow;
 
 /// Wide enough for a two-digit workspace number beside a symbol indicator.
 pub(crate) const RAIL_WIDTH: f32 = 48.;
@@ -253,7 +254,7 @@ impl HerdrWindow {
                         host,
                         workspace_label(workspace, indented),
                         None,
-                        workspace.agent_status,
+                        status_word(workspace.agent_status),
                     )))
                     .on_mouse_down(
                         MouseButton::Right,
@@ -338,7 +339,7 @@ impl HerdrWindow {
                         host,
                         agent_name(agent),
                         place.as_deref(),
-                        agent.agent_status,
+                        agent_status_word(agent).as_deref(),
                     )))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.navigate_endpoint(&navigate_endpoint, NavigationTarget::Pane(&id), cx);
@@ -362,7 +363,7 @@ impl HerdrWindow {
             .text_size(px(font.size))
             .line_height(px(line_height(font)))
             .text_color(rgb(theme.foreground))
-            .bg(rgb(theme.surface))
+            .bg(rgb(theme.sidebar_background()))
             .border_r_1()
             .border_color(rgb(theme.active))
             .child(
@@ -471,12 +472,25 @@ pub(super) fn host_initial(label: &str) -> String {
         .map_or_else(|| "?".into(), |initial| initial.to_uppercase().collect())
 }
 
+/// The status word a tooltip names, none for an unknown status.
+fn status_word(status: AgentStatus) -> Option<&'static str> {
+    (status != AgentStatus::Unknown).then(|| status_text(status))
+}
+
+/// An agent's status word: its integration's state label when it set one.
+fn agent_status_word(agent: &ClientShellAgent) -> Option<Cow<'static, str>> {
+    let word = state_label(agent, status_word(agent.agent_status).unwrap_or(""));
+    (!word.is_empty()).then_some(word)
+}
+
 /// A rail mark's tooltip: what the expanded row would have spelled out.
+/// `status` is the word for the mark's status: an agent's own state label
+/// when its integration set one.
 pub(super) fn describe(
     host: Option<&str>,
     name: &str,
     place: Option<&str>,
-    status: AgentStatus,
+    status: Option<&str>,
 ) -> SharedString {
     let mut text = String::new();
     if let Some(host) = host {
@@ -488,9 +502,9 @@ pub(super) fn describe(
         text.push_str(" in ");
         text.push_str(place);
     }
-    if status != AgentStatus::Unknown {
+    if let Some(status) = status {
         text.push_str(" (");
-        text.push_str(status_text(status));
+        text.push_str(status);
         text.push(')');
     }
     text.into()
@@ -766,11 +780,26 @@ mod tests {
                 Some("build"),
                 "review",
                 Some("herdr / tab 2"),
-                AgentStatus::Blocked
+                status_word(AgentStatus::Blocked)
             ),
             "build: review in herdr / tab 2 (blocked)"
         );
-        assert_eq!(describe(None, "herdr", None, AgentStatus::Unknown), "herdr");
+        assert_eq!(
+            describe(None, "herdr", None, status_word(AgentStatus::Unknown)),
+            "herdr"
+        );
+        let mut snapshot = snapshot(1);
+        let agent = &mut snapshot.agents[0];
+        assert_eq!(agent_status_word(agent).as_deref(), Some("working"));
+        agent.state_labels = vec![("working".into(), "deep in the mines".into())];
+        assert_eq!(
+            agent_status_word(agent).as_deref(),
+            Some("deep in the mines")
+        );
+        agent.agent_status = AgentStatus::Unknown;
+        assert_eq!(agent_status_word(agent), None);
+        agent.state_labels = vec![("unknown".into(), "resting".into())];
+        assert_eq!(agent_status_word(agent).as_deref(), Some("resting"));
         assert_eq!(host_initial("  ssh box"), "S");
         assert_eq!(host_initial(""), "?");
         assert_eq!(host_initial("éclair"), "É");

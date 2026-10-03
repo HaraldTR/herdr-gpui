@@ -1,7 +1,7 @@
 //! Resolve sidebar tokens, omitting missing values and empty rows.
 
 use super::{
-    agents::{agent_names, agent_place, status_text},
+    agents::{agent_names, agent_place, state_label, status_text},
     segment_budgets,
 };
 use crate::config::{AgentLayout, AgentToken, Rows, SpaceLayout, SpaceToken, TokenStyle};
@@ -102,24 +102,20 @@ pub(super) fn agent_rows(
             .find(|pane| pane.pane_id == agent.pane_id)
             .and_then(|pane| pane.label.as_deref())
     });
-    let state_text = agent
-        .state_labels
-        .iter()
-        .find(|(status, _)| status == status_text(agent.agent_status))
-        .map_or_else(
-            || match agent.agent_status {
-                AgentStatus::Unknown => "idle",
-                status => status_text(status),
-            },
-            |(_, label)| label,
-        );
+    let state_text = state_label(
+        agent,
+        match agent.agent_status {
+            AgentStatus::Unknown => "idle",
+            status => status_text(status),
+        },
+    );
     let tokens = token_values(&agent.tokens);
     let mut strings = HashMap::new();
     let mut text = |value, role| TokenKind::Text(shared_text(&mut strings, value), role);
     let mut rows = resolve_rows(layout.rows_for(agent.agent.as_deref()), |token| {
         Some(match token {
             AgentToken::StateIcon => TokenKind::StateIcon,
-            AgentToken::StateText => text(state_text, TextRole::Status),
+            AgentToken::StateText => text(&state_text, TextRole::Status),
             AgentToken::Machine => text(machine?, TextRole::Secondary),
             AgentToken::Workspace => text(workspace, TextRole::Workspace),
             AgentToken::Tab => text(tab?, TextRole::Secondary),
@@ -300,6 +296,14 @@ mod tests {
                 vec!["\u{2728} codex", "codex"],
                 vec!["\u{2ec1} 54% 140k"],
             ]
+        );
+        // Labels are untrusted display text: controls and bidi overrides go.
+        snapshot.agents[0].state_labels =
+            vec![("blocked".into(), "\u{1b}[31mneeds\u{202e} you\n".into())];
+        let rows = agent_rows(&layout, &snapshot.agents[0], &snapshot, None).unwrap();
+        assert_eq!(
+            rows[0][0].kind,
+            TokenKind::Text("[31mneeds you".into(), TextRole::Status)
         );
         // Without a label the wire status names the state; idle covers unknown.
         snapshot.agents[0].state_labels.clear();

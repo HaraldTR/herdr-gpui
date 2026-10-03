@@ -27,7 +27,7 @@ enum Action {
 struct Entry {
     label: String,
     detail: String,
-    badge: &'static str,
+    badge: SharedString,
     action: Action,
     /// Index of the row this one nests under, indented only while that row
     /// is visible so a search never leaves it hanging beneath nothing.
@@ -187,7 +187,7 @@ fn go_to_entries(
         entries.push(Entry {
             label: workspace.label.clone(),
             detail,
-            badge: "",
+            badge: SharedString::default(),
             action: go(NavigationTarget::Workspace(workspace.workspace_id.clone())),
             parent: None,
         });
@@ -234,7 +234,11 @@ fn go_to_entries(
             entries.push(Entry {
                 label: name.to_owned(),
                 detail,
-                badge: agent.map_or("", |agent| status_badge(agent.agent_status)),
+                badge: agent.map_or_else(SharedString::default, |agent| {
+                    crate::sidebar::state_label(agent, status_badge(agent.agent_status))
+                        .into_owned()
+                        .into()
+                }),
                 action: go(NavigationTarget::Pane(pane.pane_id.clone())),
                 parent: Some(parent),
             });
@@ -324,7 +328,7 @@ impl HerdrWindow {
                     .map(|info| Entry {
                         label: info.label.into(),
                         detail: self.keymap().primary(info.command).into(),
-                        badge: "",
+                        badge: SharedString::default(),
                         action: Action::Native(info.command),
                         parent: None,
                     }),
@@ -363,7 +367,7 @@ impl HerdrWindow {
                             .unwrap_or(&command.command_id)
                             .clone(),
                         detail: bindings.join(", "),
-                        badge: "Herdr command",
+                        badge: "Herdr command".into(),
                         action: Action::Configured(command.command_id.clone(), command.action),
                         parent: None,
                     }
@@ -1017,7 +1021,7 @@ mod tests {
                 (
                     entry.label.as_str(),
                     entry.detail.as_str(),
-                    entry.badge,
+                    entry.badge.as_ref(),
                     target.clone(),
                 )
             })
@@ -1031,10 +1035,11 @@ mod tests {
                     "",
                     NavigationTarget::Workspace("w1".into())
                 ),
+                // The fixture's agent labels its blocked state "waiting".
                 (
                     "Claude",
                     "main  /repo",
-                    "blocked",
+                    "waiting",
                     NavigationTarget::Pane("w1:p1".into())
                 ),
                 (
@@ -1046,6 +1051,34 @@ mod tests {
                 ("empty", "#2", "", NavigationTarget::Workspace("w2".into())),
             ]
         );
+    }
+
+    /// An integration's state label names the agent's status in Go To, as in
+    /// the sidebar; a label for another status leaves the daemon's word.
+    #[test]
+    fn go_to_badges_use_the_agents_state_labels() {
+        let badge =
+            |labels: &[(&str, &str)]| {
+                let mut snapshot = go_to_fixture();
+                snapshot.agents[0].state_labels = labels
+                    .iter()
+                    .map(|(state, label)| ((*state).into(), (*label).into()))
+                    .collect();
+                let mut entries = Vec::new();
+                go_to_entries(crate::endpoint::LOCAL, None, &snapshot, &mut entries);
+                entries
+                .iter()
+                .find(|entry| matches!(
+                    &entry.action,
+                    Action::Go { target: NavigationTarget::Pane(pane), .. } if pane == "w1:p1"
+                ))
+                .map(|entry| entry.badge.to_string())
+            };
+        assert_eq!(
+            badge(&[("blocked", "needs you"), ("working", "busy")]).as_deref(),
+            Some("needs you")
+        );
+        assert_eq!(badge(&[("working", "busy")]).as_deref(), Some("blocked"));
     }
 
     #[test]

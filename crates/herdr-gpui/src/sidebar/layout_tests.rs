@@ -646,6 +646,50 @@ fn agent_status_words_follow_the_daemon_sidebar_config(cx: &mut gpui::TestAppCon
     }
 }
 
+/// An integration's `state_labels` replace the status word for the status
+/// it names, in every layout, as the terminal client's sidebar does; agents
+/// without one keep the plain word.
+#[gpui::test]
+fn agent_status_words_use_the_agents_state_labels(cx: &mut gpui::TestAppContext) {
+    use crate::config::{Density, LayoutMode};
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = fixture_window(window, cx);
+        let mut snapshot = snapshot(2);
+        snapshot.agents[0].state_labels = vec![
+            ("blocked".into(), "stuck".into()),
+            ("working".into(), "deep in the mines".into()),
+        ];
+        view.live.snapshot = Some(Arc::new(snapshot));
+        view
+    });
+    cx.simulate_resize(size(px(800.), px(900.)));
+    cx.run_until_parked();
+    for mode in [
+        LayoutMode::from(Density::Comfortable),
+        LayoutMode::Superset,
+        LayoutMode::Orca,
+        LayoutMode::Minimal,
+    ] {
+        view.update(cx, |view, cx| {
+            view.config.layout.mode = mode;
+            view.config.sidebar.size = 12.;
+            view.sidebar_width = Some(320.);
+            view.config.sidebar_layout.agents =
+                toml::from_str("rows = [[\"state_text\"]]").unwrap();
+            view.config.usage.inline = false;
+            cx.notify();
+        });
+        let probes = cx.update(|window, cx| {
+            cx.default_global::<TextProbes>().0.clear();
+            full_draw(window, cx).clear(cx);
+            let probes = &cx.global::<TextProbes>().0;
+            ["deep in the mines", "stuck", "working"].map(|text| probes.contains_key(text))
+        });
+        // The second agent sets no labels, so it keeps the daemon's word.
+        assert_eq!(probes, [true, false, true], "{mode:?}");
+    }
+}
+
 #[gpui::test]
 fn configured_sidebar_rows_render_all_lines_within_the_row(cx: &mut gpui::TestAppContext) {
     use crate::config::LayoutMode;

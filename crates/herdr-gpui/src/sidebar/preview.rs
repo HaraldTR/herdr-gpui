@@ -232,7 +232,7 @@ impl Preview {
             .flex_col()
             .border_r_1()
             .border_color(rgb(theme.active))
-            .bg(rgb(theme.surface))
+            .bg(rgb(theme.sidebar_background()))
             .text_color(rgb(theme.foreground))
             .text_font(font)
             .text_size(px(font.size))
