@@ -44,7 +44,7 @@ test-gui binary:
 # Explicit opt-in: reads the real code signature and Homebrew records of an
 # installed app. Never discovers an installation on its own.
 test-update bundle:
-    HERDR_TEST_BUNDLE="{{bundle}}" cargo test --locked -p herdr-gpui updater::install::tests::installed_bundle -- --ignored --nocapture
+    HERDR_TEST_BUNDLE="{{bundle}}" cargo test --locked -p herdr-gpui updater::install::tests::signing::installed_bundle -- --ignored --nocapture
     HERDR_TEST_BUNDLE="{{bundle}}" cargo test --locked -p herdr-gpui updater::brew::tests::the_real_cask -- --ignored --nocapture
 
 # Really upgrades the installed app through Homebrew; restart it afterwards.
