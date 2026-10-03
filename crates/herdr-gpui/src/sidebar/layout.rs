@@ -362,7 +362,7 @@ impl SidebarLook {
             .rounded(px(self.style.radius().max(LIFT_RADIUS)))
             .bg(rgb(match self.style.highlight() {
                 Highlight::Fill if focused => theme.active,
-                _ => theme.surface,
+                _ => theme.sidebar_background(),
             }))
             .when(self.style.highlight() == Highlight::Outline, |card| {
                 card.border_1()

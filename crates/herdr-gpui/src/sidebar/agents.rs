@@ -274,6 +274,31 @@ pub(super) fn status_text(status: AgentStatus) -> &'static str {
     }
 }
 
+/// Herdr's own cap on a state label, so a longer one came from a peer that
+/// ignored it and is cut where the terminal client would have cut it.
+const STATE_LABEL_LIMIT: usize = 80;
+
+/// The words an agent's integration chose for its current status, as Herdr's
+/// `state_labels` metadata, else `fallback`. Labels are untrusted display
+/// text: bounded and stripped of controls and bidi overrides.
+pub(crate) fn state_label<'a>(
+    agent: &ClientShellAgent,
+    fallback: &'a str,
+) -> std::borrow::Cow<'a, str> {
+    let key = status_text(agent.agent_status);
+    agent
+        .state_labels
+        .iter()
+        .find(|(state, _)| state == key)
+        .map(|(_, label)| crate::notifications::safe_text(label, STATE_LABEL_LIMIT))
+        .map(|label| label.trim().to_owned())
+        .filter(|label| !label.is_empty())
+        .map_or(
+            std::borrow::Cow::Borrowed(fallback),
+            std::borrow::Cow::Owned,
+        )
+}
+
 /// Upstream draws status from its own palette, defaulting to Catppuccin Mocha,
 /// and never from the terminal's ANSI colors. Matching those literals keeps a
 /// dot the same color in both clients whatever terminal theme is loaded, where
@@ -292,7 +317,7 @@ pub(super) fn status_style(status: AgentStatus, theme: &Theme) -> (f32, bool, u3
 
 #[cfg(test)]
 mod tests {
-    use super::{Indicators, sorted_agents, status_indicator};
+    use super::{Indicators, sorted_agents, state_label, status_indicator};
     use crate::{config::FontConfig, herdr_settings::IndicatorStyle};
     use gpui::{Styled, rgb};
     use herdr_client::protocol::AgentStatus;
@@ -361,6 +386,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// An integration's label names the agent's current status; a label for
+    /// another status, a blank one, or none leaves the fallback. Labels are
+    /// untrusted: controls and bidi overrides go, and length is bounded.
+    #[test]
+    fn state_labels_name_the_current_status_as_safe_bounded_text() {
+        let agent = |status, labels: &[(&str, &str)]| herdr_client::protocol::ClientShellAgent {
+            pane_id: "p".into(),
+            workspace_id: "w".into(),
+            tab_id: "t".into(),
+            name: None,
+            display_agent: None,
+            agent: None,
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_status: status,
+            state_change_seq: 0,
+            state_labels: labels
+                .iter()
+                .map(|(state, label)| ((*state).into(), (*label).into()))
+                .collect(),
+            tokens: Vec::new(),
+            focused: false,
+        };
+        let labels = [("working", "deep in the mines"), ("blocked", "  ")];
+        for (status, fallback, expected) in [
+            (AgentStatus::Working, "working", "deep in the mines"),
+            (AgentStatus::Blocked, "blocked", "blocked"),
+            (AgentStatus::Done, "done", "done"),
+            (AgentStatus::Unknown, "", ""),
+        ] {
+            assert_eq!(state_label(&agent(status, &labels), fallback), expected);
+        }
+        let hostile = agent(
+            AgentStatus::Working,
+            &[("working", "\u{1b}[31mred\u{202e}dlrow\n")],
+        );
+        assert_eq!(state_label(&hostile, "working"), "[31mreddlrow");
+        let long = "x".repeat(10_000);
+        let long = agent(AgentStatus::Idle, &[("idle", &long)]);
+        assert_eq!(state_label(&long, "idle").chars().count(), 80);
     }
 
     fn ordered(

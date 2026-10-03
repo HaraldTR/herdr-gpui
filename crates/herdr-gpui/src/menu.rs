@@ -14,12 +14,15 @@ mod sessions;
 mod settings;
 mod state;
 mod teleport;
+mod whats_new;
 mod workspace;
 mod workspace_close;
 mod worktree_open;
 mod worktree_render;
 mod worktree_source;
 
+#[cfg(test)]
+mod announcement_tests;
 #[cfg(test)]
 mod font_size_tests;
 #[cfg(test)]

@@ -101,10 +101,35 @@ pub struct LiveState {
     /// it so a slow link coalesces to the latest position instead of queueing
     /// a backlog.
     pub drag_request: Option<String>,
+    /// The product announcement this client dismissed. It stays hidden until
+    /// the daemon drops it from the snapshot, and reappears if the daemon
+    /// rejects the dismissal.
+    pub(crate) announcement_dismissal: Option<AnnouncementDismissal>,
+    /// Both dismiss methods arrived with endpoint announcements; a daemon that
+    /// does not offer one can only have it hidden for this connection.
+    pub(crate) supports_announcement_dismiss: bool,
+    pub(crate) supports_release_notes_dismiss: bool,
     /// The daemon's `ClientShellKeyboardReportAll`: the focused pane asked for
     /// every key, including releases, as escape codes. Keys the window already
     /// sends as key events then also send their release.
     pub(crate) keyboard_report_all: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AnnouncementDismissal {
+    /// `None` when the daemon does not offer `product_announcement.dismiss`.
+    pub request: Option<String>,
+    pub version: String,
+    pub id: String,
+}
+
+impl AnnouncementDismissal {
+    fn covers(&self, snapshot: &ClientShellSnapshot) -> bool {
+        snapshot
+            .product_announcement
+            .as_ref()
+            .is_some_and(|current| current.version == self.version && current.id == self.id)
+    }
 }
 
 #[derive(Clone)]
@@ -161,6 +186,9 @@ impl Default for LiveState {
             tab_rename: None,
             pane_rename: None,
             drag_request: None,
+            announcement_dismissal: None,
+            supports_announcement_dismiss: false,
+            supports_release_notes_dismiss: false,
         }
     }
 }
@@ -205,6 +233,9 @@ impl LiveState {
             tab_rename,
             pane_rename,
             drag_request,
+            announcement_dismissal,
+            supports_announcement_dismiss,
+            supports_release_notes_dismiss,
             // Shapes the next key events, not anything drawn.
             keyboard_report_all: _,
         } = next;
@@ -262,6 +293,9 @@ impl LiveState {
             && pending_rename(tab_rename, &self.tab_rename)
             && pending_rename(pane_rename, &self.pane_rename)
             && *drag_request == self.drag_request
+            && *announcement_dismissal == self.announcement_dismissal
+            && *supports_announcement_dismiss == self.supports_announcement_dismiss
+            && *supports_release_notes_dismiss == self.supports_release_notes_dismiss
     }
 
     fn has_operation_result(&self, request_id: &str) -> bool {
@@ -272,6 +306,29 @@ impl LiveState {
                 .into_iter()
                 .flatten()
                 .any(|rename| rename.request == request_id)
+            || self.dismissal_request(request_id)
+    }
+
+    fn dismissal_request(&self, request_id: &str) -> bool {
+        self.announcement_dismissal
+            .as_ref()
+            .and_then(|dismissal| dismissal.request.as_deref())
+            == Some(request_id)
+    }
+
+    /// The daemon's product announcement, unless this client dismissed it.
+    pub(crate) fn product_announcement(
+        &self,
+    ) -> Option<&herdr_client::protocol::ClientShellProductAnnouncement> {
+        let snapshot = self.snapshot.as_deref()?;
+        if self
+            .announcement_dismissal
+            .as_ref()
+            .is_some_and(|dismissal| dismissal.covers(snapshot))
+        {
+            return None;
+        }
+        snapshot.product_announcement.as_ref()
     }
 
     /// Whether a navigation barrier is unacknowledged, failed, or still waiting
@@ -342,6 +399,10 @@ impl LiveState {
                 self.settings_reload = false;
                 self.supports_pane_clear = Method::PaneClear.advertised_in(&welcome.methods);
                 self.supports_tab_move = Method::TabMove.advertised_in(&welcome.methods);
+                self.supports_announcement_dismiss =
+                    Method::ProductAnnouncementDismiss.advertised_in(&welcome.methods);
+                self.supports_release_notes_dismiss =
+                    Method::ReleaseNotesDismiss.advertised_in(&welcome.methods);
                 self.supports_link_resolve =
                     crate::links::LinkRequest::Resolve.advertised_in(&welcome.methods);
                 self.supports_link_activate =
@@ -392,6 +453,15 @@ impl LiveState {
                 {
                     self.surface = None;
                 }
+                // Once the daemon drops or replaces the announcement there is
+                // nothing left to hide.
+                if self
+                    .announcement_dismissal
+                    .as_ref()
+                    .is_some_and(|dismissal| !dismissal.covers(&snapshot))
+                {
+                    self.announcement_dismissal = None;
+                }
                 self.status = ConnectionStatus::Connected;
                 // Pane IDs are only meaningful within one daemon boot.
                 self.previous_pane = match &self.snapshot {
@@ -425,6 +495,7 @@ impl LiveState {
                 self.error = Some(reason);
                 self.snapshot = None;
                 self.surface = None;
+                self.announcement_dismissal = None;
                 self.surface_images = Default::default();
             }
             ClientEvent::CommandRejected { request_id, reason } => {
@@ -455,6 +526,12 @@ impl LiveState {
                     && request_id.as_ref() == Some(&activation.request)
                 {
                     activation.failed = true;
+                }
+                if request_id
+                    .as_deref()
+                    .is_some_and(|id| self.dismissal_request(id))
+                {
+                    self.announcement_dismissal = None;
                 }
             }
             ClientEvent::Response {
@@ -498,6 +575,11 @@ impl LiveState {
                     && !self.has_operation_result(&request_id)
                 {
                     self.error = Some(crate::Error::DaemonResponse(error.clone()).to_string());
+                }
+                if self.dismissal_request(&request_id)
+                    && response.get("error").is_some_and(|error| !error.is_null())
+                {
+                    self.announcement_dismissal = None;
                 }
                 if let Some((id, result)) = &mut self.dialog_response
                     && *id == request_id
@@ -1534,5 +1616,89 @@ mod tests {
             );
         }
         assert!(state.clipboard_writes.iter().all(|text| text == "x"));
+    }
+
+    fn dismissed(request: &str) -> LiveState {
+        let mut state = LiveState::default();
+        state.apply(ClientEvent::Snapshot(snapshot()));
+        assert_eq!(
+            state.product_announcement().map(|a| a.id.as_str()),
+            Some("announcement-v1")
+        );
+        state.announcement_dismissal = Some(AnnouncementDismissal {
+            request: Some(request.into()),
+            version: "1.0.0".into(),
+            id: "announcement-v1".into(),
+        });
+        assert!(state.product_announcement().is_none());
+        state
+    }
+
+    #[test]
+    fn dismissed_announcement_stays_hidden_until_the_daemon_drops_it() {
+        let mut state = dismissed("dismiss-1");
+        state.apply(ClientEvent::Response {
+            request_id: "dismiss-1".into(),
+            response: serde_json::json!({"result": {"type": "ok"}}),
+        });
+        // A snapshot that still carries it, sent before the daemon handled
+        // the request, must not bring the card back.
+        state.apply(ClientEvent::Snapshot(snapshot()));
+        assert!(state.product_announcement().is_none());
+        assert!(state.error.is_none());
+
+        let mut dropped = (*snapshot()).clone();
+        dropped.product_announcement = None;
+        state.apply(ClientEvent::Snapshot(Arc::new(dropped)));
+        assert!(state.announcement_dismissal.is_none());
+
+        // A new announcement is never covered by an old dismissal.
+        let mut next = (*snapshot()).clone();
+        if let Some(announcement) = &mut next.product_announcement {
+            announcement.id = "announcement-v2".into();
+        }
+        let mut state = dismissed("dismiss-2");
+        state.apply(ClientEvent::Snapshot(Arc::new(next)));
+        assert_eq!(
+            state.product_announcement().map(|a| a.id.as_str()),
+            Some("announcement-v2")
+        );
+    }
+
+    #[test]
+    fn rejected_dismissal_shows_the_announcement_again() {
+        let mut state = dismissed("dismiss-1");
+        state.apply(ClientEvent::Response {
+            request_id: "other".into(),
+            response: serde_json::json!({"error": {"code": "x", "message": "y"}}),
+        });
+        assert!(state.product_announcement().is_none());
+        state.error = None;
+        state.apply(ClientEvent::Response {
+            request_id: "dismiss-1".into(),
+            response: serde_json::json!({"error": {
+                "code": "stale_announcement",
+                "message": "the product announcement is no longer current"
+            }}),
+        });
+        assert!(state.product_announcement().is_some());
+        // The card coming back is the feedback; the status line stays quiet.
+        assert!(state.error.is_none());
+
+        let mut state = dismissed("dismiss-2");
+        state.apply(ClientEvent::CommandRejected {
+            request_id: Some("dismiss-2".into()),
+            reason: herdr_client::Error::Disconnected,
+        });
+        assert!(state.product_announcement().is_some());
+    }
+
+    #[test]
+    fn dismissal_is_part_of_the_window_state() {
+        let state = dismissed("dismiss-1");
+        let mut next = state.clone();
+        assert!(state.only_surface_changed(&next));
+        next.announcement_dismissal = None;
+        assert!(!state.only_surface_changed(&next));
     }
 }

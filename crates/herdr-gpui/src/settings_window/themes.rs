@@ -798,7 +798,7 @@ impl SettingsWindow {
                             .min_w(px(90.))
                             .flex_none()
                             .p(px(10.))
-                            .bg(rgb(theme.surface))
+                            .bg(rgb(theme.sidebar_background()))
                             .overflow_hidden()
                             .text_size(px(11.))
                             .child(div().text_color(rgb(theme.subtext())).child("SPACES"))

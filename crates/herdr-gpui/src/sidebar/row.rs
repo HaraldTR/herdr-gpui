@@ -102,7 +102,7 @@ pub(super) fn row_text(kind: RowKind, focused: bool, theme: &Theme) -> (u32, Fon
 pub(super) fn left_behind(color: u32, theme: &Theme) -> u32 {
     crate::contrast::ink_on_chrome(
         crate::config::mix(theme.background, color, 45),
-        [theme.background, theme.surface, theme.active],
+        [theme.background, theme.sidebar_background(), theme.active],
         crate::contrast::Contrast::Standard.mark_ratio(),
     )
 }
@@ -674,7 +674,7 @@ pub(super) fn row(
     // The status word the daemon's `state_text` token asks to show, when its
     // sidebar config names it. Painted at the row's trailing edge in the dot's
     // color so a status reads at a glance, not only by hue.
-    status_text: Option<&'static str>,
+    status_text: Option<&str>,
     lines: &[Vec<ResolvedToken>],
     cx: &RowContext<'_>,
 ) -> Div {

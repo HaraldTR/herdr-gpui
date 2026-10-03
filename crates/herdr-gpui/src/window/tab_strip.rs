@@ -125,6 +125,11 @@ impl HerdrWindow {
             .into_any_element()
     }
 
+    /// Height of a group's tab strip, which grows with the tab font.
+    pub(super) fn tab_strip_height(&self) -> f32 {
+        (self.config.tabs.size * 1.6 + 4.).max(TAB_HEIGHT)
+    }
+
     fn render_tab_strip(&mut self, slot: Slot, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let pick = self.group_pick(slot.id);
         let indicators = Indicators::new(
@@ -183,7 +188,7 @@ impl HerdrWindow {
             .id(SharedString::from(slot.selector("tabs")))
             .flex()
             .flex_none()
-            .h(px((self.config.tabs.size * 1.6 + 4.).max(TAB_HEIGHT)))
+            .h(px(self.tab_strip_height()))
             .text_font(&self.config.tabs)
             .text_size(px(self.config.tabs.size))
             .overflow_x_scroll()
@@ -784,7 +789,7 @@ impl HerdrWindow {
             .child(
                 div()
                     .flex_none()
-                    .h(px((self.config.tabs.size * 1.6 + 4.).max(TAB_HEIGHT)))
+                    .h(px(self.tab_strip_height()))
                     .bg(rgb(self.theme.surface)),
             )
             .into_any_element()

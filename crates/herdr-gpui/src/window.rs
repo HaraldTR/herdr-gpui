@@ -3,6 +3,7 @@
 //! split by responsibility across the submodules below; the fields live here
 //! because every one of them describes this window's own presentation state.
 
+mod announcement;
 mod clipboard;
 mod commands;
 mod config_diagnostic;
@@ -65,6 +66,8 @@ pub(crate) struct HerdrWindow {
     pub(crate) bell: crate::bell::Bell,
     pub(crate) updater: updater::Updater,
     pub(crate) update_preview: Option<updater::State>,
+    /// Prepared daemon announcement and release notes text.
+    pub(crate) daemon_text: crate::release_notes::DaemonText,
     pub(crate) config: config::Config,
     /// The terminal size the last loaded config asked for. Increase/decrease
     /// write straight to `config.terminal.size`, so this is what Reset Font
@@ -502,6 +505,7 @@ impl HerdrWindow {
             bell: crate::bell::Bell::default(),
             updater: updater::Updater::default(),
             update_preview: None,
+            daemon_text: Default::default(),
             configured_terminal_size: config.terminal.size,
             gui_config_diagnostic: {
                 let mut diagnostic = crate::config_diagnostic::ConfigDiagnostic::default();
