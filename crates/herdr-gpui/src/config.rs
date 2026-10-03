@@ -85,6 +85,8 @@ pub struct Config {
     pub theme: String,
     pub confirm_close_tab: bool,
     pub show_agents: bool,
+    /// CPU and memory of the selected host in the status bar.
+    pub show_system_load: bool,
     /// How far the app's own marks and labels stand off its chrome.
     pub contrast: Contrast,
     /// Show each agent's status word beside it, following the daemon's
@@ -612,6 +614,7 @@ impl Default for Config {
             github: GitHubConfig::default(),
             confirm_close_tab: true,
             show_agents: true,
+            show_system_load: true,
             contrast: Contrast::default(),
             agent_status_text: AgentStatusText::default(),
             usage: crate::usage::UsageConfig::default(),
@@ -639,6 +642,7 @@ struct Settings {
     theme: Option<String>,
     confirm_close_tab: Option<bool>,
     show_agents: Option<bool>,
+    show_system_load: Option<bool>,
     contrast: Contrast,
     usage: crate::usage::UsageConfig,
     option_as_alt: OptionAsAlt,
@@ -1115,6 +1119,7 @@ impl Config {
         }
         config.confirm_close_tab = settings.confirm_close_tab.unwrap_or(true);
         config.show_agents = settings.show_agents.unwrap_or(true);
+        config.show_system_load = settings.show_system_load.unwrap_or(true);
         config.contrast = settings.contrast;
         settings.usage.validate()?;
         config.usage = settings.usage;

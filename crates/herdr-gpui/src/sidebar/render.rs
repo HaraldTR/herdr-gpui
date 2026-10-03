@@ -86,24 +86,46 @@ impl HerdrWindow {
                 let select_id = endpoint_id.clone();
                 let menu_id = endpoint_id.clone();
                 let removing = self.menu.removing_devices.contains(&endpoint.id);
-                // The removal pulse takes its room from the label, not from the status.
-                let label_width = if removing {
-                    (host_label_width - STATUS_WIDTH - HOST_GAP).max(0.)
-                } else {
-                    host_label_width
-                };
+                let host = crate::usage::Host::from(&endpoint.connection.target);
+                let load = self
+                    .config
+                    .show_system_load
+                    .then(|| self.system_load.get(&host))
+                    .flatten();
+                // Densities with detail lines give the load its own line;
+                // compact ones fit gauges between the name and the status.
+                let load_line = load.filter(|_| layout.workspace_details());
+                let gauges = load.filter(|_| load_line.is_none()).map(|reading| {
+                    crate::system_load::gauges(
+                        reading,
+                        theme,
+                        super::metrics::glyph_width(font),
+                        (font.size * 0.8).round(),
+                    )
+                });
+                // The removal pulse and the gauges take their room from the
+                // label, not from the status.
+                let label_width = (host_label_width
+                    - if removing {
+                        STATUS_WIDTH + HOST_GAP
+                    } else {
+                        0.
+                    }
+                    - gauges.as_ref().map_or(0., |(width, _)| width + HOST_GAP))
+                .max(0.);
+                let lines = 1. + if load_line.is_some() { 1. } else { 0. };
                 spaces = spaces.child(
                     div()
                         .id(SharedString::from(format!("host-{endpoint_id}")))
                         .debug_selector(|| format!("host-{endpoint_id}"))
-                        .h(px(line_height(font)
+                        .h(px(lines * line_height(font)
                             + 2. * layout.host_padding()
                             + look.chrome_height()))
                         .flex_none()
                         .relative()
                         .flex()
-                        .items_center()
-                        .gap(px(HOST_GAP))
+                        .flex_col()
+                        .justify_center()
                         .px(px(content_x))
                         // Hosts mark selection only; they do not join the rows'
                         // hover group.
@@ -132,52 +154,92 @@ impl HerdrWindow {
                         )
                         .child(
                             div()
-                                .id(SharedString::from(format!("collapse-host-{endpoint_id}")))
-                                .w(px(HOST_ARROW_WIDTH))
-                                .flex_none()
-                                .child(label_text(if endpoint.collapsed {
-                                    "\u{25b8}"
-                                } else {
-                                    "\u{25be}"
-                                }))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    if let Some(endpoint) =
-                                        this.endpoints.iter_mut().find(|e| e.id == collapse_id)
-                                    {
-                                        endpoint.collapsed = !endpoint.collapsed;
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                        .when(removing, |row| {
-                            row.child(removing_dot("host-removing", theme))
-                        })
-                        .child(
-                            div()
-                                // As with workspace labels, avoid zero-basis text measurement.
-                                .w(px(label_width))
-                                .flex_none()
-                                .overflow_hidden()
+                                .flex()
+                                .items_center()
+                                .gap(px(HOST_GAP))
                                 .child(
                                     div()
+                                        .id(SharedString::from(format!(
+                                            "collapse-host-{endpoint_id}"
+                                        )))
+                                        .w(px(HOST_ARROW_WIDTH))
+                                        .flex_none()
+                                        .child(label_text(if endpoint.collapsed {
+                                            "\u{25b8}"
+                                        } else {
+                                            "\u{25be}"
+                                        }))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            if let Some(endpoint) = this
+                                                .endpoints
+                                                .iter_mut()
+                                                .find(|e| e.id == collapse_id)
+                                            {
+                                                endpoint.collapsed = !endpoint.collapsed;
+                                            }
+                                            cx.notify();
+                                        })),
+                                )
+                                .when(removing, |row| {
+                                    row.child(removing_dot("host-removing", theme))
+                                })
+                                .child(
+                                    div()
+                                        // As with workspace labels, avoid zero-basis text measurement.
                                         .w(px(label_width))
-                                        .truncate()
-                                        .child(label_text(&endpoint.label)),
+                                        .flex_none()
+                                        .overflow_hidden()
+                                        .child(
+                                            div()
+                                                .w(px(label_width))
+                                                .truncate()
+                                                .child(label_text(&endpoint.label)),
+                                        ),
+                                )
+                                .when_some(gauges.zip(load), |row, ((_, gauges), reading)| {
+                                    row.child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "host-load-{endpoint_id}"
+                                            )))
+                                            .flex_none()
+                                            .child(gauges)
+                                            .tooltip(crate::system_load::tooltip(
+                                                reading, &host, theme,
+                                            )),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .debug_selector(|| format!("host-status-{endpoint_id}"))
+                                        .size(px(STATUS_WIDTH))
+                                        .flex_none()
+                                        .rounded_full()
+                                        .bg(rgb(if endpoint.live.status.is_connected() {
+                                            crate::menu::online(theme)
+                                        } else {
+                                            theme.muted
+                                        })),
                                 ),
                         )
-                        .child(
-                            div()
-                                .debug_selector(|| format!("host-status-{endpoint_id}"))
-                                .size(px(STATUS_WIDTH))
-                                .flex_none()
-                                .rounded_full()
-                                .bg(rgb(if endpoint.live.status.is_connected() {
-                                    crate::menu::online(theme)
-                                } else {
-                                    theme.muted
-                                })),
-                        )
+                        .when_some(load_line, |row, reading| {
+                            row.child(
+                                div()
+                                    .id(SharedString::from(format!("host-load-{endpoint_id}")))
+                                    .h(px(line_height(font)))
+                                    .flex()
+                                    .items_center()
+                                    .pl(px(HOST_ARROW_WIDTH + HOST_GAP))
+                                    .overflow_hidden()
+                                    .child(crate::system_load::line(
+                                        reading,
+                                        theme,
+                                        Some(super::metrics::glyph_width(font)),
+                                    ))
+                                    .tooltip(crate::system_load::tooltip(reading, &host, theme)),
+                            )
+                        })
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.select_endpoint(&select_id, cx);
                             window.focus(&this.focus, cx);

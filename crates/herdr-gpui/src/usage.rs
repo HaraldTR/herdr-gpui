@@ -23,12 +23,13 @@ mod tests;
 
 pub(crate) use model::{Host, Provider};
 pub(crate) use panel::PANEL_WIDTH;
+pub(crate) use probe::Shell;
 pub(crate) use render::Hint;
 pub use settings::UsageConfig;
 
 use cookies::CookieJar;
 use model::Report;
-use probe::{Exec, Probe, Shell};
+use probe::{Exec, Probe};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, mpsc},

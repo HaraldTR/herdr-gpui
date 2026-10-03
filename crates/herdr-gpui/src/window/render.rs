@@ -596,6 +596,7 @@ impl Render for HerdrWindow {
                                 div().debug_selector(|| "connection-message".into()).child(status)
                             )),
                     )
+                    .children(self.render_system_load())
                     .when(crate::caffeine::SUPPORTED, |bar| {
                         let awake = crate::caffeine::active(cx);
                         let (foreground, surface) = (self.theme.foreground, self.theme.surface);

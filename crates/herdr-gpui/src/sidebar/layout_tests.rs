@@ -1131,6 +1131,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         config_load_revision: 0,
         git: Default::default(),
         usage: Default::default(),
+        system_load: Default::default(),
         sidebar_visible: true,
         device_filter: None,
         endpoints: vec![crate::endpoint::Endpoint::new(

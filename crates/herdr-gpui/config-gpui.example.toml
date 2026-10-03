@@ -29,6 +29,10 @@ contrast = "standard"
 confirm_close_tab = true
 # Show the Agents section below Spaces in the sidebar.
 show_agents = true
+# Show CPU and memory: the selected host's in the status bar, and each host's
+# on its sidebar row. Connected remote hosts are read over SSH every couple of
+# seconds; false stops all sampling. Also under Settings > General.
+show_system_load = true
 # macOS only: whether Option-letter reaches a pane as an Alt shortcut (Alt-P
 # for Option-P) or types the character the keyboard layout puts there. "auto"
 # sends Alt on the U.S. and ABC layouts and types elsewhere, so layouts that
