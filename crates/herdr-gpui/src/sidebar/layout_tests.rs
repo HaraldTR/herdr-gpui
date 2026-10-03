@@ -223,6 +223,11 @@ impl ProbeText {
             )
             && bounds.top() >= mask.top()
             && bounds.bottom() <= mask.bottom()
+            // The expected column assumes the window leaves the default
+            // sidebar width alone. A frame painted mid-resize, such as the
+            // return from the 320px Preferences check, can narrow it.
+            && super::sidebar_width(None, f32::from(window.viewport_size().width))
+                == super::SIDEBAR_WIDTH
         {
             let mode = window
                 .root::<HerdrWindow>()
