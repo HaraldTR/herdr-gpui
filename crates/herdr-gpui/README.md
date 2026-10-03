@@ -1449,8 +1449,8 @@ Windows setup) nothing is saved and the window says so.
   `GITHUB_TOKEN` apply only to the main account. Removing a device keeps its
   saved credential until you sign out of it, so re-adding the device finds it. See
   [PR lookup scope and limits](../../README.md) for authentication and remote limits.
-   The same worktree-registry path supports both current and older daemons without
-    `workspace.get`. No Git or HTTP requests run from menu-open or render paths.
+   Herdr does not give endpoint clients a workspace's checkout path, so every
+    daemon version uses this worktree-registry path. No Git or HTTP requests run from menu-open or render paths.
   Opening the top-right Git/PR dropdown also queues a fresh lookup for the focused
   local branch, keeping cached details visible while the background worker runs.
   The dropdown shows draft/ready-for-review status, review decisions, merge

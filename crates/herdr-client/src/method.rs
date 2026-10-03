@@ -36,7 +36,6 @@ pub enum Method {
     WorkspaceClose,
     WorkspaceCreate,
     WorkspaceFocus,
-    WorkspaceGet,
     WorkspaceMoveBlock,
     WorkspaceRename,
     WorktreeCreate,
@@ -74,7 +73,6 @@ impl Method {
             Self::WorkspaceClose => "workspace.close",
             Self::WorkspaceCreate => "workspace.create",
             Self::WorkspaceFocus => "workspace.focus",
-            Self::WorkspaceGet => "workspace.get",
             Self::WorkspaceMoveBlock => "workspace.move_block",
             Self::WorkspaceRename => "workspace.rename",
             Self::WorktreeCreate => "worktree.create",
@@ -153,5 +151,126 @@ mod tests {
             Method::LayoutSetSplitRatio.as_str(),
             "layout.set_split_ratio"
         );
+    }
+
+    /// Herdr's `CLIENT_SHELL_METHODS` (src/server/client_commands.rs): the
+    /// only methods it answers on the client endpoint. Anything else is
+    /// rejected, so a variant outside this list is a dead code path.
+    const OFFERED: &[&str] = &[
+        "client_shell.surface.set",
+        "command.invoke",
+        "integration.install",
+        "integration.list",
+        "layout.set_split_ratio",
+        "pane.clear",
+        "pane.close",
+        "pane.copy_motion",
+        "pane.copy_search",
+        "pane.edit_scrollback",
+        "pane.focus",
+        "pane.focus_direction",
+        "pane.input.set",
+        "pane.link.activate",
+        "pane.link.resolve",
+        "pane.rename",
+        "pane.resize",
+        "pane.scroll",
+        "pane.selection.read",
+        "pane.split",
+        "pane.swap",
+        "pane.zoom",
+        "product_announcement.dismiss",
+        "release_notes.dismiss",
+        "server.reload_config",
+        "tab.close",
+        "tab.create",
+        "tab.focus",
+        "tab.move",
+        "tab.rename",
+        "workspace.close",
+        "workspace.create",
+        "workspace.focus",
+        "workspace.move",
+        "workspace.move_block",
+        "workspace.rename",
+        "worktree.create",
+        "worktree.list",
+        "worktree.open",
+        "worktree.remove",
+    ];
+
+    /// Every variant. The match in the test stops compiling when a variant is
+    /// added, as a reminder to list it here too.
+    const ALL: &[Method] = &[
+        Method::ClientShellSurfaceSet,
+        Method::CommandInvoke,
+        Method::IntegrationList,
+        Method::IntegrationInstall,
+        Method::LayoutSetSplitRatio,
+        Method::PaneClear,
+        Method::PaneClose,
+        Method::PaneFocus,
+        Method::PaneFocusDirection,
+        Method::PaneRename,
+        Method::PaneScroll,
+        Method::PaneSplit,
+        Method::PaneZoom,
+        Method::ServerReloadConfig,
+        Method::TabClose,
+        Method::TabCreate,
+        Method::TabFocus,
+        Method::TabMove,
+        Method::TabRename,
+        Method::WorkspaceClose,
+        Method::WorkspaceCreate,
+        Method::WorkspaceFocus,
+        Method::WorkspaceMoveBlock,
+        Method::WorkspaceRename,
+        Method::WorktreeCreate,
+        Method::WorktreeList,
+        Method::WorktreeOpen,
+        Method::WorktreeRemove,
+    ];
+
+    #[test]
+    fn every_method_is_offered_to_endpoint_clients() {
+        for method in ALL {
+            match method {
+                Method::ClientShellSurfaceSet
+                | Method::CommandInvoke
+                | Method::IntegrationList
+                | Method::IntegrationInstall
+                | Method::LayoutSetSplitRatio
+                | Method::PaneClear
+                | Method::PaneClose
+                | Method::PaneFocus
+                | Method::PaneFocusDirection
+                | Method::PaneRename
+                | Method::PaneScroll
+                | Method::PaneSplit
+                | Method::PaneZoom
+                | Method::ServerReloadConfig
+                | Method::TabClose
+                | Method::TabCreate
+                | Method::TabFocus
+                | Method::TabMove
+                | Method::TabRename
+                | Method::WorkspaceClose
+                | Method::WorkspaceCreate
+                | Method::WorkspaceFocus
+                | Method::WorkspaceMoveBlock
+                | Method::WorkspaceRename
+                | Method::WorktreeCreate
+                | Method::WorktreeList
+                | Method::WorktreeOpen
+                | Method::WorktreeRemove => {}
+            }
+            assert!(
+                OFFERED.contains(&method.as_str()),
+                "{method} is not offered to endpoint clients"
+            );
+        }
+        // `workspace.get` is API-socket only; the snapshot carries what we need.
+        assert!(!OFFERED.contains(&"workspace.get"));
     }
 }
