@@ -29,7 +29,7 @@ impl HerdrWindow {
     }
 
     /// Reloads when the GUI overrides change, or the daemon's config whose
-    /// `[keys]` and clipboard toast the GUI also honors.
+    /// `[keys]`, clipboard toast, and `[ui.sidebar]` rows the GUI also honors.
     pub(crate) fn watch_gui_config(&mut self, cx: &mut Context<Self>) {
         let Ok(path) = Config::local_path() else {
             return;
@@ -314,7 +314,22 @@ impl HerdrWindow {
                 | Command::ClosePane
                 | Command::CloseTab
                 | Command::NewBrowserTab
-                | Command::SplitEditor => 0,
+                | Command::SplitEditor
+                | Command::MoveTabPrevious
+                | Command::MoveTabNext
+                | Command::RenameTab
+                | Command::SwapLeft
+                | Command::SwapRight
+                | Command::SwapUp
+                | Command::SwapDown
+                | Command::ResizeLeft
+                | Command::ResizeRight
+                | Command::ResizeUp
+                | Command::ResizeDown
+                | Command::ResizeMode
+                | Command::RenamePane
+                | Command::RenameWorkspace
+                | Command::CloseWorkspace => 0,
                 Command::NextTab
                 | Command::PreviousTab
                 | Command::FocusLeft
@@ -324,7 +339,14 @@ impl HerdrWindow {
                 | Command::NextPane
                 | Command::PreviousPane
                 | Command::TabNumber(_)
-                | Command::WorkspacePicker => 1,
+                | Command::WorkspacePicker
+                | Command::LastPane
+                | Command::PreviousWorkspace
+                | Command::NextWorkspace
+                | Command::WorkspaceNumber(_)
+                | Command::PreviousAgent
+                | Command::NextAgent
+                | Command::AgentNumber(_) => 1,
                 Command::NewWindow
                 | Command::ToggleSidebar
                 | Command::IncreaseFontSize
@@ -339,7 +361,8 @@ impl HerdrWindow {
                 | Command::Quit
                 | Command::Logs
                 | Command::About
-                | Command::InstallBrowserSkill => 2,
+                | Command::InstallBrowserSkill
+                | Command::ReloadConfig => 2,
                 Command::OpenNotificationTarget => 1,
             };
             groups[group].1.push((keys, info.label));

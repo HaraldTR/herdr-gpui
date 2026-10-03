@@ -1,0 +1,437 @@
+//! Resolve sidebar tokens, omitting missing values and empty rows.
+
+use super::{
+    agents::{agent_names, agent_place, status_text},
+    segment_budgets,
+};
+use crate::config::{AgentLayout, AgentToken, Rows, SpaceLayout, SpaceToken, TokenStyle};
+use gpui::SharedString;
+use herdr_client::protocol::{AgentStatus, ClientShellAgent, ClientShellSnapshot};
+use std::collections::HashMap;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ResolvedToken {
+    pub(super) kind: TokenKind,
+    pub(super) style: TokenStyle,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum TokenKind {
+    StateIcon,
+    Text(SharedString, TextRole),
+    GitStatus { ahead: usize, behind: usize },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TextRole {
+    Status,
+    Workspace,
+    Agent,
+    Secondary,
+    Muted,
+}
+
+impl TokenKind {
+    pub(super) fn text(&self) -> Option<&SharedString> {
+        match self {
+            Self::Text(text, _) => Some(text),
+            _ => None,
+        }
+    }
+}
+
+impl ResolvedToken {
+    #[cfg(test)]
+    pub(super) fn unstyled(kind: TokenKind) -> Self {
+        Self {
+            kind,
+            style: TokenStyle::default(),
+        }
+    }
+}
+
+fn token_values(tokens: &[(String, String)]) -> HashMap<&str, &str> {
+    tokens
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect()
+}
+
+fn shared_text<'a>(strings: &mut HashMap<&'a str, SharedString>, text: &'a str) -> SharedString {
+    strings
+        .entry(text)
+        .or_insert_with(|| SharedString::from(text))
+        .clone()
+}
+
+fn resolve_rows<T>(
+    rows: &Rows<T>,
+    mut value: impl FnMut(&T) -> Option<TokenKind>,
+) -> Vec<Vec<ResolvedToken>> {
+    rows.iter()
+        .filter_map(|row| {
+            let resolved: Vec<_> = row
+                .iter()
+                .filter_map(|configured| {
+                    let kind = value(&configured.token)?;
+                    let style = match kind.text() {
+                        Some(text) => configured.style_for(text)?,
+                        None => configured.style,
+                    };
+                    Some(ResolvedToken { kind, style })
+                })
+                .collect();
+            (!resolved.is_empty()).then_some(resolved)
+        })
+        .collect()
+}
+
+/// The rows for one agent. `machine` is the host label when more than one
+/// endpoint is shown. An agent whose workspace has gone has no rows.
+pub(super) fn agent_rows(
+    layout: &AgentLayout,
+    agent: &ClientShellAgent,
+    snapshot: &ClientShellSnapshot,
+    machine: Option<&str>,
+) -> Option<Vec<Vec<ResolvedToken>>> {
+    let (workspace, tab) = agent_place(agent, snapshot)?;
+    let pane = agent.title.as_deref().or_else(|| {
+        snapshot
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == agent.pane_id)
+            .and_then(|pane| pane.label.as_deref())
+    });
+    let state_text = agent
+        .state_labels
+        .iter()
+        .find(|(status, _)| status == status_text(agent.agent_status))
+        .map_or_else(
+            || match agent.agent_status {
+                AgentStatus::Unknown => "idle",
+                status => status_text(status),
+            },
+            |(_, label)| label,
+        );
+    let tokens = token_values(&agent.tokens);
+    let mut strings = HashMap::new();
+    let mut text = |value, role| TokenKind::Text(shared_text(&mut strings, value), role);
+    let mut rows = resolve_rows(layout.rows_for(agent.agent.as_deref()), |token| {
+        Some(match token {
+            AgentToken::StateIcon => TokenKind::StateIcon,
+            AgentToken::StateText => text(state_text, TextRole::Status),
+            AgentToken::Machine => text(machine?, TextRole::Secondary),
+            AgentToken::Workspace => text(workspace, TextRole::Workspace),
+            AgentToken::Tab => text(tab?, TextRole::Secondary),
+            AgentToken::Pane => text(pane?, TextRole::Secondary),
+            AgentToken::Agent => text(
+                agent_names(agent).into_iter().flatten().next()?,
+                TextRole::Agent,
+            ),
+            AgentToken::TerminalTitle => text(agent.terminal_title.as_deref()?, TextRole::Muted),
+            AgentToken::TerminalTitleStripped => {
+                text(agent.terminal_title_stripped.as_deref()?, TextRole::Muted)
+            }
+            AgentToken::Custom(name) => text(tokens.get(name.as_str())?, TextRole::Muted),
+        })
+    });
+    if rows.is_empty() {
+        rows.push(vec![ResolvedToken {
+            kind: TokenKind::StateIcon,
+            style: TokenStyle::default(),
+        }]);
+    }
+    Some(rows)
+}
+
+pub(super) struct SpaceContext<'a> {
+    pub(super) label: &'a str,
+    pub(super) branch: Option<&'a str>,
+    pub(super) status: AgentStatus,
+    pub(super) ahead_behind: Option<(usize, usize)>,
+    pub(super) tokens: &'a [(String, String)],
+    pub(super) indented: bool,
+}
+
+pub(super) fn space_rows(
+    layout: &SpaceLayout,
+    context: SpaceContext<'_>,
+) -> Vec<Vec<ResolvedToken>> {
+    let mut strings = HashMap::new();
+    let mut text = |value, role| TokenKind::Text(shared_text(&mut strings, value), role);
+    let tokens = token_values(context.tokens);
+    let mut rows = resolve_rows(&layout.rows, |token| {
+        Some(match token {
+            SpaceToken::StateIcon => TokenKind::StateIcon,
+            SpaceToken::StateText => text(status_text(context.status), TextRole::Status),
+            SpaceToken::Workspace => text(context.label, TextRole::Workspace),
+            SpaceToken::Branch | SpaceToken::GitStatus if context.indented => return None,
+            SpaceToken::Branch => text(context.branch?, TextRole::Secondary),
+            SpaceToken::GitStatus => {
+                let (ahead, behind) = context.ahead_behind.filter(|(a, b)| *a > 0 || *b > 0)?;
+                TokenKind::GitStatus { ahead, behind }
+            }
+            SpaceToken::Custom(name) => text(tokens.get(name.as_str())?, TextRole::Muted),
+        })
+    });
+    if rows.is_empty() {
+        rows.push(Vec::new());
+    }
+    rows
+}
+
+/// Upstream joins tokens with a middle dot, except after the state icon and
+/// before the git counters, which sit a single space apart.
+pub(super) fn separator(previous: &ResolvedToken, current: &ResolvedToken) -> &'static str {
+    if matches!(previous.kind, TokenKind::StateIcon)
+        || matches!(current.kind, TokenKind::GitStatus { .. })
+    {
+        " "
+    } else {
+        " \u{b7} "
+    }
+}
+
+/// Glyph budget for each token of a row that must fit `available` glyphs,
+/// or `None` for a token dropped entirely. Fixed-width tokens (the icon and
+/// the git counters) always stay. When even one glyph per text token does not
+/// fit, text tokens are dropped from the left until the rest fit, then the
+/// survivors grow a glyph at a time in turn, as upstream shares a line.
+pub(super) fn budgets(
+    row: &[ResolvedToken],
+    fixed_width: impl Fn(&TokenKind) -> usize,
+    available: usize,
+) -> Vec<Option<usize>> {
+    let fixed: Vec<usize> = row.iter().map(|token| fixed_width(&token.kind)).collect();
+    let flexible: Vec<usize> = row
+        .iter()
+        .map(|token| token.kind.text().map_or(0, |text| text.chars().count()))
+        .collect();
+    let minimum = |active: &[bool]| -> usize {
+        (0..row.len())
+            .filter(|index| active[*index])
+            .fold((0, None), |(total, previous), index| {
+                let gap =
+                    previous.map_or(0, |prev| separator(&row[prev], &row[index]).chars().count());
+                (
+                    total + fixed[index] + usize::from(flexible[index] > 0) + gap,
+                    Some(index),
+                )
+            })
+            .0
+    };
+    let mut active = vec![true; row.len()];
+    if minimum(&active) > available {
+        for (index, width) in flexible.iter().enumerate() {
+            if *width > 0 {
+                active[index] = false;
+            }
+        }
+        for index in (0..row.len()).rev() {
+            if flexible[index] == 0 {
+                continue;
+            }
+            active[index] = true;
+            if minimum(&active) > available {
+                active[index] = false;
+            }
+        }
+    }
+    let lengths: Vec<_> = flexible
+        .iter()
+        .zip(&active)
+        .map(|(width, active)| if *active { *width } else { 0 })
+        .collect();
+    let minimum_text: usize = lengths.iter().map(|width| usize::from(*width > 0)).sum();
+    let reserved = minimum(&active).saturating_sub(minimum_text);
+    let budgets = segment_budgets(&lengths, available.saturating_sub(reserved));
+    (0..row.len())
+        .map(|index| active[index].then_some(budgets[index].max(fixed[index])))
+        .collect()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::config::SidebarLayout;
+    use crate::sidebar::layout_tests;
+
+    fn agent_layout(text: &str) -> AgentLayout {
+        toml::from_str(text).unwrap()
+    }
+
+    fn space_layout(text: &str) -> SpaceLayout {
+        toml::from_str(text).unwrap()
+    }
+
+    fn texts(rows: &[Vec<ResolvedToken>]) -> Vec<Vec<String>> {
+        rows.iter()
+            .map(|row| {
+                row.iter()
+                    .map(|token| match &token.kind {
+                        TokenKind::StateIcon => "<icon>".to_owned(),
+                        TokenKind::GitStatus { ahead, behind } => format!("{ahead}/{behind}"),
+                        kind => kind.text().unwrap().to_string(),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn agent_tokens_resolve_state_pane_titles_and_custom_values() {
+        let mut snapshot = layout_tests::snapshot(1);
+        let agent = &mut snapshot.agents[0];
+        agent.agent_status = AgentStatus::Blocked;
+        agent.state_labels = vec![("blocked".into(), "needs you".into())];
+        agent.tokens = vec![("usage_ctx_ok".into(), "\u{2ec1} 54% 140k".into())];
+        agent.terminal_title = Some("\u{2728} codex".into());
+        agent.terminal_title_stripped = Some("codex".into());
+        agent.title = Some("Fix sidebar".into());
+        let layout = agent_layout(
+            r#"rows = [["state_text", "pane"], ["terminal_title", "terminal_title_stripped"], ["$usage_ctx_ok", "$missing"], ["$missing"]]"#,
+        );
+        let rows = agent_rows(&layout, &snapshot.agents[0], &snapshot, None).unwrap();
+        assert_eq!(
+            texts(&rows),
+            [
+                vec!["needs you", "Fix sidebar"],
+                vec!["\u{2728} codex", "codex"],
+                vec!["\u{2ec1} 54% 140k"],
+            ]
+        );
+        // Without a label the wire status names the state; idle covers unknown.
+        snapshot.agents[0].state_labels.clear();
+        let rows = agent_rows(&layout, &snapshot.agents[0], &snapshot, None).unwrap();
+        assert_eq!(
+            rows[0][0].kind,
+            TokenKind::Text("blocked".into(), TextRole::Status)
+        );
+        snapshot.agents[0].agent_status = AgentStatus::Unknown;
+        let rows = agent_rows(&layout, &snapshot.agents[0], &snapshot, None).unwrap();
+        assert_eq!(
+            rows[0][0].kind,
+            TokenKind::Text("idle".into(), TextRole::Status)
+        );
+        snapshot.agents[0].title = None;
+        snapshot.panes = serde_json::from_value(serde_json::json!([{
+            "pane_id": "p0", "workspace_id": "w0", "tab_id": "t0",
+            "label": "shell", "cwd": null, "foreground_cwd": null,
+            "focused": false, "right_click_passthrough": false
+        }]))
+        .unwrap();
+        let rows = agent_rows(&layout, &snapshot.agents[0], &snapshot, None).unwrap();
+        assert_eq!(
+            rows[0][1].kind,
+            TokenKind::Text("shell".into(), TextRole::Secondary)
+        );
+    }
+
+    #[test]
+    fn rules_style_hide_and_replace_rows_per_agent() {
+        let mut snapshot = layout_tests::snapshot(1);
+        snapshot.agents[0].tokens = vec![("pct".into(), "85".into())];
+        let layout = agent_layout(
+            r##"rows = [[{ token = "agent", fg = "#111111", rules = [{ equals = "Claude Code", bold = true }] }]]
+[rows_by_agent]
+claude = [[{ token = "$pct", rules = [{ gt = 90, hide = true }, { gt = 80, fg = "#ff0000" }] }, { token = "workspace", rules = [{ contains = "herdr", hide = true }] }]]"##,
+        );
+        let rows = agent_rows(&layout, &snapshot.agents[0], &snapshot, None).unwrap();
+        assert_eq!(
+            rows,
+            [vec![ResolvedToken {
+                kind: TokenKind::Text("85".into(), TextRole::Muted),
+                style: TokenStyle {
+                    fg: Some(0xff0000),
+                    bold: None,
+                    dim: None
+                }
+            }]]
+        );
+        snapshot.agents[0].tokens[0].1 = "95".into();
+        assert_eq!(
+            texts(&agent_rows(&layout, &snapshot.agents[0], &snapshot, None).unwrap()),
+            [vec!["<icon>"]]
+        );
+        snapshot.agents[0].agent = Some("codex".into());
+        let rows = agent_rows(&layout, &snapshot.agents[0], &snapshot, None).unwrap();
+        assert_eq!(
+            rows[0][0].style,
+            TokenStyle {
+                fg: Some(0x111111),
+                bold: Some(true),
+                dim: None
+            }
+        );
+    }
+
+    #[test]
+    fn space_rows_hide_git_details_under_a_parent_and_take_custom_tokens() {
+        let layout = SidebarLayout::default().spaces;
+        let context = |indented, ahead_behind, tokens| SpaceContext {
+            label: "fix-sidebar",
+            branch: Some("worktree/fix-sidebar"),
+            status: AgentStatus::Working,
+            ahead_behind,
+            tokens,
+            indented,
+        };
+        assert_eq!(
+            texts(&space_rows(&layout, context(false, Some((2, 0)), &[]))),
+            [
+                vec!["<icon>", "fix-sidebar"],
+                vec!["worktree/fix-sidebar", "2/0"]
+            ]
+        );
+        assert_eq!(
+            texts(&space_rows(&layout, context(false, Some((0, 0)), &[]))),
+            [vec!["<icon>", "fix-sidebar"], vec!["worktree/fix-sidebar"]]
+        );
+        assert_eq!(
+            texts(&space_rows(&layout, context(true, Some((2, 1)), &[]))),
+            [vec!["<icon>", "fix-sidebar"]]
+        );
+        let tokens = [
+            ("jj".to_owned(), "old".to_owned()),
+            ("jj".to_owned(), "clean".to_owned()),
+        ];
+        let custom = space_layout(r#"rows = [["state_text", "$jj", "$none"]]"#);
+        assert_eq!(
+            texts(&space_rows(&custom, context(true, None, &tokens))),
+            [vec!["working", "clean"]]
+        );
+    }
+
+    #[test]
+    fn budgets_drop_leftmost_text_first_then_share_the_rest() {
+        let fixed = |kind: &TokenKind| match kind {
+            TokenKind::StateIcon => 1,
+            TokenKind::GitStatus { .. } => 2,
+            _ => 0,
+        };
+        let row = [
+            ResolvedToken::unstyled(TokenKind::StateIcon),
+            ResolvedToken::unstyled(TokenKind::Text("remote".into(), TextRole::Secondary)),
+            ResolvedToken::unstyled(TokenKind::Text("herdr-gpui".into(), TextRole::Workspace)),
+            ResolvedToken::unstyled(TokenKind::GitStatus {
+                ahead: 1,
+                behind: 0,
+            }),
+        ];
+        // icon(1) + " " + remote(6) + " · " + herdr-gpui(10) + " " + git(2) = 24
+        assert_eq!(
+            budgets(&row, fixed, 30),
+            [Some(1), Some(6), Some(10), Some(2)]
+        );
+        assert_eq!(
+            budgets(&row, fixed, 20),
+            [Some(1), Some(6), Some(6), Some(2)]
+        );
+        assert_eq!(budgets(&row, fixed, 8), [Some(1), None, Some(3), Some(2)]);
+        assert_eq!(budgets(&row, fixed, 6), [Some(1), None, Some(1), Some(2)]);
+        assert_eq!(budgets(&row, fixed, 4), [Some(1), None, None, Some(2)]);
+        assert_eq!(budgets(&row, fixed, 0), [Some(1), None, None, Some(2)]);
+        assert_eq!(budgets(&[], fixed, 5), Vec::<Option<usize>>::new());
+    }
+}

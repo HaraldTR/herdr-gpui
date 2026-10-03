@@ -9,9 +9,10 @@
 
 use super::super::{
     cell::{RowContext, RowState},
-    glyph_width, label_text,
-    row::{PrBadge, RowLift, removing_dot},
+    glyph_width, label_text, line_height,
+    row::{self, PrBadge, RowLift, removing_dot},
     status_indicator,
+    tokens::ResolvedToken,
 };
 use crate::config::{FontConfig, Theme};
 use gpui::{prelude::*, *};
@@ -36,6 +37,9 @@ enum Content<'a> {
     Element(AnyElement),
     /// Nothing beyond the shell itself, which already holds its children.
     Shell,
+    /// Built once the line knows the width the piece gets, for content such
+    /// as configured token lines that budgets glyphs from it.
+    Build(Box<dyn FnOnce(f32) -> Div + 'a>),
 }
 
 struct Piece<'a> {
@@ -122,6 +126,11 @@ impl<'a> Line<'a> {
         self.push(shell, Content::Text(text.into(), 0.), 0., Fit::Fill)
     }
 
+    /// Content that takes the room the other pieces leave, built at that width.
+    pub(super) fn fill_with(self, build: impl FnOnce(f32) -> Div + 'a) -> Self {
+        self.push(div(), Content::Build(Box::new(build)), 0., Fit::Fill)
+    }
+
     /// Empty room that pushes the pieces after it to the line's end.
     pub(super) fn spacer(self) -> Self {
         self.push(div(), Content::Shell, 0., Fit::Fill)
@@ -188,6 +197,7 @@ impl<'a> Line<'a> {
                     Content::Text(text, inset) => {
                         shell.px(px(inset)).truncate().child(label_text(&text))
                     }
+                    Content::Build(build) => shell.child(build(width)),
                     Content::Element(_) | Content::Shell => shell,
                 })
             })
@@ -251,6 +261,38 @@ pub(super) fn status(status: AgentStatus, removing: bool, cx: &RowContext<'_>) -
     } else {
         status_indicator(status, cx.font, cx.indicators).mt_0()
     }
+}
+
+/// What a configured row shows in its status slot: the removal pulse, the
+/// mark its leading `state_icon` styles, or nothing. Both sit on the first
+/// line, so the slot suits a line whose pieces align to its top.
+pub(super) fn configured_status(
+    lines: &[Vec<ResolvedToken>],
+    status: AgentStatus,
+    removing: bool,
+    cx: &RowContext<'_>,
+) -> Option<Div> {
+    if removing {
+        return Some(first_line(
+            cx.indicators.width(cx.font),
+            self::status(status, true, cx),
+            cx,
+        ));
+    }
+    row::leading_status(lines).map(|token| row::configured_status(token, status, cx))
+}
+
+/// `element` centered in a box one line tall, for pieces beside a block of
+/// configured lines that align to its first line.
+pub(super) fn first_line(width: f32, element: impl IntoElement, cx: &RowContext<'_>) -> Div {
+    div()
+        .w(px(width))
+        .h(px(line_height(cx.font)))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(element)
 }
 
 /// Uncommitted work, marked as the titlebar marks it.

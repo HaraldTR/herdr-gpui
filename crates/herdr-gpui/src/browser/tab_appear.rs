@@ -44,9 +44,9 @@ struct Strip {
 #[derive(Default)]
 pub(crate) struct TabAppear {
     strips: HashMap<GroupId, Strip>,
-    /// Set by `hold`: the start every motion is stamped with from then on.
+    /// Set by `hold`: motions that start from then on start held too.
     #[cfg(test)]
-    held: Option<Instant>,
+    held: bool,
 }
 
 impl TabAppear {
@@ -55,7 +55,7 @@ impl TabAppear {
     /// grows in and a missing one shrinks out where it stood.
     pub(crate) fn observe(&mut self, group: GroupId, tabs: Vec<Listed>, now: Instant) {
         #[cfg(test)]
-        let start = self.held.unwrap_or(now);
+        let start = if self.held { held_start() } else { now };
         #[cfg(not(test))]
         let start = now;
         let Some(strip) = self.strips.get_mut(&group) else {
@@ -122,14 +122,14 @@ impl TabAppear {
         self.strips.retain(|group, _| live(*group));
     }
 
-    /// Holds every moving tab where it started, including any that start
-    /// moving later, for tests whose frames are too slow to catch one
-    /// mid-way. Holding before the change matters: a slow frame can outlast
-    /// a motion between recording it and a hold that comes after.
+    /// Holds every moving tab where it started, and every one that starts
+    /// later, for tests whose frames are too slow to catch one mid-way.
+    /// Holding a motion only once it has begun would race the frame that
+    /// begins it: on a slow machine that frame can outlast the motion.
     #[cfg(test)]
     pub(crate) fn hold(&mut self) {
-        let later = Instant::now() + std::time::Duration::from_secs(3600);
-        self.held = Some(later);
+        self.held = true;
+        let later = held_start();
         for strip in self.strips.values_mut() {
             for since in strip.growing.values_mut() {
                 *since = later;
@@ -139,6 +139,12 @@ impl TabAppear {
             }
         }
     }
+}
+
+/// When a held motion starts: far enough ahead that it never moves.
+#[cfg(test)]
+fn held_start() -> Instant {
+    Instant::now() + std::time::Duration::from_secs(3600)
 }
 
 #[cfg(test)]

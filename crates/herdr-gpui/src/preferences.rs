@@ -89,6 +89,13 @@ impl HerdrWindow {
         if self.native_settings_save_in_flight() || self.theme_save_in_flight() {
             return;
         }
+        if self.config_load.is_some() || self.font_size_saves.is_busy() {
+            // A combined write and reload would be refused here, discarding
+            // the click. The config lock serializes the write with other
+            // saves, and the config watcher reloads once the busy load ends.
+            self.write_preference(save, cx);
+            return;
+        }
         let text_system = cx.text_system().clone();
         self.load_gui_config_with(
             move || {
@@ -104,6 +111,26 @@ impl HerdrWindow {
             },
             cx,
         );
+    }
+
+    fn write_preference(
+        &mut self,
+        save: impl FnOnce() -> crate::Result<()> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let saved = cx.background_executor().spawn(async move { save() });
+        cx.spawn(async move |this, cx| {
+            let result = saved.await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(()) => this.load_gui_config(cx),
+                Err(error) => {
+                    tracing::warn!(%error, "Could not save GUI preference");
+                    this.local_error = Some(format!("Save GUI config: {error}"));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn render_native_preferences(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -1115,5 +1142,41 @@ mod tests {
             endpoint_path(root, Path::new("/a.sock")),
             endpoint_path(root, Path::new("/b.sock"))
         );
+    }
+}
+
+// A sibling of `tests`: its glob import shadows `#[test]` with GPUI's macro.
+#[cfg(test)]
+mod busy_load_tests {
+    #[gpui::test]
+    #[allow(clippy::unwrap_used)]
+    fn preference_clicked_during_a_config_load_is_still_written(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let written = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        view.update(cx, |view, cx| {
+            // A load that never finishes, such as one the watcher started.
+            view.config_load = Some(cx.spawn(async |_, _| std::future::pending::<()>().await));
+            let written = written.clone();
+            view.save_preference(
+                move || {
+                    written.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(written.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        view.update(cx, |view, cx| {
+            view.save_preference(|| Err(crate::Error::InvalidSidebarGap), cx);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            let error = view.local_error.as_deref().unwrap();
+            assert!(error.starts_with("Save GUI config:"), "{error}");
+            // The busy load is left alone; the watcher applies the write.
+            assert!(view.config_load.is_some());
+        });
     }
 }

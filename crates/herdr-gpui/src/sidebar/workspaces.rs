@@ -10,10 +10,11 @@
 
 use super::{
     RowBadge,
+    agents::status_priority,
     row::{PrBadge, first_text},
 };
 use crate::config::Theme;
-use herdr_client::protocol::ClientShellWorkspace;
+use herdr_client::protocol::{AgentStatus, ClientShellWorkspace};
 use std::collections::{HashMap, HashSet};
 
 /// The repositories that form a group: those with at least one parent and at
@@ -125,4 +126,33 @@ pub(crate) fn workspace_label(workspace: &ClientShellWorkspace, indented: bool) 
         .flatten()
         .map(|branch| branch.strip_prefix("worktree/").unwrap_or(branch));
     first_text([branch, Some(&workspace.label)], "workspace")
+}
+
+/// Collapsed groups show their most urgent member's status.
+pub(super) fn displayed_workspace_status(
+    workspaces: &[ClientShellWorkspace],
+    workspace: &ClientShellWorkspace,
+    collapsed: &HashSet<String>,
+) -> AgentStatus {
+    let Some(worktree) = workspace
+        .worktree
+        .as_ref()
+        .filter(|worktree| !worktree.is_linked_worktree)
+    else {
+        return workspace.agent_status;
+    };
+    if !collapsed.contains(&worktree.key) {
+        return workspace.agent_status;
+    }
+    workspaces
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .worktree
+                .as_ref()
+                .is_some_and(|candidate| candidate.key == worktree.key)
+        })
+        .map(|candidate| candidate.agent_status)
+        .max_by_key(|status| status_priority(*status))
+        .unwrap_or(workspace.agent_status)
 }
