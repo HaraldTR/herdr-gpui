@@ -385,6 +385,13 @@ as in the TUI. Status indicators always use the shared indicator style and share
 status colors, independent of a native terminal theme override. Terminal/default
 reset colors are projected to opaque native colors.
 
+New tab and New Workspace follow the shared `ui.prompt_new_tab_name` (default
+on) and `ui.prompt_new_workspace_name` (default off). When set, every button,
+menu item, shortcut, and palette entry first asks for a name, proposing the next
+tab number or the workspace's folder; Enter creates, Escape cancels, and an empty
+or unchanged name lets the daemon choose it, as in the TUI. Teleport, worktree
+creation, and browser tabs never prompt.
+
 Sound uses the dedicated Rodio backend, shared global/per-agent settings and
 custom local paths, with Herdr's bundled sounds as fallbacks. The Sound tab offers
 an explicit QA preview. Shared Herdr toast delivery enables in-app notifications
