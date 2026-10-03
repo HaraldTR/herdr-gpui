@@ -766,10 +766,19 @@ native-frame appearance also remains unverified by these macOS tests.
 ## Terminal Selection And Copy
 
 Mouse-aware applications receive clicks, button releases, drags, and pointer
-motion. Hold Shift to select/copy locally instead, or Shift-right-click for the
-GUI pane menu. In applications without mouse reporting, selection and the pane
-menu work without Shift. A forwarded drag stays in the pane or popup where it
-started, including when the pointer moves outside it.
+motion. Hold Shift to select/copy locally instead. In applications without mouse
+reporting, selection works without Shift. A forwarded drag stays in the pane or
+popup where it started, including when the pointer moves outside it.
+
+Right-click opens the GUI pane menu unless Herdr routes that pane's right-clicks
+to the application (`herdr pane input --right-click pane`, or **Send
+Right-Clicks to Pane** in the pane menu). The routing belongs to the daemon, so
+the TUI and every other client follow the same setting. A routed pane passes a
+plain right-click to a mouse-aware application; right-click with Shift, Control,
+Option, or Command still opens the menu, where **Open This Menu on
+Right-Click** switches the pane back. A routed pane whose application has mouse
+reporting off opens the menu, since nothing would receive the click. A
+mouse-aware popup has no pane menu and keeps its right-clicks.
 
 Drag across the terminal to select cells; releasing the button copies them, drops
 the highlight, and shows the `copied to clipboard` flash described under
@@ -1548,7 +1557,8 @@ Windows setup) nothing is saved and the window says so.
   the menu without sending terminal input.
 - Click workspace, tab, agent, or a visible split pane to focus through the API.
 - Right-click a visible pane, including an inactive split, for Rename, Split
-  Right, Split Down, Toggle Zoom, and Close without first focusing it. Actions
+  Right, Split Down, Toggle Zoom, right-click routing, and Close without first
+  focusing it. Actions
   retain the clicked pane/tab/workspace and daemon boot, and reject stale
   membership or a changed connection. Rename uses an IME-aware native field,
   trims surrounding whitespace, and clears the custom label when blank. It
