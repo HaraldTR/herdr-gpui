@@ -30,22 +30,24 @@ impl HerdrWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let keymap = &self.config.keybindings;
+        let keymap = self.keymap();
+        let is_prefix = keymap.is_prefix(keystroke);
         if !self.prefix_armed {
-            if keymap.is_prefix(keystroke) {
+            if is_prefix {
                 self.prefix_armed = true;
                 cx.stop_propagation();
                 cx.notify();
             }
             return;
         }
+        let chord = keymap.chord(keystroke);
         self.prefix_armed = false;
         cx.notify();
-        if keymap.is_prefix(keystroke) {
+        if is_prefix {
             return;
         }
         cx.stop_propagation();
-        let Some(command) = keymap.chord(keystroke) else {
+        let Some(command) = chord else {
             return;
         };
         // Commands wait while a menu page holds input, so the chord ends it

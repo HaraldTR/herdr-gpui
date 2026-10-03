@@ -38,13 +38,10 @@ impl Render for HerdrWindow {
         self.cell_width = self.painter.borrow_mut().cell_width(&font, window, cx);
         // Registers the window for surface-only redraws; see `redraw_terminal`.
         self.surface_signal.read(cx);
-        let sidebar = self.sidebar_visible.then(|| {
-            crate::sidebar::cached_view(
-                &self.sidebar_view,
-                self.sidebar_width,
-                f32::from(window.viewport_size().width),
-            )
-        });
+        let sidebar = self
+            .sidebar_mode()
+            .width(self.sidebar_width, f32::from(window.viewport_size().width))
+            .map(|width| crate::sidebar::cached_view(&self.sidebar_view, width));
         // Paints the frame on screen, which during a focus change is the one
         // presented before it: the terminal area never blanks between two
         // projections. What the client knows to be current stays in `live`.
@@ -92,7 +89,7 @@ impl Render for HerdrWindow {
         self.split_cursor = self.split_cursor_at(window.mouse_position());
         // Pad the terminal itself: the canvas bounds that painting, hit testing,
         // and IME placement all read then already exclude the gap.
-        let sidebar_gap = if self.sidebar_visible {
+        let sidebar_gap = if sidebar.is_some() {
             self.config.layout.sidebar_gap
         } else {
             0.
@@ -617,7 +614,7 @@ impl Render for HerdrWindow {
                     .children(self.render_usage(cx))
                     .when_some(
                         self.prefix_armed
-                            .then(|| self.config.keybindings.prefix_label())
+                            .then(|| self.keymap().prefix_label())
                             .flatten(),
                         |bar, prefix| bar.child(
                             div()

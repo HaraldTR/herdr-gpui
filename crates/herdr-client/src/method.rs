@@ -222,10 +222,14 @@ mod tests {
         Method::LayoutSetSplitRatio,
         Method::PaneClear,
         Method::PaneClose,
+        Method::PaneCopyMotion,
+        Method::PaneCopySearch,
+        Method::PaneEditScrollback,
         Method::PaneFocus,
         Method::PaneFocusDirection,
         Method::PaneRename,
         Method::PaneScroll,
+        Method::PaneSelectionRead,
         Method::PaneSplit,
         Method::PaneZoom,
         Method::ServerReloadConfig,
@@ -256,10 +260,14 @@ mod tests {
                 | Method::LayoutSetSplitRatio
                 | Method::PaneClear
                 | Method::PaneClose
+                | Method::PaneCopyMotion
+                | Method::PaneCopySearch
+                | Method::PaneEditScrollback
                 | Method::PaneFocus
                 | Method::PaneFocusDirection
                 | Method::PaneRename
                 | Method::PaneScroll
+                | Method::PaneSelectionRead
                 | Method::PaneSplit
                 | Method::PaneZoom
                 | Method::ServerReloadConfig

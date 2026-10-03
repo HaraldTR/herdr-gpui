@@ -118,6 +118,28 @@ position = "top-center"
 }
 
 #[test]
+fn sidebar_collapse_defaults_compact_expanded_and_parses_upstream_values() -> anyhow::Result<()> {
+    let defaults = parsed("")?;
+    assert_eq!(
+        defaults.sidebar_collapsed_mode,
+        SidebarCollapsedMode::Compact
+    );
+    assert!(!defaults.sidebar_start_collapsed);
+    let set = parsed("[ui]\nsidebar_collapsed_mode = 'hidden'\nsidebar_start_collapsed = true\n")?;
+    assert_eq!(set.sidebar_collapsed_mode, SidebarCollapsedMode::Hidden);
+    assert!(set.sidebar_start_collapsed);
+    assert_eq!(
+        parsed("[ui]\nsidebar_collapsed_mode = 'compact'")?.sidebar_collapsed_mode,
+        SidebarCollapsedMode::Compact
+    );
+    // A mode from a newer Herdr falls back alone; its neighbour still applies.
+    let newer = parsed("[ui]\nsidebar_collapsed_mode = 'rail'\nsidebar_start_collapsed = true\n")?;
+    assert_eq!(newer.sidebar_collapsed_mode, SidebarCollapsedMode::Compact);
+    assert!(newer.sidebar_start_collapsed);
+    Ok(())
+}
+
+#[test]
 fn name_prompts_follow_both_ui_keys() -> anyhow::Result<()> {
     let flipped = parsed("[ui]\nprompt_new_tab_name = false\nprompt_new_workspace_name = true")?;
     assert_eq!(
@@ -156,6 +178,8 @@ fn values_from_a_newer_herdr_fall_back_one_by_one() -> anyhow::Result<()> {
         "[ui.toast]\ndelay_seconds = 3601",
         "[ui.toast]\ndelivery = 'pager'",
         "[ui.toast.herdr]\nposition = 'top-center'",
+        "[ui]\nsidebar_collapsed_mode = 'rail'",
+        "[ui]\nsidebar_start_collapsed = 'yes'",
         "[ui.toast.clipboard]\nposition = 'middle'\nenabled = 2",
         "theme = 'catppuccin'",
         "ui = 1",
@@ -177,6 +201,14 @@ fn values_from_a_newer_herdr_fall_back_one_by_one() -> anyhow::Result<()> {
         );
         assert_eq!(settings.theme_name, defaults.theme_name, "{text}");
         assert_eq!(settings.palettes, defaults.palettes, "{text}");
+        assert_eq!(
+            settings.sidebar_collapsed_mode, defaults.sidebar_collapsed_mode,
+            "{text}"
+        );
+        assert_eq!(
+            settings.sidebar_start_collapsed, defaults.sidebar_start_collapsed,
+            "{text}"
+        );
     }
     // Readable neighbours of an unreadable value still apply.
     let settings = parsed(
