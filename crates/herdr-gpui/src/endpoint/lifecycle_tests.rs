@@ -3971,6 +3971,95 @@ fn input_held_across_gap_is_bounded_and_dropped_on_reset(cx: &mut gpui::TestAppC
     });
 }
 
+#[gpui::test]
+fn system_notification_click_opens_its_origin_and_rejects_a_reconnect(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+    // Unregistered windows, as in fixtures, never reach the notification center.
+    let post = |view: &gpui::Entity<HerdrWindow>, cx: &mut gpui::VisualTestContext| {
+        view.update_in(cx, |view, window, cx| {
+            view.tick_toasts(false, Instant::now());
+            view.post_system_notifications(window, cx);
+        });
+    };
+    let (mut remote, _server) = connected_endpoint("ssh:notify");
+    remote.initial_surface = false;
+    let mut wire = crate::notifications::tests::notification("Agent needs attention");
+    wire.workspace_id = Some("w1".into());
+    wire.pane_id = Some("w1:p1".into());
+    let notice = || {
+        crate::notifications::Notice::new(wire.clone(), Instant::now())
+            .with_snapshot(remote.live.snapshot.as_deref())
+    };
+    let (first, second) = (notice(), notice());
+    view.update(cx, |view, _| {
+        view.config.notifications = crate::config::NotificationConfig {
+            enabled: false,
+            system: true,
+            delay_seconds: 0,
+            ..Default::default()
+        };
+        view.endpoints[0].detached = true;
+        remote.toasts.receive([first]);
+        view.endpoints.push(remote);
+    });
+    post(&view, cx);
+    assert!(cx.shown_system_notifications().is_empty());
+    view.update(cx, |view, _| {
+        assert!(
+            view.endpoints[1]
+                .toasts
+                .entries
+                .iter()
+                .all(|(_, n)| !n.visible)
+        );
+    });
+
+    cx.update(|_, cx| crate::window::system_notifications::install(cx));
+    view.update(cx, |view, _| view.endpoints[1].toasts.receive([second]));
+    post(&view, cx);
+    let shown = cx.shown_system_notifications();
+    let [shown] = shown.as_slice() else {
+        panic!("expected one notification: {shown:?}");
+    };
+    assert_eq!(shown.tag, "herdr:ssh:notify:boot-v1:w1:p1");
+    assert_eq!(shown.title, "Agent needs attention");
+    assert_eq!(shown.body, "ssh:notify\nReview needed");
+    assert!(shown.actions.is_empty());
+    assert_eq!(
+        cx.app_identity(),
+        Some((crate::constants::APP_ID.into(), "Herdr".into()))
+    );
+    post(&view, cx);
+    assert_eq!(cx.shown_system_notifications().len(), 1);
+
+    let response = gpui::SystemNotificationResponse {
+        tag: shown.tag.clone(),
+        action_id: None,
+    };
+    cx.simulate_system_notification_response(response.clone());
+    cx.run_until_parked();
+    view.update(cx, |view, _| {
+        assert_eq!(view.selected_endpoint, 1);
+        assert_eq!(
+            view.pending_navigation,
+            Some(NavigationTarget::Pane("w1:p1".into()))
+        );
+        // A reconnect replaces the generation the click was posted for.
+        view.selected_endpoint = 0;
+        view.pending_navigation = None;
+        view.pending_toast = None;
+        view.endpoints[1].generation += 1;
+    });
+    cx.simulate_system_notification_response(response);
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.selected_endpoint, 0);
+        assert!(view.pending_navigation.is_none());
+    });
+}
+
 /// Bells and daemon titles travel the authoritative event path of each
 /// connection, and only the selected endpoint's reach the window.
 #[gpui::test]

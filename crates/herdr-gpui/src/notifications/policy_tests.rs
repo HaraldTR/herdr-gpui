@@ -8,7 +8,7 @@ fn tick(
     hidden: bool,
     now: Instant,
 ) -> bool {
-    super::tick(endpoints, selected, config, hidden, None, now)
+    super::tick(endpoints, selected, config, hidden, true, None, now)
 }
 use crate::{config::NotificationConfig, endpoint::Endpoint};
 use herdr_client::{
@@ -440,4 +440,136 @@ fn settings_changes_bound_pending_and_preserve_explicit_corners_and_previews() {
         );
         endpoints[1].toasts.entries.clear();
     }
+}
+
+fn system(delay_seconds: u64) -> NotificationConfig {
+    NotificationConfig {
+        enabled: false,
+        system: true,
+        delay_seconds,
+        ..Default::default()
+    }
+}
+
+fn posted(endpoints: &[Endpoint]) -> usize {
+    endpoints
+        .iter()
+        .flat_map(|e| e.toasts.entries.iter())
+        .filter(|(_, n)| n.posted)
+        .count()
+}
+
+#[test]
+fn system_delivery_posts_once_with_a_pane_tag_instead_of_a_toast() {
+    let now = Instant::now();
+    let mut endpoints = endpoints();
+    receive(&mut endpoints[1], wire(Kind::NeedsAttention), now);
+    endpoints[0]
+        .toasts
+        .receive([Notice::new(tests::notification("preview"), now).preview()]);
+    // Waiting for the delay is the same as for a toast.
+    assert!(take_system(&mut endpoints, system(1)).is_empty());
+    tick(&mut endpoints, 0, system(1), false, now);
+    assert!(take_system(&mut endpoints, system(1)).is_empty());
+    let later = now + Duration::from_secs(1);
+    Arc::make_mut(endpoints[1].live.snapshot.as_mut().unwrap()).agents[0].agent_status =
+        AgentStatus::Blocked;
+    tick(&mut endpoints, 0, system(1), false, later);
+    // Client-local feedback still uses the in-app card.
+    assert_eq!(visible(&endpoints), ["preview"]);
+    let posts = take_system(&mut endpoints, system(1));
+    assert_eq!(
+        posts,
+        [SystemPost {
+            endpoint: 1,
+            id: 0,
+            tag: "herdr:remote:boot-v1:w1:p1".into(),
+            title: "event".into(),
+            body: Some("Review needed".into()),
+        }]
+    );
+    // Posted notices stay for click resolution, are never re-posted, and
+    // never fall into the in-app queue.
+    for _ in 0..2 {
+        tick(&mut endpoints, 0, system(1), false, later);
+        assert!(take_system(&mut endpoints, system(1)).is_empty());
+        assert_eq!(posted(&endpoints), 1);
+        assert_eq!(visible(&endpoints), ["preview"]);
+    }
+    assert_eq!(
+        endpoints[1].toasts.entries[0]
+            .1
+            .target(endpoints[1].live.snapshot.as_deref().unwrap()),
+        Some(NavigationTarget::Pane("w1:p1"))
+    );
+    // Turning delivery off drops the record; in-app delivery never posts.
+    tick(
+        &mut endpoints,
+        0,
+        NotificationConfig::default(),
+        false,
+        later,
+    );
+    assert_eq!(posted(&endpoints), 0);
+    receive(&mut endpoints[1], wire(Kind::Custom), later);
+    tick(&mut endpoints, 0, config(0), false, later);
+    assert!(take_system(&mut endpoints, config(0)).is_empty());
+    assert_eq!(visible(&endpoints), ["preview"]);
+    assert_eq!(endpoints[1].toasts.entries.len(), 1);
+}
+
+#[test]
+fn system_delivery_is_suppressed_for_the_active_tab_only_while_focused() {
+    for (selected, focused, expected) in [(1, true, 0), (1, false, 1), (0, true, 1), (0, false, 1)]
+    {
+        let now = Instant::now();
+        let mut endpoints = endpoints();
+        receive(&mut endpoints[1], wire(Kind::Custom), now);
+        super::tick(
+            &mut endpoints,
+            selected,
+            system(0),
+            false,
+            focused,
+            None,
+            now,
+        );
+        assert_eq!(
+            take_system(&mut endpoints, system(0)).len(),
+            expected,
+            "selected {selected} focused {focused}"
+        );
+    }
+}
+
+#[test]
+fn system_delivery_ignores_hidden_toasts_and_bounds_retained_posts() {
+    let now = Instant::now();
+    let mut endpoints = endpoints();
+    for title in 0..(PENDING_LIMIT * 2) {
+        let mut event = wire(Kind::Custom);
+        event.title = title.to_string();
+        event.pane_id = None;
+        event.tab_id = Some("other-tab".into());
+        receive(&mut endpoints[1], event, now);
+    }
+    // A menu hiding in-app toasts does not hold back the OS center.
+    tick(&mut endpoints, 1, system(0), true, now);
+    let posts = take_system(&mut endpoints, system(0));
+    assert_eq!(posts.len(), PENDING_LIMIT * 2);
+    assert!(
+        posts
+            .windows(2)
+            .all(|pair| pair[0].title.parse::<usize>().unwrap()
+                < pair[1].title.parse::<usize>().unwrap())
+    );
+    // Targetless events never share a tag, so none replaces another.
+    let mut tags: Vec<_> = posts.iter().map(|post| post.tag.as_str()).collect();
+    tags.dedup();
+    assert_eq!(tags.len(), posts.len());
+    assert_eq!(posted(&endpoints), PENDING_LIMIT);
+    assert_eq!(
+        endpoints[1].toasts.entries.back().unwrap().1.title,
+        (PENDING_LIMIT * 2 - 1).to_string()
+    );
 }

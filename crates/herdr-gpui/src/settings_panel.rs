@@ -482,10 +482,14 @@ impl HerdrWindow {
                 );
             }
             Tab::Toasts => {
-                body = body.child(div().py(px(8.)).child("Shared delivery settings also apply to other Herdr clients. This GUI uses in-app toasts; it does not deliver terminal or OS notifications. Native [notifications] overrides take precedence. QA previews work even when delivery is disabled."))
+                body = body.child(div().py(px(8.)).child("Shared delivery settings also apply to other Herdr clients. This GUI shows Herdr delivery as in-app toasts and System delivery as OS notifications; it does not deliver terminal notifications. Native [notifications] overrides take precedence. QA previews work even when delivery is disabled."))
                     .child(div().py(px(8.)).child(format!(
-                        "Effective in-app toasts: {} | Delay: {} seconds | Corner: {:?}",
-                        if self.config.notifications.enabled { "On" } else { "Off" },
+                        "Effective delivery: {} | Delay: {} seconds | Corner: {:?}",
+                        match self.config.notifications.delivery() {
+                            crate::config::NotificationDelivery::Off => "Off",
+                            crate::config::NotificationDelivery::InApp => "In-app",
+                            crate::config::NotificationDelivery::System => "System",
+                        },
                         self.config.notifications.delay_seconds,
                         self.config.notifications.position,
                     )));

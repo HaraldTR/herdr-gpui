@@ -12,13 +12,15 @@ use gpui::{prelude::*, *};
 impl HerdrWindow {
     pub(crate) fn reload_notification_config(&mut self, cx: &mut Context<Self>) {
         self.sound.reload();
-        let enabled = self.config.notifications.enabled;
+        use crate::config::NotificationDelivery::Off;
+        let was_off = self.config.notifications.delivery() == Off;
         if let Some(shared) = &self.settings.shared {
             self.config.apply_shared_notifications(shared);
         }
         let now = std::time::Instant::now();
         for endpoint in &mut self.endpoints {
-            if !enabled && self.config.notifications.enabled {
+            // Turning delivery on, in-app or system, never replays the backlog.
+            if was_off && self.config.notifications.delivery() != Off {
                 endpoint.toasts.enabled_since = Some(now);
             }
         }
@@ -197,7 +199,9 @@ impl HerdrWindow {
                             // The View menu checks the layout in use.
                             crate::menus::install(cx);
                         }
-                        if !this.config.notifications.enabled && config.notifications.enabled {
+                        if this.config.notifications.delivery() == crate::config::NotificationDelivery::Off
+                            && config.notifications.delivery() != crate::config::NotificationDelivery::Off
+                        {
                             let cutoff = std::time::Instant::now();
                             for endpoint in &mut this.endpoints {
                                 endpoint.toasts.enabled_since = Some(cutoff);
@@ -631,6 +635,50 @@ mod tests {
                 assert!(view.endpoints[0].toasts.entries[0].1.visible);
             });
         }
+    }
+
+    #[gpui::test]
+    fn enabling_system_delivery_does_not_post_the_backlog(cx: &mut gpui::TestAppContext) {
+        use crate::{
+            config::{Config, NotificationDelivery},
+            notifications::{Notice, take_system, tests::notification},
+        };
+        use std::time::Instant;
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        view.update(cx, |view, _| {
+            assert_eq!(
+                view.config.notifications.delivery(),
+                NotificationDelivery::Off
+            );
+            let mut wire = notification("while off");
+            wire.kind = herdr_client::protocol::SemanticNotificationKind::Custom;
+            view.endpoints[0]
+                .toasts
+                .receive([Notice::new(wire, Instant::now())]);
+        });
+        view.update(cx, |view, cx| {
+            view.load_gui_config_with(
+                || {
+                    let mut config = Config::default();
+                    config.notifications.system = true;
+                    config.notifications.delay_seconds = 0;
+                    let theme = config.theme()?;
+                    Ok((config, theme))
+                },
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, _| {
+            assert_eq!(
+                view.config.notifications.delivery(),
+                NotificationDelivery::System
+            );
+            assert!(view.endpoints[0].toasts.enabled_since.is_some());
+            view.tick_toasts(false, Instant::now());
+            assert!(take_system(&mut view.endpoints, view.config.notifications).is_empty());
+            assert!(view.endpoints[0].toasts.entries.is_empty());
+        });
     }
 
     #[gpui::test]
