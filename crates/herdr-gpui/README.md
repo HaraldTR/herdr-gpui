@@ -4,7 +4,11 @@ A GPUI 0.3.6 (`gpui-pre`) client for a Local daemon and saved SSH hosts, with ma
 support, experimental Linux x86_64/ARM64 builds, and an experimental Windows build with
 headless CI coverage. See [Windows](#windows) for what is unavailable there.
 It starts an installed local `herdr server` when absent; explicit socket and
-development targets remain attach-only. It does not link or install Herdr, stop
+development targets remain attach-only. On Unix, GUI launches resolve the login-shell
+environment once on the connection worker so daemon plugins can find tools such as
+`node`. Terminal launches skip the shell probe. Failed probes fall back to standard
+per-user and Homebrew bin directories; the probe has a five-second timeout.
+It does not link or install Herdr, stop
 daemons, spawn a local PTY, or emulate a terminal. Herdr's remote bridge may start
 the named remote session. SSH requires an installed POSIX Herdr, noninteractive authentication,
 and an already trusted host key. For hosts that need MFA or a password, configure
@@ -392,6 +396,17 @@ closures still ask for confirmation. Saved edits apply automatically. The
 **Show agents** control in **Settings > Appearance > Sidebar layout** saves
 `show_agents` immediately, independently of the layout draft saved on close.
 
+The status bar shows the selected host's CPU and memory: a sparkline of recent
+CPU use and a memory meter, each with its current share, and cores, load
+averages, and memory in gigabytes in its tooltip. With more than one host, each
+host row in the sidebar shows its own: right-aligned gauges after the name in
+compact layouts, and the sparkline and meter on a second line otherwise. This
+machine is read in process; each connected Linux or macOS remote host is read
+every two seconds over its own SSH shell, kept open while the host is connected
+(`/proc` on Linux; `vm_stat` and a one-second `iostat` on macOS). Other remote
+systems, and remote hosts from a Windows client, show it as unavailable. Set top-level `show_system_load = false`,
+or turn off **Show CPU and memory** in Settings, to hide it and stop sampling.
+
 `[notifications]` in `config-gpui.local.toml` overrides shared toast preferences
 for GUI-local in-app delivery, independently per key:
 
@@ -544,6 +559,34 @@ following the daemon config. Only these two keys are read from that file, it is
 never written, and an unreadable, oversized, malformed, or unrecognized value
 leaves the defaults standing.
 
+The `[bell]` table decides what a pane's terminal bell (BEL) does. Herdr has no
+bell setting: it forwards each bell to its foreground client and leaves the
+reaction to it, as the TUI hands BEL to the outer terminal.
+
+```toml
+[bell]
+attention = true  # request attention (bounce the Dock) while the window is inactive
+sound = false     # play the system alert sound
+```
+
+Only bells from the selected endpoint's own connection ring; parked editor-group
+connections and other endpoints are dropped, as the TUI drops presentation
+effects from inactive endpoints. A burst rings at most once per 500 ms. On
+platforms where GPUI does not implement attention requests or the system bell,
+those settings do nothing.
+
+**QA > Ring Bell in 3 Seconds** (QA builds) previews both reactions after a
+delay, so there is time to switch to another app and watch the Dock: it plays the
+system alert and, if the window is then inactive, requests attention. It
+bypasses `[bell]` and the rate limit, and needs no daemon.
+
+The window title follows the daemon's `WindowTitle` message for the selected
+endpoint: a title an agent set with `client.window_title.set`, or Herdr's own
+rendering of `ui.window_title` (`{hostname}`, `{workspace}`, `{tab}`, `{pane}`,
+`{terminal_title}`) for this window's view. Control characters are stripped and
+the title is capped at 200 characters. Without one, after a disconnect, or once
+the daemon restarts, the window keeps its own `Herdr — <workspace>` title.
+
 The `src/config.rs` module exposes `Config::load()` and
 `Config::path()` (managed defaults) and `Config::local_path()` (user overrides),
 all returning the crate's typed `Result`. `Config::theme()` resolves
@@ -619,7 +662,8 @@ evidence may wait up to one second from receipt, rechecking every 50 ms. New
 notifications replace pending ones for the same endpoint/pane. Only Finished is
 suppressed for the selected endpoint's active tab while the native window is
 focused (workspace focus is the fallback for events without a tab).
-Legacy `Notify`, terminal BEL, and terminal escape sequences never play audio.
+Legacy `Notify`, terminal BEL, and terminal escape sequences never play Herdr
+sounds; BEL can play the system alert through `[bell]`.
 
 Built-in Done and Request MP3s are the upstream Herdr sounds, attributed in
 [SOUND-NOTICE.md](SOUND-NOTICE.md). Rodio 0.22 uses CPAL native output and
@@ -1189,7 +1233,13 @@ Windows setup) nothing is saved and the window says so.
   linked worktrees is open), branch details, and daemon-driven
   filled/hollow activity indicators taken from the daemon's own status, so the
   GUI and the terminal client always show the same dot. Each worktree row also
-  carries its cached pull request number and diff counts.
+  carries its cached pull request number and diff counts, and a branch that has
+  drifted from its upstream shows the daemon's counts as in the terminal
+  client: a green `↑` for commits to push and a red `↓` for commits to pull.
+  They follow the branch on two-line rows (`main ↓18`) and sit at the row's
+  end on one-line rows, Compact included. Minimal rows leave them off. They
+  appear only while the daemon's `[ui.sidebar.spaces]` rows name `git_status`,
+  as its defaults do, because the daemon computes them only then.
 - Agents panel header ends with its sort, `grouped` or `priority`, which a
   click flips; an active agent view names itself there instead. Client-local
   and persisted beside the sidebar width, as in the terminal client.
@@ -1441,6 +1491,35 @@ Windows setup) nothing is saved and the window says so.
   screen and scrollback through the daemon's `pane.clear`, without sending input
   to the running program; daemons that do not advertise it (Herdr 0.9.1 and
   older) leave it out of the palette and report why instead.
+- Cmd-F (`find`, also in Terminal and the command palette) opens a find bar
+  over the focused pane that searches its whole scrollback through the
+  daemon's `pane.copy_search`. Matches are tinted, the current one more
+  strongly, and shown as "3 of 17". Enter or Up moves to the next older match
+  and Shift-Enter or Down to the next newer one (Cmd-G and Cmd-Shift-G work
+  too), scrolling the pane to it.
+  Escape closes the bar. Lowercase queries ignore case; any uppercase letter
+  makes the search case-sensitive, as Herdr's copy mode does. Text typed in
+  the bar, IME composition included, never reaches the terminal. Daemons that
+  do not advertise the method report why instead of opening the bar.
+- Cmd-Shift-C (`copy_mode`) puts the focused pane in keyboard copy mode, as
+  Herdr's `prefix+[` does in the TUI: a block cursor starts at the terminal
+  cursor and walks the whole scrollback, and nothing typed reaches the
+  program. `h` `j` `k` `l` and the arrows step, `0`/Home goes to the line
+  start, `g`/`G` to the top of history or the last row, and Ctrl-U/D/B/F or
+  Page Up/Down page. The text-aware motions `w` `b` `e` `W` `B` `E` `$` `^`
+  `{` `}` come from the daemon's `pane.copy_motion`, so words and paragraphs
+  mean what they mean in Herdr. `v` or Space marks by cell and `V` by line.
+  `y` or Enter copies the selection through `pane.selection.read`. Escape
+  clears a selection or leaves, as does `q`. Leaving scrolls the pane back to
+  where it was.
+- A mouse selection dragged past a pane's top or bottom edge scrolls the
+  pane, and the selection stays with its text as the pane moves. A selection
+  that reaches rows off the screen is copied through `pane.selection.read`;
+  one that fits the screen is still copied from the painted cells.
+- **Open Scrollback in Editor** (`edit_scrollback`, in the pane menu,
+  Terminal menu, and palette) asks Herdr to open the pane's history in the
+  configured editor, through `pane.edit_scrollback`. It is offered only by
+  daemons that advertise the method.
 - Cmd-W closes the focused pane and Cmd-Shift-W closes the focused tab only after
   a confirmation dialog (a tab asks only while an agent in it is working or
   blocked, and never with `confirm_close_tab = false`). **Cancel is selected by default**: Enter alone cancels;

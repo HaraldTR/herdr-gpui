@@ -348,6 +348,10 @@ impl HerdrWindow {
                 update.sound_events.clear();
                 update.reload_sound = false;
                 update.clipboard_writes.clear();
+                // A parked client never holds the presentation, so a bell or
+                // title it saw belongs to no window.
+                update.bells = 0;
+                update.window_title = None;
                 update.dialog_response = None;
                 parked.live = update;
                 changed = true;

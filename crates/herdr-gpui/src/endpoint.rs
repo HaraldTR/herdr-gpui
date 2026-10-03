@@ -824,6 +824,12 @@ impl HerdrWindow {
         for (index, endpoint) in self.endpoints.iter_mut().enumerate() {
             let updated = endpoint.poll(Instant::now());
             clipboard_writes.append(&mut endpoint.live.clipboard_writes);
+            // Bells are a presentation effect: only the selected endpoint's
+            // ring, as the TUI drops them from inactive endpoints.
+            let bells = std::mem::take(&mut endpoint.live.bells);
+            if index == self.selected_endpoint {
+                self.bell.queue(bells);
+            }
             selected_changed |= index == self.selected_endpoint && updated != Redraw::None;
             self.sound.poll(
                 &mut endpoint.sounds,

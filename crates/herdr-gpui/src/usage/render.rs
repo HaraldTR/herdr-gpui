@@ -1,6 +1,7 @@
 //! The status bar's usage segments: per agent, a meter for the window closest
 //! to its limit and each window's share used with its time to reset. A click
-//! opens that agent's panel, so the bar stays one quiet line.
+//! opens that agent's panel, so the bar stays one quiet line; picking a tab
+//! there brings that agent to the front of the bar.
 
 use super::{
     Reading,
@@ -18,12 +19,13 @@ use std::{
 const METER_WIDTH: f32 = 40.;
 
 impl HerdrWindow {
-    /// The providers closest to a limit, at most [`super::HEADLINE`]; nothing
-    /// when usage is hidden or no provider on the host has numbers yet.
+    /// The provider chosen in the panel, then those closest to a limit, at
+    /// most [`super::HEADLINE`]; nothing when usage is hidden or no provider
+    /// on the host has numbers yet.
     pub(crate) fn render_usage(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let entry = self.usage.current();
         let shown = entry
-            .map(|entry| entry.headline(super::HEADLINE))
+            .map(|entry| entry.headline(super::HEADLINE, self.usage.chosen()))
             .unwrap_or_default();
         // A host that could not be read at all says so, but only while
         // there is nothing older to show.
