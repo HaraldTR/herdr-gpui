@@ -11,6 +11,74 @@ use herdr_client::{
 };
 use serde_json::{Value, json};
 
+#[cfg(test)]
+mod interaction_tests;
+mod project_open;
+mod projects;
+mod render;
+mod search;
+
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PaletteConfig {
+    pub double_shift: bool,
+    pub project_roots: Vec<String>,
+}
+
+impl Default for PaletteConfig {
+    fn default() -> Self {
+        Self {
+            double_shift: true,
+            project_roots: Vec::new(),
+        }
+    }
+}
+
+impl PaletteConfig {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.project_roots.len() > 16
+            || self.project_roots.iter().any(|root| {
+                root.trim().is_empty() || root.len() > 8192 || root.chars().any(char::is_control)
+            })
+        {
+            return Err(Error::PaletteProjectRoots);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Filter {
+    #[default]
+    All,
+    Navigation,
+    Commands,
+    Projects,
+}
+
+impl Filter {
+    const ALL: [Self; 4] = [Self::All, Self::Navigation, Self::Commands, Self::Projects];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Navigation => "Navigation",
+            Self::Commands => "Commands",
+            Self::Projects => "Projects",
+        }
+    }
+
+    fn accepts(self, action: &Action) -> bool {
+        self == Self::All
+            || self
+                == match action {
+                    Action::Native(_) | Action::Configured(..) => Self::Commands,
+                    Action::Go { .. } => Self::Navigation,
+                    Action::Project(_) => Self::Projects,
+                }
+    }
+}
+
 #[derive(Clone)]
 enum Action {
     Native(Command),
@@ -21,9 +89,9 @@ enum Action {
         target: OwnedNavigationTarget,
     },
     Configured(String, ClientShellCommandAction),
+    Project(projects::Project),
 }
 
-#[derive(Clone)]
 struct Entry {
     label: String,
     detail: String,
@@ -32,6 +100,53 @@ struct Entry {
     /// Index of the row this one nests under, indented only while that row
     /// is visible so a search never leaves it hanging beneath nothing.
     parent: Option<usize>,
+    fields: search::Fields,
+}
+
+impl Entry {
+    fn new(
+        label: String,
+        detail: String,
+        badge: impl Into<SharedString>,
+        action: Action,
+        parent: Option<usize>,
+    ) -> Self {
+        let badge = badge.into();
+        let id = match &action {
+            Action::Configured(id, _) => id.as_str(),
+            _ => "",
+        };
+        let fields = search::Fields::new(&label, &format!("{detail} {badge} {id}"));
+        Self {
+            label,
+            detail,
+            badge,
+            action,
+            parent,
+            fields,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Identity {
+    Native(Command),
+    Go(String, OwnedNavigationTarget),
+    Configured(String),
+    Project(std::path::PathBuf),
+}
+
+impl Action {
+    fn identity(&self) -> Identity {
+        match self {
+            Self::Native(command) => Identity::Native(*command),
+            Self::Go {
+                endpoint, target, ..
+            } => Identity::Go(endpoint.clone(), target.clone()),
+            Self::Configured(id, _) => Identity::Configured(id.clone()),
+            Self::Project(project) => Identity::Project(project.path.clone()),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -177,6 +292,7 @@ fn go_to_entries(
             host,
             Some(&*format!("#{}", workspace.number)),
             workspace.branch.as_deref(),
+            projects::launch_root(snapshot, &workspace.workspace_id),
         ]
         .into_iter()
         .flatten()
@@ -184,13 +300,13 @@ fn go_to_entries(
         .collect::<Vec<_>>()
         .join("  ");
         let parent = entries.len();
-        entries.push(Entry {
-            label: workspace.label.clone(),
+        entries.push(Entry::new(
+            workspace.label.clone(),
             detail,
-            badge: SharedString::default(),
-            action: go(NavigationTarget::Workspace(workspace.workspace_id.clone())),
-            parent: None,
-        });
+            "Workspace",
+            go(NavigationTarget::Workspace(workspace.workspace_id.clone())),
+            None,
+        ));
         let tabs: Vec<_> = snapshot
             .tabs
             .iter()
@@ -225,40 +341,40 @@ fn go_to_entries(
             // As in the sidebar, the tab only earns its place when there is a choice.
             let tab = (tabs.len() > 1 || tab.custom_label).then_some(tab.label.as_str());
             let path = pane.foreground_cwd.as_deref().or(pane.cwd.as_deref());
-            let detail = [host, tab, path]
+            let detail = [host, Some(workspace.label.as_str()), tab, path]
                 .into_iter()
                 .flatten()
                 .filter(|text| !text.is_empty())
                 .collect::<Vec<_>>()
                 .join("  ");
-            entries.push(Entry {
-                label: name.to_owned(),
+            entries.push(Entry::new(
+                name.to_owned(),
                 detail,
-                badge: agent.map_or_else(SharedString::default, |agent| {
+                agent.map_or(SharedString::new_static("Terminal"), |agent| {
                     crate::sidebar::state_label(agent, status_badge(agent.agent_status))
                         .into_owned()
                         .into()
                 }),
-                action: go(NavigationTarget::Pane(pane.pane_id.clone())),
-                parent: Some(parent),
-            });
+                go(NavigationTarget::Pane(pane.pane_id.clone())),
+                Some(parent),
+            ));
         }
     }
 }
 
+#[cfg(test)]
 fn matches_query(text: &str, query: &str) -> bool {
-    let text = text.to_lowercase();
-    query
-        .split_whitespace()
-        .all(|token| text.contains(&token.to_lowercase()))
+    let query = query.to_lowercase();
+    search::Fields::new(text, "")
+        .score(&query.split_whitespace().collect::<Vec<_>>())
+        .is_some()
 }
 
-/// Whether a row sits under its parent in the visible list. `filtered` keeps
-/// entry order, so it stays sorted.
+/// Ranked results need not keep entry order.
 fn is_nested(entry: &Entry, filtered: &[usize]) -> bool {
     entry
         .parent
-        .is_some_and(|parent| filtered.binary_search(&parent).is_ok())
+        .is_some_and(|parent| filtered.contains(&parent))
 }
 
 pub(super) struct Palette {
@@ -268,38 +384,91 @@ pub(super) struct Palette {
     selected: usize,
     scroll: UniformListScrollHandle,
     target: Option<Target>,
-    workspaces_only: bool,
+    filter: Filter,
+    query: String,
     error: Option<String>,
+    projects: projects::Collection,
+    loading_projects: bool,
+    project_task: Option<Task<()>>,
+    _scan: projects::Cancellation,
+    sources: Vec<Source>,
+    local_target: Option<LocalTarget>,
+    project_operation: ProjectOperation,
+    configuration: PaletteConfig,
+    keymap: crate::keymap::Keymap,
+    supports_clear: bool,
+    supports_edit_scrollback: bool,
     _subscription: Subscription,
+}
+
+/// Metadata snapshots, not surface updates, invalidate the prepared entries.
+struct Source {
+    endpoint: String,
+    generation: u64,
+    enabled: bool,
+    snapshot: Option<std::sync::Arc<ClientShellSnapshot>>,
+}
+
+#[derive(Clone)]
+struct LocalTarget {
+    generation: u64,
+    boot: String,
+}
+
+#[derive(Default)]
+enum ProjectOperation {
+    #[default]
+    Idle,
+    Validating {
+        _task: Task<()>,
+    },
+    Awaiting(String),
 }
 
 impl Palette {
     fn filter(&mut self, query: &str) {
-        self.filtered = self
+        self.query = query.to_owned();
+        self.refilter(None);
+    }
+
+    fn selected_identity(&self) -> Option<Identity> {
+        self.filtered
+            .get(self.selected)
+            .map(|index| self.entries[*index].action.identity())
+    }
+
+    fn refilter(&mut self, selected: Option<Identity>) {
+        let query = self.query.to_lowercase();
+        let terms: Vec<_> = query.split_whitespace().collect();
+        let mut ranked: Vec<_> = self
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| {
-                let id = match &entry.action {
-                    Action::Configured(id, _) => id.as_str(),
-                    Action::Native(_) | Action::Go { .. } => "",
-                };
-                matches_query(
-                    &format!("{} {} {} {id}", entry.label, entry.detail, entry.badge),
-                    query,
-                )
-                .then_some(index)
-            })
+            .filter(|(_, entry)| self.filter.accepts(&entry.action))
+            .filter_map(|(index, entry)| entry.fields.score(&terms).map(|score| (index, score)))
             .collect();
-        self.selected = 0;
-        self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        ranked.sort_by(|(_, a), (_, b)| b.cmp(a));
+        self.filtered = ranked.into_iter().map(|(index, _)| index).collect();
+        self.selected = selected
+            .and_then(|selected| {
+                self.filtered
+                    .iter()
+                    .position(|index| self.entries[*index].action.identity() == selected)
+            })
+            .unwrap_or(0);
+        self.scroll
+            .scroll_to_item(self.selected, ScrollStrategy::Nearest);
+    }
+
+    fn busy(&self) -> bool {
+        !matches!(self.project_operation, ProjectOperation::Idle)
     }
 }
 
 impl HerdrWindow {
     pub(super) fn open_palette(
         &mut self,
-        workspaces_only: bool,
+        filter: Filter,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -314,96 +483,226 @@ impl HerdrWindow {
                 cx.notify();
             }
         });
-        let mut entries = Vec::new();
-        if !workspaces_only {
-            entries.extend(
-                COMMANDS
-                    .iter()
-                    .filter(|info| info.command != Command::Palette)
-                    .filter(|info| match info.command {
-                        Command::ClearPane => self.live.supports_pane_clear,
-                        Command::EditScrollback => self.live.supports_edit_scrollback,
-                        _ => true,
-                    })
-                    .map(|info| Entry {
-                        label: info.label.into(),
-                        detail: self.keymap().primary(info.command).into(),
-                        badge: SharedString::default(),
-                        action: Action::Native(info.command),
-                        parent: None,
-                    }),
-            );
-        }
-        if workspaces_only {
-            // The selected host first, so Enter on an unfiltered list stays local
-            // to what is on screen; the other connected hosts follow in order.
-            let selected = self.selected_endpoint;
-            let order = std::iter::once(selected)
-                .chain((0..self.endpoints.len()).filter(|index| *index != selected));
-            for index in order {
-                let endpoint = &self.endpoints[index];
-                let live = if index == selected {
+        let target = self
+            .live
+            .snapshot
+            .as_ref()
+            .map(|snapshot| Target::capture(snapshot));
+        let local_target = self
+            .endpoints
+            .iter()
+            .position(|endpoint| endpoint.id == crate::endpoint::LOCAL)
+            .and_then(|index| {
+                let live = if index == self.selected_endpoint {
                     &self.live
                 } else {
-                    &endpoint.live
+                    &self.endpoints[index].live
                 };
-                let Some(snapshot) = live.snapshot.as_ref().filter(|_| endpoint.enabled) else {
-                    continue;
-                };
-                let host =
-                    (endpoint.id != crate::endpoint::LOCAL).then_some(endpoint.label.as_str());
-                go_to_entries(&endpoint.id, host, snapshot, &mut entries);
-            }
-        }
-        let target = self.live.snapshot.as_ref().map(|snapshot| {
-            if !workspaces_only {
-                entries.extend(snapshot.commands.iter().map(|command| {
-                    let bindings = self.keymap().custom_labels(command);
-                    Entry {
-                        label: command
-                            .description
-                            .as_ref()
-                            .filter(|s| !s.trim().is_empty())
-                            .unwrap_or(&command.command_id)
-                            .clone(),
-                        detail: bindings.join(", "),
-                        badge: "Herdr command".into(),
-                        action: Action::Configured(command.command_id.clone(), command.action),
-                        parent: None,
-                    }
-                }));
-            }
-            Target::capture(snapshot)
-        });
+                live.snapshot.as_ref().map(|snapshot| LocalTarget {
+                    generation: self.endpoints[index].generation,
+                    boot: snapshot.boot_id.clone(),
+                })
+            });
         search.update(cx, |input, cx| {
-            input.set_placeholder(
-                if workspaces_only {
-                    "Search workspaces, agents, and terminals..."
-                } else {
-                    "Search commands..."
-                },
-                cx,
-            );
+            input.set_placeholder("Search workspaces, commands, agents, and projects...", cx);
             input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
             window.focus(&input.focus, cx);
         });
         let mut palette = Palette {
             search,
-            entries,
+            entries: Vec::new(),
             filtered: Vec::new(),
             selected: 0,
             scroll: UniformListScrollHandle::new(),
             target,
-            workspaces_only,
+            filter,
+            query: String::new(),
             error: None,
+            projects: projects::Collection::default(),
+            loading_projects: !self.config.palette.project_roots.is_empty(),
+            project_task: None,
+            _scan: projects::Cancellation::default(),
+            sources: Vec::new(),
+            local_target,
+            project_operation: ProjectOperation::Idle,
+            configuration: self.config.palette.clone(),
+            keymap: self.keymap().clone(),
+            supports_clear: self.live.supports_pane_clear,
+            supports_edit_scrollback: self.live.supports_edit_scrollback,
             _subscription: subscription,
         };
-        palette.filter("");
+        self.prepare_palette_entries(&mut palette);
         self.menu.palette = Some(palette);
+        self.load_palette_projects(window, cx);
         cx.notify();
     }
 
+    fn palette_sources(&self) -> Vec<Source> {
+        std::iter::once(self.selected_endpoint)
+            .chain((0..self.endpoints.len()).filter(|index| *index != self.selected_endpoint))
+            .map(|index| {
+                let endpoint = &self.endpoints[index];
+                let live = if index == self.selected_endpoint {
+                    &self.live
+                } else {
+                    &endpoint.live
+                };
+                Source {
+                    endpoint: endpoint.id.clone(),
+                    generation: endpoint.generation,
+                    enabled: endpoint.enabled && live.status.is_connected(),
+                    snapshot: live.snapshot.clone(),
+                }
+            })
+            .collect()
+    }
+
+    fn prepare_palette_entries(&self, palette: &mut Palette) {
+        let selected = palette.selected_identity();
+        let mut entries = Vec::new();
+        let sources = self.palette_sources();
+        for source in &sources {
+            let Some(snapshot) = source.snapshot.as_ref().filter(|_| source.enabled) else {
+                continue;
+            };
+            let host = self
+                .endpoints
+                .iter()
+                .find(|endpoint| endpoint.id == source.endpoint)
+                .map(|endpoint| endpoint.label.as_str());
+            go_to_entries(&source.endpoint, host, snapshot, &mut entries);
+        }
+        entries.extend(
+            COMMANDS
+                .iter()
+                .filter(|info| info.command != Command::Palette)
+                .filter(|info| match info.command {
+                    Command::ClearPane => self.live.supports_pane_clear,
+                    Command::EditScrollback => self.live.supports_edit_scrollback,
+                    _ => true,
+                })
+                .map(|info| {
+                    Entry::new(
+                        info.label.into(),
+                        self.keymap().primary(info.command).into(),
+                        "GUI action",
+                        Action::Native(info.command),
+                        None,
+                    )
+                }),
+        );
+        if let Some(snapshot) = self
+            .live
+            .snapshot
+            .as_ref()
+            .filter(|_| self.live.status.is_connected())
+        {
+            entries.extend(snapshot.commands.iter().map(|command| {
+                let bindings = self.keymap().custom_labels(command);
+                let host = &self.endpoints[self.selected_endpoint].label;
+                let workspace = palette
+                    .target
+                    .as_ref()
+                    .and_then(|target| target.workspace.as_deref())
+                    .and_then(|id| {
+                        snapshot
+                            .workspaces
+                            .iter()
+                            .find(|workspace| workspace.workspace_id == id)
+                    })
+                    .map(|workspace| workspace.label.as_str());
+                let context = [Some(host.as_str()), workspace]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("  ");
+                let detail = if bindings.is_empty() {
+                    context
+                } else {
+                    format!("{context}  {}", bindings.join(", "))
+                };
+                Entry::new(
+                    command
+                        .description
+                        .as_ref()
+                        .filter(|text| !text.trim().is_empty())
+                        .unwrap_or(&command.command_id)
+                        .clone(),
+                    detail,
+                    "Herdr command",
+                    Action::Configured(command.command_id.clone(), command.action),
+                    None,
+                )
+            }));
+        }
+        entries.extend(palette.projects.projects.iter().map(|project| {
+            Entry::new(
+                project.label.clone(),
+                format!("Local  {}", project.path.display()),
+                "Project",
+                Action::Project(project.clone()),
+                None,
+            )
+        }));
+        palette.entries = entries;
+        palette.sources = sources;
+        palette.keymap = self.keymap().clone();
+        palette.supports_clear = self.live.supports_pane_clear;
+        palette.supports_edit_scrollback = self.live.supports_edit_scrollback;
+        palette.refilter(selected);
+    }
+
+    pub(crate) fn refresh_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.update_palette_project(window, cx);
+        let Some(palette) = self.menu.palette.as_ref() else {
+            return;
+        };
+        if palette.configuration != self.config.palette {
+            if let Some(mut palette) = self.menu.palette.take() {
+                palette.project_task = None;
+                if matches!(
+                    palette.project_operation,
+                    ProjectOperation::Validating { .. }
+                ) {
+                    palette.project_operation = ProjectOperation::Idle;
+                }
+                palette._scan = projects::Cancellation::default();
+                palette.configuration = self.config.palette.clone();
+                palette.projects = projects::Collection::default();
+                palette.loading_projects = !self.config.palette.project_roots.is_empty();
+                self.prepare_palette_entries(&mut palette);
+                self.menu.palette = Some(palette);
+                self.load_palette_projects(window, cx);
+                cx.notify();
+            }
+            return;
+        }
+        let sources = self.palette_sources();
+        let changed = palette.keymap != *self.keymap()
+            || palette.supports_clear != self.live.supports_pane_clear
+            || palette.supports_edit_scrollback != self.live.supports_edit_scrollback
+            || sources.len() != palette.sources.len()
+            || sources.iter().zip(&palette.sources).any(|(a, b)| {
+                a.endpoint != b.endpoint
+                    || a.generation != b.generation
+                    || a.enabled != b.enabled
+                    || match (&a.snapshot, &b.snapshot) {
+                        (Some(a), Some(b)) => !std::sync::Arc::ptr_eq(a, b),
+                        (None, None) => false,
+                        _ => true,
+                    }
+            });
+        if changed && let Some(mut palette) = self.menu.palette.take() {
+            self.prepare_palette_entries(&mut palette);
+            self.menu.palette = Some(palette);
+            cx.notify();
+        }
+    }
+
     fn activate_palette(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu.palette.as_ref().is_none_or(Palette::busy) {
+            return;
+        }
         if !self.menu_target_current() {
             if let Some(palette) = &mut self.menu.palette {
                 palette.error = Some("The selected connection changed. Reopen the palette.".into());
@@ -414,6 +713,10 @@ impl HerdrWindow {
         if let Action::Native(command) = action {
             self.dismiss_menu(window, cx);
             self.command(command, window, cx);
+            return;
+        }
+        if let Action::Project(project) = action {
+            self.activate_project(project, window, cx);
             return;
         }
         if let Action::Go {
@@ -453,7 +756,7 @@ impl HerdrWindow {
                 .ok_or(Error::NoPaletteSession)?;
             match &action {
                 Action::Configured(id, action) => target.invocation(snapshot, id, *action),
-                Action::Native(_) | Action::Go { .. } => unreachable!(),
+                Action::Native(_) | Action::Go { .. } | Action::Project(_) => unreachable!(),
             }
         })();
         match result {
@@ -550,7 +853,7 @@ impl HerdrWindow {
                 .menu
                 .palette
                 .as_ref()
-                .filter(|palette| palette.workspaces_only)
+                .filter(|palette| palette.filter == Filter::Navigation)
                 .and_then(|_| self.keymap().navigates_workspace(&event.keystroke)),
         };
         let Some(palette) = &mut self.menu.palette else {
@@ -576,6 +879,22 @@ impl HerdrWindow {
                     .scroll_to_item(palette.selected, ScrollStrategy::Center);
                 cx.notify();
             }
+            "tab" => {
+                cx.stop_propagation();
+                window.prevent_default();
+                let index = Filter::ALL
+                    .iter()
+                    .position(|filter| *filter == palette.filter)
+                    .unwrap_or(0);
+                let step = if event.keystroke.modifiers.shift {
+                    Filter::ALL.len() - 1
+                } else {
+                    1
+                };
+                palette.filter = Filter::ALL[(index + step) % Filter::ALL.len()];
+                palette.refilter(None);
+                cx.notify();
+            }
             "enter" => {
                 cx.stop_propagation();
                 window.prevent_default();
@@ -587,158 +906,22 @@ impl HerdrWindow {
             _ => {}
         }
     }
+}
 
-    pub(super) fn render_palette(&self, cx: &mut Context<Self>) -> Div {
-        let Some(palette) = &self.menu.palette else {
-            return div();
-        };
-        let theme = &self.theme;
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .min_h_0()
-            .child(
-                div()
-                    .flex_none()
-                    .p(px(16.))
-                    .border_b_1()
-                    .border_color(rgb(theme.active))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(12.))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_size(px(self.config.ui.size * 1.35))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(if palette.workspaces_only {
-                                        "Go To"
-                                    } else {
-                                        "Command Palette"
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .id("palette-close")
-                                    .px_2()
-                                    .py_1()
-                                    .cursor_pointer()
-                                    .rounded(px(crate::config::corners::CONTROL))
-                                    .hover(|s| s.bg(rgb(theme.active)))
-                                    .child("Close")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.dismiss_menu(window, cx)
-                                    })),
-                            ),
-                    )
-                    .child(div().pt(px(12.)).child(palette.search.clone()))
-                    .child(div().pt(px(8.)).text_color(rgb(theme.muted)).child(format!(
-                        "{} of {} results",
-                        palette.filtered.len(),
-                        palette.entries.len()
-                    ))),
-            )
-            .when_some(palette.error.clone(), |panel, error| {
-                panel.child(
-                    div()
-                        .id("palette-error")
-                        .max_h(px(90.))
-                        .overflow_y_scroll()
-                        .flex_none()
-                        .p(px(12.))
-                        .text_color(rgb(theme.foreground))
-                        .bg(rgb(theme.active))
-                        .child(error),
-                )
-            })
-            .when(palette.filtered.is_empty(), |panel| {
-                panel.child(
-                    div()
-                        .flex_1()
-                        .p(px(16.))
-                        .text_color(rgb(theme.muted))
-                        .child("No matching results. Try a shorter search."),
-                )
-            })
-            .when(!palette.filtered.is_empty(), |panel| {
-                panel.child(
-                    uniform_list(
-                        "palette-results",
-                        palette.filtered.len(),
-                        cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                            let Some(palette) = &this.menu.palette else {
-                                return Vec::new();
-                            };
-                            range
-                                .map(|index| {
-                                    let entry = palette.entries[palette.filtered[index]].clone();
-                                    let nested = is_nested(&entry, &palette.filtered);
-                                    div()
-                                        .id(index)
-                                        .debug_selector(move || format!("palette-row-{index}"))
-                                        // Selection and hover read as rows, not as
-                                        // labels, so the fill spans the whole list.
-                                        .w_full()
-                                        .h(px(this.config.ui.line_height() * 2. + 20.))
-                                        .px(px(16.))
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(12.))
-                                        .cursor_pointer()
-                                        .when(index == palette.selected, |row| {
-                                            row.bg(rgb(this.theme.active))
-                                        })
-                                        .hover(|s| s.bg(rgb(this.theme.active)))
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .flex()
-                                                .flex_col()
-                                                .when(nested, |column| column.pl(px(16.)))
-                                                .child(div().truncate().child(entry.label))
-                                                .child(
-                                                    div()
-                                                        .truncate()
-                                                        .text_color(rgb(this.theme.muted))
-                                                        .child(entry.detail),
-                                                ),
-                                        )
-                                        .when(!entry.badge.is_empty(), |row| {
-                                            row.child(
-                                                div()
-                                                    .flex_none()
-                                                    .text_color(rgb(this.theme.muted))
-                                                    .child(entry.badge),
-                                            )
-                                        })
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.activate_palette(entry.action.clone(), window, cx)
-                                        }))
-                                })
-                                .collect()
-                        }),
-                    )
-                    .track_scroll(&palette.scroll)
-                    .flex_1()
-                    .min_h_0(),
-                )
-            })
-            .child(
-                div()
-                    .debug_selector(|| "palette-status".into())
-                    .flex_none()
-                    .px(px(16.))
-                    .py(px(10.))
-                    .border_t_1()
-                    .border_color(rgb(theme.active))
-                    .text_color(rgb(theme.muted))
-                    .child("Up / Down to navigate. Enter or click to select. Esc to cancel."),
-            )
-    }
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>) -> HerdrWindow {
+    let mut view = crate::sidebar::layout_tests::fixture_window(window, cx);
+    view.live.snapshot = Some(std::sync::Arc::new(
+        serde_json::from_str(include_str!(
+            "../../herdr-protocol/tests/fixtures/endpoint-snapshot-v1.json"
+        ))
+        .unwrap(),
+    ));
+    view.live.status = crate::state::ConnectionStatus::Connected;
+    view.live.supports_surface = true;
+    view.endpoints[0].live = view.live.clone();
+    view
 }
 
 #[cfg(test)]
@@ -760,7 +943,7 @@ mod tests {
     fn notification_command_is_searchable_and_targetless_activation_is_inert(
         cx: &mut TestAppContext,
     ) {
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let (view, cx) = cx.add_window_view(fixture_window);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
                 view.show_toast_preview(
@@ -768,7 +951,7 @@ mod tests {
                     cx,
                 );
                 let selected = view.selected_endpoint;
-                view.open_palette(false, window, cx);
+                view.open_palette(Filter::All, window, cx);
                 let palette = view.menu.palette.as_mut().unwrap();
                 palette.filter("Open Notification Target");
                 assert_eq!(palette.filtered.len(), 1);
@@ -798,7 +981,7 @@ mod tests {
     fn command_badges_mark_daemon_commands_and_go_to_badges_mark_agent_status(
         cx: &mut TestAppContext,
     ) {
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let (view, cx) = cx.add_window_view(fixture_window);
         cx.update(|_, cx| {
             view.update(cx, |view, _| {
                 let snapshot = std::sync::Arc::make_mut(view.live.snapshot.as_mut().unwrap());
@@ -811,25 +994,29 @@ mod tests {
                 }];
             })
         });
-        for workspaces_only in [true, false] {
+        for filter in [Filter::Navigation, Filter::Commands] {
             cx.update(|window, cx| {
-                view.update(cx, |view, cx| {
-                    view.open_palette(workspaces_only, window, cx)
-                })
+                view.update(cx, |view, cx| view.open_palette(filter, window, cx))
             });
             cx.run_until_parked();
             view.read_with(cx, |view, _| {
-                let entries = &view.menu.palette.as_ref().unwrap().entries;
+                let palette = view.menu.palette.as_ref().unwrap();
+                let entries: Vec<_> = palette
+                    .filtered
+                    .iter()
+                    .map(|index| &palette.entries[*index])
+                    .collect();
                 assert!(!entries.is_empty());
-                for entry in entries {
+                for entry in &entries {
                     let expected = match entry.action {
-                        Action::Native(_) => "",
+                        Action::Native(_) => "GUI action",
                         Action::Configured(..) => "Herdr command",
                         Action::Go {
                             target: NavigationTarget::Pane(_),
                             ..
-                        } => "blocked",
-                        Action::Go { .. } => "",
+                        } => "waiting",
+                        Action::Go { .. } => "Workspace",
+                        Action::Project(_) => "Project",
                     };
                     assert_eq!(entry.badge, expected, "{}", entry.label);
                 }
@@ -837,7 +1024,7 @@ mod tests {
                     entries
                         .iter()
                         .any(|entry| matches!(entry.action, Action::Go { .. })),
-                    workspaces_only
+                    filter == Filter::Navigation
                 );
             });
             cx.update(|window, cx| view.update(cx, |view, cx| view.dismiss_menu(window, cx)));
@@ -846,12 +1033,12 @@ mod tests {
 
     #[gpui::test]
     fn clear_pane_is_offered_and_sent_only_when_the_daemon_advertises_it(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let (view, cx) = cx.add_window_view(fixture_window);
         for supported in [false, true] {
             cx.update(|window, cx| {
                 view.update(cx, |view, cx| {
                     view.live.supports_pane_clear = supported;
-                    view.open_palette(false, window, cx);
+                    view.open_palette(Filter::All, window, cx);
                     let offered = view
                         .menu
                         .palette
@@ -884,10 +1071,10 @@ mod tests {
     fn go_to_rejects_a_disabled_or_missing_host_and_keeps_the_palette_open(
         cx: &mut TestAppContext,
     ) {
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let (view, cx) = cx.add_window_view(fixture_window);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.open_palette(true, window, cx);
+                view.open_palette(Filter::Navigation, window, cx);
                 let boot = view.live.snapshot.as_ref().unwrap().boot_id.clone();
                 for endpoint in ["missing-host", crate::endpoint::LOCAL] {
                     if endpoint == crate::endpoint::LOCAL {
@@ -918,7 +1105,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (view, cx) = cx.add_window_view(|window, cx| {
-            let mut view = crate::sidebar::layout_tests::fixture_window(window, cx);
+            let mut view = fixture_window(window, cx);
             let mut remote = crate::endpoint::Endpoint::new(
                 "ssh:box".into(),
                 "Box".into(),
@@ -929,13 +1116,19 @@ mod tests {
                 true,
             );
             remote.live.snapshot = Some(std::sync::Arc::new(snapshot()));
+            remote.live.status = crate::state::ConnectionStatus::Connected;
             view.endpoints.push(remote);
             view
         });
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
-                view.open_palette(true, window, cx);
-                let entries = &view.menu.palette.as_ref().unwrap().entries;
+                view.open_palette(Filter::Navigation, window, cx);
+                let palette = view.menu.palette.as_ref().unwrap();
+                let entries: Vec<_> = palette
+                    .filtered
+                    .iter()
+                    .map(|index| &palette.entries[*index])
+                    .collect();
                 let hosts: Vec<_> = entries
                     .iter()
                     .map(|entry| match &entry.action {
@@ -1031,24 +1224,29 @@ mod tests {
             [
                 (
                     "repo",
-                    "#1  main",
-                    "",
+                    "#1  main  /repo",
+                    "Workspace",
                     NavigationTarget::Workspace("w1".into())
                 ),
                 // The fixture's agent labels its blocked state "waiting".
                 (
                     "Claude",
-                    "main  /repo",
+                    "repo  main  /repo",
                     "waiting",
                     NavigationTarget::Pane("w1:p1".into())
                 ),
                 (
                     "Terminal",
-                    "logs  /repo/logs",
-                    "",
+                    "repo  logs  /repo/logs",
+                    "Terminal",
                     NavigationTarget::Pane("w1:p2".into())
                 ),
-                ("empty", "#2", "", NavigationTarget::Workspace("w2".into())),
+                (
+                    "empty",
+                    "#2",
+                    "Workspace",
+                    NavigationTarget::Workspace("w2".into())
+                ),
             ]
         );
     }
@@ -1087,7 +1285,7 @@ mod tests {
         let mut entries = Vec::new();
         go_to_entries("ssh:box", Some("Box"), &snapshot, &mut entries);
         let details: Vec<_> = entries.iter().map(|entry| entry.detail.as_str()).collect();
-        assert_eq!(details, ["Box  #1  main", "Box  /repo"]);
+        assert_eq!(details, ["Box  #1  main  /repo", "Box  repo  /repo"]);
         assert!(entries.iter().all(|entry| matches!(
             &entry.action,
             Action::Go { endpoint, .. } if endpoint == "ssh:box"
