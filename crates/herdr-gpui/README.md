@@ -360,7 +360,7 @@ Selecting a different device does not change which settings apply:
 
 | Scope | Settings | Source |
 | --- | --- | --- |
-| GUI-wide | Theme and palette overrides, indicator style, sound, toast delivery and clipboard toast, sidebar agent rows (`state_text`), and `[keys]` including the prefix | Local `config.toml`, under `config-gpui.toml` overrides |
+| GUI-wide | Theme and palette overrides, indicator style, sound, toast delivery and clipboard toast, sidebar agent rows (`state_text`), sidebar collapsing (`sidebar_collapsed_mode`, `sidebar_start_collapsed`), and `[keys]` including the prefix | Local `config.toml`, under `config-gpui.toml` overrides |
 | Per host | Worktree directory and custom commands, plus pane defaults and integrations, which the daemon applies itself | That host's daemon, through its snapshot |
 
 Keybindings stay local on an SSH device, as with Herdr's default
