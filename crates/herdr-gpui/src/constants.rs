@@ -5,6 +5,9 @@
 // Every window carries the product name; the focused space follows it.
 pub(crate) const WINDOW_TITLE: &str = "Herdr";
 
+// The macOS bundle identifier, also the Linux app ID and Windows AppUserModelID.
+pub(crate) const APP_ID: &str = "so.pen.herdr-gpui";
+
 // Even tab cells, as on herdr.dev, so short labels do not collapse to a sliver.
 pub(crate) const TAB_WIDTH: f32 = 64.;
 // The reference strip is a shallow band: chrome, not a toolbar.

@@ -101,6 +101,12 @@ when available, so clicking them tests normal navigation; other previews are ine
 Creating previews does not contact the daemon or updater. Close any in-app
 panel first: toasts remain hidden while a panel is open.
 
+**Send notification in 3 seconds** waits long enough to switch to another app,
+then posts a real OS notification (see [System notifications](#system-notifications))
+for the selected host's focused pane, whatever the delivery setting. Clicking it
+tests the normal focus and navigation path. On macOS it needs the `just run`
+bundle, and the first one asks for notification permission.
+
 Spaces lists Local first, then saved hosts in the upstream catalog's order.
 Enabled hosts connect in the background with inactive terminal surfaces; disabled
 hosts remain visible. Host and repository collapse state is endpoint-scoped, and
@@ -332,8 +338,9 @@ These native edits save automatically through the serial background save path,
 preserving unrelated TOML keys/comments and pending theme/layout selections.
 Controls are disabled while a save or reload is in progress. Shared settings
 retain their platform restrictions; Windows can edit native overrides but not
-shared Herdr settings. Terminal and OS notification delivery remain unsupported
-by this GUI.
+shared Herdr settings. System delivery posts OS notifications (see
+[System notifications](#system-notifications)); terminal delivery remains
+unsupported by this GUI.
 
 Integrations is sorted case-insensitively by name, with the original integration
 ID breaking ties. Its search field filters names and IDs without contacting the
@@ -347,6 +354,18 @@ the release `herdr` namespace even in debug builds; select a `herdr-dev` config
 explicitly with `HERDR_CONFIG_PATH` when needed. These are local preferences,
 not a remote daemon's configuration: a socket does not expose the daemon's config
 path or effective settings. General displays the shared file and reload control.
+
+This follows Herdr's own client/server split, which `herdr --remote` uses too.
+Selecting a different device does not change which settings apply:
+
+| Scope | Settings | Source |
+| --- | --- | --- |
+| GUI-wide | Theme and palette overrides, indicator style, sound, toast delivery and clipboard toast, sidebar agent rows (`state_text`), and `[keys]` including the prefix | Local `config.toml`, under `config-gpui.toml` overrides |
+| Per host | Worktree directory and custom commands, plus pane defaults and integrations, which the daemon applies itself | That host's daemon, through its snapshot |
+
+Keybindings stay local on an SSH device, as with Herdr's default
+`--remote-keybindings local`. The GUI has no equivalent of
+`--remote-keybindings server`, and it never reads a remote host's `config.toml`.
 
 Shared saves preserve comments and unknown keys, reject conflicting external
 edits and unsafe paths, and run off the UI thread. Symlinked config files and
@@ -368,8 +387,9 @@ reset colors are projected to opaque native colors.
 
 Sound uses the dedicated Rodio backend, shared global/per-agent settings and
 custom local paths, with Herdr's bundled sounds as fallbacks. The Sound tab offers
-an explicit QA preview. Shared Herdr toast delivery enables in-app notifications;
-Terminal and System delivery are not executed by this native client. Per-field
+an explicit QA preview. Shared Herdr toast delivery enables in-app notifications
+and System delivery posts OS notifications; Terminal delivery is not executed by
+this native client, which has no outer terminal. Per-field
 `[notifications]` settings in the native local override file take precedence.
 Semantic events are bounded, target-validated, and fenced by connection/boot.
 Clipboard feedback has its own shared defaults and native overrides and does not
@@ -408,7 +428,9 @@ systems, and remote hosts from a Windows client, show it as unavailable. Set top
 or turn off **Show CPU and memory** in Settings, to hide it and stop sampling.
 
 `[notifications]` in `config-gpui.local.toml` overrides shared toast preferences
-for GUI-local in-app delivery, independently per key:
+for GUI-local in-app delivery, independently per key. `enabled = true` shows
+in-app toasts even when shared delivery is `system`; `enabled = false` leaves
+shared `system` delivery posting OS notifications:
 
 ```toml
 [notifications]
@@ -516,9 +538,12 @@ the shared pieces in `layouts/parts.rs`: a `Line` gives fixed pieces (icons,
 status, fold) their size, lets labels shrink to a share of the row, and hands
 the rest to the name, so the whole `minimal` layout is under a hundred lines.
 
-Agent names have small theme-tinted icons for OpenCode, Claude Code, Codex
-(OpenAI), Gemini, Cursor, and GitHub Copilot, selected from the daemon's agent identity. Other
-or missing identities use a generic terminal icon, regardless of custom names.
+Agent names have small theme-tinted icons for every agent Herdr detects, selected
+from the daemon's agent identity: brand marks for Pi, Claude Code, Codex (OpenAI),
+Gemini, Cursor, Devin, Antigravity, Cline, Mastra Code, OpenCode, GitHub Copilot,
+Kimi, Kiro, Amp, Grok, Hermes Agent, Kilo Code, Qoder CLI, and Qwen Code, and
+lettermarks for oh-my-pi, Droid, Letta, Maki, and Muse. Unknown or missing
+identities use a generic terminal icon, regardless of custom names.
 Icons sit immediately before the name, including orphan agents whose name is
 on the first line, and reserve space before long names are truncated.
 
@@ -874,15 +899,24 @@ Agent sessions move in each agent's own format, so the full history resumes:
 | Claude Code | transcript into the new cwd's `~/.claude/projects` directory | `claude --resume <id>` |
 | Codex | rollout under `~/.codex/sessions` | `codex resume <id>` |
 | opencode | `opencode export`, then `opencode import` | `opencode --session <id>` |
-| pi, omp | session file into the new cwd's session directory | `pi --session <file>` |
+| pi, omp | session file into the new cwd's session directory | `pi --session <file>`, `omp --resume=<file>` |
+| GitHub Copilot CLI | session directory under `~/.copilot/session-state` (`$COPILOT_HOME`) | `copilot --resume=<id>` |
+| Letta Code | nothing: conversations stay on the Letta server, which the destination must be signed in to | `letta --conversation <id>` |
 
 The checkout path is rewritten inside each moved session. Model and permission
-flags from the original command line are kept. Initial prompts are dropped. An
-agent the destination lacks, or one with no reported session, is asked first to
-write a handoff note to `.herdr/teleport/handoff-N.md`. The note travels with the
-changes, even where `.herdr` is ignored. The same agent, or else the first
-installed of Claude Code, Codex, opencode and pi, then starts with that note.
-Anything nothing can continue is listed as skipped.
+flags from the original command line are kept for the agents above except Letta.
+Initial prompts are dropped. An agent the destination lacks, or one with no
+reported session, is asked first to write a handoff note to
+`.herdr/teleport/handoff-N.md`. The note travels with the changes, even where
+`.herdr` is ignored. The same agent, or else the first installed of Claude Code,
+Codex, opencode and pi, then starts with that note. Anything nothing can continue
+is listed as skipped.
+
+Herdr can resume Devin, Droid, Kimi, Mastra Code, Hermes, Qoder, Qwen Code, Kilo,
+Cursor Agent, Antigravity and Grok sessions too, but only on the host that
+stores them. Teleport does not yet know where these agents store their
+sessions, so a destination that has the agent runs its original command line again
+without a handoff note.
 
 Once the destination worktree, changes and tabs exist, the source workspace's
 programs stop: its tabs are replaced by one idle `teleported` shell tab, and the
@@ -1188,6 +1222,50 @@ mkdir -p ~/.claude/skills/herdr-gpui-browser
 herdr-gpui browser skill > ~/.claude/skills/herdr-gpui-browser/SKILL.md
 ```
 
+## System Notifications
+
+With shared `[ui.toast] delivery = "system"`, daemon notifications (agent
+finished and needs attention, plus custom and update notices) go to the OS
+notification center instead of in-app toasts. They use the same delay, Done and
+Blocked evidence, and connection/boot fencing as toasts. As in the Herdr TUI, a
+notification for the active tab of the selected host is skipped only while the
+window is focused; background tabs, other hosts, and unfocused windows always
+post. Notifications are silent: sounds still follow the Sound settings and
+per-agent overrides. Text is the same bounded, control-stripped plain text as a
+toast. When the window has more than one host, the body's first line names the
+host. A newer event for the same host, daemon boot, and pane replaces the older
+notification where the platform allows. When several windows are attached to the
+same host, an event is posted once.
+
+Clicking a notification brings the app and its window forward and opens the
+target pane, tab, or workspace through the same validation as a toast click. It
+only focuses the window when that connection has since reconnected, the daemon
+restarted, the target is gone, or a menu page is open. Clicks are handled only
+while the GUI runs: a click cannot reopen a closed window.
+
+- **macOS** uses `UNUserNotificationCenter`, which works only from an app bundle
+  with a bundle identifier: the release `Herdr.app` (`so.pen.herdr-gpui`) or the
+  `just run`/`just run-debug` bundles (`so.pen.herdr-gpui.dev`), which the
+  recipe ad-hoc signs so the signature carries that identifier. A bare
+  `target/*/herdr-gpui` binary logs that notifications are disabled and posts
+  nothing. The first notification asks for permission, and macOS shows that
+  prompt instead of the notification itself. macOS remembers the
+  answer per bundle identifier, so development bundles ask separately. If
+  permission is denied, notifications are dropped; allow them again in
+  **System Settings > Notifications > Herdr**. Banners also appear while Herdr is
+  frontmost, for events outside the active tab.
+- **Linux** uses the freedesktop notification service on the session D-Bus;
+  without a notification daemon nothing appears. Clicking requires a server that
+  supports the default action, and raising the window depends on the
+  compositor's focus policy. Notifications are neither replaced nor retracted, so
+  each event shows separately, and each keeps a small waiting thread until the
+  server closes it.
+- **Windows** uses WinRT toasts. The first notification sets the process
+  AppUserModelID to `so.pen.herdr-gpui` and registers its display name under
+  `HKCU\Software\Classes\AppUserModelId`. Because this changes taskbar grouping,
+  it happens only once system delivery posts. Native Windows behavior has not been
+  verified.
+
 ## macOS Dock Badge
 
 The Dock icon shows the number of agents reporting `Done` (finished) or `Blocked`
@@ -1233,7 +1311,13 @@ Windows setup) nothing is saved and the window says so.
   linked worktrees is open), branch details, and daemon-driven
   filled/hollow activity indicators taken from the daemon's own status, so the
   GUI and the terminal client always show the same dot. Each worktree row also
-  carries its cached pull request number and diff counts.
+  carries its cached pull request number and diff counts, and a branch that has
+  drifted from its upstream shows the daemon's counts as in the terminal
+  client: a green `↑` for commits to push and a red `↓` for commits to pull.
+  They follow the branch on two-line rows (`main ↓18`) and sit at the row's
+  end on one-line rows, Compact included. Minimal rows leave them off. They
+  appear only while the daemon's `[ui.sidebar.spaces]` rows name `git_status`,
+  as its defaults do, because the daemon computes them only then.
 - Agents panel header ends with its sort, `grouped` or `priority`, which a
   click flips; an active agent view names itself there instead. Client-local
   and persisted beside the sidebar width, as in the terminal client.
