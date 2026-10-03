@@ -70,6 +70,11 @@ pub struct LiveState {
     /// `tab.move` reorders a workspace's tabs; daemons that do not offer it
     /// to clients keep their tabs where they are.
     pub(crate) supports_tab_move: bool,
+    /// `pane.link.resolve` and `pane.link.activate` let the daemon find links
+    /// across wrapped rows and run plugin link handlers; without them links
+    /// are found row by row here and always opened by this client.
+    pub(crate) supports_link_resolve: bool,
+    pub(crate) supports_link_activate: bool,
     /// `pane.copy_search` drives the find bar; without it Find says so.
     pub(crate) supports_copy_search: bool,
     /// `pane.selection.read` copies selections reaching beyond the screen.
@@ -131,6 +136,8 @@ impl Default for LiveState {
             local_daemon_peer: false,
             supports_pane_clear: false,
             supports_tab_move: false,
+            supports_link_resolve: false,
+            supports_link_activate: false,
             supports_copy_search: false,
             supports_selection_read: false,
             supports_copy_motion: false,
@@ -172,6 +179,8 @@ impl LiveState {
             local_daemon_peer,
             supports_pane_clear,
             supports_tab_move,
+            supports_link_resolve,
+            supports_link_activate,
             supports_copy_search,
             supports_selection_read,
             supports_copy_motion,
@@ -212,6 +221,8 @@ impl LiveState {
             && *local_daemon_peer == self.local_daemon_peer
             && *supports_pane_clear == self.supports_pane_clear
             && *supports_tab_move == self.supports_tab_move
+            && *supports_link_resolve == self.supports_link_resolve
+            && *supports_link_activate == self.supports_link_activate
             && *supports_copy_search == self.supports_copy_search
             && *supports_selection_read == self.supports_selection_read
             && *supports_copy_motion == self.supports_copy_motion
@@ -318,6 +329,10 @@ impl LiveState {
                 self.settings_reload = false;
                 self.supports_pane_clear = Method::PaneClear.advertised_in(&welcome.methods);
                 self.supports_tab_move = Method::TabMove.advertised_in(&welcome.methods);
+                self.supports_link_resolve =
+                    crate::links::LinkRequest::Resolve.advertised_in(&welcome.methods);
+                self.supports_link_activate =
+                    crate::links::LinkRequest::Activate.advertised_in(&welcome.methods);
                 self.supports_copy_search = Method::PaneCopySearch.advertised_in(&welcome.methods);
                 self.supports_selection_read =
                     Method::PaneSelectionRead.advertised_in(&welcome.methods);
