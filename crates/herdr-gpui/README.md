@@ -560,6 +560,11 @@ effects from inactive endpoints. A burst rings at most once per 500 ms. On
 platforms where GPUI does not implement attention requests or the system bell,
 those settings do nothing.
 
+**QA > Ring Bell in 3 Seconds** (QA builds) previews both reactions after a
+delay, so there is time to switch to another app and watch the Dock: it plays the
+system alert and, if the window is then inactive, requests attention. It
+bypasses `[bell]` and the rate limit, and needs no daemon.
+
 The window title follows the daemon's `WindowTitle` message for the selected
 endpoint: a title an agent set with `client.window_title.set`, or Herdr's own
 rendering of `ui.window_title` (`{hostname}`, `{workspace}`, `{tab}`, `{pane}`,

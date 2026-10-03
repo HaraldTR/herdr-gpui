@@ -6,7 +6,7 @@ use super::HerdrWindow;
 use crate::{
     APP_VERSION, CheckForUpdates, Minimize, PlaySound, RunCommand, ShowHerdrNotDetected,
     ShowUpdatePreview,
-    actions::ShowToastPreview,
+    actions::{RingBellPreview, ShowToastPreview},
     browser::{Pick, Shown, Slot},
     config::ClipboardToastPosition,
     fonts::StyledFont,
@@ -502,6 +502,9 @@ impl Render for HerdrWindow {
             }))
             .on_action(cx.listener(|this, _: &PlaySound, _, _| {
                 this.sound.preview();
+            }))
+            .on_action(cx.listener(|this, _: &RingBellPreview, window, cx| {
+                this.preview_bell(window, cx);
             }))
             .size_full()
             .relative()

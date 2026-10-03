@@ -4,7 +4,7 @@
 
 use super::HerdrWindow;
 use crate::{WINDOW_TITLE, sidebar, state::LiveState};
-use gpui::Window;
+use gpui::{Context, Window};
 use herdr_client::Method;
 use serde_json::json;
 use std::time::{Duration, Instant};
@@ -17,6 +17,8 @@ pub(crate) const RESIZE_SETTLE: Duration = Duration::from_millis(150);
 /// A frame another client took is re-claimed more slowly than a settled
 /// window resize, so the request is not resent while the daemon answers it.
 pub(crate) const RESIZE_REASSERT: Duration = Duration::from_secs(1);
+
+const BELL_PREVIEW_DELAY: Duration = Duration::from_secs(3);
 
 impl HerdrWindow {
     pub(crate) fn resize(&mut self) {
@@ -88,12 +90,26 @@ impl HerdrWindow {
         else {
             return;
         };
-        if ring.attention {
-            window.request_attention();
-        }
-        if ring.sound {
-            window.play_system_bell();
-        }
+        ring_bell(window, ring);
+    }
+
+    /// QA > Ring Bell: both reactions, whatever `[bell]` says, after a delay
+    /// long enough to switch to another app, since attention is only asked
+    /// for while the window is inactive.
+    pub(crate) fn preview_bell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(BELL_PREVIEW_DELAY).await;
+            let _ = this.update_in(cx, |_, window, _| {
+                ring_bell(
+                    window,
+                    crate::bell::Ring {
+                        attention: !window.is_window_active(),
+                        sound: true,
+                    },
+                );
+            });
+        })
+        .detach();
     }
 
     /// The daemon's title for the selected connection wins: an agent's
@@ -135,6 +151,15 @@ impl HerdrWindow {
         {
             self.sent_focus = Some(focused);
         }
+    }
+}
+
+fn ring_bell(window: &Window, ring: crate::bell::Ring) {
+    if ring.attention {
+        window.request_attention();
+    }
+    if ring.sound {
+        window.play_system_bell();
     }
 }
 
