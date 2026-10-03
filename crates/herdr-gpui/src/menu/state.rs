@@ -62,6 +62,9 @@ pub(crate) struct MenuState {
     /// The correlated `worktree.create` or `worktree.open` request, so the dialog
     /// can report the daemon's answer and follow the returned workspace.
     pub(super) creation: Option<String>,
+    /// The name a new tab or workspace dialog proposed. Submitting it
+    /// unchanged, or nothing, leaves naming to the daemon, as Herdr does.
+    pub(super) suggested_name: Option<String>,
     pub(super) worktree_open: Option<super::worktree_open::Picker>,
     pub(super) keybinds_scroll: ScrollHandle,
     pub(crate) keybinds_search: Option<Entity<crate::search_input::SearchInput>>,
@@ -230,6 +233,7 @@ impl MenuState {
             deletion: None,
             close_check: None,
             creation: None,
+            suggested_name: None,
             worktree_open: None,
             keybinds_scroll: ScrollHandle::new(),
             keybinds_search: None,
@@ -287,6 +291,7 @@ impl MenuState {
         self.deletion = None;
         self.close_check = None;
         self.creation = None;
+        self.suggested_name = None;
         self.worktree_open = None;
         self.close = None;
         self.worktree = None;

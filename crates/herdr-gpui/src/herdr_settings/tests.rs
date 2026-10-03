@@ -62,6 +62,13 @@ fn defaults_and_path_precedence_without_environment_mutation() -> anyhow::Result
     assert_eq!(settings.toast_position, ToastPosition::BottomRight);
     assert!(settings.clipboard.enabled);
     assert_eq!(settings.clipboard.position, ClipboardPosition::BottomCenter);
+    assert_eq!(
+        settings.name_prompts,
+        NamePrompts {
+            tab: true,
+            workspace: false
+        }
+    );
     let temp = tempfile::tempdir()?;
     let missing = temp.path().join("missing/config.toml");
     assert_eq!(
@@ -129,6 +136,32 @@ fn sidebar_collapse_defaults_compact_expanded_and_parses_upstream_values() -> an
     let newer = parsed("[ui]\nsidebar_collapsed_mode = 'rail'\nsidebar_start_collapsed = true\n")?;
     assert_eq!(newer.sidebar_collapsed_mode, SidebarCollapsedMode::Compact);
     assert!(newer.sidebar_start_collapsed);
+    Ok(())
+}
+
+#[test]
+fn name_prompts_follow_both_ui_keys() -> anyhow::Result<()> {
+    let flipped = parsed("[ui]\nprompt_new_tab_name = false\nprompt_new_workspace_name = true")?;
+    assert_eq!(
+        flipped.name_prompts,
+        NamePrompts {
+            tab: false,
+            workspace: true
+        }
+    );
+    // Each key keeps its own default when only the other is set.
+    assert_eq!(
+        parsed("[ui]\nprompt_new_workspace_name = true")?.name_prompts,
+        NamePrompts {
+            tab: true,
+            workspace: true
+        }
+    );
+    // A value this build cannot read keeps Herdr's default.
+    assert_eq!(
+        parsed("[ui]\nprompt_new_tab_name = 'no'")?.name_prompts,
+        NamePrompts::default()
+    );
     Ok(())
 }
 

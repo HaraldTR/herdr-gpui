@@ -63,7 +63,6 @@ pub struct LiveState {
     pub missing_installation: bool,
     /// Same-user peer at the owned standard socket, not executable attestation.
     pub(crate) local_daemon_peer: bool,
-    pub(crate) supports_workspace_get: bool,
     /// `pane.clear` arrived after Herdr 0.9.1; older daemons reject it.
     pub(crate) supports_pane_clear: bool,
     /// `tab.move` reorders a workspace's tabs; daemons that do not offer it
@@ -127,7 +126,6 @@ impl Default for LiveState {
             error: None,
             missing_installation: false,
             local_daemon_peer: false,
-            supports_workspace_get: false,
             supports_pane_clear: false,
             supports_tab_move: false,
             supports_copy_search: false,
@@ -168,7 +166,6 @@ impl LiveState {
             error,
             missing_installation,
             local_daemon_peer,
-            supports_workspace_get,
             supports_pane_clear,
             supports_tab_move,
             supports_copy_search,
@@ -209,7 +206,6 @@ impl LiveState {
             && *error == self.error
             && *missing_installation == self.missing_installation
             && *local_daemon_peer == self.local_daemon_peer
-            && *supports_workspace_get == self.supports_workspace_get
             && *supports_pane_clear == self.supports_pane_clear
             && *supports_tab_move == self.supports_tab_move
             && *supports_copy_search == self.supports_copy_search
@@ -316,7 +312,6 @@ impl LiveState {
         match event {
             ClientEvent::Connected(welcome) => {
                 self.settings_reload = false;
-                self.supports_workspace_get = Method::WorkspaceGet.advertised_in(&welcome.methods);
                 self.supports_pane_clear = Method::PaneClear.advertised_in(&welcome.methods);
                 self.supports_tab_move = Method::TabMove.advertised_in(&welcome.methods);
                 self.supports_copy_search = Method::PaneCopySearch.advertised_in(&welcome.methods);
