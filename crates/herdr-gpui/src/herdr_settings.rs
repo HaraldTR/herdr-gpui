@@ -189,6 +189,8 @@ pub(crate) struct Settings {
     pub toast_delay_seconds: u64,
     pub toast_position: ToastPosition,
     pub clipboard: ClipboardToast,
+    /// The agents panel's starting order until the user toggles it.
+    pub agent_sort: crate::preferences::AgentSort,
     /// Whether releasing a mouse selection copies it. When off, the
     /// selection stays highlighted until Cmd-C or Ctrl-C copies it.
     pub copy_on_select: bool,
@@ -214,6 +216,7 @@ impl std::fmt::Debug for Settings {
             .field("toast_delay_seconds", &self.toast_delay_seconds)
             .field("toast_position", &self.toast_position)
             .field("clipboard", &self.clipboard)
+            .field("agent_sort", &self.agent_sort)
             .field("copy_on_select", &self.copy_on_select)
             .field("tab_bar_position", &self.tab_bar_position)
             .field(
@@ -239,6 +242,8 @@ struct Parsed {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct Ui {
+    #[serde(deserialize_with = "crate::lenient::or_default")]
+    agent_panel_sort: crate::preferences::AgentSort,
     #[serde(deserialize_with = "crate::lenient::or_default")]
     status_indicators: IndicatorStyle,
     #[serde(deserialize_with = "crate::lenient::or_default")]
@@ -396,6 +401,7 @@ impl Settings {
             toast_delay_seconds: delay,
             toast_position: toast.herdr.position,
             clipboard: toast.clipboard,
+            agent_sort: parsed.ui.agent_panel_sort,
             copy_on_select: parsed.ui.copy_on_select.unwrap_or(true),
             tab_bar_position: parsed.ui.tab_bar_position,
             hide_tab_bar_when_single_tab: parsed.ui.hide_tab_bar_when_single_tab,

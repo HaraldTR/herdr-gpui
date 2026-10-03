@@ -170,6 +170,7 @@ fn values_from_a_newer_herdr_fall_back_one_by_one() -> anyhow::Result<()> {
     // Each value this build cannot read keeps its own default.
     for text in [
         "[ui]\nstatus_indicators = 'bars'",
+        "[ui]\nagent_panel_sort = 'grouped'",
         "[ui.sound]\nenabled = 'true'",
         "[theme]\nauto_switch = 1",
         "[theme.custom]\nred = 123",
@@ -187,6 +188,7 @@ fn values_from_a_newer_herdr_fall_back_one_by_one() -> anyhow::Result<()> {
         let settings = parsed(text)?;
         let defaults = parsed("")?;
         assert_eq!(settings.indicators, defaults.indicators, "{text}");
+        assert_eq!(settings.agent_sort, defaults.agent_sort, "{text}");
         assert_eq!(settings.sound_enabled, defaults.sound_enabled, "{text}");
         assert_eq!(settings.toast_delivery, defaults.toast_delivery, "{text}");
         assert_eq!(settings.toast_delay_seconds, 1, "{text}");
@@ -243,6 +245,20 @@ fn malformed_toml_keeps_typed_sources() -> anyhow::Result<()> {
             .and_then(|error| error.source())
             .is_some_and(|source| source.is::<toml::de::Error>())
     );
+    Ok(())
+}
+
+#[test]
+fn agent_panel_sort_reads_upstream_spellings() -> anyhow::Result<()> {
+    use crate::preferences::AgentSort;
+    for (text, expected) in [
+        ("", AgentSort::Grouped),
+        ("[ui]\nagent_panel_sort = 'spaces'", AgentSort::Grouped),
+        ("[ui]\nagent_panel_sort = 'workspaces'", AgentSort::Grouped),
+        ("[ui]\nagent_panel_sort = 'priority'", AgentSort::Priority),
+    ] {
+        assert_eq!(parsed(text)?.agent_sort, expected, "{text}");
+    }
     Ok(())
 }
 

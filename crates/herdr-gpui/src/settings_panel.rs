@@ -101,6 +101,7 @@ impl HerdrWindow {
                         this.apply_sidebar_start();
                         this.settings.load_status = Some("Loaded from local file".into());
                         this.apply_shared_theme(cx);
+                        this.apply_shared_agent_sort();
                         this.reload_notification_config(cx);
                     }
                     Err(error) => {
@@ -112,6 +113,16 @@ impl HerdrWindow {
             });
         }));
         cx.notify();
+    }
+
+    /// Follows the daemon's `ui.agent_panel_sort` on every load, so a config
+    /// reload changes the order too, unless the user toggled the panel.
+    pub(crate) fn apply_shared_agent_sort(&mut self) {
+        if !self.agent_sort_modified
+            && let Some(shared) = &self.settings.shared
+        {
+            self.agent_sort = shared.agent_sort;
+        }
     }
 
     pub(crate) fn apply_shared_theme(&mut self, cx: &mut Context<Self>) {
@@ -162,6 +173,7 @@ impl HerdrWindow {
                         this.settings.shared = Some(shared);
                         this.settings.status = Some("Saved to local file".into());
                         this.apply_shared_theme(cx);
+                        this.apply_shared_agent_sort();
                         this.reload_notification_config(cx);
                         // Queue directly: neither dialog nor integration response slots belong to us.
                         let local = this.endpoints.iter().find(|endpoint| {
@@ -731,6 +743,61 @@ mod tests {
                 view.apply_shared_theme(cx);
                 assert_eq!(view.theme, fresh.clone().with_contrast(contrast));
             }
+        });
+    }
+
+    /// Herdr's `ui.agent_panel_sort` picks the order, also on a config reload,
+    /// until a toggle, now or stored from an earlier run, overrides it.
+    #[gpui::test]
+    #[allow(clippy::unwrap_used)]
+    fn the_daemon_sort_seeds_the_agents_panel_until_toggled(cx: &mut TestAppContext) {
+        use crate::preferences::{AgentSort, Chrome};
+        let (view, visual) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let load = |cx: &mut VisualTestContext, sort: &'static str| {
+            view.update(cx, |view, cx| {
+                view.load_shared_settings_with(
+                    move || {
+                        Ok(Settings::parse_text(&format!(
+                            "[ui]\nagent_panel_sort = '{sort}'"
+                        ))?)
+                    },
+                    cx,
+                );
+            });
+            cx.run_until_parked();
+            view.read_with(cx, |view, _| (view.agent_sort, view.agent_sort_modified))
+        };
+        assert_eq!(load(visual, "priority"), (AgentSort::Priority, false));
+        // Stored chrome without a toggle leaves the daemon's choice alone.
+        view.update(visual, |view, _| {
+            view.apply_stored_chrome(Chrome::default())
+        });
+        assert_eq!(load(visual, "priority"), (AgentSort::Priority, false));
+        assert_eq!(load(visual, "spaces"), (AgentSort::Grouped, false));
+        assert_eq!(load(visual, "priority"), (AgentSort::Priority, false));
+        // A toggle is the user's from then on; a reload no longer moves it.
+        view.update(visual, |view, _| {
+            view.agent_sort = view.agent_sort.toggled();
+            view.agent_sort_modified = true;
+        });
+        assert_eq!(load(visual, "priority"), (AgentSort::Grouped, true));
+
+        // A toggle stored by an earlier run wins whichever arrives first.
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        view.update(cx, |view, cx| {
+            view.load_shared_settings_with(
+                || Ok(Settings::parse_text("[ui]\nagent_panel_sort = 'priority'")?),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, _| {
+            view.apply_stored_chrome(Chrome {
+                agent_sort: Some(AgentSort::Grouped),
+                ..Chrome::default()
+            });
+            assert_eq!(view.agent_sort, AgentSort::Grouped);
+            assert!(view.agent_sort_modified);
         });
     }
 
