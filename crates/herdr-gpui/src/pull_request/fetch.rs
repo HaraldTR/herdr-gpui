@@ -260,8 +260,8 @@ pub(crate) fn local_checkout(
     let checkout = match &input.checkout {
         Some(path) => path.clone(),
         None => {
-            // Older daemons lack workspace.get. Use Git's own worktree registry,
-            // never pane cwd or the daemon's new-workspace directory policy.
+            // The daemon gives endpoint clients no checkout path. Use Git's own
+            // worktree registry, never pane cwd or the new-workspace policy.
             let mut command = Command::new("git");
             command.args([
                 "-c",

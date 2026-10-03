@@ -194,6 +194,16 @@ impl WorkspaceTarget {
                     "path": text, "focus": true, "trust_repository": false}),
                 )
             }
+            // The label, when there is one, is added by the dialog that knows
+            // which name it proposed.
+            WorkspaceAction::NewTab => (
+                Method::TabCreate,
+                serde_json::json!({"workspace_id": self.id, "focus": true}),
+            ),
+            WorkspaceAction::NewWorkspace => (
+                Method::WorkspaceCreate,
+                serde_json::json!({"focus": true, "source_workspace_id": self.id}),
+            ),
             WorkspaceAction::DeleteWorktree => {
                 if !self.can_delete() || self.worktree != workspace.worktree {
                     return Err(crate::Error::WorkspaceCheckoutChanged);
@@ -240,6 +250,36 @@ fn new_worktree_source(snapshot: &ClientShellSnapshot) -> Result<String, NewWork
         .ok_or(NewWorktreeUnavailable::NoWorkspace)?;
     WorkspaceTarget::for_new_worktree(snapshot, focused)?;
     Ok(focused.workspace_id.clone())
+}
+
+/// The name a new tab dialog proposes: the next number in its workspace, as
+/// Herdr numbers an unnamed tab.
+pub(super) fn suggested_tab_name(snapshot: &ClientShellSnapshot, workspace: &str) -> String {
+    let count = snapshot
+        .tabs
+        .iter()
+        .filter(|tab| tab.workspace_id == workspace)
+        .count();
+    (count + 1).to_string()
+}
+
+/// The name a new workspace dialog proposes: the folder it opens in. Herdr
+/// also consults Git there, which only the daemon's host can do, so leaving
+/// this proposal unchanged still lets the daemon choose the real name.
+pub(super) fn suggested_workspace_name(cwd: &str) -> String {
+    let trimmed = cwd.trim_end_matches('/');
+    match trimmed.rsplit('/').next() {
+        Some(name) if !name.is_empty() => name.to_owned(),
+        _ if cwd.is_empty() => "workspace".to_owned(),
+        _ => "/".to_owned(),
+    }
+}
+
+/// The label a creation sends. An empty name or the unchanged proposal sends
+/// none, so the daemon names the tab or workspace as Herdr's own prompt does.
+pub(super) fn chosen_label<'a>(text: &'a str, suggested: Option<&str>) -> Option<&'a str> {
+    let text = text.trim();
+    (!text.is_empty() && Some(text) != suggested).then_some(text)
 }
 
 /// The workspaces closing `workspace` closes: its whole group when it is its
@@ -347,6 +387,51 @@ impl HerdrWindow {
         if self.menu.page == Some(Page::Workspace) {
             self.open_workspace_dialog(WorkspaceAction::NewWorktree, window, cx);
         }
+    }
+
+    /// Asks for a name before `command` creates a tab or workspace, when the
+    /// local Herdr config's `ui.prompt_new_tab_name` or
+    /// `ui.prompt_new_workspace_name` says to. Returns whether the dialog
+    /// opened; otherwise the caller creates at once.
+    pub(crate) fn open_name_prompt(
+        &mut self,
+        command: crate::controls::Command,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::controls::Command;
+        let prompts = self
+            .settings
+            .shared
+            .as_ref()
+            .map(|shared| shared.name_prompts)
+            .unwrap_or_default();
+        let action = match command {
+            Command::Tab if prompts.tab => WorkspaceAction::NewTab,
+            Command::Workspace if prompts.workspace => WorkspaceAction::NewWorkspace,
+            _ => return false,
+        };
+        // Only where creating at once would be allowed, so the prompt never
+        // offers what the command itself would refuse.
+        if self.activation_deadline.is_some()
+            || !self.endpoints[self.selected_endpoint].surface_requested()
+        {
+            return false;
+        }
+        let Some(id) = self
+            .live
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.focused_workspace_id.clone())
+        else {
+            return false;
+        };
+        self.open_workspace_menu(&id, Point::default(), window, cx);
+        if self.menu.page != Some(Page::Workspace) {
+            return false;
+        }
+        self.open_workspace_dialog(action, window, cx);
+        true
     }
 
     pub(super) fn workspace_items(&self) -> Vec<(WorkspaceMenuAction, &'static str)> {
@@ -460,8 +545,28 @@ impl HerdrWindow {
         let Some(target) = &self.menu.target else {
             return;
         };
+        let workspace = self.live.snapshot.as_ref().and_then(|snapshot| {
+            let workspace = snapshot
+                .workspaces
+                .iter()
+                .find(|w| w.workspace_id == target.id && snapshot.boot_id == target.boot_id)?;
+            Some((snapshot, workspace))
+        });
+        // Proposed selected, as Herdr does, so typing replaces it.
+        self.menu.suggested_name = match (action, workspace) {
+            (WorkspaceAction::NewTab, Some((snapshot, _))) => {
+                Some(suggested_tab_name(snapshot, &target.id))
+            }
+            (WorkspaceAction::NewWorkspace, Some((_, workspace))) => {
+                Some(suggested_workspace_name(&workspace.new_workspace_cwd))
+            }
+            _ => None,
+        };
         self.menu.input = match action {
             WorkspaceAction::Rename => Some(DialogInput::new(target.label.clone())),
+            WorkspaceAction::NewTab | WorkspaceAction::NewWorkspace => Some(DialogInput::new(
+                self.menu.suggested_name.clone().unwrap_or_default(),
+            )),
             // Propose the daemon's own branch shape, selected so typing replaces it.
             WorkspaceAction::NewWorktree => {
                 Some(DialogInput::new(crate::worktree::proposed_branch()))
@@ -842,6 +947,13 @@ impl HerdrWindow {
             {
                 params["label"] = name.into();
             }
+            if matches!(
+                action,
+                WorkspaceAction::NewTab | WorkspaceAction::NewWorkspace
+            ) && let Some(label) = chosen_label(text, self.menu.suggested_name.as_deref())
+            {
+                params["label"] = label.into();
+            }
             if action == WorkspaceAction::Close {
                 let Some(check) = &self.menu.close_check else {
                     return Ok(Submission::Awaiting {
@@ -988,6 +1100,8 @@ impl HerdrWindow {
             WorkspaceAction::Close => (target.close_label(), target.close_label()),
             WorkspaceAction::NewWorktree => ("New worktree", "Create"),
             WorkspaceAction::OpenWorktree => ("Open worktree", "Open"),
+            WorkspaceAction::NewTab => ("New tab", "Create"),
+            WorkspaceAction::NewWorkspace => ("New workspace", "Create"),
             WorkspaceAction::DeleteWorktree if force => ("Force delete checkout?", "Force remove"),
             WorkspaceAction::DeleteWorktree => ("Delete worktree checkout?", "Remove"),
         };
@@ -997,6 +1111,16 @@ impl HerdrWindow {
             WorkspaceAction::Rename => {
                 body.child(div().text_color(rgb(theme.muted)).child("Edit the workspace label."))
             }
+            WorkspaceAction::NewTab => body.child(
+                div()
+                    .text_color(rgb(theme.muted))
+                    .child("Name the tab, or leave the suggestion for Herdr to number it."),
+            ),
+            WorkspaceAction::NewWorkspace => body.child(
+                div()
+                    .text_color(rgb(theme.muted))
+                    .child("Name the workspace, or leave the suggestion for Herdr to name it."),
+            ),
             WorkspaceAction::Close => body.child(div().text_color(rgb(theme.muted)).child(format!(
                 "Closes {} workspace(s) and terminates their running terminals. Checkout files and branches are not deleted.",
                 target.close_members.len()

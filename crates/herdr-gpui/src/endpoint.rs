@@ -950,6 +950,7 @@ impl HerdrWindow {
             self.local_error = Some(error);
             changed = Redraw::Window;
         }
+        self.sync_server_keymap(cx);
         match changed {
             Redraw::None => {}
             Redraw::Terminal => self.redraw_terminal(cx),
@@ -1173,6 +1174,7 @@ mod tests {
             0,
             config,
             false,
+            true,
             None,
             now
         ));
@@ -1182,6 +1184,7 @@ mod tests {
             0,
             config,
             false,
+            true,
             None,
             deadline
         ));

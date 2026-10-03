@@ -13,6 +13,7 @@ pub(crate) mod watch;
 use gpui::{Font, FontFallbacks};
 use serde::Deserialize;
 use std::{
+    collections::BTreeMap,
     env, fs,
     io::{ErrorKind, Write},
     ops::RangeInclusive,
@@ -108,10 +109,49 @@ pub struct Config {
     pub bell: BellConfig,
     pub layout: Layout,
     pub keybindings: Keymap,
+    /// The `[keybindings]` table `keybindings` was built from, kept so a
+    /// device's server keys can be layered under the same GUI overrides.
+    pub(crate) keybinding_overrides: BTreeMap<String, Binding>,
+    /// Per saved device, by catalog profile ID.
+    pub(crate) devices: BTreeMap<String, DeviceSettings>,
     /// Keys the file names that this build does not know, sorted. They are
     /// ignored, as Herdr ignores its own, so a config written by a newer
     /// build or with a typo still loads; `diagnostic` reports them.
     pub unknown_keys: Vec<String>,
+}
+
+/// A device list larger than any real catalog is a config mistake.
+const MAX_DEVICES: usize = 256;
+
+/// Whose `[keys]` a saved device answers to, as `herdr --remote-keybindings`
+/// chooses for the TUI. Local is upstream's default: muscle memory stays the
+/// same on every host. Only keybindings follow the server; themes, sidebar,
+/// and toasts stay local either way.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum KeybindingSource {
+    #[default]
+    Local,
+    /// The host's published `server_keybindings_toml`.
+    Server,
+}
+
+/// One `[devices.<profile-id>]` table.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct DeviceSettings {
+    pub(crate) keybindings: KeybindingSource,
+}
+
+impl Config {
+    /// Whose keybindings the endpoint uses. Local and explicit sockets are not
+    /// saved devices, so they always use the local ones.
+    pub(crate) fn keybinding_source(&self, endpoint_id: &str) -> KeybindingSource {
+        crate::endpoint::saved_profile_id(endpoint_id)
+            .and_then(|profile| self.devices.get(profile))
+            .map(|device| device.keybindings)
+            .unwrap_or_default()
+    }
 }
 
 /// Where a clicked terminal link opens. Alt-click (Option on macOS) opens it
@@ -231,7 +271,13 @@ impl Default for BellConfig {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct NotificationConfig {
+    /// In-app toasts, which take precedence over OS notifications.
     pub enabled: bool,
+    /// Shared `system` delivery: post daemon notifications to the OS
+    /// notification center. Not a native key, so a local override of
+    /// `enabled` decides between the two.
+    #[serde(skip)]
+    pub system: bool,
     #[serde(deserialize_with = "notification_delay")]
     pub delay_seconds: u64,
     pub position: herdr_client::protocol::ToastHerdrPosition,
@@ -241,6 +287,7 @@ impl Default for NotificationConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            system: false,
             delay_seconds: 1,
             position: herdr_client::protocol::ToastHerdrPosition::BottomRight,
         }
@@ -257,10 +304,31 @@ pub(crate) struct NotificationSettings {
     position: Option<herdr_client::protocol::ToastHerdrPosition>,
 }
 
+/// Where a daemon notification that passes the shared policy is presented.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NotificationDelivery {
+    Off,
+    InApp,
+    System,
+}
+
+impl NotificationConfig {
+    pub(crate) fn delivery(self) -> NotificationDelivery {
+        if self.enabled {
+            NotificationDelivery::InApp
+        } else if self.system {
+            NotificationDelivery::System
+        } else {
+            NotificationDelivery::Off
+        }
+    }
+}
+
 impl NotificationSettings {
     fn resolve(self, base: NotificationConfig) -> NotificationConfig {
         NotificationConfig {
             enabled: self.enabled.unwrap_or(base.enabled),
+            system: base.system,
             delay_seconds: self.delay_seconds.unwrap_or(base.delay_seconds),
             position: self.position.unwrap_or(base.position),
         }
@@ -674,6 +742,8 @@ impl Default for Config {
             bell: BellConfig::default(),
             layout: Layout::default(),
             keybindings: Keymap::default(),
+            keybinding_overrides: BTreeMap::new(),
+            devices: BTreeMap::new(),
             unknown_keys: Vec::new(),
             sidebar: font(monospace, 12.0),
             // Tabs are terminal chrome, so they read in the monospace face the
@@ -706,7 +776,8 @@ struct Settings {
     clipboard_toast: ClipboardToastSettings,
     bell: BellConfig,
     layout: Layout,
-    keybindings: std::collections::BTreeMap<String, Binding>,
+    keybindings: BTreeMap<String, Binding>,
+    devices: BTreeMap<String, DeviceSettings>,
 }
 
 /// Each key overrides the daemon's answer on its own, so naming one of them
@@ -822,7 +893,7 @@ pub struct AgentStatusText {
     /// Whether `rows` names the token: agents without their own entry.
     rows: bool,
     /// Per canonical agent id, whether its `rows_by_agent` entry names it.
-    by_agent: std::collections::BTreeMap<String, bool>,
+    by_agent: BTreeMap<String, bool>,
 }
 
 impl AgentStatusText {
@@ -962,10 +1033,12 @@ fn theme_directories() -> Result<Vec<PathBuf>> {
 
 impl Config {
     /// Pure application of a prepared shared snapshot. Native explicit keys win;
-    /// terminal/system delivery does not implicitly enable this GUI's in-app toasts.
+    /// system delivery posts OS notifications instead of in-app toasts, and
+    /// terminal delivery has no outer terminal to reach from this GUI.
     pub(crate) fn apply_shared_notifications(&mut self, shared: &crate::herdr_settings::Settings) {
         self.notifications = self.notification_overrides.resolve(NotificationConfig {
             enabled: shared.toast_delivery == crate::herdr_settings::ToastDelivery::Herdr,
+            system: shared.toast_delivery == crate::herdr_settings::ToastDelivery::System,
             delay_seconds: shared.toast_delay_seconds,
             position: shared.toast_position,
         });
@@ -1173,6 +1246,15 @@ impl Config {
             known
         });
         unknown_keys.extend(settings.usage.retain_known());
+        // Only catalog profile IDs name a device; anything else is ignored
+        // and reported like any other unknown key.
+        settings.devices.retain(|id, _| {
+            let known = herdr_client::valid_profile_id(id);
+            if !known {
+                unknown_keys.push(format!("devices.{id}"));
+            }
+            known
+        });
         // Unknown keys are ignored, but a credential pasted into the file is
         // refused so it is noticed and removed rather than left on disk.
         if let Some(name) = ["client_secret", "private_key", "token"]
@@ -1208,6 +1290,11 @@ impl Config {
         }
         config.layout = settings.layout;
         config.keybindings = Keymap::with_overrides(&settings.keybindings, &base.keys)?;
+        config.keybinding_overrides = settings.keybindings;
+        if settings.devices.len() > MAX_DEVICES {
+            return Err(Error::TooManyDevices(MAX_DEVICES));
+        }
+        config.devices = settings.devices;
         if let Some(theme) = settings.theme {
             if theme.trim().is_empty() {
                 return Err(Error::EmptyTheme);
@@ -1420,6 +1507,69 @@ impl Config {
                 *value.decor_mut() = previous.decor().clone();
             }
             document["contrast"] = toml_edit::Item::Value(value);
+            write_config(path, &document.to_string())
+        })();
+        result.map_err(|error| error.at_path(path))
+    }
+
+    /// Persist one device's keybinding source, keeping the rest of the local
+    /// file. Local is the default, so choosing it removes the entry.
+    pub(crate) fn save_device_keybindings(profile: &str, source: KeybindingSource) -> Result<()> {
+        let (_lock, local) = Self::prepare_files(&Self::path()?)?;
+        Self::save_device_keybindings_path(profile, source, &local)
+    }
+
+    fn save_device_keybindings_path(
+        profile: &str,
+        source: KeybindingSource,
+        path: &Path,
+    ) -> Result<()> {
+        if !herdr_client::valid_profile_id(profile) {
+            return Err(Error::InvalidDeviceId(profile.to_owned()));
+        }
+        let result = (|| -> Result<()> {
+            let text = match fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == ErrorKind::NotFound => LOCAL_CONFIG.into(),
+                Err(error) => return Err(error.into()),
+            };
+            let mut document = text.parse::<toml_edit::DocumentMut>()?;
+            match source {
+                KeybindingSource::Server => {
+                    let mut devices = toml_edit::Table::new();
+                    devices.set_implicit(true);
+                    let device = document
+                        .entry("devices")
+                        .or_insert(toml_edit::Item::Table(devices))
+                        .as_table_like_mut()
+                        .ok_or(Error::InvalidDevicesTable)?
+                        .entry(profile)
+                        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+                        .as_table_like_mut()
+                        .ok_or(Error::InvalidDevicesTable)?;
+                    device.insert("keybindings", toml_edit::value("server"));
+                }
+                KeybindingSource::Local => {
+                    let Some(devices) = document
+                        .get_mut("devices")
+                        .and_then(toml_edit::Item::as_table_like_mut)
+                    else {
+                        return Ok(());
+                    };
+                    if let Some(device) = devices
+                        .get_mut(profile)
+                        .and_then(toml_edit::Item::as_table_like_mut)
+                    {
+                        device.remove("keybindings");
+                        if device.is_empty() {
+                            devices.remove(profile);
+                        }
+                    }
+                    if devices.is_empty() {
+                        document.remove("devices");
+                    }
+                }
+            }
             write_config(path, &document.to_string())
         })();
         result.map_err(|error| error.at_path(path))
@@ -1866,12 +2016,12 @@ mod tests {
             config.clipboard_toast.enabled = false;
             config.contrast = Contrast::High;
             let session = config.clone();
-            for (delivery, enabled) in [
-                ("herdr", true),
-                ("off", false),
-                ("system", false),
-                ("terminal", false),
-                ("herdr", true),
+            for (delivery, enabled, system) in [
+                ("herdr", true, false),
+                ("off", false, false),
+                ("system", false, true),
+                ("terminal", false, false),
+                ("herdr", true, false),
             ] {
                 let shared = Shared::parse_text(&format!(
                     "[ui.toast]\ndelivery = '{delivery}'\ndelay_seconds = 7\n[ui.toast.herdr]\nposition = 'top-left'\n"
@@ -1881,6 +2031,7 @@ mod tests {
                     config.notifications,
                     NotificationConfig {
                         enabled,
+                        system,
                         delay_seconds: 7,
                         position: ToastHerdrPosition::TopLeft
                     }
@@ -1938,6 +2089,7 @@ mod tests {
                     config.notifications,
                     NotificationConfig {
                         enabled,
+                        system: false,
                         delay_seconds,
                         position
                     },
@@ -1951,6 +2103,19 @@ mod tests {
                 "[ui.toast]\ndelivery = '{delivery}'"
             ))?);
             assert!(config.notifications.enabled);
+            assert_eq!(config.notifications.delivery(), NotificationDelivery::InApp);
+        }
+        // A local opt-out of in-app toasts leaves shared system delivery in charge.
+        let mut config = Config::parse("[notifications]\nenabled = false")?;
+        for (delivery, expected) in [
+            ("system", NotificationDelivery::System),
+            ("herdr", NotificationDelivery::Off),
+            ("terminal", NotificationDelivery::Off),
+        ] {
+            config.apply_shared_notifications(&Shared::parse_text(&format!(
+                "[ui.toast]\ndelivery = '{delivery}'"
+            ))?);
+            assert_eq!(config.notifications.delivery(), expected, "{delivery}");
         }
         Ok(())
     }
@@ -2284,6 +2449,7 @@ mod tests {
                     config.notifications,
                     NotificationConfig {
                         enabled: true,
+                        system: false,
                         delay_seconds: delay,
                         position
                     }
@@ -2305,6 +2471,13 @@ mod tests {
             assert!(matches!(error, Error::Toml(_)), "{field}: {error:?}");
             assert!(error.source().is_some());
         }
+        // Delivery is a shared Herdr setting; a native `system` key is unknown.
+        assert_eq!(
+            Config::parse("[notifications]\nsystem=true")?
+                .notifications
+                .delivery(),
+            NotificationDelivery::Off
+        );
         Ok(())
     }
 
@@ -3147,6 +3320,129 @@ mod tests {
             assert!(Config::parse(text).is_err(), "accepted {text:?}");
         }
         assert!(Config::parse("[tabs]\nsize = 8\n[ui]\nsize = 48").is_ok());
+    }
+
+    #[test]
+    fn devices_opt_into_server_keybindings_one_by_one() -> anyhow::Result<()> {
+        const ID: &str = "0123456789abcdef0123456789abcdef";
+        const OTHER: &str = "fedcba9876543210fedcba9876543210";
+        let config = Config::parse(&format!(
+            "[keybindings]\nnew_tab = 'cmd-y'\n[devices.{ID}]\nkeybindings = 'server'\n[devices.{OTHER}]\nkeybindings = 'local'"
+        ))?;
+        assert_eq!(
+            config.keybinding_source(&format!("ssh:{ID}")),
+            KeybindingSource::Server
+        );
+        assert_eq!(
+            config.keybinding_source(&format!("ssh:{OTHER}")),
+            KeybindingSource::Local
+        );
+        // Local, explicit sockets, and unlisted devices keep local keys, and
+        // a bare profile ID is not an endpoint ID.
+        for endpoint in [
+            "local",
+            "socket",
+            ID,
+            "ssh:00000000000000000000000000000000",
+        ] {
+            assert_eq!(
+                config.keybinding_source(endpoint),
+                KeybindingSource::Local,
+                "{endpoint}"
+            );
+        }
+        assert_eq!(
+            Config::parse("")?.keybinding_source(&format!("ssh:{ID}")),
+            KeybindingSource::Local
+        );
+        // The overrides stay available to layer over a server profile.
+        assert_eq!(
+            config.keybinding_overrides.get("new_tab"),
+            Some(&Binding::One("cmd-y".into()))
+        );
+        // A non-catalog ID, or a key this build does not know, is ignored
+        // and reported, as other unknown keys are.
+        let ignored = Config::parse(&format!(
+            "[devices.box]\nkeybindings = 'server'\n[devices.{ID}]\nkeybindings = 'server'\ntheme = 'Nord'"
+        ))?;
+        assert_eq!(
+            ignored.unknown_keys,
+            [format!("devices.{ID}.theme"), "devices.box".to_owned()]
+        );
+        assert_eq!(ignored.devices.len(), 1);
+        assert_eq!(
+            ignored.keybinding_source(&format!("ssh:{ID}")),
+            KeybindingSource::Server
+        );
+        for text in [
+            format!("[devices.{ID}]\nkeybindings = 'remote'"),
+            format!("[devices.{ID}]\nkeybindings = true"),
+            "devices = 'server'".into(),
+        ] {
+            assert!(Config::parse(&text).is_err(), "accepted {text:?}");
+        }
+        let many: String = (0..=MAX_DEVICES)
+            .map(|index| format!("[devices.{index:032x}]\n"))
+            .collect();
+        assert!(matches!(
+            Config::parse(&many),
+            Err(Error::TooManyDevices(MAX_DEVICES))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn device_keybindings_save_in_place_and_local_removes_them() -> anyhow::Result<()> {
+        const ID: &str = "0123456789abcdef0123456789abcdef";
+        let endpoint = format!("ssh:{ID}");
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config.toml");
+        let original = "theme = 'Nord' # keep\n[usage]\nshow = false\n";
+        fs::write(&path, original)?;
+        Config::save_device_keybindings_path(ID, KeybindingSource::Server, &path)?;
+        let saved = fs::read_to_string(&path)?;
+        assert!(saved.starts_with(original), "{saved}");
+        assert!(
+            saved.contains(&format!("[devices.{ID}]\nkeybindings = \"server\"")),
+            "{saved}"
+        );
+        let config = Config::parse(&saved)?;
+        assert_eq!(
+            config.keybinding_source(&endpoint),
+            KeybindingSource::Server
+        );
+        assert!(!config.usage.show);
+        // Saving it again is a no-op, and Local restores the original file.
+        Config::save_device_keybindings_path(ID, KeybindingSource::Server, &path)?;
+        assert_eq!(fs::read_to_string(&path)?, saved);
+        Config::save_device_keybindings_path(ID, KeybindingSource::Local, &path)?;
+        assert_eq!(fs::read_to_string(&path)?, original);
+        Config::save_device_keybindings_path(ID, KeybindingSource::Local, &path)?;
+        assert_eq!(fs::read_to_string(&path)?, original);
+        // Another device's entry, and unknown keys, survive.
+        let shared = format!(
+            "[devices.{ID}]\nkeybindings = 'server'\n[devices.fedcba9876543210fedcba9876543210]\nkeybindings = 'server'\n"
+        );
+        fs::write(&path, &shared)?;
+        Config::save_device_keybindings_path(ID, KeybindingSource::Local, &path)?;
+        let kept = fs::read_to_string(&path)?;
+        assert!(!kept.contains(ID), "{kept}");
+        assert!(kept.contains("fedcba9876543210fedcba9876543210"), "{kept}");
+        // An ID that is not a catalog profile never reaches the file.
+        assert!(matches!(
+            Config::save_device_keybindings_path("../x", KeybindingSource::Server, &path),
+            Err(Error::InvalidDeviceId(_))
+        ));
+        assert_eq!(fs::read_to_string(&path)?, kept);
+        fs::remove_file(&path)?;
+        Config::save_device_keybindings_path(ID, KeybindingSource::Server, &path)?;
+        let created = fs::read_to_string(&path)?;
+        assert!(created.starts_with(LOCAL_CONFIG), "{created}");
+        assert_eq!(
+            Config::parse(&created)?.keybinding_source(&endpoint),
+            KeybindingSource::Server
+        );
+        Ok(())
     }
 
     #[test]
