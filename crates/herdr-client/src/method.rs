@@ -227,6 +227,8 @@ mod tests {
         Method::PaneEditScrollback,
         Method::PaneFocus,
         Method::PaneFocusDirection,
+        Method::PaneLinkActivate,
+        Method::PaneLinkResolve,
         Method::PaneRename,
         Method::PaneScroll,
         Method::PaneSelectionRead,
@@ -265,6 +267,8 @@ mod tests {
                 | Method::PaneEditScrollback
                 | Method::PaneFocus
                 | Method::PaneFocusDirection
+                | Method::PaneLinkActivate
+                | Method::PaneLinkResolve
                 | Method::PaneRename
                 | Method::PaneScroll
                 | Method::PaneSelectionRead
