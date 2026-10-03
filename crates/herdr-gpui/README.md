@@ -409,7 +409,20 @@ Integrations are managed on the **selected daemon's host** through advertised
 by an explicit button click, modifies agent hook/plugin configuration on that
 host, and refreshes the list afterward. No uninstall action is offered because
 the upstream binary endpoint does not advertise it. Native GitHub sign-in remains
-separate from agent integrations.
+separate from agent integrations. When the daemon reports outdated integration
+assets, **Integrations** in the Settings sidebar shows an **Update** badge before
+the list is loaded.
+
+The selected daemon's product announcement appears as a card at the top right
+of the terminal area until its close button is clicked. Dismissing it calls
+`product_announcement.dismiss`, so every client of that daemon stops showing it;
+a daemon that rejects the request brings the card back, and one that does not
+offer the method only hides it for the current connection. The sidebar menu's
+**what's new** (or **update ready**, when the daemon offers a newer Herdr) opens
+the daemon's release notes; closing them calls `release_notes.dismiss`. Both
+texts are daemon data shown as text only: control characters are stripped,
+`http`/`https` links open in the browser only when clicked, and a displayed
+install command is never run.
 
 The terminal face can also be resized for the current session from the View menu,
 the in-app menu, the command palette, or `cmd-=` / `cmd--` / `cmd-0`. Adjustments

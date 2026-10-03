@@ -1723,3 +1723,40 @@ fn reload_publishes_baseline_and_rebinds_only_changed_keys(cx: &mut TestAppConte
             .unwrap();
     });
 }
+
+#[gpui::test]
+fn integrations_badge_follows_the_daemon_flag(cx: &mut TestAppContext) {
+    let main = cx.add_window(crate::sidebar::layout_tests::fixture_window);
+    let set = |cx: &mut TestAppContext, outdated: bool| {
+        main.update(cx, |view, _, cx| {
+            let mut snapshot = crate::sidebar::layout_tests::snapshot(2);
+            snapshot.integration_updates_available = outdated;
+            view.live.snapshot = Some(Arc::new(snapshot));
+            cx.notify();
+        })
+        .unwrap();
+    };
+    set(cx, true);
+    let weak = cx.update(|cx| main.update(cx, |_, _, cx| cx.weak_entity()).unwrap());
+    let (view, cx) = cx.add_window_view(|_, cx| SettingsWindow::new(weak, cx));
+    let draw = |cx: &mut VisualTestContext| {
+        for _ in 0..2 {
+            cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+        }
+    };
+    draw(cx);
+    // The flag is the daemon's, so it shows before the section is opened.
+    assert_eq!(
+        view.read_with(cx, |view, _| view.section),
+        Section::Appearance
+    );
+    let badge = cx.debug_bounds("settings-integrations-badge").unwrap();
+    let row = cx.debug_bounds("settings-section-5").unwrap();
+    assert!(row.contains(&badge.center()));
+    set(cx, false);
+    draw(cx);
+    assert!(cx.debug_bounds("settings-integrations-badge").is_none());
+    set(cx, true);
+    draw(cx);
+    assert!(cx.debug_bounds("settings-integrations-badge").is_some());
+}

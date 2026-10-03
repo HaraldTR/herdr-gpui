@@ -1432,6 +1432,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         bell: Default::default(),
         updater: crate::updater::Updater::default(),
         update_preview: None,
+        daemon_text: Default::default(),
         removal: None,
         teleport: None,
         teleport_marks: crate::teleport::Marks::detached(),

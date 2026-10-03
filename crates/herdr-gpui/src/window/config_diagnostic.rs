@@ -9,10 +9,8 @@ use std::sync::Arc;
 const MAX_WIDTH: f32 = 420.;
 
 impl HerdrWindow {
-    pub(super) fn render_config_diagnostic(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.menu.page.is_some() {
-            return None;
-        }
+    /// This app's GUI config warning, then the selected daemon's diagnostic.
+    pub(super) fn config_diagnostic_cards(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let gui = self.gui_config_diagnostic.visible().map(|lines| {
             let drawn = lines.clone();
             self.render_diagnostic_card(
@@ -52,23 +50,10 @@ impl HerdrWindow {
                     cx,
                 ))
             });
-        if gui.is_none() && endpoint.is_none() {
-            return None;
-        }
-        Some(
-            div()
-                .absolute()
-                .top(px(8.))
-                .right(px(8.))
-                .left(px(8.))
-                .flex()
-                .flex_col()
-                .items_end()
-                .gap(px(8.))
-                .children(gui)
-                .children(endpoint)
-                .into_any_element(),
-        )
+        gui.into_iter()
+            .chain(endpoint)
+            .map(IntoElement::into_any_element)
+            .collect()
     }
 
     fn render_diagnostic_card(

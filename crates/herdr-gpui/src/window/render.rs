@@ -23,6 +23,37 @@ use std::time::Duration;
 /// this size to look as large as the 12px ring of the report-issue button.
 const STATUS_GLYPH: f32 = 16.;
 
+impl HerdrWindow {
+    /// Config warnings, then the daemon's announcement, stacked over the
+    /// top-right of the terminal area below the tab strip, whose buttons stay
+    /// reachable. A menu page owns the window's attention; they wait behind it.
+    fn render_notices(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.menu.page.is_some() {
+            return None;
+        }
+        let mut cards = self.config_diagnostic_cards(cx);
+        cards.extend(self.announcement_card(cx));
+        if cards.is_empty() {
+            return None;
+        }
+        // Spans the terminal area so a narrow window shrinks the cards rather
+        // than pushing them off the left edge.
+        Some(
+            div()
+                .absolute()
+                .top(px(self.tab_strip_height() + 8.))
+                .left(px(8.))
+                .right(px(8.))
+                .flex()
+                .flex_col()
+                .items_end()
+                .gap(px(8.))
+                .children(cards)
+                .into_any_element(),
+        )
+    }
+}
+
 impl Render for HerdrWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.restore_menu_focus(window, cx);
@@ -597,7 +628,7 @@ impl Render for HerdrWindow {
                              .min_h_0()
                             .relative()
                             .child(content)
-                            .children(self.render_config_diagnostic(cx))
+                            .children(self.render_notices(cx))
                             .child(
                 div()
                     .id("connection-status")
