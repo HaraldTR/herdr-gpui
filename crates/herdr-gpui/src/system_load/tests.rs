@@ -180,8 +180,8 @@ fn a_wanted_host_is_sampled_and_a_dropped_one_forgotten() {
     // Only this machine: a remote host would start a real `ssh`.
     let mut load = SystemLoad::default();
     let local = Host::Local;
-    // Starting a monitor shows nothing new by itself, but a fast first sample
-    // can already be drained by the same poll.
+    // Starting a worker shows nothing new by itself, but a fast machine can
+    // answer before this same poll drains it, which is a change.
     let changed = load.poll([local.clone()]);
     let reading = load.get(&local).unwrap();
     assert_eq!(

@@ -1299,6 +1299,25 @@ fn connected_mouse_focused_pane_preserves_drag_target_and_immediate_text(
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
                 prepare_mouse(view, endpoint);
+                if button == MouseButton::Right {
+                    // A right-click stays with the window until Herdr routes
+                    // the pane's right-clicks to the application.
+                    assert!(!view.terminal_mouse_down(
+                        &MouseDownEvent {
+                            position: mouse_position(view, 3.5, 4.5),
+                            button,
+                            ..Default::default()
+                        },
+                        window,
+                        cx
+                    ));
+                    assert!(view.terminal_mouse.is_none());
+                    Arc::make_mut(view.live.snapshot.as_mut().unwrap())
+                        .panes
+                        .iter_mut()
+                        .filter(|pane| pane.pane_id == "w1:p1")
+                        .for_each(|pane| pane.right_click_passthrough = true);
+                }
                 assert!(view.terminal_mouse_down(
                     &MouseDownEvent {
                         position: mouse_position(view, 3.5, 4.5),
