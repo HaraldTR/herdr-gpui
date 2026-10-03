@@ -97,6 +97,23 @@ impl HerdrWindow {
             )
     }
 
+    /// Asks the selected daemon to reread its config file.
+    pub(crate) fn reload_daemon_config(&mut self) {
+        if let (Some(handle), Some(snapshot)) = (
+            &self.endpoints[self.selected_endpoint].connection.handle,
+            &self.live.snapshot,
+        ) {
+            self.local_error = handle
+                .request(
+                    &snapshot.boot_id,
+                    Method::ServerReloadConfig,
+                    serde_json::json!({}),
+                )
+                .err()
+                .map(|error| format!("Reload config: {error}"));
+        }
+    }
+
     pub(super) fn menu_items(&self) -> Vec<&'static str> {
         let mut items = vec![
             "settings",
@@ -161,19 +178,7 @@ impl HerdrWindow {
             "preview app update" => self.open_app_update(true, window, cx),
             "reload GUI config" => self.reload_gui_config(window, cx),
             "reload daemon config" => {
-                if let (Some(handle), Some(snapshot)) = (
-                    &self.endpoints[self.selected_endpoint].connection.handle,
-                    &self.live.snapshot,
-                ) {
-                    self.local_error = handle
-                        .request(
-                            &snapshot.boot_id,
-                            Method::ServerReloadConfig,
-                            serde_json::json!({}),
-                        )
-                        .err()
-                        .map(|error| format!("Reload config: {error}"));
-                }
+                self.reload_daemon_config();
                 self.dismiss_menu(window, cx);
             }
             "detach" => {

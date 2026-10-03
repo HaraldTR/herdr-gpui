@@ -196,8 +196,14 @@ impl Render for HerdrWindow {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
             // A selection is copied when it is released, so the terminal has
-            // nothing for Cut, Copy, or Select All to act on.
+            // nothing for Cut or Select All to act on, and Copy only while
+            // Herdr's `copy_on_select` is off and a released selection waits.
             .on_action(cx.listener(|this, _: &crate::actions::Paste, _, cx| this.paste(cx)))
+            .when(self.selection_retained(), |terminal| {
+                terminal.on_action(cx.listener(|this, _: &crate::actions::Copy, _, cx| {
+                    this.copy_retained_selection(cx);
+                }))
+            })
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_drop(cx.listener(Self::drop_terminal_files))
             .on_mouse_down(
@@ -651,6 +657,21 @@ impl Render for HerdrWindow {
                                 .child(prefix),
                         ),
                     )
+                    // The mode has no control on screen, so it says how it works.
+                    .when(self.resize_mode, |bar| bar.child(
+                        div()
+                            .debug_selector(|| "resize-mode".into())
+                            .flex_none()
+                            .px(px(6.))
+                            .rounded(px(crate::config::corners::SMALL))
+                            .bg(rgb(self.theme.active))
+                            .child("Resize"),
+                    ).child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(self.theme.muted))
+                            .child("h j k l or arrows resize, Esc ends"),
+                    ))
                     .when(!self.live.status.is_connected(), |bar| bar.child(
                         if matches!(self.live.status, ConnectionStatus::StartingDaemon) {
                             div()

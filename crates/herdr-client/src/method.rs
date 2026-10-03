@@ -26,9 +26,11 @@ pub enum Method {
     PaneLinkActivate,
     PaneLinkResolve,
     PaneRename,
+    PaneResize,
     PaneScroll,
     PaneSelectionRead,
     PaneSplit,
+    PaneSwap,
     PaneZoom,
     ProductAnnouncementDismiss,
     ReleaseNotesDismiss,
@@ -68,9 +70,11 @@ impl Method {
             Self::PaneLinkActivate => "pane.link.activate",
             Self::PaneLinkResolve => "pane.link.resolve",
             Self::PaneRename => "pane.rename",
+            Self::PaneResize => "pane.resize",
             Self::PaneScroll => "pane.scroll",
             Self::PaneSelectionRead => "pane.selection.read",
             Self::PaneSplit => "pane.split",
+            Self::PaneSwap => "pane.swap",
             Self::PaneZoom => "pane.zoom",
             Self::ProductAnnouncementDismiss => "product_announcement.dismiss",
             Self::ReleaseNotesDismiss => "release_notes.dismiss",
@@ -153,6 +157,12 @@ mod tests {
         assert!(
             !Method::ReleaseNotesDismiss.advertised_in(&["product_announcement.dismiss".into()])
         );
+    }
+
+    #[test]
+    fn layout_key_action_wire_names() {
+        assert_eq!(Method::PaneResize.as_str(), "pane.resize");
+        assert_eq!(Method::PaneSwap.as_str(), "pane.swap");
     }
 
     #[test]
@@ -259,9 +269,11 @@ mod tests {
         Method::PaneLinkActivate,
         Method::PaneLinkResolve,
         Method::PaneRename,
+        Method::PaneResize,
         Method::PaneScroll,
         Method::PaneSelectionRead,
         Method::PaneSplit,
+        Method::PaneSwap,
         Method::PaneZoom,
         Method::ProductAnnouncementDismiss,
         Method::ReleaseNotesDismiss,
@@ -302,9 +314,11 @@ mod tests {
                 | Method::PaneLinkActivate
                 | Method::PaneLinkResolve
                 | Method::PaneRename
+                | Method::PaneResize
                 | Method::PaneScroll
                 | Method::PaneSelectionRead
                 | Method::PaneSplit
+                | Method::PaneSwap
                 | Method::PaneZoom
                 | Method::ProductAnnouncementDismiss
                 | Method::ReleaseNotesDismiss

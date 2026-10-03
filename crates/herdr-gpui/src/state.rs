@@ -57,6 +57,9 @@ pub struct LiveState {
     pub(crate) sound_cancel: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) sound_connection_cancel: Arc<std::sync::atomic::AtomicBool>,
     pub snapshot: Option<Arc<ClientShellSnapshot>>,
+    /// The pane focused before the current one, in any workspace or tab of
+    /// this daemon boot, for Herdr's `last_pane`.
+    pub(crate) previous_pane: Option<String>,
     pub surface: Option<Arc<PaneSurfaceFrame>>,
     /// Pixels for the images the connection's surfaces place, by asset key.
     pub(crate) surface_images: Arc<SurfaceImages>,
@@ -153,6 +156,7 @@ impl Default for LiveState {
             sound_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sound_connection_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             snapshot: None,
+            previous_pane: None,
             surface: None,
             surface_images: Default::default(),
             status: ConnectionStatus::Connecting,
@@ -199,6 +203,7 @@ impl LiveState {
             sound_cancel,
             sound_connection_cancel,
             snapshot,
+            previous_pane,
             surface: _,
             surface_images: _,
             status,
@@ -246,6 +251,7 @@ impl LiveState {
             && Arc::ptr_eq(sound_cancel, &self.sound_cancel)
             && Arc::ptr_eq(sound_connection_cancel, &self.sound_connection_cancel)
             && same_arc(snapshot, &self.snapshot)
+            && *previous_pane == self.previous_pane
             && *status == self.status
             && *error == self.error
             && *missing_installation == self.missing_installation
@@ -448,6 +454,15 @@ impl LiveState {
                     self.announcement_dismissal = None;
                 }
                 self.status = ConnectionStatus::Connected;
+                // Pane IDs are only meaningful within one daemon boot.
+                self.previous_pane = match &self.snapshot {
+                    Some(old) if old.boot_id == snapshot.boot_id => old
+                        .focused_pane_id
+                        .clone()
+                        .filter(|old| Some(old) != snapshot.focused_pane_id.as_ref())
+                        .or_else(|| self.previous_pane.take()),
+                    _ => None,
+                };
                 self.snapshot = Some(snapshot);
             }
             ClientEvent::Surface(surface) => {
@@ -765,6 +780,39 @@ mod tests {
         });
         state.dialog_response = None;
         assert_eq!(state.status_text(None), "Connected");
+    }
+
+    /// Herdr's `last_pane` returns to the pane focused before this one,
+    /// across tabs and workspaces, but never across a daemon reboot.
+    #[test]
+    fn previous_pane_follows_focus_within_one_boot() {
+        let focus = |pane: Option<&str>, boot: &str| {
+            let mut next = (*snapshot()).clone();
+            next.focused_pane_id = pane.map(str::to_owned);
+            next.boot_id = boot.into();
+            ClientEvent::Snapshot(Arc::new(next))
+        };
+        let mut state = LiveState::default();
+        state.apply(focus(Some("a"), "boot"));
+        assert_eq!(state.previous_pane, None);
+        state.apply(focus(Some("a"), "boot"));
+        assert_eq!(state.previous_pane, None);
+        state.apply(focus(Some("b"), "boot"));
+        assert_eq!(state.previous_pane.as_deref(), Some("a"));
+        // A snapshot that changes something else keeps the last pane.
+        state.apply(focus(Some("b"), "boot"));
+        assert_eq!(state.previous_pane.as_deref(), Some("a"));
+        // Losing focus remembers the pane that had it.
+        state.apply(focus(None, "boot"));
+        assert_eq!(state.previous_pane.as_deref(), Some("b"));
+        state.apply(focus(Some("c"), "reboot"));
+        assert_eq!(state.previous_pane, None);
+        state.apply(focus(Some("d"), "reboot"));
+        state.apply(ClientEvent::Disconnected {
+            reason: "gone".into(),
+        });
+        state.apply(focus(Some("e"), "reboot"));
+        assert_eq!(state.previous_pane, None);
     }
 
     #[test]
