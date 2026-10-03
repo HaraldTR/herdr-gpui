@@ -231,6 +231,19 @@ pub enum Error {
     ProfileLabel,
     #[error("too many sessions to list")]
     SessionLimit,
+    /// An endpoint answered a request with an error. The message is the
+    /// daemon's own display text; act on `code`, never on the message.
+    #[error("{message}")]
+    Endpoint {
+        code: crate::scrollback::EndpointErrorCode,
+        message: String,
+    },
+    #[error("invalid endpoint response")]
+    ResponseSchema(#[source] serde_json::Error),
+    #[error("endpoint response carried neither a result nor an error")]
+    ResponseMissingResult,
+    #[error("endpoint answered with a result of another method")]
+    ResponseType,
 }
 
 impl Error {

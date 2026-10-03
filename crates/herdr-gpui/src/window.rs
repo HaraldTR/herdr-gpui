@@ -6,7 +6,9 @@
 mod clipboard;
 mod commands;
 mod config_diagnostic;
+mod copy_mode;
 mod file_drop;
+mod find;
 mod flash;
 pub(crate) use flash::Flash;
 mod image_source;
@@ -108,6 +110,11 @@ pub(crate) struct HerdrWindow {
     /// The terminal cells the pointer is choosing. A release copies them and
     /// clears this, so a highlight only ever belongs to a drag in progress.
     pub(crate) selection: Option<Selection>,
+    pub(crate) selection_follow: selection::Follow,
+    /// The find bar, over the pane it searches.
+    pub(crate) find: Option<find::FindBar>,
+    /// Keyboard copy mode, when it holds the keyboard.
+    pub(crate) copy_mode: Option<copy_mode::CopyModeState>,
     /// The brief message over the terminal, and when it stops showing.
     pub(crate) flash: Option<(Flash, std::time::Instant)>,
     /// The frame on screen, kept across the gap between two projections.
@@ -321,6 +328,9 @@ impl HerdrWindow {
         self.poll_sessions(cx);
         self.flush_scrollbar(cx);
         self.flush_split(cx);
+        self.poll_find(window, cx);
+        self.follow_selection(cx);
+        self.poll_copy_mode(cx);
         #[cfg(target_os = "macos")]
         crate::app_badge::sync(window.window_handle().window_id(), &self.endpoints, cx);
         self.cancel_stale_image();
@@ -521,6 +531,9 @@ impl HerdrWindow {
             pending_input: Default::default(),
             file_transfer: None,
             selection: None,
+            selection_follow: Default::default(),
+            find: None,
+            copy_mode: None,
             flash: None,
             presentation: Default::default(),
             painter: Default::default(),

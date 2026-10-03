@@ -58,6 +58,8 @@ pub enum Error {
     SelectionStale,
     #[error("Selection is too large to copy.")]
     SelectionSize,
+    #[error("The selection reaches rows the pane no longer shows.")]
+    SelectionOffscreen,
     #[error("File drop exceeds 256 paths or 64 KiB of quoted text.")]
     FileDropSize,
     #[error("Dropped paths must be UTF-8.")]

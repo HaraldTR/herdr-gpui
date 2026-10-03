@@ -215,6 +215,24 @@ pub(crate) fn menus(layout: Layout) -> Vec<Menu> {
                     },
                 ),
                 MenuItem::action(
+                    "Find",
+                    RunCommand {
+                        command: Command::Find,
+                    },
+                ),
+                MenuItem::action(
+                    "Copy Mode",
+                    RunCommand {
+                        command: Command::CopyMode,
+                    },
+                ),
+                MenuItem::action(
+                    "Open Scrollback in Editor",
+                    RunCommand {
+                        command: Command::EditScrollback,
+                    },
+                ),
+                MenuItem::action(
                     "Open Notification Target",
                     RunCommand {
                         command: Command::OpenNotificationTarget,
