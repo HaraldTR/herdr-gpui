@@ -2,7 +2,7 @@
 //! the latest projection only: it never queries the daemon, touches disk, or
 //! starts a process.
 
-use super::HerdrWindow;
+use super::{HerdrWindow, PressedLink};
 use crate::{
     APP_VERSION, CheckForUpdates, Minimize, PlaySound, RunCommand, ShowHerdrNotDetected,
     ShowUpdatePreview,
@@ -12,7 +12,8 @@ use crate::{
     fonts::StyledFont,
     state::ConnectionStatus,
     terminal::*,
-    terminal_painter, worktree_banner,
+    terminal_painter::{self, ImageTarget, PlacedImages},
+    worktree_banner,
 };
 use gpui::{prelude::*, *};
 use herdr_client::ConnectOptions;
@@ -47,9 +48,11 @@ impl Render for HerdrWindow {
         // Paints the frame on screen, which during a focus change is the one
         // presented before it: the terminal area never blanks between two
         // projections. What the client knows to be current stays in `live`.
-        let surface = self.presentation.frame(&self.live);
+        let picture = self.presentation.picture(&self.live);
+        let surface = picture.as_ref().map(|picture| picture.frame.clone());
+        let images = picture.as_ref().map(|picture| picture.images.clone());
         // A group picking the tab another shows paints this same frame.
-        let window_frame = surface.clone();
+        let window_frame = picture;
         let entity = cx.entity();
         let paint_entity = entity.clone();
         let focus = self.focus.clone();
@@ -59,6 +62,15 @@ impl Render for HerdrWindow {
         // The highlight is grid coordinates, so it paints with the frame that
         // owns the cells rather than being recomputed from the pointer here.
         let selection = self.selection.clone();
+        // Like the highlight, the link underline paints with the frame that
+        // owns its cells, and only while that frame shows the content the
+        // daemon resolved it from.
+        let link_rows: Vec<_> = surface
+            .as_deref()
+            .zip(self.hovered_daemon_link())
+            .filter(|(surface, link)| link.cell.current(surface))
+            .map(|(_, link)| link.frame_rows().collect())
+            .unwrap_or_default();
         // Search matches, mapped onto the frame on screen. A popup covers the
         // panes, so their matches stay under it.
         let matches = surface
@@ -137,6 +149,7 @@ impl Render for HerdrWindow {
             // application changes what a click does, so the pointer follows.
             .on_modifiers_changed(
                 cx.listener(|this, event: &ModifiersChangedEvent, window, cx| {
+                    this.hover_link(window.mouse_position(), event.modifiers, cx);
                     let hovered =
                         this.terminal_link_hovered(window.mouse_position(), event.modifiers);
                     if hovered != this.hovered_terminal_link {
@@ -191,9 +204,7 @@ impl Render for HerdrWindow {
                     {
                         return;
                     }
-                    this.pressed_terminal_link = this
-                        .terminal_link_at(event.position)
-                        .map(|url| (url, event.position));
+                    this.pressed_terminal_link = this.terminal_link_press(event.position);
                     if this.menu.page.is_some() {
                         return;
                     }
@@ -248,6 +259,9 @@ impl Render for HerdrWindow {
                         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
                                 entity.update(cx, |this, cx| {
+                                    // Window-wide, so leaving the terminal
+                                    // drops the underline too.
+                                    this.hover_link(event.position, event.modifiers, cx);
                                     if this.scrollbar_mouse_move(event, cx)
                                         || this.split_mouse_move(event, cx)
                                         || this.terminal_mouse_move(event, cx)
@@ -256,7 +270,7 @@ impl Render for HerdrWindow {
                                         return;
                                     }
                                     if this.pressed_terminal_link.as_ref().is_some_and(
-                                        |(_, position)| {
+                                        |PressedLink { position, .. }| {
                                             (event.position.x - position.x).abs() > px(4.)
                                                 || (event.position.y - position.y).abs() > px(4.)
                                         },
@@ -339,8 +353,20 @@ impl Render for HerdrWindow {
                                 &font,
                                 &panes,
                                 &surface.panes,
+                                images.as_deref().map(|images| PlacedImages {
+                                    placements: &surface.graphics.placements,
+                                    images,
+                                    target: ImageTarget::Main,
+                                }),
                                 window,
                                 cx,
+                            );
+                            painter.borrow().paint_link(
+                                &surface.frame,
+                                bounds.origin,
+                                cell_width,
+                                &link_rows,
+                                window,
                             );
                             if let Some(popup) = &surface.popup {
                                 let offset = popup_origin(
@@ -360,6 +386,11 @@ impl Render for HerdrWindow {
                                     &font,
                                     &rows,
                                     &[],
+                                    images.as_deref().map(|images| PlacedImages {
+                                        placements: &surface.graphics.placements,
+                                        images,
+                                        target: ImageTarget::Popup(&popup.terminal_id),
+                                    }),
                                     window,
                                     cx,
                                 );
@@ -528,6 +559,11 @@ impl Render for HerdrWindow {
             .on_action(cx.listener(|this, action: &ShowToastPreview, _, cx| {
                 this.show_toast_preview(action.kind, cx);
             }))
+            .on_action(cx.listener(
+                |this, _: &crate::actions::ShowSystemNotificationPreview, window, cx| {
+                    this.show_system_notification_preview(window, cx);
+                },
+            ))
             .on_action(cx.listener(|this, _: &PlaySound, _, _| {
                 this.sound.preview();
             }))

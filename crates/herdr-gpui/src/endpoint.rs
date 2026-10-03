@@ -1173,6 +1173,7 @@ mod tests {
             0,
             config,
             false,
+            true,
             None,
             now
         ));
@@ -1182,6 +1183,7 @@ mod tests {
             0,
             config,
             false,
+            true,
             None,
             deadline
         ));

@@ -107,6 +107,24 @@ pub(crate) enum IndicatorStyle {
     Symbols,
 }
 
+/// Whether interactive creation asks for a name first, as Herdr's
+/// `ui.prompt_new_tab_name` and `ui.prompt_new_workspace_name` decide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NamePrompts {
+    pub tab: bool,
+    pub workspace: bool,
+}
+
+/// Herdr's defaults, also used before the shared config has loaded.
+impl Default for NamePrompts {
+    fn default() -> Self {
+        Self {
+            tab: true,
+            workspace: false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum ToastDelivery {
@@ -166,6 +184,7 @@ pub(crate) struct Settings {
     pub copy_on_select: bool,
     pub tab_bar_position: TabBarPosition,
     pub hide_tab_bar_when_single_tab: bool,
+    pub name_prompts: NamePrompts,
     palettes: [palette::Palette; 2],
     original: persistence::Snapshot,
 }
@@ -189,6 +208,7 @@ impl std::fmt::Debug for Settings {
                 "hide_tab_bar_when_single_tab",
                 &self.hide_tab_bar_when_single_tab,
             )
+            .field("name_prompts", &self.name_prompts)
             .finish_non_exhaustive()
     }
 }
@@ -220,6 +240,10 @@ struct Ui {
     tab_bar_position: TabBarPosition,
     #[serde(deserialize_with = "crate::lenient::or_default")]
     hide_tab_bar_when_single_tab: bool,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
+    prompt_new_tab_name: Option<bool>,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
+    prompt_new_workspace_name: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -317,6 +341,14 @@ impl Settings {
             return Err(Error::TooLarge);
         }
         let parsed: Parsed = toml::from_str(original.text.as_deref().unwrap_or(""))?;
+        let defaults = NamePrompts::default();
+        let name_prompts = NamePrompts {
+            tab: parsed.ui.prompt_new_tab_name.unwrap_or(defaults.tab),
+            workspace: parsed
+                .ui
+                .prompt_new_workspace_name
+                .unwrap_or(defaults.workspace),
+        };
         let toast = parsed.ui.toast;
         // Herdr refuses a longer delay and keeps its default, so this does too.
         let delay = toast
@@ -349,6 +381,7 @@ impl Settings {
             copy_on_select: parsed.ui.copy_on_select.unwrap_or(true),
             tab_bar_position: parsed.ui.tab_bar_position,
             hide_tab_bar_when_single_tab: parsed.ui.hide_tab_bar_when_single_tab,
+            name_prompts,
             palettes,
             original,
         })

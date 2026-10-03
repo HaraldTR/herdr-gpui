@@ -15,11 +15,14 @@ mod image_source;
 mod images;
 mod input;
 mod lifecycle;
+mod links;
+pub(crate) use links::PressedLink;
 mod mouse;
 mod pending_input;
 mod prefix;
 mod render;
 mod selection;
+pub(crate) mod system_notifications;
 mod tab_drag;
 mod tab_strip;
 mod toasts;
@@ -98,7 +101,8 @@ pub(crate) struct HerdrWindow {
     pub(crate) title: String,
     pub(crate) cell_width: f32,
     pub(crate) hovered_terminal_link: bool,
-    pub(crate) pressed_terminal_link: Option<(String, Point<Pixels>)>,
+    pub(crate) pressed_terminal_link: Option<PressedLink>,
+    pub(crate) links: links::DaemonLinks,
     pub(crate) terminal_mouse: Option<mouse::Gesture>,
     pub(crate) scrollbar_drag: Option<mouse::ScrollbarDrag>,
     pub(crate) split_drag: Option<mouse::SplitDrag>,
@@ -291,8 +295,10 @@ impl HerdrWindow {
         };
         let old_tab = focused_tab(&self.live);
         self.poll_endpoints(cx);
+        self.post_system_notifications(window, cx);
         self.ring_bell(window);
         self.poll_integrations(cx);
+        self.poll_links(window, cx);
         if self.settings.task.is_none() {
             let mut reload = false;
             for endpoint in &self.endpoints {
@@ -523,6 +529,7 @@ impl HerdrWindow {
             cell_width: 9.,
             hovered_terminal_link: false,
             pressed_terminal_link: None,
+            links: Default::default(),
             terminal_mouse: None,
             scrollbar_drag: None,
             split_drag: None,
