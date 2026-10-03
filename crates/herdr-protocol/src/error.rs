@@ -36,6 +36,30 @@ pub enum Error {
     PatchGeometry,
     #[error("patch cursor outside frame")]
     PatchCursorBounds,
+    #[error("surface encoding exceeds the frame limit")]
+    EncodingLimit,
+    #[error("invalid surface encoding payload: {0}")]
+    EncodingPayload(#[from] base64::DecodeError),
+    #[error("invalid surface encoding JSON: {0}")]
+    EncodingJson(#[from] serde_json::Error),
+    #[error("surface scroll has an invalid scroll count")]
+    ScrollCount,
+    #[error("surface scroll is truncated")]
+    ScrollTruncated,
+    #[error("surface scroll does not carry a pane patch")]
+    ScrollPayload,
+    #[error("surface scroll region is outside the frame or overlaps another")]
+    ScrollBounds,
+    #[error("surface update does not match its baseline")]
+    SurfaceBaseline,
+    #[error("surface delta grid exceeds its limits")]
+    DeltaGridLimit,
+    #[error("surface delta metadata carries cells")]
+    DeltaMetadataCells,
+    #[error("surface delta span is outside its grid, unsorted, or over budget")]
+    DeltaSpan,
+    #[error("surface delta popup update does not match its popup")]
+    DeltaPopup,
 }
 
 impl Error {

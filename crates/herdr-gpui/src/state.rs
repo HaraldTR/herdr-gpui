@@ -72,6 +72,14 @@ pub struct LiveState {
     /// `tab.move` reorders a workspace's tabs; daemons that do not offer it
     /// to clients keep their tabs where they are.
     pub(crate) supports_tab_move: bool,
+    /// `pane.copy_search` drives the find bar; without it Find says so.
+    pub(crate) supports_copy_search: bool,
+    /// `pane.selection.read` copies selections reaching beyond the screen.
+    pub(crate) supports_selection_read: bool,
+    /// `pane.copy_motion` drives copy mode's text motions.
+    pub(crate) supports_copy_motion: bool,
+    /// `pane.edit_scrollback` opens a pane's history in the user's editor.
+    pub(crate) supports_edit_scrollback: bool,
     pub dirty: bool,
     pub(crate) dialog_response: Option<(String, Option<DialogResponse>)>,
     pub(crate) notifications: std::collections::VecDeque<crate::notifications::Notice>,
@@ -126,6 +134,10 @@ impl Default for LiveState {
             supports_workspace_get: false,
             supports_pane_clear: false,
             supports_tab_move: false,
+            supports_copy_search: false,
+            supports_selection_read: false,
+            supports_copy_motion: false,
+            supports_edit_scrollback: false,
             dirty: true,
             dialog_response: None,
             notifications: Default::default(),
@@ -164,6 +176,10 @@ impl LiveState {
             supports_workspace_get,
             supports_pane_clear,
             supports_tab_move,
+            supports_copy_search,
+            supports_selection_read,
+            supports_copy_motion,
+            supports_edit_scrollback,
             dirty: _,
             dialog_response,
             notifications,
@@ -202,6 +218,10 @@ impl LiveState {
             && *supports_workspace_get == self.supports_workspace_get
             && *supports_pane_clear == self.supports_pane_clear
             && *supports_tab_move == self.supports_tab_move
+            && *supports_copy_search == self.supports_copy_search
+            && *supports_selection_read == self.supports_selection_read
+            && *supports_copy_motion == self.supports_copy_motion
+            && *supports_edit_scrollback == self.supports_edit_scrollback
             && match (dialog_response, &self.dialog_response) {
                 (Some((a, None)), Some((b, None))) => a == b,
                 (a, b) => a.is_none() && b.is_none(),
@@ -305,6 +325,12 @@ impl LiveState {
                 self.supports_workspace_get = Method::WorkspaceGet.advertised_in(&welcome.methods);
                 self.supports_pane_clear = Method::PaneClear.advertised_in(&welcome.methods);
                 self.supports_tab_move = Method::TabMove.advertised_in(&welcome.methods);
+                self.supports_copy_search = Method::PaneCopySearch.advertised_in(&welcome.methods);
+                self.supports_selection_read =
+                    Method::PaneSelectionRead.advertised_in(&welcome.methods);
+                self.supports_copy_motion = Method::PaneCopyMotion.advertised_in(&welcome.methods);
+                self.supports_edit_scrollback =
+                    Method::PaneEditScrollback.advertised_in(&welcome.methods);
                 self.supports_surface = Method::ClientShellSurfaceSet
                     .advertised_in(&welcome.methods)
                     && ["surface_interest", "presentation_effects_fence"]

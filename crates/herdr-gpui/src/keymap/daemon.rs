@@ -7,10 +7,6 @@
 //! Herdr actions with no GUI command, each for a reason:
 //! - `detach`: closing the window already leaves the daemon running, and a
 //!   window cannot stay open without a connection.
-//! - `copy_mode`: the GUI selects with the mouse and copies with `cmd-c`;
-//!   Herdr's keyboard copy mode drives a cursor the GUI does not draw.
-//! - `edit_scrollback`: `pane.edit_scrollback` opens `$EDITOR` inside the
-//!   daemon's terminal, which this client has no way to show.
 //! - `open_worktree` and `remove_worktree`: the workspace menu offers both,
 //!   but each needs a menu row as the target, not just the focused one.
 //! - `navigate_pane_*`: the workspace picker is a search field here, with no
@@ -155,7 +151,13 @@ const ACTIONS: &[(&str, Target, &str)] = &[
         Target::Command(Command::RenamePane),
         "prefix+shift+p",
     ),
+    (
+        "edit_scrollback",
+        Target::Command(Command::EditScrollback),
+        "prefix+e",
+    ),
     ("clear_pane", Target::Command(Command::ClearPane), ""),
+    ("copy_mode", Target::Command(Command::CopyMode), "prefix+["),
     (
         "focus_pane_left",
         Target::Command(Command::FocusLeft),
@@ -646,6 +648,8 @@ mod tests {
             (Command::SwapUp, "shift-k"),
             (Command::SwapRight, "shift-l"),
             (Command::ResizeMode, "r"),
+            (Command::EditScrollback, "e"),
+            (Command::CopyMode, "["),
         ] {
             assert_eq!(bound(&keys, command), [prefixed(key)], "{command:?}");
         }
