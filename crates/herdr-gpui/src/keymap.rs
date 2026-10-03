@@ -33,7 +33,7 @@ fn identity(keystroke: &Keystroke) -> (Modifiers, String) {
 
 /// One entry of the config's `[keybindings]` table: a keystroke, or a list of
 /// them. An empty string or list leaves the command unbound.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub(crate) enum Binding {
     One(String),

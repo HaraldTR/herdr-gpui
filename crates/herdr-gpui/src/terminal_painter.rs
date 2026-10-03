@@ -1,13 +1,19 @@
 mod glyphs;
 mod graphics;
+mod images;
 
 use self::glyphs::GlyphCache;
 use self::graphics::Graphic;
+use self::images::{ImageCache, ImageGeometry, below_text};
+pub(crate) use self::images::{ImageTarget, PlacedImages};
 use crate::config::Theme;
 use crate::terminal::*;
 use gpui::*;
 use herdr_client::protocol::{CellData, FrameData, PaneSurfacePane, SurfaceRect};
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use unicode_width::UnicodeWidthStr;
 
 /// The selection tints the cells it covers instead of replacing their colors:
@@ -131,6 +137,10 @@ pub(crate) struct TerminalPainter {
     glyphs: GlyphCache,
     cell_width: Option<f32>,
     diagnostics: PaintDiagnostics,
+    images: ImageCache,
+    /// Each image painted, with its z, in paint order.
+    #[cfg(test)]
+    painted_images: Vec<(i32, Bounds<Pixels>)>,
     #[cfg(feature = "integration-test")]
     pub uncached: bool,
 }
@@ -145,10 +155,39 @@ impl Default for TerminalPainter {
             glyphs: GlyphCache::default(),
             cell_width: None,
             diagnostics: PaintDiagnostics::new(Instant::now()),
+            images: ImageCache::default(),
+            #[cfg(test)]
+            painted_images: Vec::new(),
             #[cfg(feature = "integration-test")]
             uncached: false,
         }
     }
+}
+
+/// The cell rectangle covering every in-frame cell of `rows`, if any.
+fn link_bounds(frame: &FrameData, rows: &[(u16, std::ops::Range<u16>)]) -> Option<SurfaceRect> {
+    let mut cells = rows.iter().filter_map(|(row, columns)| {
+        let end = columns.end.min(frame.width);
+        (*row < frame.height && columns.start < end).then_some((*row, columns.start, end))
+    });
+    let (row, start, end) = cells.next()?;
+    let (top, bottom, left, right) = cells.fold(
+        (row, row, start, end),
+        |(top, bottom, left, right), (row, start, end)| {
+            (
+                top.min(row),
+                bottom.max(row),
+                left.min(start),
+                right.max(end),
+            )
+        },
+    );
+    Some(SurfaceRect {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top + 1,
+    })
 }
 
 fn decoration_offsets(cell: &CellData, cell_height: f32) -> impl Iterator<Item = f32> + '_ {
@@ -354,6 +393,55 @@ impl TerminalPainter {
         width
     }
 
+    /// Underlines the cells of a hovered link, painted after `paint_frame`
+    /// for the same frame and origin. Each cell takes its own text color, as
+    /// an SGR underline would, and spaces along the link are underlined too.
+    pub fn paint_link(
+        &self,
+        frame: &FrameData,
+        origin: Point<Pixels>,
+        cell_width: f32,
+        rows: &[(u16, std::ops::Range<u16>)],
+        window: &mut Window,
+    ) {
+        let Some(bounds) = link_bounds(frame, rows) else {
+            return;
+        };
+        let layer = Bounds::new(
+            origin
+                + point(
+                    px(f32::from(bounds.x) * cell_width),
+                    px(f32::from(bounds.y) * self.cell_height),
+                ),
+            size(
+                px(f32::from(bounds.width) * cell_width),
+                px(f32::from(bounds.height) * self.cell_height),
+            ),
+        );
+        window.paint_layer(layer, |window| {
+            for (row, columns) in rows {
+                if *row >= frame.height {
+                    continue;
+                }
+                for column in columns.start..columns.end.min(frame.width) {
+                    let index = usize::from(*row) * usize::from(frame.width) + usize::from(column);
+                    let Some(data) = frame.cells.get(index) else {
+                        continue;
+                    };
+                    let position = origin
+                        + point(
+                            px(f32::from(column) * cell_width),
+                            px(f32::from(*row) * self.cell_height + self.cell_height - 2.),
+                        );
+                    window.paint_quad(fill(
+                        Bounds::new(position, size(px(cell_width), px(1.))),
+                        rgb(cell_colors(data, &self.theme).0),
+                    ));
+                }
+            }
+        });
+    }
+
     /// Paints one frame, tinting the cells `highlights` name in that frame's
     /// own grid. Rows outside the frame are ignored: a selection or search was
     /// made against the live surface, which a repaint may already have replaced.
@@ -367,6 +455,7 @@ impl TerminalPainter {
         font: &Font,
         highlights: &[Highlight],
         panes: &[PaneSurfacePane],
+        images: Option<PlacedImages<'_>>,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -406,6 +495,18 @@ impl TerminalPainter {
             bars.iter()
                 .any(|r| in_rect(*r, (index % width) as u16, (index / width) as u16))
         };
+        let placed = images.map_or_else(Vec::new, |images| {
+            self.images.prepare(
+                images,
+                origin,
+                (cell_width, self.cell_height),
+                grid,
+                window,
+                cx,
+            )
+        });
+        let (below, above): (Vec<_>, Vec<_>) =
+            placed.into_iter().partition(|(z, ..)| below_text(*z));
         // A layer gives all its primitives one draw order, skipping GPUI's
         // per-primitive BoundsTree insert that dominates large grids. Within a
         // layer quads draw before glyphs, so decorations and the cursor take a
@@ -479,51 +580,36 @@ impl TerminalPainter {
                     counts.quads += 1;
                 }
             }
-            for (index, cell) in frame.cells.iter().enumerate() {
-                if cell.skip
-                    || cell.symbol.is_empty()
-                    || cell.symbol == " "
-                    || in_bar(index)
-                    || Graphic::from_symbol(&cell.symbol).is_some()
-                {
-                    continue;
-                }
-                let style = glyphs::style(cell.modifier);
-                let newly_shaped;
-                let shaped = match cached
-                    .then(|| self.glyphs.get(style, &cell.symbol))
-                    .flatten()
-                {
-                    Some(line) => line,
-                    None => {
-                        #[cfg(feature = "integration-test")]
-                        {
-                            counts.shapes += 1;
-                        }
-                        let line = self.shape(font, style, &cell.symbol, window);
-                        if cached && self.glyphs.has_room() {
-                            self.glyphs.insert(style, &cell.symbol, line)
-                        } else {
-                            newly_shaped = line;
-                            &newly_shaped
-                        }
-                    }
-                };
-                let position = origin
-                    + point(
-                        px((index % usize::from(frame.width)) as f32 * cell_width),
-                        px((index / usize::from(frame.width)) as f32 * self.cell_height),
-                    );
-                let color = rgb(cell_colors(cell, &self.theme).0);
-                let result = paint_glyphs(shaped, position, px(self.cell_height), color, window);
-                paint_errors += u64::from(result.is_err());
-                #[cfg(feature = "integration-test")]
-                {
-                    counts.glyphs += shaped.runs.iter().map(|r| r.glyphs.len()).sum::<usize>();
-                    counts.paint_errors += usize::from(result.is_err());
-                }
+            if below.is_empty() {
+                paint_errors += self.paint_text(
+                    frame,
+                    origin,
+                    cell_width,
+                    font,
+                    cached,
+                    &in_bar,
+                    window,
+                    #[cfg(feature = "integration-test")]
+                    &mut counts,
+                );
             }
         });
+        if !below.is_empty() {
+            paint_errors += self.paint_images(&below, window);
+            window.paint_layer(grid, |window| {
+                paint_errors += self.paint_text(
+                    frame,
+                    origin,
+                    cell_width,
+                    font,
+                    cached,
+                    &in_bar,
+                    window,
+                    #[cfg(feature = "integration-test")]
+                    &mut counts,
+                );
+            });
+        }
         window.paint_layer(grid, |window| {
             // Box and block graphics are quads, so they share this layer to stay
             // above the backgrounds. Decorations cover the grid, including spaces
@@ -615,6 +701,8 @@ impl TerminalPainter {
                 );
             }
         });
+        // Kitty draws `z >= 0` over the text, decorations and cursor included.
+        paint_errors += self.paint_images(&above, window);
         #[cfg(feature = "integration-test")]
         {
             let total = cx.default_global::<crate::performance::Counts>();
@@ -652,6 +740,90 @@ impl TerminalPainter {
         if let Some(count) = self.diagnostics.take_errors(now, paint_errors) {
             tracing::warn!(category = "glyph_paint", count, "Terminal paint failed");
         }
+    }
+
+    /// Paints images in order, returning how many failed.
+    fn paint_images(
+        &mut self,
+        placed: &[(i32, ImageGeometry, Arc<RenderImage>)],
+        window: &mut Window,
+    ) -> u64 {
+        let mut failed = 0;
+        for (_z, geometry, texture) in placed {
+            let painted = window.paint_image(
+                geometry.visible,
+                geometry.image,
+                Corners::default(),
+                texture.clone(),
+                0,
+                false,
+            );
+            failed += u64::from(painted.is_err());
+            #[cfg(test)]
+            self.painted_images.push((*_z, geometry.visible));
+        }
+        failed
+    }
+
+    /// Shapes and paints every visible glyph of `frame`, returning failures.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_text(
+        &mut self,
+        frame: &FrameData,
+        origin: Point<Pixels>,
+        cell_width: f32,
+        font: &Font,
+        cached: bool,
+        in_bar: &impl Fn(usize) -> bool,
+        window: &mut Window,
+        #[cfg(feature = "integration-test")] counts: &mut crate::performance::Counts,
+    ) -> u64 {
+        let mut paint_errors = 0;
+        for (index, cell) in frame.cells.iter().enumerate() {
+            if cell.skip
+                || cell.symbol.is_empty()
+                || cell.symbol == " "
+                || in_bar(index)
+                || Graphic::from_symbol(&cell.symbol).is_some()
+            {
+                continue;
+            }
+            let style = glyphs::style(cell.modifier);
+            let newly_shaped;
+            let shaped = match cached
+                .then(|| self.glyphs.get(style, &cell.symbol))
+                .flatten()
+            {
+                Some(line) => line,
+                None => {
+                    #[cfg(feature = "integration-test")]
+                    {
+                        counts.shapes += 1;
+                    }
+                    let line = self.shape(font, style, &cell.symbol, window);
+                    if cached && self.glyphs.has_room() {
+                        self.glyphs.insert(style, &cell.symbol, line)
+                    } else {
+                        newly_shaped = line;
+                        &newly_shaped
+                    }
+                }
+            };
+            let position = origin
+                + point(
+                    px((index % usize::from(frame.width)) as f32 * cell_width),
+                    px((index / usize::from(frame.width)) as f32 * self.cell_height),
+                );
+            let color = rgb(cell_colors(cell, &self.theme).0);
+            let result = paint_glyphs(shaped, position, px(self.cell_height), color, window);
+            paint_errors += u64::from(result.is_err());
+            #[cfg(feature = "integration-test")]
+            {
+                counts.glyphs += shaped.runs.iter().map(|r| r.glyphs.len()).sum::<usize>();
+                counts.paint_errors += usize::from(result.is_err());
+            }
+        }
+        paint_errors
     }
 
     /// Paints an uncommitted IME composition over the cells at the input
@@ -727,6 +899,33 @@ mod tests {
     use super::*;
     use core::prelude::v1::test;
 
+    #[test]
+    fn link_underlines_stay_inside_the_frame() {
+        let frame = FrameData {
+            width: 10,
+            height: 3,
+            cells: vec![cell("a"); 30],
+            cursor: None,
+            hyperlinks: vec![],
+            graphics: vec![],
+        };
+        let rect = |x, y, width, height| SurfaceRect {
+            x,
+            y,
+            width,
+            height,
+        };
+        // A wrapped link's two rows, the second past the frame's right edge.
+        assert_eq!(
+            link_bounds(&frame, &[(1, 4..10), (2, 0..14)]),
+            Some(rect(0, 1, 10, 2))
+        );
+        // Rows a resize has already removed, and empty ranges, paint nothing.
+        assert_eq!(link_bounds(&frame, &[(3, 0..4), (0, 5..5)]), None);
+        assert_eq!(link_bounds(&frame, &[(0, 12..14)]), None);
+        assert_eq!(link_bounds(&frame, &[]), None);
+    }
+
     #[gpui::test]
     fn edge_backgrounds_reach_the_canvas_without_stretching_popups(cx: &mut TestAppContext) {
         let (_, cx) = cx.add_window_view(|_, _| Empty);
@@ -759,6 +958,7 @@ mod tests {
                             &font("Menlo"),
                             &[],
                             &[],
+                            None,
                             window,
                             cx,
                         );
@@ -953,6 +1153,7 @@ mod tests {
                             &font("Menlo"),
                             &[],
                             &[],
+                            None,
                             window,
                             cx,
                         );
@@ -1086,6 +1287,7 @@ mod tests {
                             &font(family),
                             &[],
                             &[],
+                            None,
                             window,
                             cx,
                         );
@@ -1106,6 +1308,7 @@ mod tests {
                         &font("Menlo"),
                         &[],
                         &[],
+                        None,
                         window,
                         cx,
                     );
@@ -1118,6 +1321,124 @@ mod tests {
             )
             .size_full()
         });
+    }
+
+    #[gpui::test]
+    fn placed_images_decode_off_thread_then_paint_in_z_order(cx: &mut TestAppContext) {
+        use herdr_client::{
+            SurfaceImages,
+            protocol::{
+                SurfaceGraphicsAsset, SurfaceGraphicsAssetKey, SurfaceGraphicsFormat,
+                SurfaceGraphicsPlacement, SurfaceGraphicsSource, SurfaceGraphicsTarget,
+            },
+        };
+        let (_, cx) = cx.add_window_view(|_, _| Empty);
+        let painter = std::rc::Rc::new(std::cell::RefCell::new(TerminalPainter::default()));
+        painter
+            .borrow_mut()
+            .set_appearance(14., 20., Theme::default());
+        let key = |image_id, target| SurfaceGraphicsAssetKey {
+            source: SurfaceGraphicsSource::Terminal { target, image_id },
+            image_width: 1,
+            image_height: 1,
+            format: SurfaceGraphicsFormat::Rgba,
+            data_len: 4,
+            data_fingerprint: u64::from(image_id),
+        };
+        let pane = || SurfaceGraphicsTarget::Pane {
+            pane_id: "p1".into(),
+        };
+        let (above, below) = (key(1, pane()), key(2, pane()));
+        let popup = key(
+            3,
+            SurfaceGraphicsTarget::Popup {
+                terminal_id: "t".into(),
+            },
+        );
+        let images: Arc<SurfaceImages> = Arc::new(
+            [&above, &below, &popup]
+                .into_iter()
+                .map(|key| SurfaceGraphicsAsset {
+                    key: key.clone(),
+                    data: vec![1, 2, 3, 255],
+                })
+                .collect(),
+        );
+        let place = |key: &SurfaceGraphicsAssetKey, x, z| SurfaceGraphicsPlacement {
+            asset: key.clone(),
+            logical_placement_id: 1,
+            x,
+            y: 0,
+            cols: 1,
+            rows: 1,
+            source_x: 0,
+            source_y: 0,
+            source_width: 0,
+            source_height: 0,
+            x_offset: 0,
+            y_offset: 0,
+            z,
+            scrollback_offset: 0,
+        };
+        // Scene order is not paint order: z decides.
+        let placements: Arc<[SurfaceGraphicsPlacement]> = Arc::from([
+            place(&above, 0, 5),
+            place(&below, 1, -1),
+            place(&popup, 2, 0),
+        ]);
+        let frame = FrameData {
+            width: 3,
+            height: 1,
+            cells: vec![cell("x"); 3],
+            cursor: None,
+            hyperlinks: vec![],
+            graphics: vec![],
+        };
+        let draw = |cx: &mut VisualTestContext| {
+            let (painter, images, placements, frame) = (
+                painter.clone(),
+                images.clone(),
+                placements.clone(),
+                frame.clone(),
+            );
+            cx.draw(Point::default(), size(px(800.), px(600.)), |_, _| {
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, window, cx| {
+                        painter.borrow_mut().paint_frame(
+                            &frame,
+                            point(px(10.), px(10.)),
+                            None,
+                            10.,
+                            &font("Menlo"),
+                            &[],
+                            &[],
+                            Some(PlacedImages {
+                                placements: &placements,
+                                images: &images,
+                                target: ImageTarget::Main,
+                            }),
+                            window,
+                            cx,
+                        );
+                    },
+                )
+                .size_full()
+            });
+        };
+        draw(cx);
+        assert!(
+            painter.borrow().painted_images.is_empty(),
+            "nothing paints before its decode finishes"
+        );
+        cx.run_until_parked();
+        draw(cx);
+        let cell_at = |x: f32| Bounds::new(point(px(x), px(10.)), size(px(10.), px(20.)));
+        // The popup's image belongs to the popup frame, not the main grid.
+        assert_eq!(
+            painter.borrow().painted_images,
+            [(-1, cell_at(20.)), (5, cell_at(10.))]
+        );
     }
 
     #[gpui::test]
@@ -1156,6 +1477,7 @@ mod tests {
                             &font,
                             &[],
                             &[],
+                            None,
                             window,
                             cx,
                         );

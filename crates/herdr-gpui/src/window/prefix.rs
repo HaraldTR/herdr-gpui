@@ -39,9 +39,10 @@ impl HerdrWindow {
             self.resize_keystroke(keystroke, window, cx);
             return;
         }
-        let keymap = &self.config.keybindings;
+        let keymap = self.keymap();
+        let is_prefix = keymap.is_prefix(keystroke);
         if !self.prefix_armed {
-            if keymap.is_prefix(keystroke) {
+            if is_prefix {
                 self.prefix_armed = true;
                 cx.stop_propagation();
                 cx.notify();
@@ -53,13 +54,14 @@ impl HerdrWindow {
             }
             return;
         }
+        let chord = keymap.chord(keystroke);
         self.prefix_armed = false;
         cx.notify();
-        if keymap.is_prefix(keystroke) {
+        if is_prefix {
             return;
         }
         cx.stop_propagation();
-        let Some(command) = keymap.chord(keystroke) else {
+        let Some(command) = chord else {
             if let Some((id, action)) = self.custom_command(keystroke, true) {
                 if self.menu.page.is_some() {
                     self.dismiss_menu(window, cx);
@@ -83,8 +85,7 @@ impl HerdrWindow {
         prefixed: bool,
     ) -> Option<(String, ClientShellCommandAction)> {
         let snapshot = self.live.snapshot.as_ref()?;
-        self.config
-            .keybindings
+        self.keymap()
             .custom_command(&snapshot.commands, keystroke, prefixed)
             .map(|command| (command.command_id.clone(), command.action))
     }
@@ -108,7 +109,7 @@ impl HerdrWindow {
             return;
         }
         cx.stop_propagation();
-        let keymap = &self.config.keybindings;
+        let keymap = self.keymap();
         if matches!(keystroke.key.as_str(), "escape" | "enter")
             || keymap.triggers(Command::ResizeMode, keystroke, true)
             || keymap.triggers(Command::ResizeMode, keystroke, false)

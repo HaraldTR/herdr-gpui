@@ -22,6 +22,8 @@ pub enum Method {
     PaneEditScrollback,
     PaneFocus,
     PaneFocusDirection,
+    PaneLinkActivate,
+    PaneLinkResolve,
     PaneRename,
     PaneResize,
     PaneScroll,
@@ -61,6 +63,8 @@ impl Method {
             Self::PaneEditScrollback => "pane.edit_scrollback",
             Self::PaneFocus => "pane.focus",
             Self::PaneFocusDirection => "pane.focus_direction",
+            Self::PaneLinkActivate => "pane.link.activate",
+            Self::PaneLinkResolve => "pane.link.resolve",
             Self::PaneRename => "pane.rename",
             Self::PaneResize => "pane.resize",
             Self::PaneScroll => "pane.scroll",
@@ -138,6 +142,15 @@ mod tests {
     fn layout_key_action_wire_names() {
         assert_eq!(Method::PaneResize.as_str(), "pane.resize");
         assert_eq!(Method::PaneSwap.as_str(), "pane.swap");
+    }
+
+    #[test]
+    fn link_methods_are_separate_advertisements() {
+        assert_eq!(Method::PaneLinkResolve.as_str(), "pane.link.resolve");
+        assert_eq!(Method::PaneLinkActivate.as_str(), "pane.link.activate");
+        // A daemon may resolve hover regions without activating, or the reverse.
+        assert!(Method::PaneLinkResolve.advertised_in(&["pane.link.resolve".into()]));
+        assert!(!Method::PaneLinkActivate.advertised_in(&["pane.link.resolve".into()]));
     }
 
     #[test]
@@ -224,6 +237,8 @@ mod tests {
         Method::PaneEditScrollback,
         Method::PaneFocus,
         Method::PaneFocusDirection,
+        Method::PaneLinkActivate,
+        Method::PaneLinkResolve,
         Method::PaneRename,
         Method::PaneResize,
         Method::PaneScroll,
@@ -264,6 +279,8 @@ mod tests {
                 | Method::PaneEditScrollback
                 | Method::PaneFocus
                 | Method::PaneFocusDirection
+                | Method::PaneLinkActivate
+                | Method::PaneLinkResolve
                 | Method::PaneRename
                 | Method::PaneResize
                 | Method::PaneScroll

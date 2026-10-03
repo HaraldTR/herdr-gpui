@@ -323,7 +323,7 @@ impl HerdrWindow {
                     })
                     .map(|info| Entry {
                         label: info.label.into(),
-                        detail: self.config.keybindings.primary(info.command).into(),
+                        detail: self.keymap().primary(info.command).into(),
                         badge: "",
                         action: Action::Native(info.command),
                         parent: None,
@@ -354,7 +354,7 @@ impl HerdrWindow {
         let target = self.live.snapshot.as_ref().map(|snapshot| {
             if !workspaces_only {
                 entries.extend(snapshot.commands.iter().map(|command| {
-                    let bindings = self.config.keybindings.custom_labels(command);
+                    let bindings = self.keymap().custom_labels(command);
                     Entry {
                         label: command
                             .description
@@ -538,25 +538,23 @@ impl HerdrWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Herdr's navigate-mode keys move a Go To list as its arrows do.
+        let step = match event.keystroke.key.as_str() {
+            "up" => Some(true),
+            "down" => Some(false),
+            _ => self
+                .menu
+                .palette
+                .as_ref()
+                .filter(|palette| palette.workspaces_only)
+                .and_then(|_| self.keymap().navigates_workspace(&event.keystroke)),
+        };
         let Some(palette) = &mut self.menu.palette else {
             return;
         };
         if palette.search.read(cx).is_composing() {
             return;
         }
-        // Herdr's navigate-mode keys move a Go To list as its arrows do.
-        let step = match event.keystroke.key.as_str() {
-            "up" => Some(true),
-            "down" => Some(false),
-            _ => palette
-                .workspaces_only
-                .then(|| {
-                    self.config
-                        .keybindings
-                        .navigates_workspace(&event.keystroke)
-                })
-                .flatten(),
-        };
         match event.keystroke.key.as_str() {
             "escape" => {
                 cx.stop_propagation();
