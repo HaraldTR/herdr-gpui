@@ -1,5 +1,6 @@
 //! Application mouse gestures take precedence over local selection and links.
 //! Shift keeps a gesture local; a forwarded drag stays with its pressed target.
+//! A pane's right-click reaches the application only when Herdr routes it there.
 
 use super::HerdrWindow;
 use crate::{
@@ -146,6 +147,23 @@ impl HerdrWindow {
         }
     }
 
+    /// A pane's right-click opens its menu unless Herdr routes that pane's
+    /// right-clicks to the application, as every client of the daemon does. A
+    /// modifier always reaches the menu, so a routed pane can be switched back.
+    /// A popup has no menu, so a mouse-aware one keeps its right-clicks.
+    fn right_click_to_application(&self, target: &InputTarget, modifiers: Modifiers) -> bool {
+        let InputTarget::Pane(id) = target else {
+            return true;
+        };
+        !modifiers.modified()
+            && self.live.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .panes
+                    .iter()
+                    .any(|pane| pane.pane_id == *id && pane.right_click_passthrough)
+            })
+    }
+
     /// Returns ownership, not queue success: an unavailable application must not
     /// turn a click into an unexpected clipboard write or browser launch.
     pub(crate) fn terminal_mouse_down(
@@ -156,7 +174,10 @@ impl HerdrWindow {
     ) -> bool {
         self.cancel_terminal_mouse(cx);
         let Some(hit) = self.terminal_mouse_at(event.position).filter(|hit| {
-            hit.mouse_reporting && !self.link_modifier_held(event.position, event.modifiers)
+            hit.mouse_reporting
+                && !self.link_modifier_held(event.position, event.modifiers)
+                && (event.button != MouseButton::Right
+                    || self.right_click_to_application(&hit.target, event.modifiers))
         }) else {
             return false;
         };
