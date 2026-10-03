@@ -3152,6 +3152,105 @@ fn dialog_response_survives_initial_surface_activation(cx: &mut gpui::TestAppCon
     });
 }
 
+/// `ui.prompt_new_tab_name` and `ui.prompt_new_workspace_name` decide whether
+/// creating asks for a name first, and a typed name travels as the label.
+#[gpui::test]
+fn name_prompts_follow_shared_config_and_label_creations(cx: &mut gpui::TestAppContext) {
+    use crate::menu::{Page, WorkspaceAction};
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    // (shared config, command, dialog it opens with its proposal, typed name, request)
+    let cases = [
+        (
+            "",
+            Command::Tab,
+            Some((WorkspaceAction::NewTab, "2")),
+            Some("  Build  "),
+            serde_json::json!({"workspace_id": "w1", "focus": true, "label": "Build"}),
+        ),
+        (
+            "",
+            Command::Tab,
+            Some((WorkspaceAction::NewTab, "2")),
+            Some(""),
+            serde_json::json!({"workspace_id": "w1", "focus": true}),
+        ),
+        (
+            "",
+            Command::Workspace,
+            None,
+            None,
+            serde_json::json!({"focus": true, "source_workspace_id": "w1"}),
+        ),
+        (
+            "[ui]\nprompt_new_workspace_name = true\n",
+            Command::Workspace,
+            Some((WorkspaceAction::NewWorkspace, "repo")),
+            None,
+            serde_json::json!({"focus": true, "source_workspace_id": "w1"}),
+        ),
+        (
+            "[ui]\nprompt_new_workspace_name = true\n",
+            Command::Workspace,
+            Some((WorkspaceAction::NewWorkspace, "repo")),
+            Some("Docs"),
+            serde_json::json!({"focus": true, "source_workspace_id": "w1", "label": "Docs"}),
+        ),
+        (
+            "[ui]\nprompt_new_tab_name = false\n",
+            Command::Tab,
+            None,
+            None,
+            serde_json::json!({"workspace_id": "w1", "focus": true}),
+        ),
+    ];
+    for (config, command, dialog, typed, params) in cases {
+        let (endpoint, mut server) = connected_endpoint("ssh:fixture");
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.endpoints.truncate(1);
+                view.endpoints.push(endpoint);
+                view.selected_endpoint = 1;
+                view.options = ConnectOptions::default();
+                view.reset_selected();
+                view.activation_deadline = None;
+                // A reload replaces the prepared settings; nothing is re-read here.
+                view.settings.shared = (!config.is_empty())
+                    .then(|| crate::herdr_settings::Settings::parse_text(config).unwrap());
+                view.command(command, window, cx);
+                if let Some((action, proposed)) = dialog {
+                    assert_eq!(view.menu.page, Some(Page::Dialog(action)));
+                    assert_eq!(view.menu.input.as_ref().unwrap().text, proposed);
+                    // Cancelling sends nothing and leaves input unfenced.
+                    view.dismiss_menu(window, cx);
+                    assert!(view.activation_deadline.is_none());
+                    view.command(command, window, cx);
+                    if let Some(typed) = typed {
+                        view.menu.input = Some(crate::dialog_input::DialogInput::new(typed.into()));
+                    }
+                    crate::menu::workspace_tests::submit_dialog(view, window, cx);
+                    assert!(view.menu.page.is_none());
+                } else {
+                    assert!(view.menu.page.is_none());
+                }
+                assert!(view.activation_deadline.is_some());
+            })
+        });
+        let ClientMessage::ClientShellEndpointRequest { request, .. } = server.receive() else {
+            panic!("missing creation");
+        };
+        let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        let method = match command {
+            Command::Tab => Method::TabCreate,
+            _ => Method::WorkspaceCreate,
+        };
+        assert_eq!(request["method"], method.as_str());
+        assert_eq!(request["params"], params, "{config:?} {command:?}");
+    }
+}
+
 #[gpui::test]
 fn every_focus_changing_command_fences_immediate_input_until_ack_and_surface(
     cx: &mut gpui::TestAppContext,
@@ -3229,6 +3328,16 @@ fn every_focus_changing_command_fences_immediate_input_until_ack_and_surface(
                     prefer_character_input: false,
                 };
                 match command {
+                    // Herdr asks for a tab name by default; its proposal creates.
+                    Command::Tab => {
+                        assert_eq!(
+                            view.menu.page,
+                            Some(crate::menu::Page::Dialog(
+                                crate::menu::WorkspaceAction::NewTab
+                            ))
+                        );
+                        crate::menu::workspace_tests::submit_dialog(view, window, cx);
+                    }
                     Command::ClosePane | Command::CloseTab if confirm_close_tab => {
                         view.close_confirmation_key(&key("tab"), window, cx);
                         view.close_confirmation_key(&key("enter"), window, cx);
@@ -3276,6 +3385,12 @@ fn every_focus_changing_command_fences_immediate_input_until_ack_and_surface(
                 request["params"],
                 serde_json::json!({"workspace_id": "w3",
                 "path": "/endpoint/existing checkout ", "focus": true, "trust_repository": false})
+            );
+        }
+        if method == Method::TabCreate {
+            assert_eq!(
+                request["params"],
+                serde_json::json!({"workspace_id": "w1", "focus": true})
             );
         }
         if method == Method::TabClose {

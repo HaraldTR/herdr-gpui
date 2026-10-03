@@ -385,6 +385,13 @@ as in the TUI. Status indicators always use the shared indicator style and share
 status colors, independent of a native terminal theme override. Terminal/default
 reset colors are projected to opaque native colors.
 
+New tab and New Workspace follow the shared `ui.prompt_new_tab_name` (default
+on) and `ui.prompt_new_workspace_name` (default off). When set, every button,
+menu item, shortcut, and palette entry first asks for a name, proposing the next
+tab number or the workspace's folder; Enter creates, Escape cancels, and an empty
+or unchanged name lets the daemon choose it, as in the TUI. Teleport, worktree
+creation, and browser tabs never prompt.
+
 Sound uses the dedicated Rodio backend, shared global/per-agent settings and
 custom local paths, with Herdr's bundled sounds as fallbacks. The Sound tab offers
 an explicit QA preview. Shared Herdr toast delivery enables in-app notifications
@@ -1449,8 +1456,8 @@ Windows setup) nothing is saved and the window says so.
   `GITHUB_TOKEN` apply only to the main account. Removing a device keeps its
   saved credential until you sign out of it, so re-adding the device finds it. See
   [PR lookup scope and limits](../../README.md) for authentication and remote limits.
-   The same worktree-registry path supports both current and older daemons without
-    `workspace.get`. No Git or HTTP requests run from menu-open or render paths.
+   Herdr does not give endpoint clients a workspace's checkout path, so every
+    daemon version uses this worktree-registry path. No Git or HTTP requests run from menu-open or render paths.
   Opening the top-right Git/PR dropdown also queues a fresh lookup for the focused
   local branch, keeping cached details visible while the background worker runs.
   The dropdown shows draft/ready-for-review status, review decisions, merge
