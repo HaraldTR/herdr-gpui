@@ -84,6 +84,98 @@ fn hierarchy_uses_git_metadata_and_emits_each_workspace_once() {
     assert!(workspace_entries(&[]).is_empty());
 }
 
+fn worktree(key: &str, linked: bool) -> Option<herdr_client::protocol::ClientShellWorktree> {
+    Some(herdr_client::protocol::ClientShellWorktree {
+        key: key.into(),
+        label: "repo".into(),
+        is_linked_worktree: linked,
+    })
+}
+
+/// Like the TUI, every checkout that is not a linked worktree is a parent:
+/// two plain checkouts of one repository never nest, and only a linked
+/// worktree turns a repository into a group.
+#[test]
+fn every_plain_checkout_is_a_parent_and_only_linked_worktrees_form_groups() {
+    let mut workspaces = layout_tests::snapshot(6).workspaces;
+    for workspace in &mut workspaces {
+        workspace.worktree = None;
+    }
+    workspaces[0].worktree = worktree("/repo/.git", false);
+    workspaces[2].worktree = worktree("/repo/.git", false);
+    workspaces[4].worktree = worktree("/repo/.git", false);
+    let flat: Vec<_> = (0..6).map(|i| (i, false)).collect();
+    assert_eq!(workspace_entries(&workspaces), flat);
+    let none = std::collections::HashSet::new();
+    assert!(
+        super::visible_workspace_entries(&workspaces, &none)
+            .iter()
+            .all(|entry| entry.2.is_none())
+    );
+
+    workspaces[5].worktree = worktree("/repo/.git", true);
+    assert_eq!(
+        workspace_entries(&workspaces),
+        vec![
+            (0, false),
+            (2, false),
+            (4, false),
+            (5, true),
+            (1, false),
+            (3, false)
+        ]
+    );
+    // Each parent folds the group; folding hides only linked worktrees.
+    for collapsed in [none.clone(), ["/repo/.git".to_owned()].into()] {
+        let entries = super::visible_workspace_entries(&workspaces, &collapsed);
+        let groups: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.2.as_deref() == Some("/repo/.git"))
+            .map(|entry| entry.0)
+            .collect();
+        assert_eq!(groups, [0, 2, 4]);
+        assert_eq!(
+            entries.iter().any(|entry| entry.0 == 5),
+            collapsed.is_empty()
+        );
+        assert_eq!(entries.len(), 5 + usize::from(collapsed.is_empty()));
+    }
+}
+
+/// The daemon keeps an unavailable checkout's saved repository membership
+/// across a restart (Herdr #4770). The sidebar groups from that membership
+/// alone, so a checkout without a branch or a reachable directory stays in
+/// its group, under any parent of its repository.
+#[test]
+fn unavailable_checkouts_keep_their_saved_group() {
+    let mut workspaces = layout_tests::snapshot(7).workspaces;
+    for index in [4, 5] {
+        workspaces[index].branch = None;
+        workspaces[index].new_workspace_cwd = "/missing/checkout".into();
+    }
+    let expected = vec![
+        (0, false),
+        (1, false),
+        (2, false),
+        (3, false),
+        (4, true),
+        (5, true),
+        (6, false),
+    ];
+    assert_eq!(workspace_entries(&workspaces), expected);
+    assert_eq!(workspace_label(&workspaces[4], true), "agent-launcher");
+    // An unavailable parent is still a parent.
+    workspaces[3].branch = None;
+    workspaces[3].new_workspace_cwd = "/missing/main".into();
+    assert_eq!(workspace_entries(&workspaces), expected);
+    // Without any parent open, restored linked worktrees stand alone.
+    workspaces[3].worktree = None;
+    assert_eq!(
+        workspace_entries(&workspaces),
+        (0..7).map(|i| (i, false)).collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn collapse_uses_repository_identity_without_mutating_selection() {
     let mut workspaces = layout_tests::snapshot(7).workspaces;

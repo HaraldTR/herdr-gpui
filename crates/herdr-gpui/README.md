@@ -1230,7 +1230,9 @@ Windows setup) nothing is saved and the window says so.
 ## Supported
 
 - Workspace/worktree sidebar with main-checkout parents, indented linked
-  workspaces, local collapse arrows, branch details, and daemon-driven
+  workspaces, local collapse arrows (grouped like the TUI: every non-linked
+  checkout stays a parent, and a repository groups only while one of its
+  linked worktrees is open), branch details, and daemon-driven
   filled/hollow activity indicators taken from the daemon's own status, so the
   GUI and the terminal client always show the same dot. Each worktree row also
   carries its cached pull request number and diff counts.
@@ -1260,9 +1262,11 @@ Windows setup) nothing is saved and the window says so.
 - A searchable theme picker previews the available names from built-ins and
   Herdr/Ghostty theme folders. Selecting a theme applies and saves it while
   preserving other GUI config settings and comments.
-- Right-click spaces for Rename, Close (Close group on non-linked parents with
-  multiple spaces sharing `worktree.key`), and New worktree / Open worktree... on non-linked Git
-  parents, including spaces with a known Git branch but no worktree metadata yet.
+- Right-click spaces for Rename, Close (Close group on a repository's only
+  non-linked parent while linked worktrees sharing its `worktree.key` are open;
+  a parent beside another parent closes alone), and New worktree /
+  Open worktree... on non-linked Git parents, including spaces with a known
+  Git branch but no worktree metadata yet.
   Linked spaces offer New worktree too, while their main checkout is open: the
   daemon creates it through the main checkout, but the new branch starts from
   the linked space's branch rather than the main checkout's `HEAD`.
