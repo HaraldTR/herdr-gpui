@@ -44,6 +44,9 @@ struct Strip {
 #[derive(Default)]
 pub(crate) struct TabAppear {
     strips: HashMap<GroupId, Strip>,
+    /// Set by `hold`: the start every motion is stamped with from then on.
+    #[cfg(test)]
+    held: Option<Instant>,
 }
 
 impl TabAppear {
@@ -51,6 +54,10 @@ impl TabAppear {
     /// strip is seen its tabs are taken as they are; after that, a new tab
     /// grows in and a missing one shrinks out where it stood.
     pub(crate) fn observe(&mut self, group: GroupId, tabs: Vec<Listed>, now: Instant) {
+        #[cfg(test)]
+        let start = self.held.unwrap_or(now);
+        #[cfg(not(test))]
+        let start = now;
         let Some(strip) = self.strips.get_mut(&group) else {
             self.strips.insert(
                 group,
@@ -63,7 +70,7 @@ impl TabAppear {
         };
         for tab in &tabs {
             if !strip.tabs.iter().any(|old| old.pick == tab.pick) {
-                strip.growing.insert(tab.pick.clone(), now);
+                strip.growing.insert(tab.pick.clone(), start);
                 // A tab that comes back is no longer leaving.
                 strip.leaving.retain(|leaving| leaving.pick != tab.pick);
             }
@@ -75,7 +82,7 @@ impl TabAppear {
                     label: old.label.clone(),
                     index,
                     width: old.width,
-                    since: now,
+                    since: start,
                 });
             }
         }
@@ -115,11 +122,14 @@ impl TabAppear {
         self.strips.retain(|group, _| live(*group));
     }
 
-    /// Holds every moving tab where it started, for tests whose frames are
-    /// too slow to catch one mid-way.
+    /// Holds every moving tab where it started, including any that start
+    /// moving later, for tests whose frames are too slow to catch one
+    /// mid-way. Holding before the change matters: a slow frame can outlast
+    /// a motion between recording it and a hold that comes after.
     #[cfg(test)]
     pub(crate) fn hold(&mut self) {
         let later = Instant::now() + std::time::Duration::from_secs(3600);
+        self.held = Some(later);
         for strip in self.strips.values_mut() {
             for since in strip.growing.values_mut() {
                 *since = later;
