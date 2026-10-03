@@ -1,7 +1,7 @@
-//! OpenCode Go subscription usage. Sign-in sources, in CodexBar's order for
-//! an unscoped account: an OpenCode API key from the config or
-//! `OPENCODE_API_KEY` reads the public `zen/go/v1/usage` API; otherwise an
-//! opencode.ai session cookie (the `cookie` setting, or, when OpenCode Go is
+//! OpenCode Go subscription usage. Sign-in sources: an OpenCode API key from
+//! the config or `OPENCODE_API_KEY`, else the key `opencode auth login` saved
+//! in OpenCode's `auth.json`, reads the public `zen/go/v1/usage` API;
+//! otherwise an opencode.ai session cookie (the `cookie` setting, or, when OpenCode Go is
 //! listed in `[usage] show_providers`, `auth` / `__Host-console_session` from
 //! Chrome or Safari) reads the console's Go meters and prepaid Zen balance,
 //! falling back to the legacy `/workspace/<id>/go` page for workspaces that
@@ -19,7 +19,7 @@ use crate::{
     Error, Result,
     usage::{
         model::{Account, Balance, Provider, Report, Section, Unit, Window},
-        probe::{Probe, Request, Secret},
+        probe::{HostPath, Probe, Request, Secret},
         service::{Meta, Service, Setting, json},
         values::invalid,
     },
@@ -34,6 +34,9 @@ const BILLING_STATUS: &str = "https://opencode.ai/console/api/billing/status";
 /// The console answers HTTP 400 without the workspace in this header.
 const ORG_HEADER: &str = "x-org-id";
 const MICRO_CENTS: f64 = 100_000_000.;
+/// Entries of OpenCode's `auth.json` holding an API key, Go's first: any key
+/// of the workspace reads its Go usage.
+const AUTH_KEYS: [&[&str]; 2] = [&["opencode-go", "key"], &["opencode", "key"]];
 
 pub(crate) struct Opencodego;
 
@@ -44,7 +47,9 @@ static META: Meta = Meta::new("opencodego", "OpenCode Go")
             "api_key",
             &["OPENCODE_API_KEY"],
             "An OpenCode API key for the account with the Go subscription, created at \
-             https://opencode.ai/auth under API Keys. Preferred over the cookie.",
+             https://opencode.ai/auth under API Keys. Preferred over the cookie. When \
+             unset, the key `opencode auth login` saved in \
+             ~/.local/share/opencode/auth.json is used.",
         ),
         Setting::new(
             "cookie",
@@ -71,19 +76,63 @@ impl Service for Opencodego {
 
     fn fetch(&self, probe: &mut Probe) -> Option<Result<Report>> {
         if let Some(key) = probe.setting("api_key") {
-            let request = Request::get(API)
-                .bearer(&key)
-                .header("Accept", "application/json")
-                .header("User-Agent", "CodexBar");
             return Some(
                 probe
-                    .body(request)
+                    .body(api_request(&key))
                     .and_then(|body| parse_api(&body, SystemTime::now())),
             );
         }
-        let cookie = probe.cookies(DOMAINS, COOKIES)?;
-        Some(fetch_web(probe, &cookie))
+        // The CLI's key may belong to a workspace without Go, or be stale, so
+        // a session cookie still gets its turn.
+        let cli = cli_key(probe).map(|key| fetch_api(probe, &key));
+        if let Some(Ok(Some(report))) = cli {
+            return Some(Ok(report));
+        }
+        match probe.cookies(DOMAINS, COOKIES) {
+            Some(cookie) => Some(fetch_web(probe, &cookie)),
+            None => cli
+                .map(|result| result.map(|report| report.unwrap_or_else(|| no_subscription(None)))),
+        }
     }
+}
+
+fn api_request(key: &Secret) -> Request {
+    Request::get(API)
+        .bearer(key)
+        .header("Accept", "application/json")
+        .header("User-Agent", "CodexBar")
+}
+
+/// The API key OpenCode's CLI saved, in `$XDG_DATA_HOME/opencode/auth.json`
+/// (`~/.local/share` on every platform when unset).
+fn cli_key(probe: &mut Probe) -> Option<Secret> {
+    let auth = probe.file(&HostPath::env_or(
+        "XDG_DATA_HOME",
+        ".local/share",
+        "opencode/auth.json",
+    ))?;
+    auth_key(probe, &auth)
+}
+
+fn auth_key(probe: &mut Probe, auth: &Secret) -> Option<Secret> {
+    AUTH_KEYS.iter().find_map(|path| probe.field(auth, path))
+}
+
+/// Go usage for `key`, or `None` when its workspace has no Go subscription.
+fn fetch_api(probe: &mut Probe, key: &Secret) -> Result<Option<Report>> {
+    let response = probe.http(api_request(key))?;
+    if response.status == 403 && is_entitlement_error(&response.body) {
+        return Ok(None);
+    }
+    parse_api(&response.ok()?, SystemTime::now()).map(Some)
+}
+
+/// The API's 403 for a valid key whose workspace has no Go subscription, as
+/// opposed to a rejected key.
+pub(crate) fn is_entitlement_error(body: &str) -> bool {
+    serde_json::from_str::<Value>(body).is_ok_and(|value| {
+        value.pointer("/error/type").and_then(Value::as_str) == Some("EntitlementError")
+    })
 }
 
 fn fetch_web(probe: &mut Probe, cookie: &Secret) -> Result<Report> {
@@ -174,6 +223,13 @@ fn report(windows: Vec<Window>, balance: Option<f64>) -> Report {
     )
 }
 
+fn no_subscription(balance: Option<f64>) -> Report {
+    report(Vec::new(), balance).with_sections([Section::Facts {
+        title: "Subscription".into(),
+        facts: vec![("OpenCode Go".into(), "None".into())],
+    }])
+}
+
 /// The public usage API: `usage.rolling/weekly/monthly`, in percent units.
 pub(crate) fn parse_api(body: &str, now: SystemTime) -> Result<Report> {
     let value: Value = json(body)?;
@@ -201,10 +257,7 @@ pub(crate) fn parse_console(body: &str, balance: Option<f64>, now: SystemTime) -
     let value: Value = json(body)?;
     let Some(access) = value.get("access").and_then(Value::as_object) else {
         if value.is_null() || value.get("access").is_some_and(Value::is_null) {
-            return Ok(report(Vec::new(), balance).with_sections([Section::Facts {
-                title: "Subscription".into(),
-                facts: vec![("OpenCode Go".into(), "None".into())],
-            }]));
+            return Ok(no_subscription(balance));
         }
         return json_windows(&value, now, true)
             .map(|windows| report(windows, balance))
@@ -287,6 +340,53 @@ mod tests {
         assert_eq!(report.windows[1].used, 1.);
         assert_eq!(report.windows[2].kind, Kind::Monthly);
         assert_eq!(report.windows[2].length, Some(MONTH));
+    }
+
+    #[test]
+    fn parses_api_usage_with_reset_times() {
+        // The shape `zen/go/v1/usage` answers today.
+        let report = parse_api(
+            r#"{"usage":{"rolling":{"status":"ok","percent":12,"resetsAt":"2026-09-20T03:00:00.000Z"},
+                "weekly":{"status":"rate-limited","percent":100,"resetsAt":"2026-09-21T00:00:00.000Z"},
+                "monthly":{"status":"ok","percent":40,"resetsAt":"2026-10-19T00:00:00.000Z"}}}"#,
+            at(NOW),
+        )
+        .unwrap();
+        assert_eq!(report.windows[0].used, 12.);
+        assert_eq!(report.windows[0].resets_at, Some(at(NOW + 3 * 3600)));
+        assert_eq!(report.windows[1].used, 100.);
+        assert_eq!(report.windows[1].resets_at, Some(at(NOW + 86_400)));
+        assert_eq!(report.windows[2].resets_at, Some(at(NOW + 29 * 86_400)));
+    }
+
+    #[test]
+    fn tells_a_missing_subscription_from_a_rejected_key() {
+        assert!(is_entitlement_error(
+            r#"{"type":"error","error":{"type":"EntitlementError","message":"OpenCode Go subscription required."}}"#
+        ));
+        assert!(!is_entitlement_error(
+            r#"{"type":"error","error":{"type":"AuthError","message":"Unauthorized"}}"#
+        ));
+        assert!(!is_entitlement_error("<html>Forbidden</html>"));
+    }
+
+    #[test]
+    fn reads_the_cli_key_go_entry_first() {
+        use crate::usage::{cookies::CookieJar, probe::Exec};
+        let mut exec = Exec::Local;
+        let mut jar = CookieJar::default();
+        let mut probe = Probe::new(&mut exec, Provider(&Opencodego), None, &mut jar, false);
+        let auth = |text: &str| Secret::from(secrecy::SecretString::from(text.to_owned()));
+        // Numeric keys read back through `text`, which parses JSON scalars.
+        let both =
+            auth(r#"{"opencode":{"type":"api","key":"1"},"opencode-go":{"type":"api","key":"2"}}"#);
+        let key = auth_key(&mut probe, &both).unwrap();
+        assert_eq!(probe.text(&key, &[]).as_deref(), Some("2"));
+        let zen = auth(r#"{"opencode":{"type":"api","key":"1"},"anthropic":{"type":"oauth"}}"#);
+        let key = auth_key(&mut probe, &zen).unwrap();
+        assert_eq!(probe.text(&key, &[]).as_deref(), Some("1"));
+        let none = auth(r#"{"opencode-go":{"type":"api","key":""},"openai":{"key":"3"}}"#);
+        assert!(auth_key(&mut probe, &none).is_none());
     }
 
     #[test]

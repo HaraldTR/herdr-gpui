@@ -1889,8 +1889,11 @@ GPUI native action/menu/keybinding patterns.
   server-owned keybindings, session picker, saved-host editing, or daemon
   stop/upgrade management.
 - IME uses a minimal transient buffer, not a local editable terminal document;
-  composition appears in the status bar rather than inline. Key releases and
-  physical-key/extended keyboard protocol metadata are not reported.
+  composition appears in the status bar rather than inline. Key releases are
+  reported only while Herdr says the focused pane asks for every key (kitty
+  report-all), and only for keys sent as key events: typed text still arrives
+  as text rather than escape codes, so IME and dead keys keep working.
+  Physical-key metadata is not reported.
 - Popups have a basic centered text presentation, without native title/border
   chrome. Only semantic notifications get in-app toasts; legacy notification
   commands and server clipboard writes are not executed. There is no notification

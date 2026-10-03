@@ -276,7 +276,9 @@ size = 12
 # OpenCode Go (opencodego)
 # [usage.providers.opencodego]
 #   An OpenCode API key for the account with the Go subscription, created at
-#   https://opencode.ai/auth under API Keys. Preferred over the cookie.
+#   https://opencode.ai/auth under API Keys. Preferred over the cookie. When
+#   unset, the key `opencode auth login` saved in
+#   ~/.local/share/opencode/auth.json is used.
 # api_key = ""  # or OPENCODE_API_KEY
 #   Your opencode.ai session, used when no API key is set. Sign in at
 #   https://opencode.ai/auth, open Developer Tools > Application > Cookies >

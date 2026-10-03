@@ -7,7 +7,7 @@ use crate::{
     connection::ConnectionBridge,
     terminal::{WheelAccumulator, key_input, wheel_target},
 };
-use gpui::{Context, KeyDownEvent, ScrollWheelEvent, Window};
+use gpui::{Context, KeyDownEvent, KeyUpEvent, ScrollWheelEvent, Window};
 
 impl HerdrWindow {
     pub(crate) fn open_terminal_link(
@@ -139,6 +139,9 @@ impl HerdrWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A new press goes wherever this decides; only the pane branch at the
+        // end holds it again for its release.
+        self.held_keys.forget(&event.keystroke.key);
         // A keystroke bubbling out of the find field is the field's: an
         // unhandled one is still on its way to the field's IME.
         if self.find_focused(window, cx) {
@@ -204,9 +207,26 @@ impl HerdrWindow {
         } else if self.marked.is_empty()
             && let Some(input) = key_input(event, alt_keys)
         {
+            let input =
+                self.held_keys
+                    .press(&event.keystroke.key, input, self.live.keyboard_report_all);
             self.send(input, cx);
             cx.stop_propagation();
             window.prevent_default();
+        }
+    }
+
+    /// Releases a key the pane received while Herdr reported that its focused
+    /// pane wants every key event, as the TUI does by switching its outer
+    /// terminal to report all keys. Text stays with the input handler, so
+    /// only keys sent as key events are released.
+    pub(crate) fn key_up(&mut self, event: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(release) = self.held_keys.release(&event.keystroke.key) else {
+            return;
+        };
+        if self.live.keyboard_report_all && self.marked.is_empty() {
+            self.send(release, cx);
+            cx.stop_propagation();
         }
     }
 }

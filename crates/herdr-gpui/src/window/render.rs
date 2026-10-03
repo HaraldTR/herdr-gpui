@@ -220,6 +220,7 @@ impl Render for HerdrWindow {
                 },
             )
             .on_key_down(cx.listener(Self::key_down))
+            .on_key_up(cx.listener(Self::key_up))
             // The terminal has nothing for Cut or Select All to act on, and
             // Copy only while a released selection is still highlighted.
             .on_action(cx.listener(|this, _: &crate::actions::Paste, _, cx| this.paste(cx)))
