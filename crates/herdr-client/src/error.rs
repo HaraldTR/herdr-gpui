@@ -123,6 +123,10 @@ pub enum Error {
     SurfaceIdentity,
     #[error("patch before baseline")]
     PatchBeforeBaseline,
+    #[error("encoded surface before baseline")]
+    EncodedSurfaceBeforeBaseline,
+    #[error("surface encoding was not advertised by endpoint")]
+    SurfaceEncodingNotNegotiated,
     #[error("response boot mismatch")]
     ResponseBoot,
     #[error("response limit exceeded")]

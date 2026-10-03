@@ -24,6 +24,26 @@ adapt to an I/O interface can use `io::Error::new(error.kind(), error)` without
 discarding the source. Error display and source chains are diagnostics, not
 sanitized presentation of untrusted terminal or daemon content.
 
+## Optional Surface Encodings
+
+Three upstream encodings shrink surface updates. Each module exposes its
+`CAPABILITY`, `MESSAGE_KIND` (an `EndpointControl` kind), `decode`, and an
+`encode` used by mock peers. They are requested in the hello, which precedes
+the welcome, and accepted only when the welcome advertises the capability.
+
+- `surface_scroll`: a patch plus per-region row shifts, applied by
+  `PaneSurfaceFrame::apply_scroll_patch` with the same atomic validation as
+  `apply_patch`; regions must fit the frame and be disjoint.
+- `surface_delta`: a recomputed surface as metadata plus sorted changed-cell
+  spans (and a popup patch or replacement); `SurfaceDelta::reconstruct`
+  rebuilds the full surface from the retained one.
+- `surface_reuse`: JSON metadata for a recomputed surface whose cells are all
+  unchanged; `SurfaceReuse::reconstruct` reuses the retained cells.
+
+Reconstruction is fenced on boot ID, base projection/surface revision, and the
+next surface revision; the result still goes through `FrameData::validate`.
+Failures are typed (`ScrollBounds`, `DeltaSpan`, `SurfaceBaseline`, ...).
+
 ## Clipboard Images
 
 `encode_clipboard_image(target: ClientClipboardImageTarget, extension: &str,
@@ -50,4 +70,5 @@ image-specific encoder selects the larger cap.
 
 `cargo test --locked -p herdr-protocol` covers frozen wire tags, independent
 positional layouts, JSON fixtures, bounded framing, atomic patch validation,
-and typed error categories/source preservation.
+typed error categories/source preservation, and replay of Herdr-encoded
+surface scroll/delta/reuse fixtures.
