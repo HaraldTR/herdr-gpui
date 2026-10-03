@@ -85,8 +85,8 @@ api_key = "sk-or-…"
   Application → Cookies, which cookie names to copy, and that the value is
   the full `name=value; name2=value2` header. The panel shows this text
   when the provider is listed but not signed in.
-- Unknown names in the config are rejected, so every name a provider reads
-  must be declared.
+- Unknown provider ids and setting names in the config are ignored and named
+  in the GUI config warning, so every name a provider reads must be declared.
 
 ## Probe
 

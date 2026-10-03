@@ -4,7 +4,10 @@
 # Herdr GUI settings. Independent of the daemon config, except where a setting
 # below says it starts from one the daemon config already carries.
 # Save at $XDG_CONFIG_HOME/herdr/config-gpui.toml (default ~/.config/herdr/).
-# Omitted settings use defaults. Font sizes are logical pixels, inclusive 8..48.
+# Omitted settings use defaults. Keys this build does not know, such as ones a
+# newer build reads, are ignored and named in a dismissible warning instead of
+# failing the load. [github] credentials are still refused.
+# Font sizes are logical pixels, inclusive 8..48.
 # Font families below are examples; leave them commented to use platform defaults.
 # Fonts must be installed locally; none are bundled.
 # Powerline separators and Nerd Font icons live in the Private Use Area, which
@@ -29,6 +32,10 @@ contrast = "standard"
 confirm_close_tab = true
 # Show the Agents section below Spaces in the sidebar.
 show_agents = true
+# Show CPU and memory: the selected host's in the status bar, and each host's
+# on its sidebar row. Connected remote hosts are read over SSH every couple of
+# seconds; false stops all sampling. Also under Settings > General.
+show_system_load = true
 # macOS only: whether Option-letter reaches a pane as an Alt shortcut (Alt-P
 # for Option-P) or types the character the keyboard layout puts there. "auto"
 # sends Alt on the U.S. and ABC layouts and types elsewhere, so layouts that
@@ -69,6 +76,14 @@ layout = "normal"
 # top-left, top-center, top-right, bottom-left, bottom-center, bottom-right.
 # The position also places the note saying why New Worktree opened no dialog.
 # position = "bottom-center"
+
+# What a pane's terminal bell (BEL) does. Herdr has no bell setting of its own:
+# it forwards each bell to the focused client, as an outer terminal would see it.
+# [bell]
+# Bounce the Dock icon while the window is in the background.
+# attention = true
+# Play the system alert sound.
+# sound = false
 
 # To customize spacing too, REPLACE the top-level layout above with this table:
 # [layout]
@@ -156,7 +171,7 @@ size = 12
 # Other software running as you and backups can read it. Default is false.
 # allow_plaintext_credentials = false
 
-# Optional behaviors, all off unless turned on here. Unknown keys are rejected.
+# Optional behaviors, all off unless turned on here.
 # [features]
 # Open a space's menu when the pointer rests on its sidebar row, without a
 # right click. Moving the pointer anywhere but into that menu closes it again.

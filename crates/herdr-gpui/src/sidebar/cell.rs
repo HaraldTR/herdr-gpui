@@ -13,7 +13,7 @@
 
 use super::{
     layout::SidebarLook,
-    row::{RowBadge, RowIcon, RowLift, RowTree},
+    row::{RowBadge, RowIcon, RowLift, RowTree, Upstream},
 };
 use crate::{
     config::{FontConfig, LayoutMode, Theme},
@@ -73,6 +73,11 @@ impl<'a> WorkspaceRow<'a> {
             .as_deref()
             .map(str::trim)
             .filter(|branch| !branch.is_empty())
+    }
+
+    /// Commits to push and pull against the branch's upstream, if any.
+    pub(super) fn upstream(&self) -> Option<Upstream> {
+        Upstream::new(self.workspace.git_ahead_behind)
     }
 
     pub(super) fn status(&self) -> AgentStatus {

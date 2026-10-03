@@ -2,7 +2,9 @@
 
 use super::snapshot::{AgentSession, Pane, ProcessInfo, SessionKind};
 
-/// Agents whose sessions Teleport can carry across hosts.
+/// Agents Herdr's integrations report resumable sessions for. Resume commands
+/// follow Herdr's own (`agent_resume::plan`); whether Teleport can also bring
+/// the session to another host is [`AgentKind::carries`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentKind {
     Claude,
@@ -10,9 +12,41 @@ pub(crate) enum AgentKind {
     Opencode,
     Pi,
     Omp,
+    Copilot,
+    Devin,
+    Droid,
+    Kimi,
+    Mastracode,
+    Hermes,
+    Qodercli,
+    Qwen,
+    Kilo,
+    Cursor,
+    Antigravity,
+    Grok,
+    Letta,
+}
+
+/// The longest session id Herdr records.
+const MAX_SESSION_ID: usize = 512;
+/// The longest session file path Herdr records.
+const MAX_SESSION_PATH: usize = 4096;
+
+/// How many arguments follow a flag on an agent's command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Arity {
+    /// A switch.
+    Zero,
+    /// Exactly one value, unless given inline with `=`.
+    One,
+    /// One value when the next argument is not a flag.
+    Optional,
+    /// Every following argument up to the next flag.
+    Many,
 }
 
 impl AgentKind {
+    /// The kind for the agent name Herdr reports.
     pub(crate) fn parse(name: &str) -> Option<Self> {
         Some(match name {
             "claude" => Self::Claude,
@@ -20,36 +54,111 @@ impl AgentKind {
             "opencode" => Self::Opencode,
             "pi" => Self::Pi,
             "omp" => Self::Omp,
+            "copilot" => Self::Copilot,
+            "devin" => Self::Devin,
+            "droid" => Self::Droid,
+            "kimi" => Self::Kimi,
+            "mastracode" => Self::Mastracode,
+            "hermes" => Self::Hermes,
+            "qodercli" => Self::Qodercli,
+            "qwen" => Self::Qwen,
+            "kilo" => Self::Kilo,
+            "cursor" => Self::Cursor,
+            "agy" => Self::Antigravity,
+            "grok" => Self::Grok,
+            "letta" => Self::Letta,
             _ => return None,
         })
     }
 
-    pub(crate) fn binary(self) -> &'static str {
+    /// The agent name Herdr reports.
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Opencode => "opencode",
             Self::Pi => "pi",
             Self::Omp => "omp",
+            Self::Copilot => "copilot",
+            Self::Devin => "devin",
+            Self::Droid => "droid",
+            Self::Kimi => "kimi",
+            Self::Mastracode => "mastracode",
+            Self::Hermes => "hermes",
+            Self::Qodercli => "qodercli",
+            Self::Qwen => "qwen",
+            Self::Kilo => "kilo",
+            Self::Cursor => "cursor",
+            Self::Antigravity => "agy",
+            Self::Grok => "grok",
+            Self::Letta => "letta",
         }
     }
 
+    /// The name of the Herdr integration that reports this agent's sessions.
+    fn integration(self) -> &'static str {
+        match self {
+            Self::Antigravity => "antigravity_cli",
+            _ => self.name(),
+        }
+    }
+
+    /// The program that runs this agent. Teleport hosts are POSIX, so
+    /// Cursor's is never Windows' `cursor-agent.cmd`.
+    pub(crate) fn binary(self) -> &'static str {
+        match self {
+            Self::Cursor => "cursor-agent",
+            _ => self.name(),
+        }
+    }
+
+    /// Whether Teleport can bring this agent's session to another host: it
+    /// knows where the agent keeps it, or the agent keeps it on a server.
+    /// The rest resume through Herdr's own restore on the host that stores
+    /// the session; where that storage lives is unconfirmed, so Teleport
+    /// starts them afresh instead.
+    pub(crate) fn carries(self) -> bool {
+        matches!(
+            self,
+            Self::Claude
+                | Self::Codex
+                | Self::Opencode
+                | Self::Pi
+                | Self::Omp
+                | Self::Copilot
+                | Self::Letta
+        )
+    }
+
     /// Whether a reported session reference identifies a session this kind
-    /// can resume. Only Herdr's own integrations are trusted to report one.
+    /// can resume. Only Herdr's own integrations are trusted to report one,
+    /// and only with the reference kinds Herdr's restore accepts.
     fn accepts(self, session: &AgentSession) -> bool {
-        session.source == format!("herdr:{}", self.binary())
-            && session.agent == self.binary()
-            && !session.value.is_empty()
-            && !session.value.chars().any(char::is_control)
-            && match self {
-                Self::Claude | Self::Codex | Self::Opencode => session.kind == SessionKind::Id,
-                Self::Pi | Self::Omp => true,
+        session.source.strip_prefix("herdr:") == Some(self.integration())
+            && session.agent == self.name()
+            && match (self, session.kind) {
+                (Self::Pi | Self::Omp, SessionKind::Path) => valid_path(&session.value),
+                (_, SessionKind::Id) => self.valid_id(&session.value),
+                (_, SessionKind::Path) => false,
             }
     }
 
-    /// Flags that take a separate value, so the value is kept with its flag.
-    fn value_flags(self) -> &'static [&'static str] {
-        match self {
+    /// Ids are passed as one argument, never through a shell unquoted; they
+    /// must still not read as a flag or carry control characters.
+    fn valid_id(self, id: &str) -> bool {
+        let plain = !id.is_empty()
+            && id.len() <= MAX_SESSION_ID
+            && !id.starts_with('-')
+            && !id.chars().any(char::is_control);
+        // Letta's default conversation is named by its agent.
+        plain && (self != Self::Letta || id.strip_prefix("default:") != Some(""))
+    }
+
+    /// How many values follow `flag` on the original command line. Only
+    /// agents whose flags are known keep any; the rest resume with none,
+    /// as Herdr's restore does.
+    fn arity(self, flag: &str) -> Option<Arity> {
+        let one: &[&str] = match self {
             Self::Claude => &[
                 "--model",
                 "--permission-mode",
@@ -81,26 +190,101 @@ impl AgentKind {
             ],
             Self::Opencode => &["-m", "--model", "--agent"],
             Self::Pi | Self::Omp => &["--model", "--provider", "--thinking"],
+            // From `copilot --help` (1.0.8).
+            Self::Copilot => &[
+                "--add-dir",
+                "--add-github-mcp-tool",
+                "--add-github-mcp-toolset",
+                "--additional-mcp-config",
+                "--agent",
+                "--disable-mcp-server",
+                "--log-level",
+                "--max-autopilot-continues",
+                "--model",
+                "--plugin-dir",
+                "--reasoning-effort",
+                "--stream",
+            ],
+            _ => &[],
+        };
+        let (optional, many): (&[&str], &[&str]) = match self {
+            Self::Copilot => (
+                &["--alt-screen", "--bash-env", "--mouse"],
+                &[
+                    "--allow-tool",
+                    "--allow-url",
+                    "--available-tools",
+                    "--deny-tool",
+                    "--deny-url",
+                    "--excluded-tools",
+                    "--secret-env-vars",
+                ],
+            ),
+            _ => (&[], &[]),
+        };
+        if one.contains(&flag) {
+            Some(Arity::One)
+        } else if optional.contains(&flag) {
+            Some(Arity::Optional)
+        } else if many.contains(&flag) {
+            Some(Arity::Many)
+        } else if self.keeps_flags() {
+            Some(Arity::Zero)
+        } else {
+            None
         }
     }
 
-    /// Flags naming a session, a working directory, or a one-shot mode; the
-    /// resume command supplies its own.
-    fn replaced_flags(self) -> &'static [&'static str] {
-        match self {
-            Self::Claude => &["--resume", "-r", "--session-id", "--fork-session"],
-            Self::Codex => &["-C", "--cd"],
-            Self::Opencode => &["-s", "--session", "--port", "--hostname"],
-            Self::Pi | Self::Omp => &["--session", "--resume", "-r", "--fork", "--session-dir"],
-        }
+    fn keeps_flags(self) -> bool {
+        matches!(
+            self,
+            Self::Claude | Self::Codex | Self::Opencode | Self::Pi | Self::Omp | Self::Copilot
+        )
     }
 
-    fn replaced_switches(self) -> &'static [&'static str] {
-        match self {
-            Self::Claude => &["--continue", "-c", "--print", "-p"],
-            Self::Codex => &[],
-            Self::Opencode => &["-c", "--continue", "--fork"],
-            Self::Pi | Self::Omp => &["-c", "--continue", "--no-session"],
+    /// Flags naming a session, a working directory, or a one-shot mode, with
+    /// the values they take; the resume command supplies its own.
+    fn replaced(self, flag: &str) -> Option<Arity> {
+        let (one, zero, optional): (&[&str], &[&str], &[&str]) = match self {
+            Self::Claude => (
+                &["--resume", "-r", "--session-id", "--fork-session"],
+                &["--continue", "-c", "--print", "-p"],
+                &[],
+            ),
+            Self::Codex => (&["-C", "--cd"], &[], &[]),
+            Self::Opencode => (
+                &["-s", "--session", "--port", "--hostname"],
+                &["-c", "--continue", "--fork"],
+                &[],
+            ),
+            Self::Pi | Self::Omp => (
+                &["--session", "--resume", "-r", "--fork", "--session-dir"],
+                &["-c", "--continue", "--no-session"],
+                &[],
+            ),
+            Self::Copilot => (
+                &[
+                    "-i",
+                    "--interactive",
+                    "-p",
+                    "--prompt",
+                    "--config-dir",
+                    "--log-dir",
+                    "--output-format",
+                ],
+                &["--continue", "--acp", "-s", "--silent", "--share-gist"],
+                &["--resume", "--share"],
+            ),
+            _ => (&[], &[], &[]),
+        };
+        if one.contains(&flag) {
+            Some(Arity::One)
+        } else if zero.contains(&flag) {
+            Some(Arity::Zero)
+        } else if optional.contains(&flag) {
+            Some(Arity::Optional)
+        } else {
+            None
         }
     }
 
@@ -109,23 +293,41 @@ impl AgentKind {
     /// initial prompt or project directory that must not be replayed.
     pub(crate) fn kept_flags(self, argv: &[String]) -> Vec<String> {
         let mut kept = Vec::new();
-        let mut args = argv.iter().skip(1);
+        let mut args = argv.iter().skip(1).peekable();
         while let Some(arg) = args.next() {
-            let name = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
-            let inline = arg.contains('=');
-            if self.replaced_flags().contains(&name) {
-                if !inline {
-                    args.next();
+            if !arg.starts_with('-') {
+                continue;
+            }
+            let (name, inline) = arg
+                .split_once('=')
+                .map_or((arg.as_str(), false), |(name, _)| (name, true));
+            let (keep, arity) = match self.replaced(name) {
+                Some(arity) => (false, arity),
+                None => match self.arity(name) {
+                    Some(arity) => (true, arity),
+                    None => continue,
+                },
+            };
+            let mut values = Vec::new();
+            if !inline {
+                match arity {
+                    Arity::Zero => {}
+                    Arity::One => match args.next() {
+                        Some(value) => values.push(value),
+                        // A flag missing its value is not worth replaying.
+                        None => continue,
+                    },
+                    Arity::Optional => values.extend(args.next_if(|next| !next.starts_with('-'))),
+                    Arity::Many => {
+                        while let Some(value) = args.next_if(|next| !next.starts_with('-')) {
+                            values.push(value);
+                        }
+                    }
                 }
-            } else if self.replaced_switches().contains(&name) || !arg.starts_with('-') {
-                // A switch the resume replaces, or a positional.
-            } else if self.value_flags().contains(&name) && !inline {
-                if let Some(value) = args.next() {
-                    kept.push(arg.clone());
-                    kept.push(value.clone());
-                }
-            } else {
+            }
+            if keep {
                 kept.push(arg.clone());
+                kept.extend(values.into_iter().cloned());
             }
         }
         kept
@@ -135,17 +337,36 @@ impl AgentKind {
     /// destination path), with `flags` from the original command line.
     pub(crate) fn resume_argv(self, reference: &str, flags: &[String]) -> Vec<String> {
         let mut argv = vec![self.binary().to_owned()];
+        let mut flag = |flag: &str| argv.extend([flag.to_owned(), reference.to_owned()]);
         match self {
-            Self::Claude => argv.extend(["--resume".to_owned(), reference.to_owned()]),
+            Self::Claude
+            | Self::Devin
+            | Self::Droid
+            | Self::Hermes
+            | Self::Qodercli
+            | Self::Qwen
+            | Self::Cursor
+            | Self::Grok => flag("--resume"),
+            Self::Opencode | Self::Pi | Self::Kimi | Self::Kilo => flag("--session"),
+            Self::Mastracode => flag("--thread"),
+            Self::Antigravity => flag("--conversation"),
             Self::Codex => argv.extend(["resume".to_owned(), reference.to_owned()]),
-            Self::Opencode | Self::Pi => {
-                argv.extend(["--session".to_owned(), reference.to_owned()])
-            }
-            Self::Omp => argv.push(format!("--resume={reference}")),
+            // Their resume flags take an optional value, so it must be inline.
+            Self::Copilot | Self::Omp => argv.push(format!("--resume={reference}")),
+            Self::Letta => match reference.strip_prefix("default:") {
+                Some(agent) => {
+                    argv.extend(["--conversation", "default", "--agent", agent].map(str::to_owned))
+                }
+                None => flag("--conversation"),
+            },
         }
         argv.extend(flags.iter().cloned());
         argv
     }
+}
+
+fn valid_path(path: &str) -> bool {
+    path.starts_with('/') && path.len() <= MAX_SESSION_PATH && !path.chars().any(char::is_control)
 }
 
 /// What a source pane is doing, and so what its destination pane will do.
@@ -172,6 +393,7 @@ impl Work {
         let argv = job.map(|job| job.argv.clone()).unwrap_or_default();
         if let Some(session) = &pane.agent_session
             && let Some(agent) = AgentKind::parse(&session.agent)
+            && agent.carries()
             && agent.accepts(session)
         {
             return Self::Session {
@@ -352,12 +574,25 @@ pub(crate) fn handoff_resume_prompt(path: &str) -> String {
 }
 
 impl AgentKind {
-    /// The command that starts this agent afresh, optionally with a first prompt.
+    /// Whether [`AgentKind::start_argv`] knows how to give this agent a
+    /// first prompt, so it can continue from a handoff note.
+    pub(crate) fn takes_prompt(self) -> bool {
+        matches!(
+            self,
+            Self::Claude | Self::Codex | Self::Opencode | Self::Pi | Self::Omp | Self::Copilot
+        )
+    }
+
+    /// The command that starts this agent afresh, optionally with a first
+    /// prompt when it [takes one](AgentKind::takes_prompt).
     pub(crate) fn start_argv(self, prompt: Option<&str>) -> Vec<String> {
         let mut argv = vec![self.binary().to_owned()];
-        if let Some(prompt) = prompt {
-            if self == Self::Opencode {
-                argv.push("--prompt".to_owned());
+        if let Some(prompt) = prompt.filter(|_| self.takes_prompt()) {
+            match self {
+                Self::Opencode => argv.push("--prompt".to_owned()),
+                // Copilot's `-p` runs the prompt and exits.
+                Self::Copilot => argv.push("-i".to_owned()),
+                _ => {}
             }
             argv.push(prompt.to_owned());
         }
@@ -496,6 +731,185 @@ mod tests {
     }
 
     #[test]
+    fn resume_commands_match_herdr_for_every_agent() {
+        // Herdr's `agent_resume::plan`, agent by agent.
+        for (agent, reference, argv) in [
+            ("copilot", "c-1", &["copilot", "--resume=c-1"][..]),
+            ("devin", "d-1", &["devin", "--resume", "d-1"]),
+            ("droid", "d-1", &["droid", "--resume", "d-1"]),
+            ("kimi", "k-1", &["kimi", "--session", "k-1"]),
+            ("mastracode", "m-1", &["mastracode", "--thread", "m-1"]),
+            ("hermes", "h-1", &["hermes", "--resume", "h-1"]),
+            ("qodercli", "q-1", &["qodercli", "--resume", "q-1"]),
+            ("qwen", "q-1", &["qwen", "--resume", "q-1"]),
+            ("kilo", "k-1", &["kilo", "--session", "k-1"]),
+            ("cursor", "c-1", &["cursor-agent", "--resume", "c-1"]),
+            ("agy", "a-1", &["agy", "--conversation", "a-1"]),
+            ("grok", "g-1", &["grok", "--resume", "g-1"]),
+            ("letta", "conv-1", &["letta", "--conversation", "conv-1"]),
+            (
+                "letta",
+                "default:agent-1",
+                &["letta", "--conversation", "default", "--agent", "agent-1"],
+            ),
+        ] {
+            let kind = AgentKind::parse(agent).unwrap();
+            assert_eq!(kind.name(), agent);
+            assert_eq!(kind.resume_argv(reference, &[]), strings(argv), "{agent}");
+        }
+        assert_eq!(AgentKind::parse("cursor-agent"), None);
+        assert_eq!(AgentKind::parse("antigravity_cli"), None);
+    }
+
+    #[test]
+    fn sessions_are_accepted_only_from_herdr_with_safe_references() {
+        let accepts = |agent: &str, source: &str, kind: SessionKind, value: &str| {
+            let mut reported = session(agent, kind, value);
+            reported.source = source.into();
+            AgentKind::parse(agent).unwrap().accepts(&reported)
+        };
+        assert!(accepts(
+            "agy",
+            "herdr:antigravity_cli",
+            SessionKind::Id,
+            "a"
+        ));
+        assert!(!accepts("agy", "herdr:agy", SessionKind::Id, "a"));
+        assert!(accepts("cursor", "herdr:cursor", SessionKind::Id, "a"));
+        assert!(accepts(
+            "letta",
+            "herdr:letta",
+            SessionKind::Id,
+            "default:agent-1"
+        ));
+        assert!(!accepts(
+            "letta",
+            "herdr:letta",
+            SessionKind::Id,
+            "default:"
+        ));
+        assert!(!accepts("copilot", "herdr:copilot", SessionKind::Id, ""));
+        assert!(!accepts(
+            "copilot",
+            "herdr:copilot",
+            SessionKind::Id,
+            "--yolo"
+        ));
+        assert!(!accepts(
+            "copilot",
+            "herdr:copilot",
+            SessionKind::Id,
+            "a\nb"
+        ));
+        assert!(accepts(
+            "copilot",
+            "herdr:copilot",
+            SessionKind::Id,
+            &"a".repeat(512)
+        ));
+        assert!(!accepts(
+            "copilot",
+            "herdr:copilot",
+            SessionKind::Id,
+            &"a".repeat(513)
+        ));
+        // Only pi and omp report session files, and only absolute ones.
+        assert!(!accepts(
+            "copilot",
+            "herdr:copilot",
+            SessionKind::Path,
+            "/s"
+        ));
+        assert!(accepts("omp", "herdr:omp", SessionKind::Path, "/h/s.jsonl"));
+        assert!(!accepts("omp", "herdr:omp", SessionKind::Path, "s.jsonl"));
+        assert!(accepts("pi", "herdr:pi", SessionKind::Id, "01a0"));
+    }
+
+    #[test]
+    fn only_carried_agents_resume_on_another_host() {
+        let copilot = pane(
+            Some("copilot"),
+            Some(session("copilot", SessionKind::Id, "c-1")),
+        );
+        assert_eq!(
+            Work::classify(&copilot, &running(&["copilot", "--yolo"])),
+            Work::Session {
+                agent: AgentKind::Copilot,
+                session: session("copilot", SessionKind::Id, "c-1"),
+                flags: strings(&["--yolo"]),
+            }
+        );
+        assert!(matches!(
+            Work::classify(
+                &pane(
+                    Some("letta"),
+                    Some(session("letta", SessionKind::Id, "conv-1"))
+                ),
+                &running(&["letta"])
+            ),
+            Work::Session {
+                agent: AgentKind::Letta,
+                ..
+            }
+        ));
+        // Droid's session storage is unconfirmed, so its session stays put.
+        assert_eq!(
+            Work::classify(
+                &pane(
+                    Some("droid"),
+                    Some(session("droid", SessionKind::Id, "d-1"))
+                ),
+                &running(&["droid", "--auto", "high"])
+            ),
+            Work::Agent {
+                name: "droid".into(),
+                argv: strings(&["droid", "--auto", "high"])
+            }
+        );
+    }
+
+    #[test]
+    fn copilot_flags_keep_their_values() {
+        assert_eq!(
+            AgentKind::Copilot.kept_flags(&strings(&[
+                "copilot",
+                "--model",
+                "gpt-5",
+                "--allow-tool",
+                "shell(git)",
+                "write",
+                "--alt-screen",
+                "off",
+                "--resume",
+                "old",
+                "--share=/tmp/s.md",
+                "-i",
+                "fix it",
+                "--log-dir",
+                "/tmp/l",
+                "--continue",
+                "--yolo",
+            ])),
+            strings(&[
+                "--model",
+                "gpt-5",
+                "--allow-tool",
+                "shell(git)",
+                "write",
+                "--alt-screen",
+                "off",
+                "--yolo"
+            ])
+        );
+        // Flags of agents whose options are unknown are never replayed.
+        assert!(
+            AgentKind::Letta
+                .kept_flags(&strings(&["letta", "--agent", "a", "--yolo"]))
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn kept_flags_drop_sessions_positionals_and_directories() {
         assert_eq!(
             AgentKind::Codex.kept_flags(&strings(&[
@@ -609,6 +1023,17 @@ mod tests {
             strings(&["opencode", "--prompt", "go"])
         );
         assert_eq!(AgentKind::Codex.start_argv(None), strings(&["codex"]));
+        assert_eq!(
+            AgentKind::Copilot.start_argv(Some("go")),
+            strings(&["copilot", "-i", "go"])
+        );
+        // An agent whose prompt flag is unknown starts without the note.
+        assert!(!AgentKind::Droid.takes_prompt());
+        assert_eq!(AgentKind::Droid.start_argv(Some("go")), strings(&["droid"]));
+        assert_eq!(
+            AgentKind::Cursor.start_argv(None),
+            strings(&["cursor-agent"])
+        );
     }
 
     #[test]

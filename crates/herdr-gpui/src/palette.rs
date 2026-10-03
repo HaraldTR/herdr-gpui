@@ -320,8 +320,10 @@ impl HerdrWindow {
                 COMMANDS
                     .iter()
                     .filter(|info| info.command != Command::Palette)
-                    .filter(|info| {
-                        info.command != Command::ClearPane || self.live.supports_pane_clear
+                    .filter(|info| match info.command {
+                        Command::ClearPane => self.live.supports_pane_clear,
+                        Command::EditScrollback => self.live.supports_edit_scrollback,
+                        _ => true,
                     })
                     .map(|info| Entry {
                         label: info.label.into(),

@@ -1,6 +1,9 @@
 //! Stable gen1 wire model with no terminal or server runtime dependencies.
 #![doc = include_str!("../README.md")]
 pub mod endpoint;
+pub mod surface_delta;
+pub mod surface_reuse;
+pub mod surface_scroll;
 
 mod clipboard;
 mod codec;
