@@ -518,7 +518,50 @@ pub(crate) mod tests {
             read_message(&mut self.stream, MAX_FRAME_SIZE).unwrap()
         }
 
-        fn prepare(&self, view: &mut HerdrWindow) {
+        /// The next endpoint API request, skipping the resize and focus
+        /// traffic a drawn window sends on its own.
+        pub(crate) fn request(&mut self) -> serde_json::Value {
+            loop {
+                if let ClientMessage::ClientShellEndpointRequest { request, .. } = self.receive() {
+                    return serde_json::from_str(&request).unwrap();
+                }
+            }
+        }
+
+        /// Answers `request_id` with `response`, an endpoint envelope, and
+        /// returns the event the client reports for it, skipping events that
+        /// arrived before it.
+        pub(crate) fn respond(
+            &mut self,
+            boot_id: &str,
+            request_id: &str,
+            response: &serde_json::Value,
+        ) -> ClientEvent {
+            write_message(
+                &mut self.stream,
+                &ServerMessage::ClientShellEndpointResponseChunk {
+                    boot_id: boot_id.into(),
+                    request_id: request_id.into(),
+                    final_chunk: true,
+                    data: serde_json::to_vec(response).unwrap(),
+                },
+                MAX_FRAME_SIZE,
+            )
+            .unwrap();
+            loop {
+                let event = self
+                    .client
+                    .events
+                    .recv_timeout(Duration::from_secs(3))
+                    .unwrap();
+                if matches!(&event, ClientEvent::Response { request_id: id, .. } if id == request_id)
+                {
+                    return event;
+                }
+            }
+        }
+
+        pub(crate) fn prepare(&self, view: &mut HerdrWindow) {
             // Only the fixture's explicit nonexistent local socket is used to
             // initialize endpoint lifecycle flags. Replace its handle before
             // marking the synthetic projection as SSH; never reconnect to HOST.

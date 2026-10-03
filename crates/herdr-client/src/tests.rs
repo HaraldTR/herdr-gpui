@@ -11,7 +11,7 @@ use crate::{
     method::Method,
     options::validate_options,
     protocol::{endpoint::*, *},
-    session::{Health, Pending, Session, run_connection},
+    session::{Health, Pending, Session, SurfaceEncodings, run_connection},
     transport::Stream,
 };
 use crossbeam_channel::bounded;
@@ -31,6 +31,8 @@ const WELCOME: &str = include_str!("../../herdr-protocol/tests/fixtures/endpoint
 
 #[path = "clipboard_tests.rs"]
 mod clipboard_tests;
+#[path = "surface_encoding_tests.rs"]
+mod surface_encoding_tests;
 
 fn send(stream: &mut Stream, message: ServerMessage) {
     write_message(stream, &message, MAX_GRAPHICS_FRAME_SIZE).unwrap();
@@ -56,7 +58,8 @@ fn handshake(stream: &mut Stream) {
     let hello: EndpointClientHello = serde_json::from_str(&data).unwrap();
     assert_eq!(hello.generation, 1);
     assert!(hello.surface_active);
-    assert!(!hello.surface_reuse && !hello.surface_delta && !hello.direct_graphics);
+    assert!(hello.surface_reuse && hello.surface_delta && hello.surface_scroll);
+    assert!(!hello.direct_graphics);
     send(
         stream,
         ServerMessage::EndpointControl {
@@ -213,6 +216,7 @@ fn test_client_mode(
                     stop,
                     next_request: AtomicU64::new(1),
                     image_busy: Arc::new(AtomicBool::new(false)),
+                    last_queued_theme: Default::default(),
                 }),
             },
             events,
@@ -637,6 +641,7 @@ fn bounded_command_queue_and_outbound_limit_are_explicit() {
             stop: Arc::new(AtomicBool::new(false)),
             next_request: AtomicU64::new(1),
             image_busy: Arc::new(AtomicBool::new(false)),
+            last_queued_theme: Default::default(),
         }),
     };
     assert!(matches!(
@@ -1306,4 +1311,264 @@ fn cancellation_does_not_flush_commands_behind_pending_request() {
     worker.join().unwrap().unwrap();
     assert_eq!(server.read(&mut [0]).unwrap(), 0);
     assert!(client.events.try_recv().is_err());
+}
+
+#[test]
+fn surface_images_precede_their_surface_and_survive_a_pending_projection() {
+    let key = |image_id| SurfaceGraphicsAssetKey {
+        source: SurfaceGraphicsSource::Terminal {
+            target: SurfaceGraphicsTarget::Pane {
+                pane_id: "p1".into(),
+            },
+            image_id,
+        },
+        image_width: 1,
+        image_height: 1,
+        format: SurfaceGraphicsFormat::Rgba,
+        data_len: 4,
+        data_fingerprint: u64::from(image_id),
+    };
+    let placing = |key: &SurfaceGraphicsAssetKey, revision, projection| {
+        let mut surface = baseline();
+        surface.surface_revision = revision;
+        surface.projection_revision = projection;
+        surface.graphics = SurfaceGraphicsScene {
+            assets: vec![SurfaceGraphicsAsset {
+                key: key.clone(),
+                data: vec![1, 2, 3, 255],
+            }],
+            placements: vec![SurfaceGraphicsPlacement {
+                asset: key.clone(),
+                logical_placement_id: 1,
+                x: 0,
+                y: 0,
+                cols: 1,
+                rows: 1,
+                source_x: 0,
+                source_y: 0,
+                source_width: 0,
+                source_height: 0,
+                x_offset: 0,
+                y_offset: 0,
+                z: 0,
+                scrollback_offset: 0,
+            }],
+            retained_assets: vec![],
+        };
+        ServerMessage::PaneSurface(surface)
+    };
+    let mut session = ready_session();
+    let mut handle = |message| {
+        let mut events = Vec::new();
+        session
+            .handle_message(message, |event| {
+                events.push(event);
+                Ok(())
+            })
+            .unwrap();
+        events
+    };
+    let (a, b) = (key(1), key(2));
+    let events = handle(placing(&a, 1, 7));
+    let [
+        ClientEvent::SurfaceImages(images),
+        ClientEvent::Surface(surface),
+    ] = events.as_slice()
+    else {
+        panic!("unexpected events {events:?}");
+    };
+    assert_eq!(images.get(&a).unwrap().data().as_ref(), [1, 2, 3, 255]);
+    assert!(surface.graphics.assets.is_empty());
+    assert_eq!(surface.graphics.placements.len(), 1);
+
+    // A surface ahead of its snapshot is held back, but its bytes are kept,
+    // and so are those the surface on screen still places.
+    let events = handle(placing(&b, 2, 8));
+    let [ClientEvent::SurfaceImages(images)] = events.as_slice() else {
+        panic!("unexpected events {events:?}");
+    };
+    assert!(images.get(&a).is_some() && images.get(&b).is_some());
+
+    let events = handle(ServerMessage::EndpointControl {
+        kind: ENDPOINT_SNAPSHOT_KIND.into(),
+        data: SNAPSHOT.replace("\"revision\": 7", "\"revision\": 8"),
+    });
+    let [
+        ClientEvent::Snapshot(_),
+        ClientEvent::SurfaceImages(images),
+        ClientEvent::Surface(surface),
+    ] = events.as_slice()
+    else {
+        panic!("unexpected events {events:?}");
+    };
+    assert!(images.get(&a).is_none() && images.get(&b).is_some());
+    assert_eq!(surface.graphics.placements[0].asset, b);
+}
+
+fn host_theme(appearance: ClientHostAppearance) -> HostTheme {
+    let rgb = |value: u8| ClientHostColor {
+        r: value,
+        g: value,
+        b: value,
+    };
+    HostTheme {
+        foreground: rgb(0xee),
+        background: rgb(0x11),
+        palette: std::array::from_fn(|index| rgb(index as u8)),
+        appearance,
+    }
+}
+
+fn receive_host_theme(stream: &mut Stream) -> ClientHostThemeUpdate {
+    let ClientMessage::ClientShellHostTheme { update } = receive(stream) else {
+        panic!("expected host theme")
+    };
+    update
+}
+
+/// Ends a check that nothing else was written: the next frame is this focus.
+fn assert_next_is_focus(client: &Client, server: &mut Stream) {
+    client.handle.set_focus("boot-v1", true).unwrap();
+    assert_eq!(
+        receive(server),
+        ClientMessage::ClientShellFocus { focused: true }
+    );
+}
+
+#[test]
+fn host_theme_is_sent_in_full_once_then_as_ordered_diffs() {
+    let (client, mut server, _worker) = test_client();
+    handshake(&mut server);
+    event(&client);
+    event(&client);
+    let dark = host_theme(ClientHostAppearance::Dark);
+    client.handle.set_host_theme("boot-v1", &dark).unwrap();
+    assert_eq!(
+        receive_host_theme(&mut server),
+        ClientHostThemeUpdate::Appearance(ClientHostAppearance::Dark)
+    );
+    assert!(matches!(
+        receive_host_theme(&mut server),
+        ClientHostThemeUpdate::DefaultColor {
+            kind: ClientHostDefaultColorKind::Foreground,
+            color: ClientHostColor { r: 0xee, .. },
+        }
+    ));
+    assert!(matches!(
+        receive_host_theme(&mut server),
+        ClientHostThemeUpdate::DefaultColor {
+            kind: ClientHostDefaultColorKind::Background,
+            color: ClientHostColor { r: 0x11, .. },
+        }
+    ));
+    let ClientHostThemeUpdate::PaletteColors(palette) = receive_host_theme(&mut server) else {
+        panic!("expected palette")
+    };
+    assert_eq!(palette.len(), 256);
+    assert!(
+        palette
+            .iter()
+            .enumerate()
+            .all(|(i, (index, color))| { usize::from(*index) == i && color.r == *index })
+    );
+
+    // Repeats queue nothing.
+    client.handle.set_host_theme("boot-v1", &dark).unwrap();
+    client.handle.set_host_theme("boot-v1", &dark).unwrap();
+    assert_next_is_focus(&client, &mut server);
+
+    // A system appearance flip is one update, ordered with other commands.
+    let light = host_theme(ClientHostAppearance::Light);
+    client.handle.set_host_theme("boot-v1", &light).unwrap();
+    client.handle.set_focus("boot-v1", false).unwrap();
+    assert_eq!(
+        receive_host_theme(&mut server),
+        ClientHostThemeUpdate::Appearance(ClientHostAppearance::Light)
+    );
+    assert_eq!(
+        receive(&mut server),
+        ClientMessage::ClientShellFocus { focused: false }
+    );
+
+    let mut recolored = light.clone();
+    recolored.palette[1] = ClientHostColor { r: 1, g: 2, b: 3 };
+    client.handle.set_host_theme("boot-v1", &recolored).unwrap();
+    assert_eq!(
+        receive_host_theme(&mut server),
+        ClientHostThemeUpdate::PaletteColors(vec![(1, ClientHostColor { r: 1, g: 2, b: 3 })])
+    );
+    assert_next_is_focus(&client, &mut server);
+}
+
+#[test]
+fn each_connection_reports_the_whole_theme_again() {
+    let theme = host_theme(ClientHostAppearance::Dark);
+    // A reconnect is a new connection with its own handle, as is each SSH host.
+    for remote in [false, true] {
+        let (client, mut server, _worker) = test_client_mode(true, remote);
+        if remote {
+            server
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            receive(&mut server);
+            let mut welcome: Value = serde_json::from_str(WELCOME).unwrap();
+            welcome["methods"] = json!(["client_shell.surface.set"]);
+            welcome["capabilities"] = json!([
+                "surface_interest",
+                "presentation_effects_fence",
+                "health_check"
+            ]);
+            for (kind, data) in [
+                (ENDPOINT_WELCOME_KIND, welcome.to_string()),
+                (ENDPOINT_SNAPSHOT_KIND, SNAPSHOT.into()),
+            ] {
+                send(
+                    &mut server,
+                    ServerMessage::EndpointControl {
+                        kind: kind.into(),
+                        data,
+                    },
+                );
+            }
+        } else {
+            handshake(&mut server);
+        }
+        event(&client);
+        event(&client);
+        client.handle.set_host_theme("boot-v1", &theme).unwrap();
+        let updates: Vec<_> = (0..4).map(|_| receive_host_theme(&mut server)).collect();
+        assert_eq!(updates, theme.updates(None));
+        assert_next_is_focus(&client, &mut server);
+    }
+}
+
+#[test]
+fn host_theme_is_boot_fenced_and_a_failed_queue_resends_in_full() {
+    let theme = host_theme(ClientHostAppearance::Dark);
+    let (client, mut server, _worker) = test_client();
+    // Before the first snapshot there is no boot to report against.
+    assert!(matches!(
+        client.handle.set_host_theme("", &theme),
+        Err(Error::MissingBootId)
+    ));
+    handshake(&mut server);
+    event(&client);
+    event(&client);
+    // The failed call recorded nothing, so this one still sends everything.
+    client.handle.set_host_theme("boot-v1", &theme).unwrap();
+    let updates: Vec<_> = (0..4).map(|_| receive_host_theme(&mut server)).collect();
+    assert_eq!(updates, theme.updates(None));
+
+    let disconnected = connect_with_connector(
+        ConnectTarget::Local,
+        ConnectOptions::default(),
+        true,
+        |_, _| Err(io::Error::other("offline")),
+    )
+    .unwrap();
+    disconnected.handle.disconnect();
+    assert!(matches!(
+        disconnected.handle.set_host_theme("boot-v1", &theme),
+        Err(Error::Disconnected)
+    ));
 }

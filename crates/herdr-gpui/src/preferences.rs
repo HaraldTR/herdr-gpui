@@ -81,7 +81,7 @@ impl HerdrWindow {
 
     /// Write one setting off the UI thread, then reload so the window shows
     /// what the file now says rather than what was clicked.
-    fn save_preference(
+    pub(crate) fn save_preference(
         &mut self,
         save: impl FnOnce() -> crate::Result<()> + Send + 'static,
         cx: &mut Context<Self>,
@@ -212,6 +212,25 @@ impl HerdrWindow {
                     cx.stop_propagation();
                     let show = !this.config.usage.show;
                     this.save_preference(move || Config::save_usage_visibility(show), cx);
+                })),
+            )
+            .child(
+                toggle(
+                    "preferences-show-system-load",
+                    "Show CPU and memory",
+                    self.config.show_system_load,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    let show = !this.config.show_system_load;
+                    this.save_preference(
+                        move || {
+                            Config::save_preference(
+                                crate::config::preferences::Preference::ShowSystemLoad(show),
+                            )
+                        },
+                        cx,
+                    );
                 })),
             )
             .child(

@@ -1,5 +1,5 @@
 use herdr_client::{
-    ClientEvent, Method,
+    ClientEvent, Method, SurfaceImages,
     protocol::{ClientShellSnapshot, PaneSurfaceFrame, ServerMessage},
 };
 use std::sync::Arc;
@@ -47,21 +47,42 @@ pub struct LiveState {
     /// UI thread drains them to the pasteboard; the queue is bounded like
     /// sounds, since a pane may write faster than the window repaints.
     pub(crate) clipboard_writes: std::collections::VecDeque<String>,
+    /// Terminal bells forwarded since the UI last drained them. Only their
+    /// presence matters to the window, so a saturating count bounds a burst.
+    pub(crate) bells: u16,
+    /// The outer window title the daemon pushed: an agent's
+    /// `client.window_title.set`, or its rendered `ui.window_title`. `None`
+    /// leaves the window on its own title. Sanitized on receipt.
+    pub(crate) window_title: Option<String>,
     pub(crate) sound_cancel: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) sound_connection_cancel: Arc<std::sync::atomic::AtomicBool>,
     pub snapshot: Option<Arc<ClientShellSnapshot>>,
     pub surface: Option<Arc<PaneSurfaceFrame>>,
+    /// Pixels for the images the connection's surfaces place, by asset key.
+    pub(crate) surface_images: Arc<SurfaceImages>,
     pub status: ConnectionStatus,
     pub error: Option<String>,
     pub missing_installation: bool,
     /// Same-user peer at the owned standard socket, not executable attestation.
     pub(crate) local_daemon_peer: bool,
-    pub(crate) supports_workspace_get: bool,
     /// `pane.clear` arrived after Herdr 0.9.1; older daemons reject it.
     pub(crate) supports_pane_clear: bool,
     /// `tab.move` reorders a workspace's tabs; daemons that do not offer it
     /// to clients keep their tabs where they are.
     pub(crate) supports_tab_move: bool,
+    /// `pane.link.resolve` and `pane.link.activate` let the daemon find links
+    /// across wrapped rows and run plugin link handlers; without them links
+    /// are found row by row here and always opened by this client.
+    pub(crate) supports_link_resolve: bool,
+    pub(crate) supports_link_activate: bool,
+    /// `pane.copy_search` drives the find bar; without it Find says so.
+    pub(crate) supports_copy_search: bool,
+    /// `pane.selection.read` copies selections reaching beyond the screen.
+    pub(crate) supports_selection_read: bool,
+    /// `pane.copy_motion` drives copy mode's text motions.
+    pub(crate) supports_copy_motion: bool,
+    /// `pane.edit_scrollback` opens a pane's history in the user's editor.
+    pub(crate) supports_edit_scrollback: bool,
     pub dirty: bool,
     pub(crate) dialog_response: Option<(String, Option<DialogResponse>)>,
     pub(crate) notifications: std::collections::VecDeque<crate::notifications::Notice>,
@@ -102,17 +123,25 @@ impl Default for LiveState {
             sound_events: Default::default(),
             reload_sound: false,
             clipboard_writes: Default::default(),
+            bells: 0,
+            window_title: None,
             sound_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sound_connection_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             snapshot: None,
             surface: None,
+            surface_images: Default::default(),
             status: ConnectionStatus::Connecting,
             error: None,
             missing_installation: false,
             local_daemon_peer: false,
-            supports_workspace_get: false,
             supports_pane_clear: false,
             supports_tab_move: false,
+            supports_link_resolve: false,
+            supports_link_activate: false,
+            supports_copy_search: false,
+            supports_selection_read: false,
+            supports_copy_motion: false,
+            supports_edit_scrollback: false,
             dirty: true,
             dialog_response: None,
             notifications: Default::default(),
@@ -137,17 +166,25 @@ impl LiveState {
             reload_sound,
             settings_reload,
             clipboard_writes,
+            bells,
+            window_title,
             sound_cancel,
             sound_connection_cancel,
             snapshot,
             surface: _,
+            surface_images: _,
             status,
             error,
             missing_installation,
             local_daemon_peer,
-            supports_workspace_get,
             supports_pane_clear,
             supports_tab_move,
+            supports_link_resolve,
+            supports_link_activate,
+            supports_copy_search,
+            supports_selection_read,
+            supports_copy_motion,
+            supports_edit_scrollback,
             dirty: _,
             dialog_response,
             notifications,
@@ -173,6 +210,8 @@ impl LiveState {
             && !reload_sound
             && !settings_reload
             && clipboard_writes.is_empty()
+            && *bells == 0
+            && *window_title == self.window_title
             && Arc::ptr_eq(sound_cancel, &self.sound_cancel)
             && Arc::ptr_eq(sound_connection_cancel, &self.sound_connection_cancel)
             && same_arc(snapshot, &self.snapshot)
@@ -180,9 +219,14 @@ impl LiveState {
             && *error == self.error
             && *missing_installation == self.missing_installation
             && *local_daemon_peer == self.local_daemon_peer
-            && *supports_workspace_get == self.supports_workspace_get
             && *supports_pane_clear == self.supports_pane_clear
             && *supports_tab_move == self.supports_tab_move
+            && *supports_link_resolve == self.supports_link_resolve
+            && *supports_link_activate == self.supports_link_activate
+            && *supports_copy_search == self.supports_copy_search
+            && *supports_selection_read == self.supports_selection_read
+            && *supports_copy_motion == self.supports_copy_motion
+            && *supports_edit_scrollback == self.supports_edit_scrollback
             && match (dialog_response, &self.dialog_response) {
                 (Some((a, None)), Some((b, None))) => a == b,
                 (a, b) => a.is_none() && b.is_none(),
@@ -283,9 +327,18 @@ impl LiveState {
         match event {
             ClientEvent::Connected(welcome) => {
                 self.settings_reload = false;
-                self.supports_workspace_get = Method::WorkspaceGet.advertised_in(&welcome.methods);
                 self.supports_pane_clear = Method::PaneClear.advertised_in(&welcome.methods);
                 self.supports_tab_move = Method::TabMove.advertised_in(&welcome.methods);
+                self.supports_link_resolve =
+                    crate::links::LinkRequest::Resolve.advertised_in(&welcome.methods);
+                self.supports_link_activate =
+                    crate::links::LinkRequest::Activate.advertised_in(&welcome.methods);
+                self.supports_copy_search = Method::PaneCopySearch.advertised_in(&welcome.methods);
+                self.supports_selection_read =
+                    Method::PaneSelectionRead.advertised_in(&welcome.methods);
+                self.supports_copy_motion = Method::PaneCopyMotion.advertised_in(&welcome.methods);
+                self.supports_edit_scrollback =
+                    Method::PaneEditScrollback.advertised_in(&welcome.methods);
                 self.supports_surface = Method::ClientShellSurfaceSet
                     .advertised_in(&welcome.methods)
                     && ["surface_interest", "presentation_effects_fence"]
@@ -306,6 +359,10 @@ impl LiveState {
                     self.notifications.clear();
                     self.cancel_sounds();
                     self.sound_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    // A restarted daemon pushes its own title; the old one's
+                    // must not outlive it.
+                    self.bells = 0;
+                    self.window_title = None;
                 }
                 if let Some(activation) = &mut self.activation
                     && activation.boot != snapshot.boot_id
@@ -332,14 +389,18 @@ impl LiveState {
                     self.surface = Some(surface);
                 }
             }
+            ClientEvent::SurfaceImages(images) => self.surface_images = images,
             ClientEvent::Disconnected { reason } => {
                 self.settings_reload = false;
                 self.notifications.clear();
                 self.cancel_sounds();
+                self.bells = 0;
+                self.window_title = None;
                 self.status = ConnectionStatus::Disconnected;
                 self.error = Some(reason);
                 self.snapshot = None;
                 self.surface = None;
+                self.surface_images = Default::default();
             }
             ClientEvent::CommandRejected { request_id, reason } => {
                 if request_id.is_some() && request_id == self.drag_request {
@@ -462,6 +523,19 @@ impl LiveState {
                     tracing::debug!("dropped an invalid or oversized clipboard payload");
                 }
             }
+            ClientEvent::Message(ServerMessage::TerminalBell { count }) => {
+                if count == 0 || !self.status.is_connected() {
+                    return;
+                }
+                self.bells = self.bells.saturating_add(count);
+            }
+            ClientEvent::Message(ServerMessage::WindowTitle { title }) => {
+                let title = title.as_deref().and_then(sanitize_window_title);
+                if title == self.window_title {
+                    return;
+                }
+                self.window_title = title;
+            }
             _ => return,
         }
         // Focus is evidence for completing one navigation, not a permanent
@@ -483,6 +557,22 @@ impl LiveState {
     }
 }
 
+/// Longest window title shown, in characters, as Herdr caps its own.
+pub(crate) const MAX_WINDOW_TITLE_CHARS: usize = 200;
+
+/// Daemon titles are untrusted pane-influenced text: drop control characters
+/// (escape, BEL, C1 terminators included) and cap the length, as Herdr's
+/// `sanitize_window_title_text` does. A blank result means no title.
+fn sanitize_window_title(title: &str) -> Option<String> {
+    let title = title
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(MAX_WINDOW_TITLE_CHARS)
+        .collect::<String>();
+    let title = title.trim();
+    (!title.is_empty()).then(|| title.to_owned())
+}
+
 fn coherent(snapshot: &ClientShellSnapshot, surface: &PaneSurfaceFrame) -> bool {
     snapshot.boot_id == surface.boot_id && snapshot.revision == surface.projection_revision
 }
@@ -493,6 +583,78 @@ mod tests {
     use super::*;
     use herdr_client::protocol::AgentStatus;
     use herdr_client::protocol::FrameData;
+
+    #[test]
+    fn window_titles_are_sanitized_capped_and_cleared() {
+        let mut state = LiveState {
+            status: ConnectionStatus::Connected,
+            ..LiveState::default()
+        };
+        let title = |title: &str| {
+            ClientEvent::Message(ServerMessage::WindowTitle {
+                title: Some(title.into()),
+            })
+        };
+        state.apply(title("  agent\u{1b}]2;evil\u{7}\u{9c}\r\n done  "));
+        assert_eq!(state.window_title.as_deref(), Some("agent]2;evil done"));
+
+        state.apply(title(&"é".repeat(MAX_WINDOW_TITLE_CHARS + 50)));
+        assert_eq!(
+            state.window_title.as_ref().map(|t| t.chars().count()),
+            Some(MAX_WINDOW_TITLE_CHARS)
+        );
+
+        // Nothing printable left is no title, as is an explicit clear.
+        state.apply(title("\u{1b}\u{7} \t"));
+        assert_eq!(state.window_title, None);
+        state.apply(title("x"));
+        state.apply(ClientEvent::Message(ServerMessage::WindowTitle {
+            title: None,
+        }));
+        assert_eq!(state.window_title, None);
+
+        // An unchanged title does not wake the window.
+        state.apply(title("same"));
+        state.dirty = false;
+        state.apply(title("same"));
+        assert!(!state.dirty);
+    }
+
+    #[test]
+    fn bells_count_only_while_connected_and_reset_with_the_connection() {
+        let bell = |count| ClientEvent::Message(ServerMessage::TerminalBell { count });
+        let title = || {
+            ClientEvent::Message(ServerMessage::WindowTitle {
+                title: Some("t".into()),
+            })
+        };
+        let mut state = LiveState::default();
+        state.apply(bell(1));
+        assert_eq!(state.bells, 0, "no bells before the connection is up");
+
+        state.status = ConnectionStatus::Connected;
+        state.apply(bell(0));
+        assert_eq!(state.bells, 0);
+        state.apply(bell(u16::MAX));
+        state.apply(bell(2));
+        assert_eq!(state.bells, u16::MAX, "a burst saturates");
+        assert!(!state.only_surface_changed(&state.clone()));
+
+        state.apply(title());
+        state.apply(ClientEvent::Disconnected {
+            reason: "gone".into(),
+        });
+        assert_eq!((state.bells, state.window_title.as_deref()), (0, None));
+
+        // A restarted daemon's first snapshot drops the old daemon's title.
+        state.apply(ClientEvent::Snapshot(snapshot()));
+        state.apply(title());
+        state.apply(bell(1));
+        let mut restarted = (*snapshot()).clone();
+        restarted.boot_id = "restarted".into();
+        state.apply(ClientEvent::Snapshot(Arc::new(restarted)));
+        assert_eq!((state.bells, state.window_title.as_deref()), (0, None));
+    }
 
     #[test]
     fn worktree_failure_stays_in_dialog_after_snapshots_and_successful_retry() {
@@ -860,6 +1022,55 @@ mod tests {
             200,
         )));
         assert_status(&state, AgentStatus::Done);
+    }
+
+    #[test]
+    fn surface_images_follow_the_connection_and_file_paths_stay_ignored() {
+        use herdr_client::{
+            SurfaceImages,
+            protocol::{
+                SurfaceGraphicsAsset, SurfaceGraphicsAssetKey, SurfaceGraphicsFormat,
+                SurfaceGraphicsSource, SurfaceGraphicsTarget,
+            },
+        };
+        let key = SurfaceGraphicsAssetKey {
+            source: SurfaceGraphicsSource::Terminal {
+                target: SurfaceGraphicsTarget::Pane {
+                    pane_id: "p1".into(),
+                },
+                image_id: 1,
+            },
+            image_width: 1,
+            image_height: 1,
+            format: SurfaceGraphicsFormat::Rgba,
+            data_len: 4,
+            data_fingerprint: 1,
+        };
+        let images: SurfaceImages = [SurfaceGraphicsAsset {
+            key: key.clone(),
+            data: vec![0; 4],
+        }]
+        .into_iter()
+        .collect();
+        let mut state = LiveState::default();
+        state.apply(ClientEvent::SurfaceImages(Arc::new(images)));
+        assert!(state.surface_images.get(&key).is_some());
+        // A daemon naming a file for this client is never followed.
+        let before = state.surface_images.clone();
+        state.apply(ClientEvent::Message(ServerMessage::GraphicsFile {
+            path: "/etc/passwd".into(),
+            expected_len: 4,
+            image_id: 1,
+            transfer_id: 1,
+            leading: vec![],
+            control: String::new(),
+            surface_asset: Some(key.clone()),
+        }));
+        assert!(Arc::ptr_eq(&before, &state.surface_images));
+        state.apply(ClientEvent::Disconnected {
+            reason: "test".into(),
+        });
+        assert!(state.surface_images.is_empty());
     }
 
     #[test]

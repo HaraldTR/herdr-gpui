@@ -13,6 +13,7 @@ pub(crate) mod watch;
 use gpui::{Font, FontFallbacks};
 use serde::Deserialize;
 use std::{
+    collections::BTreeMap,
     env, fs,
     io::{ErrorKind, Write},
     ops::RangeInclusive,
@@ -85,6 +86,8 @@ pub struct Config {
     pub theme: String,
     pub confirm_close_tab: bool,
     pub show_agents: bool,
+    /// CPU and memory of the selected host in the status bar.
+    pub show_system_load: bool,
     /// How far the app's own marks and labels stand off its chrome.
     pub contrast: Contrast,
     /// Show each agent's status word beside it, following the daemon's
@@ -103,8 +106,52 @@ pub struct Config {
     pub notifications: NotificationConfig,
     pub(crate) notification_overrides: NotificationSettings,
     pub clipboard_toast: ClipboardToast,
+    pub bell: BellConfig,
     pub layout: Layout,
     pub keybindings: Keymap,
+    /// The `[keybindings]` table `keybindings` was built from, kept so a
+    /// device's server keys can be layered under the same GUI overrides.
+    pub(crate) keybinding_overrides: BTreeMap<String, Binding>,
+    /// Per saved device, by catalog profile ID.
+    pub(crate) devices: BTreeMap<String, DeviceSettings>,
+    /// Keys the file names that this build does not know, sorted. They are
+    /// ignored, as Herdr ignores its own, so a config written by a newer
+    /// build or with a typo still loads; `diagnostic` reports them.
+    pub unknown_keys: Vec<String>,
+}
+
+/// A device list larger than any real catalog is a config mistake.
+const MAX_DEVICES: usize = 256;
+
+/// Whose `[keys]` a saved device answers to, as `herdr --remote-keybindings`
+/// chooses for the TUI. Local is upstream's default: muscle memory stays the
+/// same on every host. Only keybindings follow the server; themes, sidebar,
+/// and toasts stay local either way.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum KeybindingSource {
+    #[default]
+    Local,
+    /// The host's published `server_keybindings_toml`.
+    Server,
+}
+
+/// One `[devices.<profile-id>]` table.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct DeviceSettings {
+    pub(crate) keybindings: KeybindingSource,
+}
+
+impl Config {
+    /// Whose keybindings the endpoint uses. Local and explicit sockets are not
+    /// saved devices, so they always use the local ones.
+    pub(crate) fn keybinding_source(&self, endpoint_id: &str) -> KeybindingSource {
+        crate::endpoint::saved_profile_id(endpoint_id)
+            .and_then(|profile| self.devices.get(profile))
+            .map(|device| device.keybindings)
+            .unwrap_or_default()
+    }
 }
 
 /// Where a clicked terminal link opens. Alt-click (Option on macOS) opens it
@@ -200,10 +247,37 @@ pub enum ClipboardToastPosition {
     BottomRight,
 }
 
+/// What a pane's terminal bell does. Herdr forwards each bell to its
+/// foreground client and leaves the reaction to it, as an outer terminal's
+/// own bell settings would, so this is the GUI's `[bell]` alone.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
+pub struct BellConfig {
+    /// Ask for attention (bounce the Dock icon) while the window is inactive.
+    pub attention: bool,
+    /// Play the system alert sound.
+    pub sound: bool,
+}
+
+impl Default for BellConfig {
+    fn default() -> Self {
+        Self {
+            attention: true,
+            sound: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct NotificationConfig {
+    /// In-app toasts, which take precedence over OS notifications.
     pub enabled: bool,
+    /// Shared `system` delivery: post daemon notifications to the OS
+    /// notification center. Not a native key, so a local override of
+    /// `enabled` decides between the two.
+    #[serde(skip)]
+    pub system: bool,
     #[serde(deserialize_with = "notification_delay")]
     pub delay_seconds: u64,
     pub position: herdr_client::protocol::ToastHerdrPosition,
@@ -213,6 +287,7 @@ impl Default for NotificationConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            system: false,
             delay_seconds: 1,
             position: herdr_client::protocol::ToastHerdrPosition::BottomRight,
         }
@@ -221,7 +296,7 @@ impl Default for NotificationConfig {
 
 /// Only explicitly configured GUI keys override the shared Herdr preferences.
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub(crate) struct NotificationSettings {
     enabled: Option<bool>,
     #[serde(deserialize_with = "optional_notification_delay")]
@@ -229,10 +304,31 @@ pub(crate) struct NotificationSettings {
     position: Option<herdr_client::protocol::ToastHerdrPosition>,
 }
 
+/// Where a daemon notification that passes the shared policy is presented.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NotificationDelivery {
+    Off,
+    InApp,
+    System,
+}
+
+impl NotificationConfig {
+    pub(crate) fn delivery(self) -> NotificationDelivery {
+        if self.enabled {
+            NotificationDelivery::InApp
+        } else if self.system {
+            NotificationDelivery::System
+        } else {
+            NotificationDelivery::Off
+        }
+    }
+}
+
 impl NotificationSettings {
     fn resolve(self, base: NotificationConfig) -> NotificationConfig {
         NotificationConfig {
             enabled: self.enabled.unwrap_or(base.enabled),
+            system: base.system,
             delay_seconds: self.delay_seconds.unwrap_or(base.delay_seconds),
             position: self.position.unwrap_or(base.position),
         }
@@ -438,41 +534,62 @@ impl<'de> Deserialize<'de> for Layout {
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
-        // Keep shipped [layout] spacing settings readable alongside named layouts.
-        #[derive(Deserialize)]
-        #[serde(untagged, deny_unknown_fields)]
-        enum Setting {
-            Named(LayoutMode),
-            Options {
-                #[serde(default)]
-                mode: LayoutMode,
-                sidebar_gap: Option<f32>,
-            },
+        // Keep shipped [layout] spacing settings readable alongside named
+        // layouts. A visitor rather than an untagged enum, so a key this build
+        // does not know is reported as ignored instead of buffered away.
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Options {
+            mode: LayoutMode,
+            sidebar_gap: Option<f32>,
         }
-        Ok(match Setting::deserialize(deserializer)? {
-            Setting::Named(mode) => Self {
-                mode,
-                ..Self::default()
-            },
-            Setting::Options { mode, sidebar_gap } => Self {
-                mode,
-                sidebar_gap: sidebar_gap.unwrap_or(DEFAULT_SIDEBAR_GAP),
-            },
-        })
+
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Layout;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a layout name or a [layout] table")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, name: &str) -> std::result::Result<Layout, E> {
+                let mode = LayoutMode::try_from(name)
+                    .map_err(|_| E::unknown_variant(name, LayoutMode::NAMES))?;
+                Ok(Layout {
+                    mode,
+                    ..Layout::default()
+                })
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> std::result::Result<Layout, A::Error> {
+                let Options { mode, sidebar_gap } =
+                    Options::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(Layout {
+                    mode,
+                    sidebar_gap: sidebar_gap.unwrap_or(DEFAULT_SIDEBAR_GAP),
+                })
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
     }
 }
 
 /// Optional behaviors the config file turns on. Every flag is off by default,
 /// so a missing or empty `[features]` table is the shipped experience.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Features {
     /// Open a space's menu when the pointer rests on its sidebar row.
     pub sidebar_hover_menu: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct GitHubConfig {
     pub oauth_client_id: Option<String>,
     pub allow_plaintext_credentials: bool,
@@ -612,6 +729,7 @@ impl Default for Config {
             github: GitHubConfig::default(),
             confirm_close_tab: true,
             show_agents: true,
+            show_system_load: true,
             contrast: Contrast::default(),
             agent_status_text: AgentStatusText::default(),
             usage: crate::usage::UsageConfig::default(),
@@ -621,8 +739,12 @@ impl Default for Config {
             notifications: NotificationConfig::default(),
             notification_overrides: NotificationSettings::default(),
             clipboard_toast: ClipboardToast::default(),
+            bell: BellConfig::default(),
             layout: Layout::default(),
             keybindings: Keymap::default(),
+            keybinding_overrides: BTreeMap::new(),
+            devices: BTreeMap::new(),
+            unknown_keys: Vec::new(),
             sidebar: font(monospace, 12.0),
             // Tabs are terminal chrome, so they read in the monospace face the
             // sidebar and terminal use, as they do in the reference UI.
@@ -634,11 +756,12 @@ impl Default for Config {
 }
 
 #[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 struct Settings {
     theme: Option<String>,
     confirm_close_tab: Option<bool>,
     show_agents: Option<bool>,
+    show_system_load: Option<bool>,
     contrast: Contrast,
     usage: crate::usage::UsageConfig,
     option_as_alt: OptionAsAlt,
@@ -651,14 +774,16 @@ struct Settings {
     features: Features,
     notifications: NotificationSettings,
     clipboard_toast: ClipboardToastSettings,
+    bell: BellConfig,
     layout: Layout,
-    keybindings: std::collections::BTreeMap<String, Binding>,
+    keybindings: BTreeMap<String, Binding>,
+    devices: BTreeMap<String, DeviceSettings>,
 }
 
 /// Each key overrides the daemon's answer on its own, so naming one of them
 /// here does not silently reset the other to a GUI default.
 #[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 struct ClipboardToastSettings {
     enabled: Option<bool>,
     position: Option<ClipboardToastPosition>,
@@ -674,7 +799,7 @@ impl ClipboardToastSettings {
 }
 
 #[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 struct FontSettings {
     family: Option<String>,
     size: Option<f32>,
@@ -768,7 +893,7 @@ pub struct AgentStatusText {
     /// Whether `rows` names the token: agents without their own entry.
     rows: bool,
     /// Per canonical agent id, whether its `rows_by_agent` entry names it.
-    by_agent: std::collections::BTreeMap<String, bool>,
+    by_agent: BTreeMap<String, bool>,
 }
 
 impl AgentStatusText {
@@ -908,10 +1033,12 @@ fn theme_directories() -> Result<Vec<PathBuf>> {
 
 impl Config {
     /// Pure application of a prepared shared snapshot. Native explicit keys win;
-    /// terminal/system delivery does not implicitly enable this GUI's in-app toasts.
+    /// system delivery posts OS notifications instead of in-app toasts, and
+    /// terminal delivery has no outer terminal to reach from this GUI.
     pub(crate) fn apply_shared_notifications(&mut self, shared: &crate::herdr_settings::Settings) {
         self.notifications = self.notification_overrides.resolve(NotificationConfig {
             enabled: shared.toast_delivery == crate::herdr_settings::ToastDelivery::Herdr,
+            system: shared.toast_delivery == crate::herdr_settings::ToastDelivery::System,
             delay_seconds: shared.toast_delay_seconds,
             position: shared.toast_position,
         });
@@ -947,6 +1074,22 @@ impl Config {
                 face.fallbacks = Some(detected.clone());
             }
         }
+    }
+
+    /// A one-line warning naming the keys this build ignored, if any.
+    pub(crate) fn diagnostic(&self) -> Option<String> {
+        const LISTED: usize = 5;
+        if self.unknown_keys.is_empty() {
+            return None;
+        }
+        let listed = self.unknown_keys[..self.unknown_keys.len().min(LISTED)].join(", ");
+        let more = match self.unknown_keys.len().saturating_sub(LISTED) {
+            0 => String::new(),
+            more => format!(" and {more} more"),
+        };
+        Some(format!(
+            "config-gpui.local.toml: ignoring unknown keys {listed}{more}"
+        ))
     }
 
     pub fn load() -> Result<Self> {
@@ -1089,8 +1232,47 @@ impl Config {
         // Config's typed deserializer coerces strings/numbers. Preserve TOML
         // types so existing strict font and theme validation remains intact.
         let value: toml::Value = loaded.try_deserialize()?;
-        let settings: Settings = value.try_into()?;
-        let mut config = Self::default();
+        let mut unknown_keys = Vec::new();
+        let mut settings: Settings = serde_ignored::deserialize(value, |path| {
+            unknown_keys.push(path.to_string());
+        })?;
+        settings.keybindings.retain(|name, _| {
+            let known = crate::controls::COMMANDS
+                .iter()
+                .any(|info| info.name == name);
+            if !known {
+                unknown_keys.push(format!("keybindings.{name}"));
+            }
+            known
+        });
+        unknown_keys.extend(settings.usage.retain_known());
+        // Only catalog profile IDs name a device; anything else is ignored
+        // and reported like any other unknown key.
+        settings.devices.retain(|id, _| {
+            let known = herdr_client::valid_profile_id(id);
+            if !known {
+                unknown_keys.push(format!("devices.{id}"));
+            }
+            known
+        });
+        // Unknown keys are ignored, but a credential pasted into the file is
+        // refused so it is noticed and removed rather than left on disk.
+        if let Some(name) = ["client_secret", "private_key", "token"]
+            .into_iter()
+            .find(|name| {
+                unknown_keys
+                    .iter()
+                    .any(|key| key == &format!("github.{name}"))
+            })
+        {
+            return Err(Error::GitHubSecretInConfig(name));
+        }
+        unknown_keys.sort();
+        unknown_keys.dedup();
+        let mut config = Self {
+            unknown_keys,
+            ..Self::default()
+        };
         settings.github.client_id_with_override(None)?;
         config.github = settings.github;
         config.features = settings.features;
@@ -1099,6 +1281,7 @@ impl Config {
             .notifications
             .resolve(NotificationConfig::default());
         config.clipboard_toast = settings.clipboard_toast.resolve(base.clipboard_toast);
+        config.bell = settings.bell;
         config.agent_status_text = base.agent_status_text.clone();
         if !settings.layout.sidebar_gap.is_finite()
             || !(0.0..=MAX_SIDEBAR_GAP).contains(&settings.layout.sidebar_gap)
@@ -1107,6 +1290,11 @@ impl Config {
         }
         config.layout = settings.layout;
         config.keybindings = Keymap::with_overrides(&settings.keybindings, &base.keys)?;
+        config.keybinding_overrides = settings.keybindings;
+        if settings.devices.len() > MAX_DEVICES {
+            return Err(Error::TooManyDevices(MAX_DEVICES));
+        }
+        config.devices = settings.devices;
         if let Some(theme) = settings.theme {
             if theme.trim().is_empty() {
                 return Err(Error::EmptyTheme);
@@ -1115,8 +1303,8 @@ impl Config {
         }
         config.confirm_close_tab = settings.confirm_close_tab.unwrap_or(true);
         config.show_agents = settings.show_agents.unwrap_or(true);
+        config.show_system_load = settings.show_system_load.unwrap_or(true);
         config.contrast = settings.contrast;
-        settings.usage.validate()?;
         config.usage = settings.usage;
         config.option_as_alt = settings.option_as_alt;
         config.open_links_in = settings.open_links_in;
@@ -1319,6 +1507,69 @@ impl Config {
                 *value.decor_mut() = previous.decor().clone();
             }
             document["contrast"] = toml_edit::Item::Value(value);
+            write_config(path, &document.to_string())
+        })();
+        result.map_err(|error| error.at_path(path))
+    }
+
+    /// Persist one device's keybinding source, keeping the rest of the local
+    /// file. Local is the default, so choosing it removes the entry.
+    pub(crate) fn save_device_keybindings(profile: &str, source: KeybindingSource) -> Result<()> {
+        let (_lock, local) = Self::prepare_files(&Self::path()?)?;
+        Self::save_device_keybindings_path(profile, source, &local)
+    }
+
+    fn save_device_keybindings_path(
+        profile: &str,
+        source: KeybindingSource,
+        path: &Path,
+    ) -> Result<()> {
+        if !herdr_client::valid_profile_id(profile) {
+            return Err(Error::InvalidDeviceId(profile.to_owned()));
+        }
+        let result = (|| -> Result<()> {
+            let text = match fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == ErrorKind::NotFound => LOCAL_CONFIG.into(),
+                Err(error) => return Err(error.into()),
+            };
+            let mut document = text.parse::<toml_edit::DocumentMut>()?;
+            match source {
+                KeybindingSource::Server => {
+                    let mut devices = toml_edit::Table::new();
+                    devices.set_implicit(true);
+                    let device = document
+                        .entry("devices")
+                        .or_insert(toml_edit::Item::Table(devices))
+                        .as_table_like_mut()
+                        .ok_or(Error::InvalidDevicesTable)?
+                        .entry(profile)
+                        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+                        .as_table_like_mut()
+                        .ok_or(Error::InvalidDevicesTable)?;
+                    device.insert("keybindings", toml_edit::value("server"));
+                }
+                KeybindingSource::Local => {
+                    let Some(devices) = document
+                        .get_mut("devices")
+                        .and_then(toml_edit::Item::as_table_like_mut)
+                    else {
+                        return Ok(());
+                    };
+                    if let Some(device) = devices
+                        .get_mut(profile)
+                        .and_then(toml_edit::Item::as_table_like_mut)
+                    {
+                        device.remove("keybindings");
+                        if device.is_empty() {
+                            devices.remove(profile);
+                        }
+                    }
+                    if devices.is_empty() {
+                        document.remove("devices");
+                    }
+                }
+            }
             write_config(path, &document.to_string())
         })();
         result.map_err(|error| error.at_path(path))
@@ -1765,12 +2016,12 @@ mod tests {
             config.clipboard_toast.enabled = false;
             config.contrast = Contrast::High;
             let session = config.clone();
-            for (delivery, enabled) in [
-                ("herdr", true),
-                ("off", false),
-                ("system", false),
-                ("terminal", false),
-                ("herdr", true),
+            for (delivery, enabled, system) in [
+                ("herdr", true, false),
+                ("off", false, false),
+                ("system", false, true),
+                ("terminal", false, false),
+                ("herdr", true, false),
             ] {
                 let shared = Shared::parse_text(&format!(
                     "[ui.toast]\ndelivery = '{delivery}'\ndelay_seconds = 7\n[ui.toast.herdr]\nposition = 'top-left'\n"
@@ -1780,6 +2031,7 @@ mod tests {
                     config.notifications,
                     NotificationConfig {
                         enabled,
+                        system,
                         delay_seconds: 7,
                         position: ToastHerdrPosition::TopLeft
                     }
@@ -1837,6 +2089,7 @@ mod tests {
                     config.notifications,
                     NotificationConfig {
                         enabled,
+                        system: false,
                         delay_seconds,
                         position
                     },
@@ -1850,6 +2103,19 @@ mod tests {
                 "[ui.toast]\ndelivery = '{delivery}'"
             ))?);
             assert!(config.notifications.enabled);
+            assert_eq!(config.notifications.delivery(), NotificationDelivery::InApp);
+        }
+        // A local opt-out of in-app toasts leaves shared system delivery in charge.
+        let mut config = Config::parse("[notifications]\nenabled = false")?;
+        for (delivery, expected) in [
+            ("system", NotificationDelivery::System),
+            ("herdr", NotificationDelivery::Off),
+            ("terminal", NotificationDelivery::Off),
+        ] {
+            config.apply_shared_notifications(&Shared::parse_text(&format!(
+                "[ui.toast]\ndelivery = '{delivery}'"
+            ))?);
+            assert_eq!(config.notifications.delivery(), expected, "{delivery}");
         }
         Ok(())
     }
@@ -1912,6 +2178,35 @@ mod tests {
                 PathBuf::from(expected)
             );
         }
+    }
+
+    #[test]
+    fn bell_defaults_to_attention_and_rejects_unknown_keys() -> anyhow::Result<()> {
+        let temp = TempDirectory::new()?;
+        let gui = temp.0.join("config-gpui.toml");
+        let local = gui.with_extension("local.toml");
+        let daemon = temp.0.join("config.toml");
+        fs::write(&gui, "")?;
+        assert_eq!(
+            Config::load_path(&gui, &daemon)?.bell,
+            BellConfig {
+                attention: true,
+                sound: false
+            }
+        );
+        fs::write(&local, "[bell]\nsound = true\n")?;
+        assert_eq!(
+            Config::load_path(&gui, &daemon)?.bell,
+            BellConfig {
+                attention: true,
+                sound: true
+            }
+        );
+        fs::write(&local, "[bell]\nattention = false\n")?;
+        assert!(!Config::load_path(&gui, &daemon)?.bell.attention);
+        fs::write(&local, "[bell]\nvisual = true\n")?;
+        assert!(Config::load_path(&gui, &daemon).is_err());
+        Ok(())
     }
 
     /// The daemon's own answer is the starting point, each GUI key overrides
@@ -2122,7 +2417,6 @@ mod tests {
             "[clipboard_toast]\nposition = \"middle\"",
             "[clipboard_toast]\nposition = \"BottomCenter\"",
             "[clipboard_toast]\nposition = 1",
-            "[clipboard_toast]\nunknown = true",
             "clipboard_toast = true",
         ] {
             assert!(Config::parse(text).is_err(), "{text}");
@@ -2155,6 +2449,7 @@ mod tests {
                     config.notifications,
                     NotificationConfig {
                         enabled: true,
+                        system: false,
                         delay_seconds: delay,
                         position
                     }
@@ -2169,7 +2464,6 @@ mod tests {
             "delay_seconds=1.5",
             "delay_seconds=\"1\"",
             "position=\"center\"",
-            "unknown=true",
         ] {
             let error = Config::parse(&format!("[notifications]\n{field}"))
                 .err()
@@ -2177,6 +2471,13 @@ mod tests {
             assert!(matches!(error, Error::Toml(_)), "{field}: {error:?}");
             assert!(error.source().is_some());
         }
+        // Delivery is a shared Herdr setting; a native `system` key is unknown.
+        assert_eq!(
+            Config::parse("[notifications]\nsystem=true")?
+                .notifications
+                .delivery(),
+            NotificationDelivery::Off
+        );
         Ok(())
     }
 
@@ -2848,8 +3149,10 @@ mod tests {
             (LayoutMode::Orca.density(), LayoutMode::Orca.style()),
             (Density::Comfortable, Style::Rounded)
         );
-        // A second setting for rows no longer exists.
-        assert!(Config::parse("[layout]\nrows = 'orca'").is_err());
+        // A second setting for rows no longer exists: ignored, not applied.
+        let config = Config::parse("[layout]\nmode = 'minimal'\nrows = 'orca'")?;
+        assert_eq!(config.layout.mode, LayoutMode::Minimal);
+        assert_eq!(config.unknown_keys, ["layout.rows"]);
         assert!(Config::parse("layout = 'herdr'").is_err());
         Ok(())
     }
@@ -2990,9 +3293,6 @@ mod tests {
     #[test]
     fn rejects_invalid_settings() {
         for text in [
-            "unknown = 1",
-            "[sidebar]\nunknown = 1",
-            "[unknown]",
             "theme = ''",
             "[ui]\nfamily = '  '",
             "[tabs]\nsize = 7.9",
@@ -3002,7 +3302,6 @@ mod tests {
             "[sidebar]\nsize = -inf",
             "[tabs]\nsize = '14'",
             "[tabs]\nfamily = 14",
-            "[github]\nunknown = 'value'",
             "[github]\nclient_secret = 'not-allowed'",
             "[github]\nprivate_key = 'not-allowed'",
             "[github]\ntoken = 'not-allowed'",
@@ -3011,10 +3310,8 @@ mod tests {
             "[github]\noauth_client_id = ' bad-id'",
             "[github]\noauth_client_id = 'bad/id'",
             "[github]\noauth_client_id = '\u{e9}'",
-            "[features]\nunknown = true",
             "[features]\nsidebar_hover_menu = 'true'",
             "[features]\nsidebar_hover_menu = 1",
-            "[layout]\nunknown = 1",
             "[layout]\nsidebar_gap = -1",
             "[layout]\nsidebar_gap = 65",
             "[layout]\nsidebar_gap = inf",
@@ -3023,6 +3320,129 @@ mod tests {
             assert!(Config::parse(text).is_err(), "accepted {text:?}");
         }
         assert!(Config::parse("[tabs]\nsize = 8\n[ui]\nsize = 48").is_ok());
+    }
+
+    #[test]
+    fn devices_opt_into_server_keybindings_one_by_one() -> anyhow::Result<()> {
+        const ID: &str = "0123456789abcdef0123456789abcdef";
+        const OTHER: &str = "fedcba9876543210fedcba9876543210";
+        let config = Config::parse(&format!(
+            "[keybindings]\nnew_tab = 'cmd-y'\n[devices.{ID}]\nkeybindings = 'server'\n[devices.{OTHER}]\nkeybindings = 'local'"
+        ))?;
+        assert_eq!(
+            config.keybinding_source(&format!("ssh:{ID}")),
+            KeybindingSource::Server
+        );
+        assert_eq!(
+            config.keybinding_source(&format!("ssh:{OTHER}")),
+            KeybindingSource::Local
+        );
+        // Local, explicit sockets, and unlisted devices keep local keys, and
+        // a bare profile ID is not an endpoint ID.
+        for endpoint in [
+            "local",
+            "socket",
+            ID,
+            "ssh:00000000000000000000000000000000",
+        ] {
+            assert_eq!(
+                config.keybinding_source(endpoint),
+                KeybindingSource::Local,
+                "{endpoint}"
+            );
+        }
+        assert_eq!(
+            Config::parse("")?.keybinding_source(&format!("ssh:{ID}")),
+            KeybindingSource::Local
+        );
+        // The overrides stay available to layer over a server profile.
+        assert_eq!(
+            config.keybinding_overrides.get("new_tab"),
+            Some(&Binding::One("cmd-y".into()))
+        );
+        // A non-catalog ID, or a key this build does not know, is ignored
+        // and reported, as other unknown keys are.
+        let ignored = Config::parse(&format!(
+            "[devices.box]\nkeybindings = 'server'\n[devices.{ID}]\nkeybindings = 'server'\ntheme = 'Nord'"
+        ))?;
+        assert_eq!(
+            ignored.unknown_keys,
+            [format!("devices.{ID}.theme"), "devices.box".to_owned()]
+        );
+        assert_eq!(ignored.devices.len(), 1);
+        assert_eq!(
+            ignored.keybinding_source(&format!("ssh:{ID}")),
+            KeybindingSource::Server
+        );
+        for text in [
+            format!("[devices.{ID}]\nkeybindings = 'remote'"),
+            format!("[devices.{ID}]\nkeybindings = true"),
+            "devices = 'server'".into(),
+        ] {
+            assert!(Config::parse(&text).is_err(), "accepted {text:?}");
+        }
+        let many: String = (0..=MAX_DEVICES)
+            .map(|index| format!("[devices.{index:032x}]\n"))
+            .collect();
+        assert!(matches!(
+            Config::parse(&many),
+            Err(Error::TooManyDevices(MAX_DEVICES))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn device_keybindings_save_in_place_and_local_removes_them() -> anyhow::Result<()> {
+        const ID: &str = "0123456789abcdef0123456789abcdef";
+        let endpoint = format!("ssh:{ID}");
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config.toml");
+        let original = "theme = 'Nord' # keep\n[usage]\nshow = false\n";
+        fs::write(&path, original)?;
+        Config::save_device_keybindings_path(ID, KeybindingSource::Server, &path)?;
+        let saved = fs::read_to_string(&path)?;
+        assert!(saved.starts_with(original), "{saved}");
+        assert!(
+            saved.contains(&format!("[devices.{ID}]\nkeybindings = \"server\"")),
+            "{saved}"
+        );
+        let config = Config::parse(&saved)?;
+        assert_eq!(
+            config.keybinding_source(&endpoint),
+            KeybindingSource::Server
+        );
+        assert!(!config.usage.show);
+        // Saving it again is a no-op, and Local restores the original file.
+        Config::save_device_keybindings_path(ID, KeybindingSource::Server, &path)?;
+        assert_eq!(fs::read_to_string(&path)?, saved);
+        Config::save_device_keybindings_path(ID, KeybindingSource::Local, &path)?;
+        assert_eq!(fs::read_to_string(&path)?, original);
+        Config::save_device_keybindings_path(ID, KeybindingSource::Local, &path)?;
+        assert_eq!(fs::read_to_string(&path)?, original);
+        // Another device's entry, and unknown keys, survive.
+        let shared = format!(
+            "[devices.{ID}]\nkeybindings = 'server'\n[devices.fedcba9876543210fedcba9876543210]\nkeybindings = 'server'\n"
+        );
+        fs::write(&path, &shared)?;
+        Config::save_device_keybindings_path(ID, KeybindingSource::Local, &path)?;
+        let kept = fs::read_to_string(&path)?;
+        assert!(!kept.contains(ID), "{kept}");
+        assert!(kept.contains("fedcba9876543210fedcba9876543210"), "{kept}");
+        // An ID that is not a catalog profile never reaches the file.
+        assert!(matches!(
+            Config::save_device_keybindings_path("../x", KeybindingSource::Server, &path),
+            Err(Error::InvalidDeviceId(_))
+        ));
+        assert_eq!(fs::read_to_string(&path)?, kept);
+        fs::remove_file(&path)?;
+        Config::save_device_keybindings_path(ID, KeybindingSource::Server, &path)?;
+        let created = fs::read_to_string(&path)?;
+        assert!(created.starts_with(LOCAL_CONFIG), "{created}");
+        assert_eq!(
+            Config::parse(&created)?.keybinding_source(&endpoint),
+            KeybindingSource::Server
+        );
+        Ok(())
     }
 
     #[test]
@@ -3044,10 +3464,10 @@ mod tests {
         )?;
         assert_eq!(layered.keybindings.primary(Command::Themes), "cmd-k");
         assert_eq!(layered.keybindings.primary(Command::Tab), "cmd-t");
-        assert!(matches!(
-            Config::parse("[keybindings]\nnew_space = \"cmd-n\""),
-            Err(Error::UnknownKeybinding(_))
-        ));
+        // A command this build does not have is ignored, not fatal.
+        let config = Config::parse("[keybindings]\nnew_space = \"cmd-n\"\nthemes = \"cmd-k\"")?;
+        assert_eq!(config.unknown_keys, ["keybindings.new_space"]);
+        assert_eq!(config.keybindings.primary(Command::Themes), "cmd-k");
         assert!(matches!(
             Config::parse("[keybindings]\nnew_tab = \"t\""),
             Err(Error::KeystrokeWithoutModifier { .. })
@@ -3502,6 +3922,79 @@ mod tests {
     }
 
     #[test]
+    fn unknown_keys_are_ignored_and_reported() -> anyhow::Result<()> {
+        // What a newer build might write: every key it knows still applies.
+        let config = Config::parse(
+            "future = 1\ntheme = 'Nord'\n[future_table]\nx = 1\n\
+             [terminal]\nsize = 18\nligatures = true\n\
+             [notifications]\nenabled = true\nsound = 'ping'\n\
+             [clipboard_toast]\nduration = 3\n[features]\nnew_flag = true\n\
+             [github]\nenterprise = 'x'\n[layout]\nsidebar_gap = 4\nshadow = true\n\
+             [usage.providers.future]\ntoken = 'y'",
+        )?;
+        assert_eq!(config.theme, "Nord");
+        assert_eq!(config.terminal.size, 18.);
+        assert!(config.notifications.enabled);
+        assert_eq!(config.layout.sidebar_gap, 4.);
+        assert_eq!(
+            config.unknown_keys,
+            [
+                "clipboard_toast.duration",
+                "features.new_flag",
+                "future",
+                "future_table",
+                "github.enterprise",
+                "layout.shadow",
+                "notifications.sound",
+                "terminal.ligatures",
+                "usage.providers.future",
+            ]
+        );
+        assert_eq!(
+            config.diagnostic().as_deref(),
+            Some(
+                "config-gpui.local.toml: ignoring unknown keys clipboard_toast.duration, \
+                 features.new_flag, future, future_table, github.enterprise and 4 more"
+            )
+        );
+        assert_eq!(Config::parse("")?.diagnostic(), None);
+        assert_eq!(
+            Config::parse("[sidebar]\nnope = 1")?
+                .diagnostic()
+                .as_deref(),
+            Some("config-gpui.local.toml: ignoring unknown keys sidebar.nope")
+        );
+        // The managed defaults layered underneath name no unknown keys.
+        assert!(
+            Config::parse_layers([DEFAULT_CONFIG], &Daemon::default())?
+                .unknown_keys
+                .is_empty()
+        );
+        // Credentials stay refused rather than ignored.
+        for name in ["client_secret", "private_key", "token"] {
+            assert!(matches!(
+                Config::parse(&format!("[github]\n{name} = 'x'")),
+                Err(Error::GitHubSecretInConfig(found)) if found == name
+            ));
+        }
+
+        // Loading from disk keeps going too, and leaves the file alone.
+        let temp = TempDirectory::new()?;
+        let path = temp.0.join("config-gpui.toml");
+        let local = path.with_extension("local.toml");
+        let daemon = temp.0.join("absent.toml");
+        Config::load_path(&path, &daemon)?;
+        let text = "theme = 'Dracula'\n[notifications]\nunknown = true\n";
+        fs::write(&local, text)?;
+        let loaded = Config::load_path(&path, &daemon)?;
+        assert_eq!(loaded.theme, "Dracula");
+        assert_eq!(loaded.unknown_keys, ["notifications.unknown"]);
+        assert_eq!(Config::load_startup_path(&path, &daemon)?.theme, "Dracula");
+        assert_eq!(fs::read_to_string(&local)?, text);
+        Ok(())
+    }
+
+    #[test]
     fn invalid_local_overrides_keep_their_path_and_contents() -> anyhow::Result<()> {
         let temp = TempDirectory::new()?;
         let path = temp.0.join("config-gpui.toml");
@@ -3511,7 +4004,7 @@ mod tests {
         for text in [
             "theme = [",
             "[terminal]\nsize = '19'",
-            "[notifications]\nunknown = true",
+            "[notifications]\nenabled = 1",
         ] {
             fs::write(&local, text)?;
             let error = Config::load_path(&path, &daemon)

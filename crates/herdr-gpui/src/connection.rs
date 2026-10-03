@@ -1,10 +1,12 @@
 use crate::{
+    config::Theme,
     state::{ConnectionStatus, LiveState},
     terminal::InputTarget,
 };
 use herdr_client::{
-    ClientEvent, ClientHandle, ConnectOptions, ConnectTarget, Method, connect_with_connector,
-    protocol::ClientPaneInputEvent,
+    ClientEvent, ClientHandle, ConnectOptions, ConnectTarget, HostTheme, Method,
+    connect_with_connector,
+    protocol::{ClientHostAppearance, ClientHostColor, ClientPaneInputEvent},
 };
 use std::sync::{
     Arc, Mutex,
@@ -17,6 +19,9 @@ pub(crate) struct ConnectionBridge {
     pub inbox: Arc<Mutex<LiveState>>,
     pub drained: Arc<AtomicBool>,
     pub integrations: Arc<Mutex<IntegrationInbox>>,
+    pub(crate) links: Arc<Mutex<crate::links::LinkInbox>>,
+    /// Scrollback answers, fenced with the connection like the main inbox.
+    pub scrollback: Arc<Mutex<crate::scrollback::Inbox>>,
     sound_cancel: Arc<AtomicBool>,
 }
 
@@ -67,6 +72,27 @@ impl IntegrationInbox {
     }
 }
 
+/// What the daemon is told about this client's terminal: the colors cells are
+/// painted with, and the system appearance rather than the theme's lightness,
+/// so Herdr's light and dark theme overrides follow the OS as they would in a
+/// terminal that reports its color scheme.
+pub(crate) fn host_theme(theme: &Theme, light: bool) -> HostTheme {
+    let rgb = |color: u32| {
+        let [_, r, g, b] = color.to_be_bytes();
+        ClientHostColor { r, g, b }
+    };
+    HostTheme {
+        foreground: rgb(theme.foreground),
+        background: rgb(theme.background),
+        palette: theme.palette.map(rgb),
+        appearance: if light {
+            ClientHostAppearance::Light
+        } else {
+            ClientHostAppearance::Dark
+        },
+    }
+}
+
 impl ConnectionBridge {
     pub fn new(target: ConnectTarget) -> Self {
         let state = LiveState::default();
@@ -77,6 +103,8 @@ impl ConnectionBridge {
             inbox: Arc::new(Mutex::new(state)),
             drained: Arc::new(AtomicBool::new(true)),
             integrations: Arc::default(),
+            links: Arc::default(),
+            scrollback: Arc::default(),
         }
     }
 
@@ -98,6 +126,8 @@ impl ConnectionBridge {
         self.inbox = Arc::new(Mutex::new(state));
         self.drained = Arc::new(AtomicBool::new(true));
         self.integrations = Arc::default();
+        self.links = Arc::default();
+        self.scrollback = Arc::default();
     }
 
     pub fn detach(&mut self, active: bool) {
@@ -167,6 +197,8 @@ impl ConnectionBridge {
                 let inbox = self.inbox.clone();
                 let drained = self.drained.clone();
                 let integrations = self.integrations.clone();
+                let links = self.links.clone();
+                let scrollback = self.scrollback.clone();
                 // Drain ordered events even while GPUI is busy; retain only coherent state.
                 spawn(Box::new(move || {
                     while let Ok(event) = client.events.recv() {
@@ -179,9 +211,21 @@ impl ConnectionBridge {
                             Ok(mut integrations) => integrations.apply(event),
                             Err(_) => Some(event),
                         };
-                        if let Some(event) = event
-                            && let Ok(mut state) = inbox.lock() {
-                            state.apply(event);
+                        let event = event.and_then(|event| match scrollback.lock() {
+                            Ok(mut scrollback) => scrollback.apply(event),
+                            Err(_) => Some(event),
+                        });
+                        let event = event.and_then(|event| match links.lock() {
+                            Ok(mut links) => links.apply(event),
+                            Err(_) => Some(event),
+                        });
+                        if let Ok(mut state) = inbox.lock() {
+                            match event {
+                                Some(event) => state.apply(event),
+                                // A link answer changes nothing the live state
+                                // holds, but the window polls only when it is dirty.
+                                None => state.dirty = true,
+                            }
                         }
                     }
                     drained.store(true, Ordering::Release);
@@ -228,6 +272,7 @@ impl ConnectionBridge {
         let sounds = std::mem::take(&mut state.sound_events);
         let reload_sound = std::mem::take(&mut state.reload_sound);
         let clipboard_writes = std::mem::take(&mut state.clipboard_writes);
+        let bells = std::mem::take(&mut state.bells);
         let mut update = state.clone();
         update.settings_reload = false;
         update.notifications = notifications;
@@ -235,6 +280,7 @@ impl ConnectionBridge {
         update.sound_events = sounds;
         update.reload_sound = reload_sound;
         update.clipboard_writes = clipboard_writes;
+        update.bells = bells;
         if let Some((_, result)) = &mut update.dialog_response {
             *result = response;
         }
@@ -301,6 +347,40 @@ impl ConnectionBridge {
         Ok(id)
     }
 
+    /// Queues a link request without waiting on the event reader: a busy
+    /// mailbox is reported as such, and the caller tries again later.
+    pub(crate) fn request_link(
+        &self,
+        request: crate::links::LinkRequest,
+        cell: &crate::links::LinkCell,
+    ) -> crate::Result<String> {
+        let mut links = self
+            .links
+            .try_lock()
+            .map_err(|_| crate::Error::ConnectionBusy)?;
+        links.request(
+            self.handle.as_ref().ok_or(crate::Error::NotConnected)?,
+            request,
+            cell,
+        )
+    }
+
+    /// Report `theme` once this connection has a snapshot to address it to.
+    /// The handle skips repeats and starts over on every new connection, so
+    /// this is safe to call whenever the theme or appearance may have changed.
+    pub fn sync_host_theme(&self, live: &LiveState, theme: &HostTheme) {
+        let (Some(handle), Some(snapshot)) = (&self.handle, &live.snapshot) else {
+            return;
+        };
+        if !live.status.is_connected() {
+            return;
+        }
+        // A full queue leaves nothing recorded; the next sync resends it all.
+        if let Err(error) = handle.set_host_theme(&snapshot.boot_id, theme) {
+            tracing::debug!(%error, "Connection bridge host theme not queued");
+        }
+    }
+
     pub fn send_input(
         handle: &ClientHandle,
         boot_id: &str,
@@ -335,6 +415,39 @@ mod tests {
 
     fn bridge() -> ConnectionBridge {
         ConnectionBridge::new(ConnectTarget::Socket("/unused-connection-test.sock".into()))
+    }
+
+    #[test]
+    fn host_theme_paints_cell_colors_and_follows_system_appearance() {
+        let theme = Theme {
+            foreground: 0xabcdef,
+            background: 0x010203,
+            ..Theme::default()
+        };
+        let dark = host_theme(&theme, false);
+        assert_eq!(dark.appearance, ClientHostAppearance::Dark);
+        assert_eq!(
+            dark.foreground,
+            ClientHostColor {
+                r: 0xab,
+                g: 0xcd,
+                b: 0xef
+            }
+        );
+        assert_eq!(dark.background, ClientHostColor { r: 1, g: 2, b: 3 });
+        assert!(
+            dark.palette
+                .iter()
+                .zip(theme.palette)
+                .all(|(color, packed)| (u32::from(color.r) << 16
+                    | u32::from(color.g) << 8
+                    | u32::from(color.b))
+                    == packed)
+        );
+        // A dark background under a light system still reports light.
+        let light = host_theme(&theme, true);
+        assert_eq!(light.appearance, ClientHostAppearance::Light);
+        assert_eq!(light.palette, dark.palette);
     }
 
     #[test]
@@ -472,6 +585,48 @@ mod tests {
         assert!(!Arc::ptr_eq(&old, &bridge.integrations));
         let inbox = bridge.integrations.lock().unwrap();
         assert!(!inbox.list && !inbox.install && inbox.pending.is_none());
+    }
+
+    #[test]
+    fn bells_move_once_titles_persist_and_old_inboxes_are_fenced() {
+        use herdr_client::protocol::ServerMessage;
+        let mut bridge = bridge();
+        let old = bridge.inbox.clone();
+        {
+            let mut state = old.lock().unwrap();
+            state.status = ConnectionStatus::Connected;
+            state.apply(ClientEvent::Message(ServerMessage::TerminalBell {
+                count: 2,
+            }));
+            state.apply(ClientEvent::Message(ServerMessage::WindowTitle {
+                title: Some("agent".into()),
+            }));
+        }
+        let update = bridge.take_update().unwrap();
+        assert_eq!(update.bells, 2);
+        assert_eq!(update.window_title.as_deref(), Some("agent"));
+        old.lock().unwrap().set_outer_focus(true);
+        let next = bridge.take_update().unwrap();
+        assert_eq!(next.bells, 0, "a bell is delivered once");
+        assert_eq!(
+            next.window_title.as_deref(),
+            Some("agent"),
+            "a title is state"
+        );
+
+        bridge.reset(ConnectionStatus::Connected, false);
+        {
+            let mut state = old.lock().unwrap();
+            state.apply(ClientEvent::Message(ServerMessage::TerminalBell {
+                count: 1,
+            }));
+            state.apply(ClientEvent::Message(ServerMessage::WindowTitle {
+                title: Some("late".into()),
+            }));
+        }
+        let replacement = bridge.take_update().unwrap();
+        assert_eq!(replacement.bells, 0);
+        assert_eq!(replacement.window_title, None);
     }
 
     #[test]

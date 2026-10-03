@@ -50,6 +50,7 @@ list_remote_sessions(target: &str) -> Result<Vec<RemoteSession>>
 delete_local_session(executable: &Path, name: &str) -> Result<()>
 delete_remote_session(target: &str, name: &str) -> Result<()>
 ConnectOptions { surface_size: ClientSurfaceSize, cell_width_px: u32, cell_height_px: u32 }
+HostTheme { pub foreground: ClientHostColor, pub background: ClientHostColor, pub palette: [ClientHostColor; 256], pub appearance: ClientHostAppearance }
 ```
 
 Session listing and deletion are blocking worker-only functions. Deletion
@@ -71,6 +72,7 @@ send_popup_input(&self, boot_id: &str, terminal_id: &str, events: impl IntoItera
 reserve_clipboard_image(&self, boot_id: &str, target: ClientClipboardImageTarget) -> Result<ClipboardImageUpload>
 reserve_clipboard_input(&self, boot_id: &str, target: ClientClipboardImageTarget) -> Result<ClipboardImageUpload>
 resize(&self, boot_id: &str, options: ConnectOptions) -> Result<()>
+set_host_theme(&self, boot_id: &str, theme: &HostTheme) -> Result<()>
 set_focus(&self, boot_id: &str, focused: bool) -> Result<()>
 set_surface_active(&self, boot_id: &str, active: bool) -> Result<String>
 request(&self, boot_id: &str, method: &str, params: serde_json::Value) -> Result<String>
@@ -91,6 +93,16 @@ methods return a unique ID. The worker rejects stale boot IDs, requests before
 the first snapshot and unadvertised methods via
 `CommandRejected`. Navigation uses the real `pane.focus`, `tab.focus`, and
 `workspace.focus` API methods, not synthetic terminal keys.
+
+`set_host_theme` reports the client's terminal colors and light/dark appearance
+as `ClientShellHostTheme` updates on the ordered command path. Herdr answers OSC
+10/11/4 color queries from pane applications with them and picks its per-mode
+theme overrides from the appearance. Each connection starts unknown to the
+daemon: the first call queues the appearance, both default colors, and the full
+palette; later calls queue only what changed, and an unchanged theme queues
+nothing. A reconnect is a new connection and reports everything again. Like
+other commands it needs the snapshot boot ID, and a failed call leaves nothing
+recorded so the next one starts over in full.
 
 `remote_config_value` reads a single Git configuration key on a saved SSH host
 with the same bounded, noninteractive process policy as `remote_origin_url`.
@@ -249,6 +261,7 @@ unsupported there. Ordinary Windows commands retain their existing behavior.
 Connected(EndpointServerWelcome)
 Snapshot(Arc<ClientShellSnapshot>)
 Surface(Arc<PaneSurfaceFrame>)
+SurfaceImages(Arc<SurfaceImages>)
 Response { request_id: String, response: serde_json::Value }
 CommandRejected { request_id: Option<String>, reason: Error }
 Message(ServerMessage)
@@ -322,10 +335,23 @@ whose `(boot_id, projection_revision)` differs from `(boot_id, revision)` and
 wait for matching content. Snapshot metadata and cells must not be mixed across
 focus changes. Full surfaces can skip surface revisions; patches cannot.
 
-This is a complete **text** baseline. Images retain their wire scene semantics:
-assets contain newly required bytes, not necessarily every live image's bytes.
-Rendering/caching images, optional delta codecs, local server spawning, discovery
-of all running sessions, and automatic reconnect are out of scope. No existing Herdr server or session is modified or started by discovery.
+Herdr sends an image's bytes only in the first surface that places it, so the
+worker, which sees every surface, keeps them: each received surface's
+`graphics.assets` moves into a per-connection store and the emitted surface
+carries placements and retained keys only. Whenever the stored set changes,
+`SurfaceImages` (bytes by asset key, each with a process-unique serial) is
+emitted before the `Surface` that needs it. The store keeps the keys the newest
+received and newest emitted surfaces reference, so a surface waiting for its
+snapshot cannot drop pixels from the one on screen. Assets are untrusted: bytes
+must match their key's length and raw RGB/RGBA size, sides are at most
+`MAX_IMAGE_SIDE`, and placements, images and total bytes are capped
+(`MAX_PLACEMENTS`, `MAX_IMAGES`, `MAX_IMAGE_BYTES`). Over-limit or invalid
+assets are dropped, not fatal. Direct graphics stay disabled and
+`ServerMessage::GraphicsFile` paths are never read. Decoding and painting belong
+to the GUI.
+
+Optional delta codecs, local server spawning, discovery of all running sessions,
+and automatic reconnect are out of scope. No existing Herdr server or session is modified or started by discovery.
 
 ## Saved SSH Hosts
 

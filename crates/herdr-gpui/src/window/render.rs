@@ -2,16 +2,17 @@
 //! the latest projection only: it never queries the daemon, touches disk, or
 //! starts a process.
 
-use super::HerdrWindow;
+use super::{HerdrWindow, PressedLink};
 use crate::{
     APP_VERSION, CheckForUpdates, Minimize, PlaySound, RunCommand, ShowHerdrNotDetected,
     ShowUpdatePreview,
-    actions::ShowToastPreview,
+    actions::{RingBellPreview, ShowToastPreview},
     browser::{Pick, Shown, Slot},
     config::ClipboardToastPosition,
     fonts::StyledFont,
     state::ConnectionStatus,
     terminal::*,
+    terminal_painter::{self, ImageTarget, PlacedImages},
     worktree_banner,
 };
 use gpui::{prelude::*, *};
@@ -37,19 +38,18 @@ impl Render for HerdrWindow {
         self.cell_width = self.painter.borrow_mut().cell_width(&font, window, cx);
         // Registers the window for surface-only redraws; see `redraw_terminal`.
         self.surface_signal.read(cx);
-        let sidebar = self.sidebar_visible.then(|| {
-            crate::sidebar::cached_view(
-                &self.sidebar_view,
-                self.sidebar_width,
-                f32::from(window.viewport_size().width),
-            )
-        });
+        let sidebar = self
+            .sidebar_mode()
+            .width(self.sidebar_width, f32::from(window.viewport_size().width))
+            .map(|width| crate::sidebar::cached_view(&self.sidebar_view, width));
         // Paints the frame on screen, which during a focus change is the one
         // presented before it: the terminal area never blanks between two
         // projections. What the client knows to be current stays in `live`.
-        let surface = self.presentation.frame(&self.live);
+        let picture = self.presentation.picture(&self.live);
+        let surface = picture.as_ref().map(|picture| picture.frame.clone());
+        let images = picture.as_ref().map(|picture| picture.images.clone());
         // A group picking the tab another shows paints this same frame.
-        let window_frame = surface.clone();
+        let window_frame = picture;
         let entity = cx.entity();
         let paint_entity = entity.clone();
         let focus = self.focus.clone();
@@ -59,6 +59,25 @@ impl Render for HerdrWindow {
         // The highlight is grid coordinates, so it paints with the frame that
         // owns the cells rather than being recomputed from the pointer here.
         let selection = self.selection.clone();
+        // Like the highlight, the link underline paints with the frame that
+        // owns its cells, and only while that frame shows the content the
+        // daemon resolved it from.
+        let link_rows: Vec<_> = surface
+            .as_deref()
+            .zip(self.hovered_daemon_link())
+            .filter(|(surface, link)| link.cell.current(surface))
+            .map(|(_, link)| link.frame_rows().collect())
+            .unwrap_or_default();
+        // Search matches, mapped onto the frame on screen. A popup covers the
+        // panes, so their matches stay under it.
+        let matches = surface
+            .as_deref()
+            .map(|surface| {
+                let mut highlights = self.find_highlights(surface);
+                highlights.extend(self.copy_mode_highlights(surface));
+                highlights
+            })
+            .unwrap_or_default();
         // The IME composition paints inline at the input cursor; a menu's
         // text field shows its own.
         // It anchors to the live surface, as the IME's candidate window does,
@@ -70,7 +89,7 @@ impl Render for HerdrWindow {
         self.split_cursor = self.split_cursor_at(window.mouse_position());
         // Pad the terminal itself: the canvas bounds that painting, hit testing,
         // and IME placement all read then already exclude the gap.
-        let sidebar_gap = if self.sidebar_visible {
+        let sidebar_gap = if sidebar.is_some() {
             self.config.layout.sidebar_gap
         } else {
             0.
@@ -95,6 +114,8 @@ impl Render for HerdrWindow {
             })
             .map(|(slot, _)| *slot);
         let terminal_gap = terminal_slot.map_or(sidebar_gap, slot_gap);
+        let find_bar = self.render_find_bar(surface.as_deref(), terminal_gap, cx);
+        let copy_badge = self.render_copy_mode_badge(surface.as_deref(), terminal_gap);
         let terminal = div()
             .id("terminal")
             .debug_selector(|| "terminal".into())
@@ -125,6 +146,7 @@ impl Render for HerdrWindow {
             // application changes what a click does, so the pointer follows.
             .on_modifiers_changed(
                 cx.listener(|this, event: &ModifiersChangedEvent, window, cx| {
+                    this.hover_link(window.mouse_position(), event.modifiers, cx);
                     let hovered =
                         this.terminal_link_hovered(window.mouse_position(), event.modifiers);
                     if hovered != this.hovered_terminal_link {
@@ -173,9 +195,7 @@ impl Render for HerdrWindow {
                     {
                         return;
                     }
-                    this.pressed_terminal_link = this
-                        .terminal_link_at(event.position)
-                        .map(|url| (url, event.position));
+                    this.pressed_terminal_link = this.terminal_link_press(event.position);
                     if this.menu.page.is_some() {
                         return;
                     }
@@ -230,6 +250,9 @@ impl Render for HerdrWindow {
                         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
                                 entity.update(cx, |this, cx| {
+                                    // Window-wide, so leaving the terminal
+                                    // drops the underline too.
+                                    this.hover_link(event.position, event.modifiers, cx);
                                     if this.scrollbar_mouse_move(event, cx)
                                         || this.split_mouse_move(event, cx)
                                         || this.terminal_mouse_move(event, cx)
@@ -238,7 +261,7 @@ impl Render for HerdrWindow {
                                         return;
                                     }
                                     if this.pressed_terminal_link.as_ref().is_some_and(
-                                        |(_, position)| {
+                                        |PressedLink { position, .. }| {
                                             (event.position.x - position.x).abs() > px(4.)
                                                 || (event.position.y - position.y).abs() > px(4.)
                                         },
@@ -290,20 +313,29 @@ impl Render for HerdrWindow {
                         if let Some(surface) = &surface {
                             // The highlight belongs to the frame that owns the
                             // cells, so only one of the two paints it.
-                            let highlight = |owned: bool| {
+                            let highlight = |owned: bool| -> Vec<_> {
                                 selection
                                     .as_ref()
                                     .filter(|_| owned)
-                                    .map(|selection| {
-                                        selection.rows(surface, cell_width, cell_height).collect()
+                                    .into_iter()
+                                    .flat_map(|selection| {
+                                        selection.rows(surface, cell_width, cell_height)
                                     })
-                                    .unwrap_or_default()
+                                    .map(|(row, columns)| terminal_painter::Highlight {
+                                        row,
+                                        columns,
+                                        tint: terminal_painter::Tint::Selection,
+                                    })
+                                    .collect()
                             };
-                            let panes: Vec<_> = highlight(
+                            // Matches tint below the selection, which reads
+                            // as chosen over them.
+                            let mut panes = matches;
+                            panes.extend(highlight(
                                 selection
                                     .as_ref()
                                     .is_some_and(|selection| selection.in_panes()),
-                            );
+                            ));
                             painter.borrow_mut().paint_frame(
                                 &surface.frame,
                                 bounds.origin,
@@ -312,8 +344,20 @@ impl Render for HerdrWindow {
                                 &font,
                                 &panes,
                                 &surface.panes,
+                                images.as_deref().map(|images| PlacedImages {
+                                    placements: &surface.graphics.placements,
+                                    images,
+                                    target: ImageTarget::Main,
+                                }),
                                 window,
                                 cx,
+                            );
+                            painter.borrow().paint_link(
+                                &surface.frame,
+                                bounds.origin,
+                                cell_width,
+                                &link_rows,
+                                window,
                             );
                             if let Some(popup) = &surface.popup {
                                 let offset = popup_origin(
@@ -322,10 +366,9 @@ impl Render for HerdrWindow {
                                     cell_width,
                                     cell_height,
                                 );
-                                let rows: Vec<_> =
-                                    highlight(selection.as_ref().is_some_and(|selection| {
-                                        selection.in_popup(&popup.terminal_id)
-                                    }));
+                                let rows = highlight(selection.as_ref().is_some_and(|selection| {
+                                    selection.in_popup(&popup.terminal_id)
+                                }));
                                 painter.borrow_mut().paint_frame(
                                     &popup.frame,
                                     bounds.origin + offset,
@@ -334,6 +377,11 @@ impl Render for HerdrWindow {
                                     &font,
                                     &rows,
                                     &[],
+                                    images.as_deref().map(|images| PlacedImages {
+                                        placements: &surface.graphics.placements,
+                                        images,
+                                        target: ImageTarget::Popup(&popup.terminal_id),
+                                    }),
                                     window,
                                     cx,
                                 );
@@ -354,6 +402,8 @@ impl Render for HerdrWindow {
                 )
                 .size_full(),
             )
+            .when_some(find_bar, |terminal, bar| terminal.child(bar))
+            .when_some(copy_badge, |terminal, badge| terminal.child(badge))
             // Direct feedback for the user's own gesture, not a daemon notice:
             // it sits over the cells it copied and needs no dismissing.
             .when_some(self.flash.as_ref(), |terminal, (flash, _)| {
@@ -500,8 +550,16 @@ impl Render for HerdrWindow {
             .on_action(cx.listener(|this, action: &ShowToastPreview, _, cx| {
                 this.show_toast_preview(action.kind, cx);
             }))
+            .on_action(cx.listener(
+                |this, _: &crate::actions::ShowSystemNotificationPreview, window, cx| {
+                    this.show_system_notification_preview(window, cx);
+                },
+            ))
             .on_action(cx.listener(|this, _: &PlaySound, _, _| {
                 this.sound.preview();
+            }))
+            .on_action(cx.listener(|this, _: &RingBellPreview, window, cx| {
+                this.preview_bell(window, cx);
             }))
             .size_full()
             .relative()
@@ -531,7 +589,9 @@ impl Render for HerdrWindow {
                              .flex_1()
                              .min_w_0()
                              .min_h_0()
+                            .relative()
                             .child(content)
+                            .children(self.render_config_diagnostic(cx))
                             .child(
                 div()
                     .id("connection-status")
@@ -548,7 +608,7 @@ impl Render for HerdrWindow {
                     .children(self.render_usage(cx))
                     .when_some(
                         self.prefix_armed
-                            .then(|| self.config.keybindings.prefix_label())
+                            .then(|| self.keymap().prefix_label())
                             .flatten(),
                         |bar, prefix| bar.child(
                             div()
@@ -596,6 +656,7 @@ impl Render for HerdrWindow {
                                 div().debug_selector(|| "connection-message".into()).child(status)
                             )),
                     )
+                    .children(self.render_system_load())
                     .when(crate::caffeine::SUPPORTED, |bar| {
                         let awake = crate::caffeine::active(cx);
                         let (foreground, surface) = (self.theme.foreground, self.theme.surface);

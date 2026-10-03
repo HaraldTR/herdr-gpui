@@ -30,22 +30,24 @@ impl HerdrWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let keymap = &self.config.keybindings;
+        let keymap = self.keymap();
+        let is_prefix = keymap.is_prefix(keystroke);
         if !self.prefix_armed {
-            if keymap.is_prefix(keystroke) {
+            if is_prefix {
                 self.prefix_armed = true;
                 cx.stop_propagation();
                 cx.notify();
             }
             return;
         }
+        let chord = keymap.chord(keystroke);
         self.prefix_armed = false;
         cx.notify();
-        if keymap.is_prefix(keystroke) {
+        if is_prefix {
             return;
         }
         cx.stop_propagation();
-        let Some(command) = keymap.chord(keystroke) else {
+        let Some(command) = chord else {
             return;
         };
         // Commands wait while a menu page holds input, so the chord ends it
@@ -82,7 +84,7 @@ mod tests {
     #[gpui::test]
     fn the_prefix_runs_chords_and_swallows_other_keys(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
-        let table: toml::Table = "prefix = 'cmd+j'\ntoggle_sidebar = 'prefix+cmd+b'"
+        let table: toml::Table = "prefix = ['cmd+j', 'cmd+u']\ntoggle_sidebar = 'prefix+cmd+b'"
             .parse()
             .unwrap();
         view.update(cx, |view, _| {
@@ -108,6 +110,18 @@ mod tests {
         assert_eq!(state(cx), (true, true));
         assert!(press("cmd-b", cx));
         assert_eq!(state(cx), (false, false), "the chord ran");
+
+        // Any configured prefix arms the same chords.
+        assert!(press("cmd-u", cx));
+        assert_eq!(state(cx), (true, false));
+        assert!(press("cmd-b", cx));
+        assert_eq!(state(cx), (false, true), "the second prefix ran the chord");
+        assert!(press("cmd-j", cx));
+        assert!(!press("cmd-u", cx), "another prefix passes through too");
+        assert_eq!(state(cx), (false, true));
+        assert!(press("cmd-u", cx));
+        assert!(press("cmd-b", cx));
+        assert_eq!(state(cx), (false, false));
 
         // An unbound key after the prefix goes nowhere, as in the TUI.
         assert!(press("cmd-j", cx));

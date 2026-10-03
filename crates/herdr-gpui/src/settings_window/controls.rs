@@ -550,7 +550,7 @@ impl SettingsWindow {
             (
                 "System",
                 ToastDelivery::System,
-                "Other clients only; OS notifications are not supported by this GUI",
+                "OS notifications; clicking one opens its pane",
             ),
         ] {
             let selected = self
@@ -681,6 +681,15 @@ impl SettingsWindow {
                     }))
                 }),
             )
+            .child(self.preference_switch(
+                "settings-system-load",
+                "Show CPU and memory",
+                self.config.show_system_load,
+                crate::config::preferences::Preference::ShowSystemLoad(
+                    !self.config.show_system_load,
+                ),
+                cx,
+            ))
             .child(self.preference_switch(
                 "settings-confirm-close",
                 "Confirm tab close",
