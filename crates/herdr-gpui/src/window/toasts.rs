@@ -26,6 +26,12 @@ impl HerdrWindow {
         }) else {
             return;
         };
+        self.open_notice(index, id, cx);
+    }
+
+    /// Selects the notice's host and navigates once its inbox validates the
+    /// target, for a toast click and an OS notification click alike.
+    pub(super) fn open_notice(&mut self, index: usize, id: u64, cx: &mut Context<Self>) {
         let target = match self.toast_target(index, id) {
             Poll::Ready(target) => target,
             Poll::Pending => {
@@ -46,7 +52,8 @@ impl HerdrWindow {
         let Some(target) = target else {
             return;
         };
-        if !self.select_endpoint(endpoint_id, cx) {
+        let endpoint_id = self.endpoints[index].id.clone();
+        if !self.select_endpoint(&endpoint_id, cx) {
             return;
         }
         self.pending_navigation = Some(target);
@@ -73,7 +80,9 @@ impl HerdrWindow {
             return Poll::Ready(None);
         };
         let accepted = index == self.selected_endpoint && self.pending_toast == Some(id);
-        if !notice.visible || (!accepted && notice.expires <= Instant::now()) {
+        // A posted OS notification has no in-app lifetime; its click is
+        // fenced by the boot, inbox, and loss checks below instead.
+        if !notice.posted && (!notice.visible || (!accepted && notice.expires <= Instant::now())) {
             return Poll::Ready(None);
         }
         let state = match endpoint.connection.inbox.try_lock() {
@@ -182,6 +191,7 @@ impl HerdrWindow {
             self.selected_endpoint,
             self.config.notifications,
             hidden,
+            self.active,
             self.pending_toast,
             now,
         )
