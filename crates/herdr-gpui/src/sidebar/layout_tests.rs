@@ -396,6 +396,17 @@ pub(crate) const REPO_KEY: &str = if cfg!(windows) {
     "/fixture/agent-launcher/.git"
 };
 
+/// [`snapshot`] with the main checkout behind its upstream, one child
+/// diverged, and another in sync.
+#[cfg(test)]
+fn snapshot_with_upstream() -> ClientShellSnapshot {
+    let mut snapshot = snapshot(6);
+    for (index, counts) in [(0, (0, 18)), (4, (2, 3)), (5, (0, 0))] {
+        snapshot.workspaces[index].git_ahead_behind = Some(counts);
+    }
+    snapshot
+}
+
 pub(crate) fn snapshot(workspace_count: usize) -> ClientShellSnapshot {
     serde_json::from_value(serde_json::json!({
         "boot_id": "layout-test", "revision": 1,
@@ -664,7 +675,7 @@ fn check_layouts(modes: &[crate::config::LayoutMode], cx: &mut gpui::TestAppCont
     use crate::config::LayoutMode;
     let (view, cx) = cx.add_window_view(|window, cx| {
         let mut view = fixture_window(window, cx);
-        view.live.snapshot = Some(Arc::new(snapshot(6)));
+        view.live.snapshot = Some(Arc::new(snapshot_with_upstream()));
         let input = crate::pull_request::Input {
             checkout: None,
             repo_key: REPO_KEY.into(),
@@ -757,6 +768,30 @@ fn check_layouts(modes: &[crate::config::LayoutMode], cx: &mut gpui::TestAppCont
                     );
                     assert!(cx.debug_bounds("dirty-sidebar-child").is_some());
                 }
+                // Minimal rows leave upstream counts off too; the rest keep
+                // them inside the row, and never on a branch in sync.
+                if mode != LayoutMode::Minimal {
+                    for (key, row, upstream) in [
+                        ("herdr", "row-herdr", "upstream-herdr"),
+                        (
+                            "sidebar-child",
+                            "row-sidebar-child",
+                            "upstream-sidebar-child",
+                        ),
+                    ] {
+                        let row = cx.debug_bounds(row).unwrap();
+                        let upstream = cx
+                            .debug_bounds(upstream)
+                            .unwrap_or_else(|| panic!("{context}: no upstream on {key}"));
+                        assert!(upstream.right() <= row.right(), "{context}: {key}");
+                        assert!(upstream.bottom() <= row.bottom(), "{context}: {key}");
+                    }
+                }
+                assert!(
+                    cx.debug_bounds("upstream-sidebar-child-with-a-long-readable-branch-name")
+                        .is_none(),
+                    "{context}"
+                );
                 // Every layout, Minimal included, marks a teleported checkout.
                 let row = cx.debug_bounds("row-sidebar-child").unwrap();
                 let teleported = cx
@@ -4389,4 +4424,60 @@ fn teleported_names_fade_but_stay_legible() {
             }
         }
     }
+}
+
+#[gpui::test]
+fn upstream_counts_follow_the_branch_or_trail_one_line_rows(cx: &mut gpui::TestAppContext) {
+    use crate::config::{Density, LayoutMode, Style};
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = fixture_window(window, cx);
+        view.live.snapshot = Some(Arc::new(snapshot_with_upstream()));
+        view
+    });
+    cx.simulate_resize(size(px(800.), px(900.)));
+    cx.run_until_parked();
+    let draw = |density, cx: &mut gpui::VisualTestContext| {
+        view.update(cx, |view, cx| {
+            view.config.layout.mode = LayoutMode::Classic {
+                density,
+                style: Style::Flat,
+            };
+            view.sidebar_width = Some(320.);
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            cx.default_global::<TextProbes>().0.clear();
+            full_draw(window, cx).clear(cx);
+            let probes = &cx.global::<TextProbes>().0;
+            assert!(probes.contains_key("\u{2193}18"), "{density:?}");
+            assert!(probes.contains_key("\u{2191}2"), "{density:?}");
+            assert!(probes.contains_key("\u{2193}3"), "{density:?}");
+            assert!(!probes.contains_key("\u{2191}0"), "{density:?}");
+        });
+    };
+
+    // Like the TUI's `main ↓18`: the counts sit right after the branch on
+    // the repository's second line, not pushed to the row's edge.
+    draw(Density::Normal, cx);
+    let detail = cx.debug_bounds("detail-herdr").unwrap();
+    let name = cx.debug_bounds("name-herdr").unwrap();
+    let upstream = cx.debug_bounds("upstream-herdr").unwrap();
+    assert!(upstream.top() >= name.bottom());
+    assert!(upstream.left() >= detail.right());
+    assert!(upstream.left() - detail.right() < px(20.));
+    assert!(upstream.right() < cx.debug_bounds("row-herdr").unwrap().right() - px(100.));
+    // A one-line worktree child keeps them in a trailing column instead.
+    let child = cx.debug_bounds("name-sidebar-child").unwrap();
+    let trailing = cx.debug_bounds("upstream-sidebar-child").unwrap();
+    assert_eq!(trailing.top(), child.top());
+    assert!(trailing.left() >= child.right());
+
+    // Compact rows have no branch line, so the repository's counts trail
+    // its name on the one line it has.
+    draw(Density::Compact, cx);
+    let name = cx.debug_bounds("name-herdr").unwrap();
+    let upstream = cx.debug_bounds("upstream-herdr").unwrap();
+    assert_eq!(upstream.top(), name.top());
+    assert!(upstream.left() >= name.right());
+    assert!(cx.debug_bounds("detail-herdr").is_none());
 }
