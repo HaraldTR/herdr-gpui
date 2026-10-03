@@ -144,6 +144,11 @@ just ci
 - Documentation-only changes need command/path/link review and `git diff --check`; do not claim a code test run that did not happen.
 - Add deterministic tests for invariants: ordering, cancellation, fragmentation, revision fencing, error paths, geometry, and cleanup. Prefer explicit coordination and bounded waits over timing guesses.
 - Test pure session/CLI/geometry logic without a socket or window where possible. Exercise public behavior with mock peers and headless GPUI tests where integration matters.
+- Keep test bodies out of production files, which only declare `#[cfg(test)] mod tests;`.
+  Put tests for a new feature in a new topic file under the module's `tests/` directory
+  (for example `keymap/tests/pane_keys.rs`, starting with `use super::*;`) rather than
+  inserting them into an existing large test module, and keep shared fixtures in the
+  parent `tests.rs`. Parallel PRs then edit different files instead of conflicting.
 - Fix flaky tests rather than hiding them with retries or new ignores. Existing live/native tests are ignored because they require explicit external resources.
 - For visual changes, verify the actual native UI when a desktop is available, including narrow layouts, long labels, focus, popup/IME behavior, and clipping. Headless layout tests do not prove native glyph or OS input correctness.
 - Measure interactive performance in release mode (`just run`), not debug mode. Preserve bounded glyph caching and deterministic paint budgets; native timing budgets are machine-dependent.
