@@ -172,8 +172,6 @@ struct SettingsWindow {
     shared: Option<herdr_settings::Settings>,
     source: WeakEntity<HerdrWindow>,
     section: Section,
-    /// The source daemon reports integration assets that need an update.
-    integration_updates: bool,
     themes: themes::ThemeBrowser,
     controls: controls::Controls,
     error: Option<String>,
@@ -247,9 +245,6 @@ impl SettingsWindow {
                         source.settings.shared.clone(),
                     )
                 });
-        let integration_updates = source
-            .upgrade()
-            .is_some_and(|source| source.read(cx).integration_updates_available());
         let subscription = source
             .upgrade()
             .map(|source| cx.observe(&source, Self::source_changed));
@@ -274,7 +269,6 @@ impl SettingsWindow {
             shared,
             source,
             section: Section::Appearance,
-            integration_updates,
             themes: themes::ThemeBrowser::new(cx),
             controls: controls::Controls::new(cx),
             error: appearance.error,
@@ -334,10 +328,8 @@ impl SettingsWindow {
         }
     }
 
-    fn source_changed(&mut self, source: Entity<HerdrWindow>, cx: &mut Context<Self>) {
-        let updates = source.read(cx).integration_updates_available();
-        if self.section == Section::Integrations || updates != self.integration_updates {
-            self.integration_updates = updates;
+    fn source_changed(&mut self, _source: Entity<HerdrWindow>, cx: &mut Context<Self>) {
+        if self.section == Section::Integrations {
             cx.notify();
         }
     }
@@ -355,7 +347,6 @@ impl SettingsWindow {
             return;
         };
         self._source = Some(cx.observe(&owner, Self::source_changed));
-        self.integration_updates = owner.read(cx).integration_updates_available();
         self.source = source;
         self.new_window_target = owner
             .read(cx)
@@ -953,31 +944,12 @@ impl SettingsWindow {
                                     })),
                             )
                             .child(section.label())
-                            .when(
-                                section == Section::Integrations && self.integration_updates,
-                                |row| row.child(update_badge(theme)),
-                            )
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.select_section(section, window, cx)
                             }))
                     }),
             )
     }
-}
-
-/// Marks the Integrations section while the daemon reports outdated assets.
-fn update_badge(theme: &Theme) -> Div {
-    div()
-        .debug_selector(|| "settings-integrations-badge".into())
-        .ml_auto()
-        .flex_none()
-        .px(px(6.))
-        .rounded_full()
-        .bg(rgb(theme.primary()))
-        .text_color(rgb(theme.background))
-        .text_size(px(10.))
-        .line_height(px(16.))
-        .child("Update")
 }
 
 impl Render for SettingsWindow {
