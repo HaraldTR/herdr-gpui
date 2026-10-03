@@ -27,7 +27,7 @@ impl HerdrWindow {
     }
 
     /// Reloads when the GUI overrides change, or the daemon's config whose
-    /// `[keys]` and clipboard toast the GUI also honors.
+    /// `[keys]`, clipboard toast, and `[ui.sidebar]` rows the GUI also honors.
     pub(crate) fn watch_gui_config(&mut self, cx: &mut Context<Self>) {
         let Ok(path) = Config::local_path() else {
             return;
@@ -216,6 +216,7 @@ impl HerdrWindow {
                         });
                         this.font_size_saves.apply_pending(&mut config);
                         this.config = config;
+                        this.gui_config_diagnostic.sync(this.config.diagnostic().as_deref());
                         crate::settings_window::apply_loaded_theme(&mut this.config, &mut this.theme, theme_revision, cx);
                         this.tick_toasts(
                             this.menu.page.is_some() || this.toasts_hidden,
