@@ -559,6 +559,34 @@ following the daemon config. Only these two keys are read from that file, it is
 never written, and an unreadable, oversized, malformed, or unrecognized value
 leaves the defaults standing.
 
+The `[bell]` table decides what a pane's terminal bell (BEL) does. Herdr has no
+bell setting: it forwards each bell to its foreground client and leaves the
+reaction to it, as the TUI hands BEL to the outer terminal.
+
+```toml
+[bell]
+attention = true  # request attention (bounce the Dock) while the window is inactive
+sound = false     # play the system alert sound
+```
+
+Only bells from the selected endpoint's own connection ring; parked editor-group
+connections and other endpoints are dropped, as the TUI drops presentation
+effects from inactive endpoints. A burst rings at most once per 500 ms. On
+platforms where GPUI does not implement attention requests or the system bell,
+those settings do nothing.
+
+**QA > Ring Bell in 3 Seconds** (QA builds) previews both reactions after a
+delay, so there is time to switch to another app and watch the Dock: it plays the
+system alert and, if the window is then inactive, requests attention. It
+bypasses `[bell]` and the rate limit, and needs no daemon.
+
+The window title follows the daemon's `WindowTitle` message for the selected
+endpoint: a title an agent set with `client.window_title.set`, or Herdr's own
+rendering of `ui.window_title` (`{hostname}`, `{workspace}`, `{tab}`, `{pane}`,
+`{terminal_title}`) for this window's view. Control characters are stripped and
+the title is capped at 200 characters. Without one, after a disconnect, or once
+the daemon restarts, the window keeps its own `Herdr — <workspace>` title.
+
 The `src/config.rs` module exposes `Config::load()` and
 `Config::path()` (managed defaults) and `Config::local_path()` (user overrides),
 all returning the crate's typed `Result`. `Config::theme()` resolves
@@ -634,7 +662,8 @@ evidence may wait up to one second from receipt, rechecking every 50 ms. New
 notifications replace pending ones for the same endpoint/pane. Only Finished is
 suppressed for the selected endpoint's active tab while the native window is
 focused (workspace focus is the fallback for events without a tab).
-Legacy `Notify`, terminal BEL, and terminal escape sequences never play audio.
+Legacy `Notify`, terminal BEL, and terminal escape sequences never play Herdr
+sounds; BEL can play the system alert through `[bell]`.
 
 Built-in Done and Request MP3s are the upstream Herdr sounds, attributed in
 [SOUND-NOTICE.md](SOUND-NOTICE.md). Rodio 0.22 uses CPAL native output and
