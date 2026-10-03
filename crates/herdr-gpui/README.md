@@ -1233,7 +1233,13 @@ Windows setup) nothing is saved and the window says so.
   linked worktrees is open), branch details, and daemon-driven
   filled/hollow activity indicators taken from the daemon's own status, so the
   GUI and the terminal client always show the same dot. Each worktree row also
-  carries its cached pull request number and diff counts.
+  carries its cached pull request number and diff counts, and a branch that has
+  drifted from its upstream shows the daemon's counts as in the terminal
+  client: a green `↑` for commits to push and a red `↓` for commits to pull.
+  They follow the branch on two-line rows (`main ↓18`) and sit at the row's
+  end on one-line rows, Compact included. Minimal rows leave them off. They
+  appear only while the daemon's `[ui.sidebar.spaces]` rows name `git_status`,
+  as its defaults do, because the daemon computes them only then.
 - Agents panel header ends with its sort, `grouped` or `priority`, which a
   click flips; an active agent view names itself there instead. Client-local
   and persisted beside the sidebar width, as in the terminal client.

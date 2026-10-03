@@ -17,7 +17,7 @@ impl RowLayout for Herdr {
     fn workspace(&self, row: WorkspaceRow<'_>, state: RowState, cx: &RowContext<'_>) -> Div {
         let density = cx.look.density;
         let lines = if density.workspace_details() { 2. } else { 1. };
-        let (branch, status) = (row.branch().unwrap_or(""), row.status());
+        let (branch, status, upstream) = (row.branch().unwrap_or(""), row.status(), row.upstream());
         let WorkspaceRow {
             label,
             tree,
@@ -49,6 +49,7 @@ impl RowLayout for Herdr {
             icon,
             arrow,
             badge,
+            upstream,
             None,
             cx.look,
             (cx.font, cx.theme),
@@ -70,6 +71,7 @@ impl RowLayout for Herdr {
             false,
             cx.width,
             RowIcon::None,
+            None,
             None,
             None,
             agent.status_text,
