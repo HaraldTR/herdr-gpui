@@ -425,6 +425,22 @@ closures still ask for confirmation. Saved edits apply automatically. The
 **Show agents** control in **Settings > Appearance > Sidebar layout** saves
 `show_agents` immediately, independently of the layout draft saved on close.
 
+`[usage]` provides independent switches in `config-gpui.local.toml`:
+
+```toml
+[usage]
+show = true     # Native bottom-bar usage
+topbar = true   # Daemon toolbar text, including plugin percentages
+inline = true   # Daemon sidebar rows, styles, and custom tokens
+```
+
+All three default to `true` and apply on config reload. Set `topbar`
+to `false` to hide daemon text without hiding the Git/account controls. Set
+`inline` to `false` to use native sidebar layouts.
+These switches affect GPUI only; they do not change
+the daemon or its plugins. Header text uses GPUI's standard truncation: character boundaries, with trailing
+space or punctuation trimmed before the ellipsis.
+
 The status bar shows the selected host's CPU and memory: a sparkline of recent
 CPU use and a memory meter, each with its current share, and cores, load
 averages, and memory in gigabytes in its tooltip. With more than one host, each
@@ -589,9 +605,9 @@ Positions are `top-left`, `top-center`, `top-right`, `bottom-left`,
 `bottom-center`, and `bottom-right`, measured against the terminal area rather
 than the window. Both keys default to herdr's own defaults, shown at the bottom
 center, and the example file leaves them commented out so an unedited GUI keeps
-following the daemon config. Only these two keys are read from that file, it is
-never written, and an unreadable, oversized, malformed, or unrecognized value
-leaves the defaults standing.
+following the daemon config. Only these two keys are read from that table. The
+file is never written, and an unreadable, oversized, malformed, or unrecognized
+value leaves these defaults standing.
 
 The `[bell]` table decides what a pane's terminal bell (BEL) does. Herdr has no
 bell setting: it forwards each bell to its foreground client and leaves the
@@ -660,6 +676,38 @@ host's files: `HERDR_CONFIG_PATH` takes precedence, then
 Debug GUI builds and `--dev` still use the production `herdr` sound settings.
 The GUI only reads this file. Daemon `ReloadSoundConfig` messages reload it
 asynchronously; invalid reloads retain the last valid settings.
+
+With `[usage] inline = true`, the same file's `[ui.sidebar.agents]`
+and `[ui.sidebar.spaces]` configure sidebar rows for every endpoint
+shown: the same tokens (`state_icon`, `state_text`, `machine`, `workspace`,
+`tab`, `pane`, `agent`, `terminal_title`, `terminal_title_stripped`, `branch`,
+`git_status`, and `$name` for a value a plugin reported), the same `fg`, `bold`,
+`dim` and `rules`, `rows_by_agent` and `row_gap`. A token with no value drops
+out, an empty row drops out, and a row too narrow for its text loses tokens
+from the left. If all configured rows disappear, agents keep only their status
+icon and workspaces keep one blank selectable line. Saving the file and
+**Reload GUI config** re-read it; an invalid section falls back to the
+default rows, including whether the status word is shown. While a section still
+matches the built-in rows, the selected sidebar layout paints it. A section
+that differs replaces each row's text with its lines inside the selected
+layout's own frame: Herdr's rows, Superset's icon slot and stripe, Orca's card,
+or Minimal's compact line. A configured row shows its status only when its
+first line leads with `state_icon`.
+`rows_by_agent` keys match the daemon's agent IDs directly (for example, `claude`
+or `codex`); the GUI does not maintain a separate registry of allowed IDs.
+
+[Usage Tracker (`herdr_agents_tracker`)](https://github.com/VHemanth45/herdr_agents_tracker)
+uses these fields for account usage percentages in the header and per-agent
+context meters in the sidebar. The same rendering supports other plugins that
+publish daemon status segments or custom tokens.
+
+```toml
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", "workspace", "tab"],
+  ["agent", { token = "$usage_ctx_warn", fg = "#f9e2af" }, { token = "$usage_ctx_hot", fg = "#f38ba8" }],
+]
+```
 
 ```toml
 [ui.sound]
@@ -766,10 +814,19 @@ native-frame appearance also remains unverified by these macOS tests.
 ## Terminal Selection And Copy
 
 Mouse-aware applications receive clicks, button releases, drags, and pointer
-motion. Hold Shift to select/copy locally instead, or Shift-right-click for the
-GUI pane menu. In applications without mouse reporting, selection and the pane
-menu work without Shift. A forwarded drag stays in the pane or popup where it
-started, including when the pointer moves outside it.
+motion. Hold Shift to select/copy locally instead. In applications without mouse
+reporting, selection works without Shift. A forwarded drag stays in the pane or
+popup where it started, including when the pointer moves outside it.
+
+Right-click opens the GUI pane menu unless Herdr routes that pane's right-clicks
+to the application (`herdr pane input --right-click pane`, or **Send
+Right-Clicks to Pane** in the pane menu). The routing belongs to the daemon, so
+the TUI and every other client follow the same setting. A routed pane passes a
+plain right-click to a mouse-aware application; right-click with Shift, Control,
+Option, or Command still opens the menu, where **Open This Menu on
+Right-Click** switches the pane back. A routed pane whose application has mouse
+reporting off opens the menu, since nothing would receive the click. A
+mouse-aware popup has no pane menu and keeps its right-clicks.
 
 Drag across the terminal to select cells; releasing the button copies them, drops
 the highlight, and shows the `copied to clipboard` flash described under
@@ -1471,6 +1528,9 @@ Windows setup) nothing is saved and the window says so.
   checks/reviews or an unknown merge status, and orange for a blocked/behind branch
   without a more specific check/review status. Drafts remain gray, merged PRs
   purple, and closed PRs red.
+- The header shows the selected daemon's status segments, including usage
+  percentages supplied by plugins, to the left of the Git and account controls.
+  Long text truncates to keep those controls reachable; status clears on disconnect.
 - The top-right titlebar profile control starts native GitHub device sign-in on
   a signed-out click, shows the authenticated user's avatar, and offers Sign out
   on right-click. Signed-out workspace menus have no GitHub section or requests.
@@ -1542,9 +1602,10 @@ Windows setup) nothing is saved and the window says so.
   the menu without sending terminal input.
 - Click workspace, tab, agent, or a visible split pane to focus through the API.
 - Right-click a visible pane, including an inactive split, for Rename, Split
-  Right, Split Down, Toggle Zoom, and Close without first focusing it, and, on
-  another pane of the focused tab, Swap with Focused Pane, which moves the
-  focused pane to the clicked one's place and keeps it focused. Actions
+  Right, Split Down, Toggle Zoom, right-click routing, and Close without first
+  focusing it, and, on another pane of the focused tab, Swap with Focused
+  Pane, which moves the focused pane to the clicked one's place and keeps it
+  focused. Actions
   retain the clicked pane/tab/workspace and daemon boot, and reject stale
   membership or a changed connection. Rename uses an IME-aware native field,
   trims surrounding whitespace, and clears the custom label when blank. It

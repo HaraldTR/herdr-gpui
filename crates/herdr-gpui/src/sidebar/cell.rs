@@ -62,6 +62,10 @@ pub(super) struct WorkspaceRow<'a> {
     pub(super) badge: Option<RowBadge>,
     /// The checkout is being deleted.
     pub(super) removing: bool,
+    /// Status the row shows. A collapsed group's head takes its most urgent member.
+    pub(super) status: AgentStatus,
+    /// Daemon token rows, painted in the layout's own frame. Empty keeps its native lines.
+    pub(super) lines: Vec<Vec<super::tokens::ResolvedToken>>,
 }
 
 impl<'a> WorkspaceRow<'a> {
@@ -80,7 +84,7 @@ impl<'a> WorkspaceRow<'a> {
     }
 
     pub(super) fn status(&self) -> AgentStatus {
-        self.workspace.agent_status
+        self.status
     }
 }
 
@@ -96,6 +100,8 @@ pub(super) struct AgentRow<'a> {
     /// The daemon's `state_text` word when its sidebar config asks for it, so
     /// the GUI and the TUI name the status the same way.
     pub(super) status_text: Option<&'static str>,
+    /// Daemon token rows, painted in the layout's own frame. Empty keeps its native lines.
+    pub(super) lines: Vec<Vec<super::tokens::ResolvedToken>>,
 }
 
 /// What a row shows.
