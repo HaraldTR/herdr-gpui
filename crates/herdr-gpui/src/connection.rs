@@ -251,6 +251,7 @@ impl ConnectionBridge {
         let sounds = std::mem::take(&mut state.sound_events);
         let reload_sound = std::mem::take(&mut state.reload_sound);
         let clipboard_writes = std::mem::take(&mut state.clipboard_writes);
+        let bells = std::mem::take(&mut state.bells);
         let mut update = state.clone();
         update.settings_reload = false;
         update.notifications = notifications;
@@ -258,6 +259,7 @@ impl ConnectionBridge {
         update.sound_events = sounds;
         update.reload_sound = reload_sound;
         update.clipboard_writes = clipboard_writes;
+        update.bells = bells;
         if let Some((_, result)) = &mut update.dialog_response {
             *result = response;
         }
@@ -544,6 +546,48 @@ mod tests {
         assert!(!Arc::ptr_eq(&old, &bridge.integrations));
         let inbox = bridge.integrations.lock().unwrap();
         assert!(!inbox.list && !inbox.install && inbox.pending.is_none());
+    }
+
+    #[test]
+    fn bells_move_once_titles_persist_and_old_inboxes_are_fenced() {
+        use herdr_client::protocol::ServerMessage;
+        let mut bridge = bridge();
+        let old = bridge.inbox.clone();
+        {
+            let mut state = old.lock().unwrap();
+            state.status = ConnectionStatus::Connected;
+            state.apply(ClientEvent::Message(ServerMessage::TerminalBell {
+                count: 2,
+            }));
+            state.apply(ClientEvent::Message(ServerMessage::WindowTitle {
+                title: Some("agent".into()),
+            }));
+        }
+        let update = bridge.take_update().unwrap();
+        assert_eq!(update.bells, 2);
+        assert_eq!(update.window_title.as_deref(), Some("agent"));
+        old.lock().unwrap().set_outer_focus(true);
+        let next = bridge.take_update().unwrap();
+        assert_eq!(next.bells, 0, "a bell is delivered once");
+        assert_eq!(
+            next.window_title.as_deref(),
+            Some("agent"),
+            "a title is state"
+        );
+
+        bridge.reset(ConnectionStatus::Connected, false);
+        {
+            let mut state = old.lock().unwrap();
+            state.apply(ClientEvent::Message(ServerMessage::TerminalBell {
+                count: 1,
+            }));
+            state.apply(ClientEvent::Message(ServerMessage::WindowTitle {
+                title: Some("late".into()),
+            }));
+        }
+        let replacement = bridge.take_update().unwrap();
+        assert_eq!(replacement.bells, 0);
+        assert_eq!(replacement.window_title, None);
     }
 
     #[test]
