@@ -139,6 +139,7 @@ pub(crate) enum ToastDelivery {
 #[derive(Deserialize)]
 #[serde(default)]
 struct Sound {
+    #[serde(deserialize_with = "crate::lenient::or_true")]
     enabled: bool,
 }
 
@@ -192,35 +193,55 @@ impl std::fmt::Debug for Settings {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct Parsed {
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     theme: palette::ThemeConfig,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     ui: Ui,
 }
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct Ui {
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     status_indicators: IndicatorStyle,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     sound: Sound,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     toast: RawToast,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     accent: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     prompt_new_tab_name: Option<bool>,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     prompt_new_workspace_name: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct RawToast {
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     delivery: Option<ToastDelivery>,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     enabled: Option<bool>,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     delay_seconds: Option<u64>,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     herdr: HerdrToast,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     clipboard: ClipboardToast,
 }
 
 #[derive(Deserialize)]
 #[serde(default)]
 struct HerdrToast {
+    #[serde(deserialize_with = "bottom_right")]
     position: ToastPosition,
+}
+
+fn bottom_right<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ToastPosition, D::Error> {
+    Ok(crate::lenient::value(deserializer)?.unwrap_or(ToastPosition::BottomRight))
 }
 
 impl Default for HerdrToast {
@@ -234,7 +255,9 @@ impl Default for HerdrToast {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub(crate) struct ClipboardToast {
+    #[serde(deserialize_with = "crate::lenient::or_true")]
     pub enabled: bool,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     pub position: ClipboardPosition,
 }
 
@@ -297,10 +320,11 @@ impl Settings {
                 .unwrap_or(defaults.workspace),
         };
         let toast = parsed.ui.toast;
-        let delay = toast.delay_seconds.unwrap_or(1);
-        if delay > 3600 {
-            return Err(Error::ToastDelay);
-        }
+        // Herdr refuses a longer delay and keeps its default, so this does too.
+        let delay = toast
+            .delay_seconds
+            .filter(|delay| *delay <= 3600)
+            .unwrap_or(1);
         let theme_name = parsed.theme.name.as_deref().unwrap_or("catppuccin");
         let legacy_accent = parsed
             .ui

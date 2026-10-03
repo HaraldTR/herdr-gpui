@@ -531,7 +531,9 @@ impl Render for HerdrWindow {
                              .flex_1()
                              .min_w_0()
                              .min_h_0()
+                            .relative()
                             .child(content)
+                            .children(self.render_config_diagnostic(cx))
                             .child(
                 div()
                     .id("connection-status")
@@ -596,6 +598,7 @@ impl Render for HerdrWindow {
                                 div().debug_selector(|| "connection-message".into()).child(status)
                             )),
                     )
+                    .children(self.render_system_load())
                     .when(crate::caffeine::SUPPORTED, |bar| {
                         let awake = crate::caffeine::active(cx);
                         let (foreground, surface) = (self.theme.foreground, self.theme.surface);

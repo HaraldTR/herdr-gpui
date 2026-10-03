@@ -19,6 +19,9 @@ pub(crate) struct WorkspaceTarget {
     pub(super) label: String,
     pub(super) worktree: Option<ClientShellWorktree>,
     pub(super) close_members: Vec<String>,
+    /// Whether linked worktrees of this parent's repository are open, so its
+    /// row folds a group even when another parent closes on its own.
+    pub(super) heads_group: bool,
     pub(super) branch: Option<String>,
     /// The branch a new worktree starts from, when it is not this checkout's
     /// `HEAD`: a linked checkout asks its main checkout, the only source the
@@ -34,6 +37,7 @@ impl WorkspaceTarget {
             label: workspace.label.clone(),
             worktree: workspace.worktree.clone(),
             close_members: close_members(snapshot, workspace),
+            heads_group: heads_group(snapshot, workspace),
             branch: workspace.branch.clone(),
             base: None,
         }
@@ -109,11 +113,11 @@ impl WorkspaceTarget {
         Ok(())
     }
 
-    /// The worktree key this workspace heads, when other checkouts hang off it.
+    /// The worktree key this workspace heads, when linked checkouts hang off it.
     pub(super) fn group_key(&self) -> Option<&str> {
         self.worktree
             .as_ref()
-            .filter(|tree| !tree.is_linked_worktree && self.close_members.len() > 1)
+            .filter(|_| self.heads_group)
             .map(|tree| tree.key.as_str())
     }
 
@@ -154,9 +158,12 @@ impl WorkspaceTarget {
                 {
                     return Err(crate::Error::WorkspaceGroupChanged);
                 }
+                // The daemon closes every checkout of the repository for a
+                // group close, so a parent beside another parent asks for
+                // itself alone.
                 (
                     Method::WorkspaceClose,
-                    serde_json::json!({"workspace_id": self.id, "close_group": true}),
+                    serde_json::json!({"workspace_id": self.id, "close_group": self.close_members.len() > 1}),
                 )
             }
             WorkspaceAction::NewWorktree => {
@@ -275,23 +282,47 @@ pub(super) fn chosen_label<'a>(text: &'a str, suggested: Option<&str>) -> Option
     (!text.is_empty() && Some(text) != suggested).then_some(text)
 }
 
+/// The workspaces closing `workspace` closes: its whole group when it is its
+/// repository's only parent and linked worktrees hang off it, else itself.
+/// Like the TUI, a parent beside another parent closes alone.
 fn close_members(snapshot: &ClientShellSnapshot, workspace: &ClientShellWorkspace) -> Vec<String> {
-    let mut members: Vec<_> = snapshot
-        .workspaces
-        .iter()
-        .filter(|w| {
-            w.workspace_id == workspace.workspace_id
-                || workspace.worktree.as_ref().is_some_and(|tree| {
-                    !tree.is_linked_worktree
-                        && w.worktree
-                            .as_ref()
-                            .is_some_and(|other| tree.key == other.key)
-                })
-        })
-        .map(|w| w.workspace_id.clone())
-        .collect();
+    let alone = || vec![workspace.workspace_id.clone()];
+    let Some(tree) = workspace
+        .worktree
+        .as_ref()
+        .filter(|tree| !tree.is_linked_worktree)
+    else {
+        return alone();
+    };
+    let mut members = Vec::new();
+    for w in &snapshot.workspaces {
+        match &w.worktree {
+            Some(other) if other.key == tree.key => {
+                if w.workspace_id != workspace.workspace_id && !other.is_linked_worktree {
+                    return alone();
+                }
+                members.push(w.workspace_id.clone());
+            }
+            _ => {}
+        }
+    }
     members.sort();
     members
+}
+
+/// Whether `workspace` is a parent with linked worktrees of its repository open.
+fn heads_group(snapshot: &ClientShellSnapshot, workspace: &ClientShellWorkspace) -> bool {
+    workspace
+        .worktree
+        .as_ref()
+        .filter(|tree| !tree.is_linked_worktree)
+        .is_some_and(|tree| {
+            snapshot.workspaces.iter().any(|w| {
+                w.worktree
+                    .as_ref()
+                    .is_some_and(|other| other.key == tree.key && other.is_linked_worktree)
+            })
+        })
 }
 
 impl HerdrWindow {

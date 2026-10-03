@@ -4,7 +4,11 @@ A GPUI 0.3.6 (`gpui-pre`) client for a Local daemon and saved SSH hosts, with ma
 support, experimental Linux x86_64/ARM64 builds, and an experimental Windows build with
 headless CI coverage. See [Windows](#windows) for what is unavailable there.
 It starts an installed local `herdr server` when absent; explicit socket and
-development targets remain attach-only. It does not link or install Herdr, stop
+development targets remain attach-only. On Unix, GUI launches resolve the login-shell
+environment once on the connection worker so daemon plugins can find tools such as
+`node`. Terminal launches skip the shell probe. Failed probes fall back to standard
+per-user and Homebrew bin directories; the probe has a five-second timeout.
+It does not link or install Herdr, stop
 daemons, spawn a local PTY, or emulate a terminal. Herdr's remote bridge may start
 the named remote session. SSH requires an installed POSIX Herdr, noninteractive authentication,
 and an already trusted host key. For hosts that need MFA or a password, configure
@@ -398,6 +402,17 @@ section and give Spaces the full sidebar height. Both default to `true`. Pane
 closures still ask for confirmation. Saved edits apply automatically. The
 **Show agents** control in **Settings > Appearance > Sidebar layout** saves
 `show_agents` immediately, independently of the layout draft saved on close.
+
+The status bar shows the selected host's CPU and memory: a sparkline of recent
+CPU use and a memory meter, each with its current share, and cores, load
+averages, and memory in gigabytes in its tooltip. With more than one host, each
+host row in the sidebar shows its own: right-aligned gauges after the name in
+compact layouts, and the sparkline and meter on a second line otherwise. This
+machine is read in process; each connected Linux or macOS remote host is read
+every two seconds over its own SSH shell, kept open while the host is connected
+(`/proc` on Linux; `vm_stat` and a one-second `iostat` on macOS). Other remote
+systems, and remote hosts from a Windows client, show it as unavailable. Set top-level `show_system_load = false`,
+or turn off **Show CPU and memory** in Settings, to hide it and stop sampling.
 
 `[notifications]` in `config-gpui.local.toml` overrides shared toast preferences
 for GUI-local in-app delivery, independently per key:
@@ -1191,7 +1206,9 @@ Windows setup) nothing is saved and the window says so.
 ## Supported
 
 - Workspace/worktree sidebar with main-checkout parents, indented linked
-  workspaces, local collapse arrows, branch details, and daemon-driven
+  workspaces, local collapse arrows (grouped like the TUI: every non-linked
+  checkout stays a parent, and a repository groups only while one of its
+  linked worktrees is open), branch details, and daemon-driven
   filled/hollow activity indicators taken from the daemon's own status, so the
   GUI and the terminal client always show the same dot. Each worktree row also
   carries its cached pull request number and diff counts.
@@ -1221,9 +1238,11 @@ Windows setup) nothing is saved and the window says so.
 - A searchable theme picker previews the available names from built-ins and
   Herdr/Ghostty theme folders. Selecting a theme applies and saves it while
   preserving other GUI config settings and comments.
-- Right-click spaces for Rename, Close (Close group on non-linked parents with
-  multiple spaces sharing `worktree.key`), and New worktree / Open worktree... on non-linked Git
-  parents, including spaces with a known Git branch but no worktree metadata yet.
+- Right-click spaces for Rename, Close (Close group on a repository's only
+  non-linked parent while linked worktrees sharing its `worktree.key` are open;
+  a parent beside another parent closes alone), and New worktree /
+  Open worktree... on non-linked Git parents, including spaces with a known
+  Git branch but no worktree metadata yet.
   Linked spaces offer New worktree too, while their main checkout is open: the
   daemon creates it through the main checkout, but the new branch starts from
   the linked space's branch rather than the main checkout's `HEAD`.
