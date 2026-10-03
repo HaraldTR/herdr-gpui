@@ -22,6 +22,7 @@ mod pending_input;
 mod prefix;
 mod render;
 mod selection;
+mod server_keys;
 pub(crate) mod system_notifications;
 mod tab_drag;
 mod tab_strip;
@@ -54,6 +55,8 @@ use herdr_client::{ConnectOptions, ConnectTarget};
 #[cfg(feature = "integration-test")]
 use std::sync::Arc;
 use std::time::Duration;
+
+pub(crate) use server_keys::ActiveServerKeymap;
 
 pub(crate) struct HerdrWindow {
     pub(crate) sound: crate::sound::Service,
@@ -183,6 +186,8 @@ pub(crate) struct HerdrWindow {
     pub(crate) _browser_tabs: Subscription,
     /// The daemon's prefix was typed, so the next keystroke completes a chord.
     pub(crate) prefix_armed: bool,
+    /// The selected device's server keymap, when it opted into one.
+    pub(crate) server_keys: Option<server_keys::ServerKeymap>,
     pub(crate) _prefix_interceptor: Subscription,
 }
 
@@ -585,10 +590,13 @@ impl HerdrWindow {
             // Another window, or an agent, may open or close a tab.
             _browser_tabs: cx.observe_global::<crate::browser::Store>(|_, cx| cx.notify()),
             prefix_armed: false,
+            server_keys: None,
             _prefix_interceptor: Self::intercept_prefix(window, cx),
             _activation: cx.observe_window_activation(window, |this, window, cx| {
                 this.active = window.is_window_active();
-                if !this.active {
+                if this.active {
+                    this.publish_server_keymap(cx);
+                } else {
                     this.disarm_prefix();
                     this.cancel_terminal_mouse(cx);
                     this.selection = None;

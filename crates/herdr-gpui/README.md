@@ -364,8 +364,10 @@ Selecting a different device does not change which settings apply:
 | Per host | Worktree directory and custom commands, plus pane defaults and integrations, which the daemon applies itself | That host's daemon, through its snapshot |
 
 Keybindings stay local on an SSH device, as with Herdr's default
-`--remote-keybindings local`. The GUI has no equivalent of
-`--remote-keybindings server`, and it never reads a remote host's `config.toml`.
+`--remote-keybindings local`. **Use server keybindings** in a device's
+right-click menu is the equivalent of `--remote-keybindings server`: that
+device's published `[keys]` profile applies while it is selected (see
+Supported below). The GUI never reads a remote host's `config.toml`.
 
 Shared saves preserve comments and unknown keys, reject conflicting external
 edits and unsafe paths, and run off the UI thread. Symlinked config files and
@@ -1643,6 +1645,17 @@ Windows setup) nothing is saved and the window says so.
   prefix. Herdr validates its own file, so a daemon entry the GUI cannot
   express (a `hyper` modifier, a direct key without cmd, ctrl, alt, or fn) is
   skipped rather than rejected. Saving either file rebinds live.
+- Saved SSH devices use these local keybindings too, as `herdr --remote` does
+  by default. **Use server keybindings** in a device's right-click menu opts
+  that device into the `[keys]` profile its server publishes, like
+  `herdr --remote-keybindings server`: its prefix, actions, and indexed keys
+  replace the local daemon `[keys]` while that device is selected, and moving
+  to another host switches back. The GUI's own `[keybindings]` still apply on
+  top. The choice is saved per device in `config-gpui.local.toml` as
+  `[devices.<id>] keybindings = "server"`. A server that publishes no profile,
+  or one that cannot be read, leaves the device on local keys, and the menu
+  says why. Only keybindings follow the server; themes, sidebar, and toasts
+  stay local, and no remote config file is read.
 - Cmd-B toggles sidebar visibility locally without changing daemon state.
   Cmd-, opens Settings; Cmd-/ opens the grouped native shortcut reference.
   Native shortcut labels and keycaps come from the shared `controls::COMMANDS`
