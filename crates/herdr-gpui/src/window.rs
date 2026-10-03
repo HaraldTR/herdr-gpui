@@ -129,6 +129,7 @@ pub(crate) struct HerdrWindow {
     pub(crate) teleport_follow: Option<crate::teleport::Follow>,
     pub(crate) git: git::Git,
     pub(crate) usage: crate::usage::Usage,
+    pub(crate) system_load: crate::system_load::SystemLoad,
     pub(crate) install_warning_shown: bool,
     pub(crate) collapsed_repos: std::collections::HashSet<String>,
     pub(crate) sidebar_visible: bool,
@@ -351,6 +352,9 @@ impl HerdrWindow {
         if self.update_usage() {
             cx.notify();
         }
+        if self.update_system_load() {
+            cx.notify();
+        }
         if self.live.missing_installation && !self.install_warning_shown {
             self.install_warning_shown = true;
             self.show_install_modal(window, cx);
@@ -377,6 +381,37 @@ impl HerdrWindow {
             self.active,
             std::time::Instant::now(),
         )
+    }
+
+    /// CPU and memory are sampled for every enabled host: this machine
+    /// always, a remote host while it is connected, so a dropped host is not
+    /// dialled every few seconds.
+    fn update_system_load(&mut self) -> bool {
+        let hosts = self
+            .config
+            .show_system_load
+            .then_some(self.endpoints.iter().enumerate())
+            .into_iter()
+            .flatten()
+            .filter(|(index, endpoint)| {
+                let live = if *index == self.selected_endpoint {
+                    &self.live
+                } else {
+                    &endpoint.live
+                };
+                endpoint.enabled
+                    && (live.status.is_connected()
+                        || !matches!(endpoint.connection.target, ConnectTarget::Ssh { .. }))
+            })
+            .map(|(_, endpoint)| crate::usage::Host::from(&endpoint.connection.target));
+        self.system_load.poll(hosts)
+    }
+
+    /// The machine the selected endpoint runs on.
+    pub(crate) fn selected_host(&self) -> Option<crate::usage::Host> {
+        self.endpoints
+            .get(self.selected_endpoint)
+            .map(|endpoint| crate::usage::Host::from(&endpoint.connection.target))
     }
 
     pub(crate) fn new(
@@ -497,6 +532,7 @@ impl HerdrWindow {
             teleport_follow: None,
             git: git::Git::default(),
             usage: Default::default(),
+            system_load: Default::default(),
             install_warning_shown: false,
             collapsed_repos: Default::default(),
             sidebar_visible: true,

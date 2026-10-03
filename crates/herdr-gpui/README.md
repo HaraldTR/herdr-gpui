@@ -396,6 +396,17 @@ closures still ask for confirmation. Saved edits apply automatically. The
 **Show agents** control in **Settings > Appearance > Sidebar layout** saves
 `show_agents` immediately, independently of the layout draft saved on close.
 
+The status bar shows the selected host's CPU and memory: a sparkline of recent
+CPU use and a memory meter, each with its current share, and cores, load
+averages, and memory in gigabytes in its tooltip. With more than one host, each
+host row in the sidebar shows its own: right-aligned gauges after the name in
+compact layouts, and the sparkline and meter on a second line otherwise. This
+machine is read in process; each connected Linux or macOS remote host is read
+every two seconds over its own SSH shell, kept open while the host is connected
+(`/proc` on Linux; `vm_stat` and a one-second `iostat` on macOS). Other remote
+systems, and remote hosts from a Windows client, show it as unavailable. Set top-level `show_system_load = false`,
+or turn off **Show CPU and memory** in Settings, to hide it and stop sampling.
+
 `[notifications]` in `config-gpui.local.toml` overrides shared toast preferences
 for GUI-local in-app delivery, independently per key:
 

@@ -745,7 +745,7 @@ sys.stdout.write(str(v))' "$@" 2>/dev/null
 /// A `/bin/sh` on a remote host, fed one step at a time over SSH stdin. Each
 /// step ends with a marker carrying its exit status, so steps can be read
 /// back without closing the session.
-pub(super) struct Shell {
+pub(crate) struct Shell {
     child: Child,
     stdin: ChildStdin,
     output: mpsc::Receiver<std::io::Result<Vec<u8>>>,
