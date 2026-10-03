@@ -89,14 +89,42 @@ theme foreground, rather than fixed-color cached images.
 
 ## Sidebar agent marks
 
-`agent-{opencode,claude,codex,gemini,cursor,copilot}.svg` use Lobe Icons' monochrome
-brand paths (Codex uses the OpenAI mark). Source attribution and the full MIT
-license are included in the root [NOTICE](../../NOTICE), shipped with releases.
-`agent-generic.svg` is original terminal artwork under this project's Apache-2.0
-license. All are embedded SVG masks, tinted with the adjacent name's theme color.
+Each `agent-<label>.svg` is named after Herdr's canonical `agent_label`
+identifier in `src/detect/mod.rs`, not an editable display label. The
+`agent_icons!` table in `crates/herdr-gpui/src/icons.rs` is the only mapping;
+its test checks that every label Herdr emits has its own mark. Unknown, empty,
+and missing identities use `agent-generic.svg`.
 
-Mapping follows Herdr's `src/detect/mod.rs` canonical `agent_label` identifiers,
-not editable display labels. The other inspected kinds (`pi`, `devin`, `agy`,
-`cline`, `omp`, `mastracode`, `kimi`, `kiro`, `droid`, `amp`, `grok`,
-`hermes`, `kilo`, `qodercli`, `qwen`, `letta`, `maki`, `muse`) currently use the
-generic mark, as do unknown, empty, and missing identities.
+| Label | Source |
+| --- | --- |
+| `pi` | Lobe Icons `pi.svg` (Pi Agent, pi.dev) |
+| `claude` | Lobe Icons `claude.svg` |
+| `codex` | Lobe Icons `openai.svg` |
+| `gemini` | Lobe Icons `gemini.svg` |
+| `cursor` | Lobe Icons `cursor.svg` |
+| `devin` | Lobe Icons `devin.svg` |
+| `agy` | Lobe Icons `antigravity.svg` |
+| `cline` | Lobe Icons `cline.svg` |
+| `mastracode` | Lobe Icons `mastra.svg` |
+| `opencode` | Lobe Icons `opencode.svg` |
+| `copilot` | Lobe Icons `githubcopilot.svg` |
+| `kimi` | Lobe Icons `kimi.svg` |
+| `kiro` | Lobe Icons `kiro.svg` |
+| `amp` | Lobe Icons `amp.svg` |
+| `grok` | Lobe Icons `grok.svg` |
+| `hermes` | Lobe Icons `hermesagent.svg` |
+| `kilo` | Lobe Icons `kilocode.svg` |
+| `qodercli` | Lobe Icons `qoder.svg` |
+| `qwen` | Lobe Icons `qwen.svg` |
+| `omp`, `droid`, `letta`, `maki` | Original lettermark (O, D, L, M) in a rounded square |
+| `muse` | Original lettermark (M) in a circle, to tell it apart from Maki |
+| generic | Original terminal artwork |
+
+Lobe Icons marks are MIT licensed; source attribution and the full license are
+in the root [NOTICE](../../NOTICE), shipped with releases. Their SVG wrappers
+were reduced to a 24px `currentColor` mask and titles removed; paths are
+unchanged. No redistributable monochrome mark was found for oh-my-pi, Factory
+Droid, Letta, Maki, or Muse, so their lettermarks and the generic mark are
+original artwork under this project's Apache-2.0 license, drawn with the same
+2px round stroke as the generic mark. All are embedded SVG masks tinted with
+the adjacent name's theme color.
