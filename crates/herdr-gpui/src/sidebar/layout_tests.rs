@@ -689,6 +689,68 @@ fn configured_sidebar_rows_render_all_lines_within_the_row(cx: &mut gpui::TestAp
     }
 }
 
+/// Configured rows replace each layout's text, not its frame: Superset keeps
+/// its icon slot, every layout grows with the configured lines, and a config
+/// that does not lead with `state_icon` gives the status room to the text.
+#[gpui::test]
+fn configured_rows_keep_each_layouts_frame(cx: &mut gpui::TestAppContext) {
+    use crate::config::LayoutMode;
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut view = fixture_window(window, cx);
+        view.live.snapshot = Some(Arc::new(snapshot(2)));
+        view.sidebar_width = Some(320.);
+        view
+    });
+    cx.simulate_resize(size(px(800.), px(900.)));
+    cx.run_until_parked();
+    let configure = |rows: &str, view: &Entity<HerdrWindow>, cx: &mut gpui::VisualTestContext| {
+        view.update(cx, |view, cx| {
+            view.config.sidebar_layout =
+                toml::from_str(&format!("[agents]\nrows = {rows}\n[spaces]\nrows = {rows}"))
+                    .unwrap();
+            cx.notify();
+        });
+        cx.run_until_parked();
+    };
+    for mode in [LayoutMode::Superset, LayoutMode::Orca, LayoutMode::Minimal] {
+        view.update(cx, |view, cx| {
+            view.config.layout.mode = mode;
+            cx.notify();
+        });
+        configure(r#"[["state_icon", "workspace"]]"#, &view, cx);
+        let one: Vec<_> = ["row-herdr", "row-agent-p0", "name-herdr", "name-agent-p0"]
+            .map(|key| cx.debug_bounds(key).unwrap())
+            .into();
+        if mode == LayoutMode::Superset {
+            for key in ["icon-herdr", "icon-agent-p0"] {
+                assert!(cx.debug_bounds(key).is_some(), "{mode:?}: {key}");
+            }
+        }
+        configure(
+            r#"[["state_icon", "workspace"], ["workspace"], ["state_text"]]"#,
+            &view,
+            cx,
+        );
+        for (index, key) in ["row-herdr", "row-agent-p0"].into_iter().enumerate() {
+            let three = cx.debug_bounds(key).unwrap();
+            assert!(
+                three.size.height > one[index].size.height,
+                "{mode:?}: {key} did not grow"
+            );
+        }
+        configure(r#"[["workspace"]]"#, &view, cx);
+        for (index, key) in ["name-herdr", "name-agent-p0"].into_iter().enumerate() {
+            let left = cx.debug_bounds(key).unwrap().left();
+            let leading = one[index + 2].left();
+            if mode == LayoutMode::Superset {
+                assert_eq!(left, leading, "{mode:?}: {key} moved off the slot");
+            } else {
+                assert!(left < leading, "{mode:?}: {key} kept the status room");
+            }
+        }
+    }
+}
+
 #[gpui::test]
 fn empty_configured_rows_keep_only_the_upstream_fallback(cx: &mut gpui::TestAppContext) {
     let (view, cx) = cx.add_window_view(fixture_window);

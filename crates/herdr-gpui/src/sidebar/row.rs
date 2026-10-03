@@ -477,6 +477,71 @@ fn token_line(
     place_line(parts, width, font, theme.muted)
 }
 
+/// The `state_icon` leading a configured row's first line. It takes the row's
+/// status slot; a configured row without one shows no status of its own.
+pub(super) fn leading_status(lines: &[Vec<ResolvedToken>]) -> Option<&ResolvedToken> {
+    lines
+        .first()
+        .and_then(|line| line.first())
+        .filter(|token| matches!(token.kind, TokenKind::StateIcon))
+}
+
+/// The status mark a leading `state_icon` styles, offset onto the first line.
+pub(super) fn configured_status(
+    token: &ResolvedToken,
+    status: AgentStatus,
+    cx: &RowContext<'_>,
+) -> Div {
+    let (color, weight) = styled(
+        (cx.indicators.color(status), FontWeight::NORMAL),
+        token.style,
+        cx.theme,
+    );
+    status_mark(
+        status,
+        cx.font,
+        cx.indicators,
+        color,
+        weight == FontWeight::BOLD,
+    )
+}
+
+/// A line's tokens, less the leading `state_icon` the status slot draws.
+fn line_tokens(index: usize, line: &[ResolvedToken]) -> &[ResolvedToken] {
+    match line.split_first() {
+        Some((first, rest)) if index == 0 && matches!(first.kind, TokenKind::StateIcon) => rest,
+        _ => line,
+    }
+}
+
+fn line_selector(key: &str, index: usize) -> String {
+    match index {
+        0 => format!("name-{key}"),
+        1 => format!("detail-{key}"),
+        index => format!("line-{key}-{index}"),
+    }
+}
+
+/// Configured lines stacked at `width`, for layouts that draw their own
+/// status and icons beside the text.
+pub(super) fn token_column(
+    key: &str,
+    lines: &[Vec<ResolvedToken>],
+    (kind, status, focused): (RowKind, AgentStatus, bool),
+    width: f32,
+    cx: &RowContext<'_>,
+) -> Div {
+    lines.iter().enumerate().fold(
+        div().w(px(width)).flex_none().flex().flex_col(),
+        |column, (index, line)| {
+            column.child(
+                token_line(line_tokens(index, line), status, kind, focused, width, cx)
+                    .debug_selector(|| line_selector(key, index)),
+            )
+        },
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn configured_lines(
     mut column: Div,
@@ -505,24 +570,11 @@ fn configured_lines(
         ICON_RESERVE
     };
     for (index, line) in lines.iter().enumerate() {
-        let tokens = if index == 0
-            && line
-                .first()
-                .is_some_and(|token| matches!(token.kind, TokenKind::StateIcon))
-        {
-            &line[1..]
-        } else {
-            line.as_slice()
-        };
         let agent_here = agent_at == Some(index);
         let reserve = if index == 0 { workspace_reserve } else { 0. }
             + if agent_here { agent_reserve } else { 0. };
         let text_width = (label_width - reserve).max(0.);
-        let selector = match index {
-            0 => format!("name-{key}"),
-            1 => format!("detail-{key}"),
-            index => format!("line-{key}-{index}"),
-        };
+        let selector = line_selector(key, index);
         let icon_color = line
             .iter()
             .find(|token| matches!(token.kind, TokenKind::Text(_, TextRole::Agent)))
@@ -547,9 +599,16 @@ fn configured_lines(
             ));
         }
         text = text.child(
-            token_line(tokens, status, kind, focused, text_width, cx)
-                .debug_selector(|| selector.clone())
-                .ml(px(reserve.min(label_width))),
+            token_line(
+                line_tokens(index, line),
+                status,
+                kind,
+                focused,
+                text_width,
+                cx,
+            )
+            .debug_selector(|| selector.clone())
+            .ml(px(reserve.min(label_width))),
         );
         column = column.child(text);
     }
@@ -584,10 +643,7 @@ pub(super) fn row(
     let focused = state.selected;
     let layout = look.density;
     let configured = !lines.is_empty();
-    let leading_icon = lines
-        .first()
-        .and_then(|line| line.first())
-        .filter(|token| matches!(token.kind, TokenKind::StateIcon));
+    let leading_icon = leading_status(lines);
     let show_status = !configured || leading_icon.is_some() || removing;
     let status_text = status_text.filter(|_| !configured);
     let text_lines = if configured {
@@ -735,9 +791,7 @@ pub(super) fn row(
                     .justify_center()
                     .child(removing_dot("worktree-removing", theme))
             } else if let Some(token) = leading_icon {
-                let (color, weight) =
-                    styled((status_color, FontWeight::NORMAL), token.style, theme);
-                status_mark(status, font, indicators, color, weight == FontWeight::BOLD)
+                configured_status(token, status, cx)
             } else {
                 status_indicator(status, font, indicators)
             })

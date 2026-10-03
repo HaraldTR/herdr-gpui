@@ -1,13 +1,19 @@
 //! Superset's single-line rows: one icon slot that reports the row's state,
 //! the name, and the pull request's change counts on the right. The focused
-//! row is filled and marked with a stripe down its leading edge.
+//! row is filled and marked with a stripe down its leading edge. Rows Herdr's
+//! sidebar config defines replace the name with its lines; the slot keeps its
+//! dot only when those lines lead with the status.
 
 use super::{
     super::{
         agents::{status_indicator, status_style},
         cell::{AgentRow, RowContext, RowLayout, RowState, WorkspaceRow},
         line_height,
-        row::{RowIcon, RowLift, RowTree, left_behind, removing_dot},
+        row::{
+            RowIcon, RowKind, RowLift, RowTree, leading_status, left_behind, removing_dot,
+            token_column,
+        },
+        tokens::ResolvedToken,
     },
     parts::{self, Line, glyph_at, wash},
 };
@@ -121,6 +127,16 @@ fn slot(
         .children(dot)
 }
 
+/// The status a configured row's slot reports: none unless its lines lead
+/// with the status, as Herdr's rows omit it.
+fn configured_status(lines: &[Vec<ResolvedToken>], status: AgentStatus) -> AgentStatus {
+    if lines.is_empty() || leading_status(lines).is_some() {
+        status
+    } else {
+        AgentStatus::Unknown
+    }
+}
+
 fn text_color(state: RowState, theme: &Theme) -> u32 {
     if state.selected {
         theme.foreground
@@ -139,10 +155,12 @@ impl RowLayout for Superset {
             fold,
             badge,
             removing,
+            lines,
             ..
         } = row;
         let theme = cx.theme;
         let m = Metrics::new(cx);
+        let slot_status = configured_status(&lines, status);
         let indent = if tree == RowTree::None {
             0.
         } else {
@@ -178,16 +196,16 @@ impl RowLayout for Superset {
                 cx,
             )
         } else {
-            slot(label, glyph, status, &m, cx)
+            slot(label, glyph, slot_status, &m, cx)
         };
         let counts = if state.selected {
             (theme.ink(theme.palette[2]), theme.ink(theme.palette[1]))
         } else {
             (theme.muted, theme.muted)
         };
-        let line = Line::new(cx.look.content_width(cx.width) - indent, m.gap)
-            .fixed(m.icon, slot)
-            .fill(
+        let line = Line::new(cx.look.content_width(cx.width) - indent, m.gap).fixed(m.icon, slot);
+        let line = if lines.is_empty() {
+            line.fill(
                 div()
                     .debug_selector(|| format!("name-{label}"))
                     .text_color(rgb(if teleported {
@@ -197,6 +215,18 @@ impl RowLayout for Superset {
                     })),
                 label,
             )
+        } else {
+            line.fill_with(|width| {
+                token_column(
+                    label,
+                    &lines,
+                    (RowKind::Workspace, status, state.selected),
+                    width,
+                    cx,
+                )
+            })
+        };
+        let line = line
             .when(teleported, |line| {
                 line.fixed(dirty_size, parts::teleported(label, dirty_size, theme))
             })
@@ -220,9 +250,23 @@ impl RowLayout for Superset {
         let key = agent.key.as_str();
         let color = text_color(state, theme);
         let glyph = parts::icon(agent.icon.path(), m.icon * 0.7, color);
-        // Where the agent runs trails its name, never over half the row.
+        let status = configured_status(&agent.lines, agent.status);
         let line = Line::new(cx.look.content_width(cx.width), m.gap)
-            .fixed(m.icon, slot(key, glyph, agent.status, &m, cx))
+            .fixed(m.icon, slot(key, glyph, status, &m, cx));
+        if !agent.lines.is_empty() {
+            let line = line.fill_with(|width| {
+                token_column(
+                    key,
+                    &agent.lines,
+                    (RowKind::Agent(agent.icon), agent.status, state.selected),
+                    width,
+                    cx,
+                )
+            });
+            return shell(key, state, 0., line, cx);
+        }
+        // Where the agent runs trails its name, never over half the row.
+        let line = line
             .fill(
                 div()
                     .debug_selector(|| format!("name-{key}"))

@@ -608,10 +608,14 @@ shown: the same tokens (`state_icon`, `state_text`, `machine`, `workspace`,
 `dim` and `rules`, `rows_by_agent` and `row_gap`. A token with no value drops
 out, an empty row drops out, and a row too narrow for its text loses tokens
 from the left. If all configured rows disappear, agents keep only their status
-icon and workspaces keep one blank selectable line. The daemon's reload signal
-and **Reload GUI config** re-read it; an invalid section falls back to the
+icon and workspaces keep one blank selectable line. Saving the file and
+**Reload GUI config** re-read it; an invalid section falls back to the
 default rows, including whether the status word is shown. While a section still
-matches the built-in rows, the selected sidebar layout paints it; a section that differs uses those rows in every layout.
+matches the built-in rows, the selected sidebar layout paints it. A section
+that differs replaces each row's text with its lines inside the selected
+layout's own frame: Herdr's rows, Superset's icon slot and stripe, Orca's card,
+or Minimal's compact line. A configured row shows its status only when its
+first line leads with `state_icon`.
 `rows_by_agent` keys match the daemon's agent IDs directly (for example, `claude`
 or `codex`); the GUI does not maintain a separate registry of allowed IDs.
 
