@@ -6,6 +6,7 @@
 mod announcement;
 mod clipboard;
 mod commands;
+mod config_diagnostic;
 mod file_drop;
 mod flash;
 pub(crate) use flash::Flash;
@@ -61,6 +62,8 @@ pub(crate) struct HerdrWindow {
     /// write straight to `config.terminal.size`, so this is what Reset Font
     /// Size restores; a session adjustment never reaches disk.
     pub(crate) configured_terminal_size: f32,
+    /// Unknown keys in the GUI config, ignored but reported; follows `config`.
+    pub(crate) gui_config_diagnostic: crate::config_diagnostic::ConfigDiagnostic,
     pub(crate) theme: config::Theme,
     pub(crate) config_load: Option<Task<()>>,
     pub(crate) settings: crate::settings_panel::SettingsPanel,
@@ -164,6 +167,7 @@ pub(crate) struct HerdrWindow {
     /// the window while the cached sidebar keeps its layout.
     pub(crate) surface_signal: Entity<SurfaceSignal>,
     pub(crate) _sidebar_invalidation: Subscription,
+    pub(crate) _host_theme: Subscription,
     /// Browser tabs this window shows, and its pages for them.
     pub(crate) browser: crate::browser::Browser,
     pub(crate) _browser_tabs: Subscription,
@@ -200,6 +204,26 @@ impl HerdrWindow {
                 cx.notify();
             });
         })
+    }
+
+    /// Theme and appearance changes all notify this view, so each one reaches
+    /// the daemon without every place that sets a theme having to report it.
+    pub(crate) fn observe_host_theme(cx: &mut Context<Self>) -> Subscription {
+        cx.observe_self(|this, cx| this.sync_host_theme(cx))
+    }
+
+    /// Tell every connection the terminal theme. Only queues, never waits:
+    /// each handle skips a theme it already queued.
+    pub(crate) fn sync_host_theme(&self, cx: &App) {
+        let light = matches!(
+            cx.window_appearance(),
+            WindowAppearance::Light | WindowAppearance::VibrantLight
+        );
+        let theme = crate::connection::host_theme(&self.theme, light);
+        for endpoint in &self.endpoints {
+            endpoint.connection.sync_host_theme(&endpoint.live, &theme);
+        }
+        self.sync_group_host_theme(&theme);
     }
 
     /// Runs every display frame while the window draws, so a new surface is
@@ -288,6 +312,9 @@ impl HerdrWindow {
             self.redraw_terminal(cx);
         }
         self.reconcile_group_terminals(cx);
+        // After polling: a connection that just got its first snapshot, or a
+        // reconnect, is told the theme without waiting for it to change.
+        self.sync_host_theme(cx);
         self.save_group_layouts(cx);
         self.poll_browser(window, cx);
         self.offer_browser_skill(window, cx);
@@ -410,6 +437,11 @@ impl HerdrWindow {
             update_preview: None,
             daemon_text: Default::default(),
             configured_terminal_size: config.terminal.size,
+            gui_config_diagnostic: {
+                let mut diagnostic = crate::config_diagnostic::ConfigDiagnostic::default();
+                diagnostic.sync(config.diagnostic().as_deref());
+                diagnostic
+            },
             config,
             theme,
             config_load: None,
@@ -493,6 +525,7 @@ impl HerdrWindow {
             sidebar_view,
             surface_signal: cx.new(|_| SurfaceSignal),
             _sidebar_invalidation: Self::invalidate_sidebar(cx),
+            _host_theme: Self::observe_host_theme(cx),
             browser: crate::browser::Browser::new(cx),
             // Another window, or an agent, may open or close a tab.
             _browser_tabs: cx.observe_global::<crate::browser::Store>(|_, cx| cx.notify()),

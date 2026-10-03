@@ -88,6 +88,24 @@ fn dismissing_the_card_asks_the_daemon_and_hides_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_card_stacks_below_a_config_diagnostic(cx: &mut TestAppContext) {
+    let peer = MockPeer::new();
+    let mut warned = snapshot();
+    warned.config_diagnostic = Some("config.toml invalid; using defaults".into());
+    let (view, cx) = connected(cx, &peer, warned);
+    view.update(cx, |view, cx| {
+        view.endpoints[0].live = view.live.clone();
+        view.endpoints[0].sync_live();
+        cx.notify();
+    });
+    draw(cx);
+    let diagnostic = cx.debug_bounds("config-diagnostic").unwrap();
+    let card = cx.debug_bounds("announcement").unwrap();
+    assert!(diagnostic.bottom() <= card.top());
+    assert_eq!(diagnostic.right(), card.right());
+}
+
+#[gpui::test]
 fn a_daemon_without_the_method_only_hides_the_card(cx: &mut TestAppContext) {
     let peer = MockPeer::new();
     let (view, cx) = connected(cx, &peer, snapshot());

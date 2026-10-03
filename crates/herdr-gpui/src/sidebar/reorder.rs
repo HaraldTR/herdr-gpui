@@ -5,10 +5,10 @@
 //! so the preview holds until the next snapshot reorders the list, the same
 //! for every attached client.
 //!
-//! A top-level row carries its whole worktree group, collapsed children
-//! included, and lands between other top-level rows. A linked worktree only
-//! moves among its own siblings: the group is decided by its repository, not
-//! by where it is dropped.
+//! A top-level row carries its whole worktree group, collapsed children and
+//! the group's other parents included, and lands between other top-level
+//! rows. A linked worktree only moves among its own siblings: the group is
+//! decided by its repository, not by where it is dropped.
 
 use crate::{
     HerdrWindow,
@@ -18,7 +18,7 @@ use gpui::{Context, Pixels, Point, Task};
 use herdr_client::{Method, protocol::ClientShellWorkspace};
 use std::{cell::RefCell, collections::HashMap, time::Instant};
 
-use super::workspaces::workspace_entries;
+use super::workspaces::{grouped_keys, workspace_entries};
 
 /// A press on a workspace row that may become a reorder.
 pub(crate) struct WorkspaceDrag {
@@ -135,17 +135,34 @@ impl Plan {
         let pressed = workspaces
             .iter()
             .position(|w| w.workspace_id == workspace)?;
+        // A group's rows are contiguous, so a block is a run of one grouped
+        // repository's rows, or a single ungrouped row.
+        let grouped = grouped_keys(workspaces);
+        let group_of = |index: usize| {
+            workspaces[index]
+                .worktree
+                .as_ref()
+                .map(|tree| tree.key.as_str())
+                .filter(|key| grouped.contains(key))
+        };
         let mut blocks: Vec<Vec<(usize, bool)>> = Vec::new();
         for (index, child) in workspace_entries(workspaces) {
             match blocks.last_mut() {
-                Some(block) if child => block.push((index, child)),
+                Some(block)
+                    if group_of(index).is_some() && group_of(block[0].0) == group_of(index) =>
+                {
+                    block.push((index, child));
+                }
                 _ => blocks.push(vec![(index, child)]),
             }
         }
-        let block = blocks
-            .iter()
-            .position(|block| block.iter().any(|&(index, _)| index == pressed))?;
-        let plan = if blocks[block][0].0 == pressed {
+        let (block, &(_, child)) = blocks.iter().enumerate().find_map(|(position, block)| {
+            Some((
+                position,
+                block.iter().find(|&&(index, _)| index == pressed)?,
+            ))
+        })?;
+        let plan = if !child {
             Self {
                 units: blocks
                     .iter()
@@ -155,7 +172,11 @@ impl Plan {
                 children: false,
             }
         } else {
-            let children: Vec<_> = blocks[block][1..].iter().map(|&(i, _)| vec![i]).collect();
+            let children: Vec<_> = blocks[block]
+                .iter()
+                .filter(|&&(_, child)| child)
+                .map(|&(i, _)| vec![i])
+                .collect();
             Self {
                 dragged: children.iter().position(|unit| unit[0] == pressed)?,
                 units: children,
@@ -434,6 +455,32 @@ mod tests {
             workspace_ids: ids.iter().map(|&id| id.into()).collect(),
             before: before.map(Into::into),
         })
+    }
+
+    /// Every parent of a group carries the whole group, its other parents
+    /// included; without a linked worktree, plain checkouts move alone.
+    #[test]
+    fn a_group_s_parents_move_together_and_plain_checkouts_alone() {
+        let mut list = list();
+        list.push(workspace("a3", Some(("repo-a", false))));
+        for pressed in ["a", "a3"] {
+            let plan = Plan::new(&list, pressed).unwrap();
+            assert_eq!(plan.units, [vec![0, 5, 1, 3], vec![2], vec![4]]);
+            assert_eq!(plan.dragged, 0);
+            assert_eq!(
+                plan.request(&list, 3),
+                request(&["a", "a3", "a1", "a2"], None)
+            );
+        }
+        // A child still moves only among its siblings.
+        let plan = Plan::new(&list, "a2").unwrap();
+        assert_eq!(plan.units, [vec![1], vec![3]]);
+
+        list.retain(|w| !w.worktree.as_ref().is_some_and(|t| t.is_linked_worktree));
+        let plan = Plan::new(&list, "a3").unwrap();
+        assert_eq!(plan.units, [vec![0], vec![1], vec![2], vec![3]]);
+        assert_eq!(plan.dragged, 3);
+        assert_eq!(plan.request(&list, 1), request(&["a3"], Some("b")));
     }
 
     #[test]

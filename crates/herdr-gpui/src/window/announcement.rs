@@ -1,5 +1,5 @@
-//! The daemon's product announcement, drawn as a dismissible card over the
-//! top-right of the terminal area. Dismissing asks the daemon to mark it seen,
+//! The daemon's product announcement, drawn as a dismissible card among the
+//! notices over the top-right of the terminal area. Dismissing asks the daemon to mark it seen,
 //! so every client of that daemon stops showing it.
 use super::HerdrWindow;
 use crate::{notifications::safe_text, state::AnnouncementDismissal};
@@ -11,11 +11,7 @@ const MAX_BODY_HEIGHT: f32 = 240.;
 const MAX_TITLE: usize = 160;
 
 impl HerdrWindow {
-    pub(super) fn render_announcement(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        // A menu page owns the window's attention; the card waits behind it.
-        if self.menu.page.is_some() {
-            return None;
-        }
+    pub(super) fn announcement_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let announcement = self.live.product_announcement()?;
         let lines = self.daemon_text.announcement.lines(&announcement.body);
         let theme = &self.theme;
@@ -95,20 +91,7 @@ impl HerdrWindow {
                         this.dismiss_announcement(&version, &id, cx);
                     })),
             );
-        // Spans the terminal area so a narrow window shrinks the card rather
-        // than pushing it off the left edge.
-        Some(
-            div()
-                .absolute()
-                // Below the tab strip, whose buttons stay reachable.
-                .top(px(self.tab_strip_height() + 8.))
-                .left(px(8.))
-                .right(px(8.))
-                .flex()
-                .justify_end()
-                .child(card)
-                .into_any_element(),
-        )
+        Some(card.into_any_element())
     }
 
     /// Hides the announcement at once and asks the daemon to mark it seen. A

@@ -281,26 +281,40 @@ fn every_provider_is_registered_once_with_its_icon() {
 }
 
 #[test]
-fn config_names_only_known_providers_and_settings() {
-    let parse = |text: &str| -> crate::Result<UsageConfig> {
-        let config: UsageConfig = toml::from_str(text)?;
-        config.validate()?;
-        Ok(config)
+fn config_ignores_unknown_providers_and_settings() {
+    let parse = |text: &str| {
+        let mut config: UsageConfig = toml::from_str(text).unwrap();
+        let unknown = config.retain_known();
+        (config, unknown)
     };
-    let config = parse("show_providers = [\"claude\"]\nhide_providers = [\"codex\"]").unwrap();
+    let (config, unknown) = parse("show_providers = [\"claude\"]\nhide_providers = [\"codex\"]");
     assert!(config.shown(provider("claude")));
     assert!(config.hidden(provider("codex")));
     assert!(config.show);
-    assert!(matches!(
-        parse("show_providers = [\"nope\"]"),
-        Err(Error::UnknownUsageProvider(id)) if id == "nope"
-    ));
-    assert!(matches!(
-        parse("[providers.claude]\napi_key = \"x\""),
-        Err(Error::UnknownUsageSetting { provider, setting })
-            if provider == "claude" && setting == "api_key"
-    ));
-    assert!(parse("unknown = 1").is_err());
+    assert!(unknown.is_empty());
+    // Names a newer build may know are dropped and reported, not fatal.
+    let (config, unknown) = parse(
+        "show_providers = [\"nope\", \"claude\"]\nhide_providers = [\"later\"]\n\
+         [providers.claude]\napi_key = \"x\"\n[providers.future]\ntoken = \"y\"",
+    );
+    assert!(config.shown(provider("claude")));
+    assert_eq!(config.show_providers, ["claude"]);
+    assert!(config.hide_providers.is_empty());
+    assert!(!config.providers.contains_key("future"));
+    assert!(
+        config
+            .settings(provider("claude"))
+            .is_none_or(|settings| settings.get("api_key").is_none())
+    );
+    assert_eq!(
+        unknown,
+        [
+            "usage.show_providers.nope",
+            "usage.hide_providers.later",
+            "usage.providers.claude.api_key",
+            "usage.providers.future",
+        ]
+    );
 }
 
 #[test]
