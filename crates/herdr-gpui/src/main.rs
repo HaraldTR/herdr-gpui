@@ -38,7 +38,9 @@ mod input;
 mod integrations;
 mod keymap;
 mod lenient;
+mod local_path;
 mod log_window;
+mod login_env;
 mod menu;
 mod menus;
 #[cfg(feature = "mockup")]

@@ -4,7 +4,11 @@ A GPUI 0.3.6 (`gpui-pre`) client for a Local daemon and saved SSH hosts, with ma
 support, experimental Linux x86_64/ARM64 builds, and an experimental Windows build with
 headless CI coverage. See [Windows](#windows) for what is unavailable there.
 It starts an installed local `herdr server` when absent; explicit socket and
-development targets remain attach-only. It does not link or install Herdr, stop
+development targets remain attach-only. On Unix, GUI launches resolve the login-shell
+environment once on the connection worker so daemon plugins can find tools such as
+`node`. Terminal launches skip the shell probe. Failed probes fall back to standard
+per-user and Homebrew bin directories; the probe has a five-second timeout.
+It does not link or install Herdr, stop
 daemons, spawn a local PTY, or emulate a terminal. Herdr's remote bridge may start
 the named remote session. SSH requires an installed POSIX Herdr, noninteractive authentication,
 and an already trusted host key. For hosts that need MFA or a password, configure
