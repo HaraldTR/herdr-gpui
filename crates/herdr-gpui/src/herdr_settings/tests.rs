@@ -259,6 +259,51 @@ fn shared_sound_reader_only_validates_the_enabled_switch() -> anyhow::Result<()>
     Ok(())
 }
 
+#[test]
+fn tab_bar_and_copy_on_select_follow_herdr_defaults_and_values() -> anyhow::Result<()> {
+    let defaults = parsed("")?;
+    assert!(defaults.copy_on_select);
+    assert_eq!(defaults.tab_bar_position, TabBarPosition::Top);
+    assert!(!defaults.hide_tab_bar_when_single_tab);
+    let set = parsed(
+        "[ui]\ncopy_on_select = false\ntab_bar_position = 'bottom'\nhide_tab_bar_when_single_tab = true",
+    )?;
+    assert!(!set.copy_on_select);
+    assert_eq!(set.tab_bar_position, TabBarPosition::Bottom);
+    assert!(set.hide_tab_bar_when_single_tab);
+    // Like Herdr, a value this build does not know keeps the default.
+    let unknown = parsed(
+        "[ui]\ncopy_on_select = 'sometimes'\ntab_bar_position = 'left'\nhide_tab_bar_when_single_tab = 1",
+    )?;
+    assert!(unknown.copy_on_select);
+    assert_eq!(unknown.tab_bar_position, TabBarPosition::Top);
+    assert!(!unknown.hide_tab_bar_when_single_tab);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn tab_bar_and_copy_on_select_edits_keep_comments() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("config.toml");
+    let original = "[ui]\ncopy_on_select = true # copy\nfuture = 1\n";
+    fs::write(&path, original)?;
+    let settings = Settings::load_path(path.clone())?
+        .save(Edit::CopyOnSelect(false))?
+        .save(Edit::TabBarPosition(TabBarPosition::Bottom))?
+        .save(Edit::HideSingleTabBar(true))?;
+    assert!(!settings.copy_on_select);
+    assert_eq!(settings.tab_bar_position, TabBarPosition::Bottom);
+    assert!(settings.hide_tab_bar_when_single_tab);
+    assert_eq!(
+        fs::read_to_string(&path)?,
+        "[ui]\ncopy_on_select = false # copy\nfuture = 1\ntab_bar_position = \"bottom\"\nhide_tab_bar_when_single_tab = true\n"
+    );
+    let settings = settings.save(Edit::TabBarPosition(TabBarPosition::Top))?;
+    assert_eq!(settings.tab_bar_position, TabBarPosition::Top);
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn sound_edits_preserve_paths_per_agent_policy_and_unknown_fields_verbatim() -> anyhow::Result<()> {
