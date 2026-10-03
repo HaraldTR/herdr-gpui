@@ -1,5 +1,5 @@
 use herdr_client::{
-    ClientEvent, Method,
+    ClientEvent, Method, SurfaceImages,
     protocol::{ClientShellSnapshot, PaneSurfaceFrame, ServerMessage},
 };
 use std::sync::Arc;
@@ -58,17 +58,23 @@ pub struct LiveState {
     pub(crate) sound_connection_cancel: Arc<std::sync::atomic::AtomicBool>,
     pub snapshot: Option<Arc<ClientShellSnapshot>>,
     pub surface: Option<Arc<PaneSurfaceFrame>>,
+    /// Pixels for the images the connection's surfaces place, by asset key.
+    pub(crate) surface_images: Arc<SurfaceImages>,
     pub status: ConnectionStatus,
     pub error: Option<String>,
     pub missing_installation: bool,
     /// Same-user peer at the owned standard socket, not executable attestation.
     pub(crate) local_daemon_peer: bool,
-    pub(crate) supports_workspace_get: bool,
     /// `pane.clear` arrived after Herdr 0.9.1; older daemons reject it.
     pub(crate) supports_pane_clear: bool,
     /// `tab.move` reorders a workspace's tabs; daemons that do not offer it
     /// to clients keep their tabs where they are.
     pub(crate) supports_tab_move: bool,
+    /// `pane.link.resolve` and `pane.link.activate` let the daemon find links
+    /// across wrapped rows and run plugin link handlers; without them links
+    /// are found row by row here and always opened by this client.
+    pub(crate) supports_link_resolve: bool,
+    pub(crate) supports_link_activate: bool,
     /// `pane.copy_search` drives the find bar; without it Find says so.
     pub(crate) supports_copy_search: bool,
     /// `pane.selection.read` copies selections reaching beyond the screen.
@@ -123,13 +129,15 @@ impl Default for LiveState {
             sound_connection_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             snapshot: None,
             surface: None,
+            surface_images: Default::default(),
             status: ConnectionStatus::Connecting,
             error: None,
             missing_installation: false,
             local_daemon_peer: false,
-            supports_workspace_get: false,
             supports_pane_clear: false,
             supports_tab_move: false,
+            supports_link_resolve: false,
+            supports_link_activate: false,
             supports_copy_search: false,
             supports_selection_read: false,
             supports_copy_motion: false,
@@ -164,13 +172,15 @@ impl LiveState {
             sound_connection_cancel,
             snapshot,
             surface: _,
+            surface_images: _,
             status,
             error,
             missing_installation,
             local_daemon_peer,
-            supports_workspace_get,
             supports_pane_clear,
             supports_tab_move,
+            supports_link_resolve,
+            supports_link_activate,
             supports_copy_search,
             supports_selection_read,
             supports_copy_motion,
@@ -209,9 +219,10 @@ impl LiveState {
             && *error == self.error
             && *missing_installation == self.missing_installation
             && *local_daemon_peer == self.local_daemon_peer
-            && *supports_workspace_get == self.supports_workspace_get
             && *supports_pane_clear == self.supports_pane_clear
             && *supports_tab_move == self.supports_tab_move
+            && *supports_link_resolve == self.supports_link_resolve
+            && *supports_link_activate == self.supports_link_activate
             && *supports_copy_search == self.supports_copy_search
             && *supports_selection_read == self.supports_selection_read
             && *supports_copy_motion == self.supports_copy_motion
@@ -316,9 +327,12 @@ impl LiveState {
         match event {
             ClientEvent::Connected(welcome) => {
                 self.settings_reload = false;
-                self.supports_workspace_get = Method::WorkspaceGet.advertised_in(&welcome.methods);
                 self.supports_pane_clear = Method::PaneClear.advertised_in(&welcome.methods);
                 self.supports_tab_move = Method::TabMove.advertised_in(&welcome.methods);
+                self.supports_link_resolve =
+                    crate::links::LinkRequest::Resolve.advertised_in(&welcome.methods);
+                self.supports_link_activate =
+                    crate::links::LinkRequest::Activate.advertised_in(&welcome.methods);
                 self.supports_copy_search = Method::PaneCopySearch.advertised_in(&welcome.methods);
                 self.supports_selection_read =
                     Method::PaneSelectionRead.advertised_in(&welcome.methods);
@@ -375,6 +389,7 @@ impl LiveState {
                     self.surface = Some(surface);
                 }
             }
+            ClientEvent::SurfaceImages(images) => self.surface_images = images,
             ClientEvent::Disconnected { reason } => {
                 self.settings_reload = false;
                 self.notifications.clear();
@@ -385,6 +400,7 @@ impl LiveState {
                 self.error = Some(reason);
                 self.snapshot = None;
                 self.surface = None;
+                self.surface_images = Default::default();
             }
             ClientEvent::CommandRejected { request_id, reason } => {
                 if request_id.is_some() && request_id == self.drag_request {
@@ -1006,6 +1022,55 @@ mod tests {
             200,
         )));
         assert_status(&state, AgentStatus::Done);
+    }
+
+    #[test]
+    fn surface_images_follow_the_connection_and_file_paths_stay_ignored() {
+        use herdr_client::{
+            SurfaceImages,
+            protocol::{
+                SurfaceGraphicsAsset, SurfaceGraphicsAssetKey, SurfaceGraphicsFormat,
+                SurfaceGraphicsSource, SurfaceGraphicsTarget,
+            },
+        };
+        let key = SurfaceGraphicsAssetKey {
+            source: SurfaceGraphicsSource::Terminal {
+                target: SurfaceGraphicsTarget::Pane {
+                    pane_id: "p1".into(),
+                },
+                image_id: 1,
+            },
+            image_width: 1,
+            image_height: 1,
+            format: SurfaceGraphicsFormat::Rgba,
+            data_len: 4,
+            data_fingerprint: 1,
+        };
+        let images: SurfaceImages = [SurfaceGraphicsAsset {
+            key: key.clone(),
+            data: vec![0; 4],
+        }]
+        .into_iter()
+        .collect();
+        let mut state = LiveState::default();
+        state.apply(ClientEvent::SurfaceImages(Arc::new(images)));
+        assert!(state.surface_images.get(&key).is_some());
+        // A daemon naming a file for this client is never followed.
+        let before = state.surface_images.clone();
+        state.apply(ClientEvent::Message(ServerMessage::GraphicsFile {
+            path: "/etc/passwd".into(),
+            expected_len: 4,
+            image_id: 1,
+            transfer_id: 1,
+            leading: vec![],
+            control: String::new(),
+            surface_asset: Some(key.clone()),
+        }));
+        assert!(Arc::ptr_eq(&before, &state.surface_images));
+        state.apply(ClientEvent::Disconnected {
+            reason: "test".into(),
+        });
+        assert!(state.surface_images.is_empty());
     }
 
     #[test]

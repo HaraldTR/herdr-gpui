@@ -1,17 +1,26 @@
 //! The sidebar host header's context menu. Only saved SSH devices have one:
 //! Local is always present, and an explicit socket is not in the catalog.
 use super::setup;
-use crate::{HerdrWindow, github::Account, menu::Page, search_input::SearchInput};
+use crate::{
+    HerdrWindow,
+    config::{Config, KeybindingSource},
+    github::Account,
+    menu::Page,
+    search_input::SearchInput,
+};
 use gpui::{prelude::*, *};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
     Rename,
+    /// Toggles `[devices.<id>] keybindings` between local and server.
+    ServerKeybindings,
     Remove,
 }
 
-const ACTIONS: [(Action, &str); 2] = [
+const ACTIONS: [(Action, &str); 3] = [
     (Action::Rename, "Rename…"),
+    (Action::ServerKeybindings, "Use server keybindings"),
     (Action::Remove, "Remove device…"),
 ];
 
@@ -106,9 +115,27 @@ impl HerdrWindow {
                 }
                 self.menu.page = Some(Page::RenameDevice);
             }
+            Action::ServerKeybindings => self.toggle_server_keybindings(cx),
             Action::Remove => self.menu.page = Some(Page::RemoveDevice),
         }
         cx.notify();
+    }
+
+    /// Saves the other choice. The reload that follows the save applies it, in
+    /// every window, so a save that could not start changes nothing.
+    fn toggle_server_keybindings(&mut self, cx: &mut Context<Self>) {
+        let Some(host) = &self.menu.host else {
+            return;
+        };
+        let profile = host.profile.clone();
+        let source = match self.config.keybinding_source(&host.id) {
+            KeybindingSource::Local => KeybindingSource::Server,
+            KeybindingSource::Server => KeybindingSource::Local,
+        };
+        self.save_preference(
+            move || Config::save_device_keybindings(&profile, source),
+            cx,
+        );
     }
 
     /// Rename in the background and close once the catalog has the new name;
@@ -331,7 +358,9 @@ impl HerdrWindow {
                             .child(format!("{} · {}", host.target, host.session)),
                     ),
             );
+            let server_keys = self.config.keybinding_source(&host.id) == KeybindingSource::Server;
             for (index, (action, label)) in ACTIONS.into_iter().enumerate() {
+                let toggle = action == Action::ServerKeybindings;
                 body = body.child(
                     div()
                         .id(("host-menu-action", index))
@@ -340,7 +369,11 @@ impl HerdrWindow {
                         .px(px(8.))
                         .flex()
                         .items_center()
+                        .gap(px(8.))
                         .cursor_pointer()
+                        .when(toggle, |row| {
+                            row.child(if server_keys { "☑" } else { "☐" })
+                        })
                         .when(action == Action::Remove, |row| {
                             row.text_color(crate::menu::danger(theme))
                         })
@@ -359,6 +392,22 @@ impl HerdrWindow {
                             this.activate_host_menu(action, window, cx)
                         })),
                 );
+                // Opting in never silently changes nothing: say why the
+                // device is still on local keys.
+                if let Some(error) = toggle
+                    .then(|| self.server_keybindings_error(&host.id))
+                    .flatten()
+                {
+                    body = body.child(
+                        div()
+                            .debug_selector(|| "host-menu-keybindings-error".into())
+                            .px(px(8.))
+                            .pb(px(4.))
+                            .text_size(px(self.config.ui.size * 0.85))
+                            .text_color(rgb(theme.muted))
+                            .child(format!("Using local keybindings: {error}")),
+                    );
+                }
             }
             return body;
         }
@@ -528,9 +577,9 @@ impl HerdrWindow {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{Action, HostMenu};
-    use crate::{menu::Page, sidebar::layout_tests::fixture_window};
-    use gpui::{Modifiers, MouseButton, TestAppContext, point, px, size};
+    use super::{ACTIONS, Action, HostMenu};
+    use crate::{config::KeybindingSource, menu::Page, sidebar::layout_tests::fixture_window};
+    use gpui::{Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px, size};
 
     // Endpoint IDs carry the `ssh:` prefix; the profile ID is the rest.
     const HOST: &str = "ssh:0123456789abcdef0123456789abcdef";
@@ -589,7 +638,7 @@ mod tests {
         let header = cx.debug_bounds("host-menu-header").unwrap();
         assert!(header.bottom() <= cx.debug_bounds("host-menu-0").unwrap().top());
         // Rename comes first; Remove is last, in the danger color.
-        cx.simulate_keystrokes("down down enter");
+        cx.simulate_keystrokes("up enter");
         assert!(view.read_with(cx, |view, _| view.menu.page == Some(Page::RemoveDevice)));
         cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
         assert!(cx.debug_bounds("remove-device").is_some());
@@ -597,6 +646,48 @@ mod tests {
         assert!(cx.debug_bounds("remove-device-github").is_none());
         cx.simulate_keystrokes("escape");
         assert!(view.read_with(cx, |view, _| view.menu.page.is_none()));
+    }
+
+    /// The opt-in reads the device's saved choice, and a device on local keys
+    /// despite opting in says why. Activating the row saves the GUI config, so
+    /// this only checks what the menu shows.
+    #[gpui::test]
+    fn the_menu_shows_the_server_keybindings_choice(cx: &mut TestAppContext) {
+        if cfg!(windows) {
+            return;
+        }
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = fixture_window(window, cx);
+            add_host(&mut view);
+            view
+        });
+        cx.simulate_resize(size(px(800.), px(600.)));
+        view.update_in(cx, |view, window, cx| {
+            view.open_host_menu(HOST, point(px(20.), px(20.)), window, cx)
+        });
+        let row = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+            (
+                cx.debug_bounds("host-menu-1").is_some(),
+                cx.debug_bounds("host-menu-keybindings-error").is_some(),
+            )
+        };
+        assert_eq!(row(cx), (true, false));
+        assert_eq!(ACTIONS[1].0, Action::ServerKeybindings);
+        view.update(cx, |view, cx| {
+            view.config.devices.insert(
+                "0123456789abcdef0123456789abcdef".into(),
+                crate::config::DeviceSettings {
+                    keybindings: KeybindingSource::Server,
+                },
+            );
+            view.selected_endpoint = 1;
+            let mut snapshot = crate::sidebar::layout_tests::snapshot(2);
+            snapshot.server_keybindings_toml = None;
+            view.live.snapshot = Some(std::sync::Arc::new(snapshot));
+            view.sync_server_keymap(cx);
+        });
+        assert_eq!(row(cx), (true, true));
     }
 
     /// The menu speaks for the saved device: after the sessions list attached it

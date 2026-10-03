@@ -302,7 +302,7 @@ impl PaintedText {
 }
 
 #[cfg(test)]
-struct SidebarFixture(Entity<HerdrWindow>);
+pub(crate) struct SidebarFixture(pub(crate) Entity<HerdrWindow>);
 
 #[test]
 fn native_child_probe_reports_geometry_and_glyph_failures_without_panicking() {
@@ -486,6 +486,12 @@ fn terminal_redraws_reuse_the_cached_sidebar(cx: &mut gpui::TestAppContext) {
 
     // A hidden sidebar is not built, even for a full frame.
     view.update(cx, |view, cx| {
+        view.settings.shared = Some(
+            crate::herdr_settings::Settings::parse_text(
+                "[ui]\nsidebar_collapsed_mode = 'hidden'\n",
+            )
+            .unwrap(),
+        );
         view.sidebar_visible = false;
         cx.notify();
     });
@@ -1455,6 +1461,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         usage: Default::default(),
         system_load: Default::default(),
         sidebar_visible: true,
+        sidebar_start_pending: true,
         device_filter: None,
         endpoints: vec![crate::endpoint::Endpoint::new(
             crate::endpoint::LOCAL.into(),
@@ -1491,6 +1498,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         cell_width: 9.,
         hovered_terminal_link: false,
         pressed_terminal_link: None,
+        links: Default::default(),
         terminal_mouse: None,
         scrollbar_drag: None,
         split_drag: None,
@@ -1546,6 +1554,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         browser: crate::browser::Browser::new(cx),
         _browser_tabs: cx.observe_global::<crate::browser::Store>(|_, cx| cx.notify()),
         prefix_armed: false,
+        server_keys: None,
         _prefix_interceptor: HerdrWindow::intercept_prefix(window, cx),
     }
 }

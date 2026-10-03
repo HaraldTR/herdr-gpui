@@ -81,7 +81,7 @@ impl HerdrWindow {
 
     /// Write one setting off the UI thread, then reload so the window shows
     /// what the file now says rather than what was clicked.
-    fn save_preference(
+    pub(crate) fn save_preference(
         &mut self,
         save: impl FnOnce() -> crate::Result<()> + Send + 'static,
         cx: &mut Context<Self>,

@@ -130,6 +130,13 @@ layout = "normal"
 # quit = "cmd-q"
 # Unbound by default: themes, reconnect, logs, about.
 
+# Saved SSH devices use the local keybindings above, as `herdr --remote` does.
+# "server" uses the [keys] profile that device's Herdr publishes instead, like
+# `herdr --remote-keybindings server`; [keybindings] still apply on top. Keyed
+# by catalog ID; a device's right-click menu toggles it.
+# [devices.0123456789abcdef0123456789abcdef]
+# keybindings = "server"
+
 # Preferences offers a searchable picker for all four families together or each row.
 # Platform default removes the local family override; fallback cascades remain active.
 [sidebar]

@@ -251,6 +251,11 @@ impl HerdrWindow {
                 self.open_new_worktree(window, cx);
                 return;
             }
+            // Every interactive creation path ends here, so Herdr's name prompt
+            // covers buttons, menus, shortcuts, and the palette alike.
+            Command::Tab | Command::Workspace if self.open_name_prompt(command, window, cx) => {
+                return;
+            }
             Command::Keybinds => {
                 self.open_keybinds(window, cx);
                 return;
@@ -288,7 +293,7 @@ impl HerdrWindow {
                 );
                 return;
             }
-            Command::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
+            Command::ToggleSidebar => self.toggle_sidebar(),
             Command::IncreaseFontSize | Command::DecreaseFontSize => {
                 let step = if command == Command::IncreaseFontSize {
                     FONT_SIZE_STEP

@@ -15,11 +15,15 @@ mod image_source;
 mod images;
 mod input;
 mod lifecycle;
+mod links;
+pub(crate) use links::PressedLink;
 mod mouse;
 mod pending_input;
 mod prefix;
 mod render;
 mod selection;
+mod server_keys;
+pub(crate) mod system_notifications;
 mod tab_drag;
 mod tab_strip;
 mod toasts;
@@ -51,6 +55,8 @@ use herdr_client::{ConnectOptions, ConnectTarget};
 #[cfg(feature = "integration-test")]
 use std::sync::Arc;
 use std::time::Duration;
+
+pub(crate) use server_keys::ActiveServerKeymap;
 
 pub(crate) struct HerdrWindow {
     pub(crate) sound: crate::sound::Service,
@@ -98,7 +104,8 @@ pub(crate) struct HerdrWindow {
     pub(crate) title: String,
     pub(crate) cell_width: f32,
     pub(crate) hovered_terminal_link: bool,
-    pub(crate) pressed_terminal_link: Option<(String, Point<Pixels>)>,
+    pub(crate) pressed_terminal_link: Option<PressedLink>,
+    pub(crate) links: links::DaemonLinks,
     pub(crate) terminal_mouse: Option<mouse::Gesture>,
     pub(crate) scrollbar_drag: Option<mouse::ScrollbarDrag>,
     pub(crate) split_drag: Option<mouse::SplitDrag>,
@@ -140,7 +147,12 @@ pub(crate) struct HerdrWindow {
     pub(crate) system_load: crate::system_load::SystemLoad,
     pub(crate) install_warning_shown: bool,
     pub(crate) collapsed_repos: std::collections::HashSet<String>,
+    /// Expanded; collapsed leaves the rail or nothing, as Herdr's
+    /// `ui.sidebar_collapsed_mode` chooses (see `sidebar_mode`).
     pub(crate) sidebar_visible: bool,
+    /// Herdr's `ui.sidebar_start_collapsed` still applies: no shared settings
+    /// have loaded yet and the user has not toggled the sidebar since startup.
+    pub(crate) sidebar_start_pending: bool,
     pub(crate) device_filter: Option<String>,
     pub(crate) wheel: WheelAccumulator,
     pub(crate) sidebar_width: Option<f32>,
@@ -179,6 +191,8 @@ pub(crate) struct HerdrWindow {
     pub(crate) _browser_tabs: Subscription,
     /// The daemon's prefix was typed, so the next keystroke completes a chord.
     pub(crate) prefix_armed: bool,
+    /// The selected device's server keymap, when it opted into one.
+    pub(crate) server_keys: Option<server_keys::ServerKeymap>,
     pub(crate) _prefix_interceptor: Subscription,
 }
 
@@ -291,8 +305,10 @@ impl HerdrWindow {
         };
         let old_tab = focused_tab(&self.live);
         self.poll_endpoints(cx);
+        self.post_system_notifications(window, cx);
         self.ring_bell(window);
         self.poll_integrations(cx);
+        self.poll_links(window, cx);
         if self.settings.task.is_none() {
             let mut reload = false;
             for endpoint in &self.endpoints {
@@ -523,6 +539,7 @@ impl HerdrWindow {
             cell_width: 9.,
             hovered_terminal_link: false,
             pressed_terminal_link: None,
+            links: Default::default(),
             terminal_mouse: None,
             scrollbar_drag: None,
             split_drag: None,
@@ -552,6 +569,7 @@ impl HerdrWindow {
             install_warning_shown: false,
             collapsed_repos: Default::default(),
             sidebar_visible: true,
+            sidebar_start_pending: true,
             device_filter: None,
             wheel: WheelAccumulator::default(),
             sidebar_width: None,
@@ -578,10 +596,13 @@ impl HerdrWindow {
             // Another window, or an agent, may open or close a tab.
             _browser_tabs: cx.observe_global::<crate::browser::Store>(|_, cx| cx.notify()),
             prefix_armed: false,
+            server_keys: None,
             _prefix_interceptor: Self::intercept_prefix(window, cx),
             _activation: cx.observe_window_activation(window, |this, window, cx| {
                 this.active = window.is_window_active();
-                if !this.active {
+                if this.active {
+                    this.publish_server_keymap(cx);
+                } else {
                     this.disarm_prefix();
                     this.cancel_terminal_mouse(cx);
                     this.selection = None;

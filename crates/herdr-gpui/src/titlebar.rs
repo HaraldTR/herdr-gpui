@@ -221,24 +221,7 @@ impl HerdrWindow {
                         cx.stop_propagation();
                         this.command(crate::controls::Command::ToggleSidebar, window, cx);
                     }))
-                    .child(
-                        div()
-                            .w(px(18.))
-                            .h(px(14.))
-                            .border_1()
-                            .border_color(rgb(self.theme.foreground))
-                            .rounded(px(2.))
-                            .child(
-                                div()
-                                    .w(px(5.))
-                                    .h_full()
-                                    .border_r_1()
-                                    .border_color(rgb(self.theme.foreground))
-                                    .when(self.sidebar_visible, |bar| {
-                                        bar.bg(rgb(self.theme.foreground))
-                                    }),
-                            ),
-                    )
+                    .child(sidebar_glyph(self.sidebar_visible, &self.theme))
                     .into_any_element(),
             ),
         )
@@ -345,6 +328,25 @@ pub(super) fn options(title: &str) -> TitlebarOptions {
         appears_transparent: cfg!(target_os = "macos"),
         traffic_light_position: cfg!(target_os = "macos").then(|| point(px(9.), px(9.))),
     }
+}
+
+/// A window with its sidebar panel, filled while the sidebar is expanded.
+pub(crate) fn sidebar_glyph(expanded: bool, theme: &crate::config::Theme) -> Div {
+    div()
+        .w(px(18.))
+        .h(px(14.))
+        .flex_none()
+        .border_1()
+        .border_color(rgb(theme.foreground))
+        .rounded(px(2.))
+        .child(
+            div()
+                .w(px(5.))
+                .h_full()
+                .border_r_1()
+                .border_color(rgb(theme.foreground))
+                .when(expanded, |bar| bar.bg(rgb(theme.foreground))),
+        )
 }
 
 #[cfg(test)]
