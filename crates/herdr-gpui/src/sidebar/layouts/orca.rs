@@ -8,7 +8,7 @@ use super::{
     super::{
         cell::{AgentRow, RowContext, RowLayout, RowState, WorkspaceRow},
         line_height,
-        row::{RowKind, RowTree, left_behind, token_column},
+        row::{RowKind, RowTree, TokenLook, left_behind, token_column},
         tokens::ResolvedToken,
     },
     parts::{self, Line, glyph_at, wash},
@@ -138,7 +138,12 @@ impl RowLayout for Orca {
                     token_column(
                         label,
                         &lines,
-                        (RowKind::Workspace, status, state.selected),
+                        TokenLook {
+                            kind: RowKind::Workspace,
+                            status,
+                            focused: state.selected,
+                            teleported,
+                        },
                         width,
                         cx,
                     )
@@ -258,7 +263,12 @@ impl RowLayout for Orca {
             let column = token_column(
                 key,
                 &agent.lines,
-                (RowKind::Agent(agent.icon), agent.status, state.selected),
+                TokenLook {
+                    kind: RowKind::Agent(agent.icon),
+                    status: agent.status,
+                    focused: state.selected,
+                    teleported: false,
+                },
                 inner(cx, 0.) - icon - GAP + room,
                 cx,
             );

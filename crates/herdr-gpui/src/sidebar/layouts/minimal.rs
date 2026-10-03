@@ -8,14 +8,13 @@ use super::{
         ARROW_RESERVE,
         cell::{AgentRow, RowContext, RowLayout, RowState, WorkspaceRow},
         line_height,
-        row::{RowKind, RowTree, left_behind, row_text, token_column},
+        row::{RowKind, RowTree, TokenLook, left_behind, row_text, token_column},
         tokens::ResolvedToken,
     },
     parts::{self, Line},
 };
 use crate::config::Theme;
 use gpui::{prelude::*, *};
-use herdr_client::protocol::AgentStatus;
 
 pub(in super::super) struct Minimal;
 
@@ -53,17 +52,16 @@ fn shell(
 fn configured<'a>(
     key: &'a str,
     lines: &'a [Vec<ResolvedToken>],
-    (kind, status, removing, state): (RowKind, AgentStatus, bool, RowState),
+    (look, removing): (TokenLook, bool),
     line: Line<'a>,
     lead: impl FnOnce(Line<'a>) -> Line<'a>,
     cx: &'a RowContext<'a>,
 ) -> Line<'a> {
-    let line = match parts::configured_status(lines, status, removing, cx) {
+    let line = match parts::configured_status(lines, look.status, removing, cx) {
         Some(mark) => line.fixed(cx.indicators.width(cx.font), mark),
         None => line,
     };
-    lead(line)
-        .fill_with(move |width| token_column(key, lines, (kind, status, state.selected), width, cx))
+    lead(line).fill_with(move |width| token_column(key, lines, look, width, cx))
 }
 
 fn name(key: &str, kind: RowKind, state: RowState, teleported: bool, theme: &Theme) -> Div {
@@ -106,7 +104,15 @@ impl RowLayout for Minimal {
             configured(
                 row.label,
                 &row.lines,
-                (RowKind::Workspace, status, row.removing, state),
+                (
+                    TokenLook {
+                        kind: RowKind::Workspace,
+                        status,
+                        focused: state.selected,
+                        teleported,
+                    },
+                    row.removing,
+                ),
                 line,
                 |line| line,
                 cx,
@@ -147,7 +153,15 @@ impl RowLayout for Minimal {
             let line = configured(
                 &agent.key,
                 &agent.lines,
-                (kind, agent.status, false, state),
+                (
+                    TokenLook {
+                        kind,
+                        status: agent.status,
+                        focused: state.selected,
+                        teleported: false,
+                    },
+                    false,
+                ),
                 line,
                 |line| line.fixed(line_height(font).min(12.), icon),
                 cx,

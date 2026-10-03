@@ -390,18 +390,25 @@ pub(super) fn removing_dot(selector: &'static str, theme: &Theme) -> Div {
         )
 }
 
-fn token_appearance(
-    kind: &TokenKind,
-    status: AgentStatus,
-    kind_of_row: RowKind,
-    focused: bool,
-    cx: &RowContext<'_>,
-) -> (u32, FontWeight) {
+/// What colors a configured row's tokens: the row they paint and its state.
+#[derive(Clone, Copy)]
+pub(super) struct TokenLook {
+    pub(super) kind: RowKind,
+    pub(super) status: AgentStatus,
+    pub(super) focused: bool,
+    /// A teleported checkout fades its name, as the native rows do.
+    pub(super) teleported: bool,
+}
+
+fn token_appearance(kind: &TokenKind, look: TokenLook, cx: &RowContext<'_>) -> (u32, FontWeight) {
     let theme = cx.theme;
-    let (name, weight, secondary) = row_text(kind_of_row, focused, theme);
+    let (name, weight, secondary) = row_text(look.kind, look.focused, theme);
     match kind {
         TokenKind::StateIcon | TokenKind::Text(_, TextRole::Status) => {
-            (cx.indicators.color(status), FontWeight::NORMAL)
+            (cx.indicators.color(look.status), FontWeight::NORMAL)
+        }
+        TokenKind::Text(_, TextRole::Workspace) if look.teleported => {
+            (left_behind(name, theme), weight)
         }
         TokenKind::Text(_, TextRole::Workspace) => (name, weight),
         TokenKind::Text(_, TextRole::Secondary | TextRole::Agent) => {
@@ -445,14 +452,8 @@ fn fixed_glyphs(kind: &TokenKind, glyph: f32, status_width: f32) -> usize {
 }
 
 /// Fixed token widths preserve GPUI's text truncation during layout.
-fn token_line(
-    row: &[ResolvedToken],
-    status: AgentStatus,
-    kind: RowKind,
-    focused: bool,
-    width: f32,
-    cx: &RowContext<'_>,
-) -> Div {
+fn token_line(row: &[ResolvedToken], look: TokenLook, width: f32, cx: &RowContext<'_>) -> Div {
+    let status = look.status;
     let (font, theme) = (cx.font, cx.theme);
     let glyph = glyph_width(font);
     let budgets = budgets(
@@ -481,11 +482,7 @@ fn token_line(
             separator(visible[index - 1].0, token)
         };
         let advance = *budget as f32 * glyph + if last_text == Some(index) { slack } else { 0. };
-        let (color, weight) = styled(
-            token_appearance(&token.kind, status, kind, focused, cx),
-            token.style,
-            theme,
-        );
+        let (color, weight) = styled(token_appearance(&token.kind, look, cx), token.style, theme);
         let cell = div();
         let cell = match &token.kind {
             TokenKind::StateIcon => cell
@@ -540,24 +537,28 @@ pub(super) fn leading_status(lines: &[Vec<ResolvedToken>]) -> Option<&ResolvedTo
         .filter(|token| matches!(token.kind, TokenKind::StateIcon))
 }
 
+/// The color, and whether bold, a leading `state_icon` paints the status in.
+pub(super) fn configured_status_style(
+    token: &ResolvedToken,
+    status: AgentStatus,
+    cx: &RowContext<'_>,
+) -> (u32, bool) {
+    let (color, weight) = styled(
+        (cx.indicators.color(status), FontWeight::NORMAL),
+        token.style,
+        cx.theme,
+    );
+    (color, weight == FontWeight::BOLD)
+}
+
 /// The status mark a leading `state_icon` styles, offset onto the first line.
 pub(super) fn configured_status(
     token: &ResolvedToken,
     status: AgentStatus,
     cx: &RowContext<'_>,
 ) -> Div {
-    let (color, weight) = styled(
-        (cx.indicators.color(status), FontWeight::NORMAL),
-        token.style,
-        cx.theme,
-    );
-    status_mark(
-        status,
-        cx.font,
-        cx.indicators,
-        color,
-        weight == FontWeight::BOLD,
-    )
+    let (color, bold) = configured_status_style(token, status, cx);
+    status_mark(status, cx.font, cx.indicators, color, bold)
 }
 
 /// A line's tokens, less the leading `state_icon` the status slot draws.
@@ -581,7 +582,7 @@ fn line_selector(key: &str, index: usize) -> String {
 pub(super) fn token_column(
     key: &str,
     lines: &[Vec<ResolvedToken>],
-    (kind, status, focused): (RowKind, AgentStatus, bool),
+    look: TokenLook,
     width: f32,
     cx: &RowContext<'_>,
 ) -> Div {
@@ -589,27 +590,24 @@ pub(super) fn token_column(
         div().w(px(width)).flex_none().flex().flex_col(),
         |column, (index, line)| {
             column.child(
-                token_line(line_tokens(index, line), status, kind, focused, width, cx)
+                token_line(line_tokens(index, line), look, width, cx)
                     .debug_selector(|| line_selector(key, index)),
             )
         },
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn configured_lines(
     mut column: Div,
     key: &str,
     lines: &[Vec<ResolvedToken>],
-    kind: RowKind,
-    status: AgentStatus,
-    focused: bool,
+    look: TokenLook,
     label_width: f32,
     mut workspace_icon: RowIcon,
     cx: &RowContext<'_>,
 ) -> Div {
     let (font, theme) = (cx.font, cx.theme);
-    let agent_icon = match kind {
+    let agent_icon = match look.kind {
         RowKind::Agent(icon) => Some(icon),
         RowKind::Workspace => None,
     };
@@ -632,14 +630,7 @@ fn configured_lines(
         let icon_color = line
             .iter()
             .find(|token| matches!(token.kind, TokenKind::Text(_, TextRole::Agent)))
-            .map(|token| {
-                styled(
-                    token_appearance(&token.kind, status, kind, focused, cx),
-                    token.style,
-                    theme,
-                )
-                .0
-            })
+            .map(|token| styled(token_appearance(&token.kind, look, cx), token.style, theme).0)
             .unwrap_or(theme.muted);
         let mut text = div().relative().w(px(label_width)).h(px(line_height(font)));
         if agent_here && let Some(icon) = agent_icon {
@@ -653,16 +644,9 @@ fn configured_lines(
             ));
         }
         text = text.child(
-            token_line(
-                line_tokens(index, line),
-                status,
-                kind,
-                focused,
-                text_width,
-                cx,
-            )
-            .debug_selector(|| selector.clone())
-            .ml(px(reserve.min(label_width))),
+            token_line(line_tokens(index, line), look, text_width, cx)
+                .debug_selector(|| selector.clone())
+                .ml(px(reserve.min(label_width))),
         );
         column = column.child(text);
     }
@@ -698,6 +682,7 @@ pub(super) fn row(
     let focused = state.selected;
     let layout = look.density;
     let configured = !lines.is_empty();
+    let teleported = badge.as_ref().is_some_and(|badge| badge.teleported);
     let leading_icon = leading_status(lines);
     let show_status = !configured || leading_icon.is_some() || removing;
     let status_text = status_text.filter(|_| !configured);
@@ -721,7 +706,7 @@ pub(super) fn row(
             layout.child_details()
         };
     let (name_color, weight, detail_color) = row_text(kind, focused, theme);
-    let name_color = if badge.as_ref().is_some_and(|badge| badge.teleported) {
+    let name_color = if teleported {
         left_behind(name_color, theme)
     } else {
         name_color
@@ -885,9 +870,12 @@ pub(super) fn row(
                             column,
                             key,
                             lines,
-                            kind,
-                            status,
-                            focused,
+                            TokenLook {
+                                kind,
+                                status,
+                                focused,
+                                teleported,
+                            },
                             label_width,
                             workspace_icon,
                             cx,
@@ -1133,4 +1121,59 @@ pub(super) fn first_text<'a>(
         .map(str::trim)
         .find(|s| !s.is_empty())
         .unwrap_or(fallback)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        super::{agents::Indicators, cell::RowContext, layout},
+        RowKind, TextRole, TokenKind, TokenLook, left_behind, token_appearance,
+    };
+    use crate::config::{FontConfig, LayoutMode, Theme};
+    use herdr_client::protocol::AgentStatus;
+
+    #[core::prelude::v1::test]
+    fn teleported_rows_fade_only_their_workspace_tokens() {
+        let font = FontConfig {
+            family: "Menlo".into(),
+            size: 12.,
+            fallbacks: None,
+        };
+        let theme = Theme::default();
+        let cx = RowContext {
+            indicators: Indicators::new(None, false, &theme),
+            font: &font,
+            theme: &theme,
+            look: layout::for_mode(LayoutMode::default()),
+            width: 232.,
+            host: None,
+        };
+        let here = TokenLook {
+            kind: RowKind::Workspace,
+            status: AgentStatus::Idle,
+            focused: false,
+            teleported: false,
+        };
+        let away = TokenLook {
+            teleported: true,
+            ..here
+        };
+        let workspace = TokenKind::Text("repo".into(), TextRole::Workspace);
+        let (name, weight) = token_appearance(&workspace, here, &cx);
+        assert_eq!(
+            token_appearance(&workspace, away, &cx),
+            (left_behind(name, &theme), weight)
+        );
+        assert_ne!(left_behind(name, &theme), name);
+        for other in [
+            TokenKind::Text("idle".into(), TextRole::Status),
+            TokenKind::Text("main".into(), TextRole::Secondary),
+            TokenKind::StateIcon,
+        ] {
+            assert_eq!(
+                token_appearance(&other, away, &cx),
+                token_appearance(&other, here, &cx)
+            );
+        }
+    }
 }
