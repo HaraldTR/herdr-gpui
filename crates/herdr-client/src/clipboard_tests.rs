@@ -157,6 +157,7 @@ mod unix {
                 stop: Arc::new(AtomicBool::new(false)),
                 next_request: AtomicU64::new(1),
                 image_busy: Arc::new(AtomicBool::new(false)),
+                last_queued_theme: Default::default(),
             }),
         };
         let target = ClientClipboardImageTarget::Pane("p".into());
@@ -230,6 +231,7 @@ mod unix {
                 stop: Arc::new(AtomicBool::new(false)),
                 next_request: AtomicU64::new(1),
                 image_busy: Arc::new(AtomicBool::new(false)),
+                last_queued_theme: Default::default(),
             }),
         };
         let target = ClientClipboardImageTarget::Pane("p".into());
@@ -381,6 +383,7 @@ mod unix {
                     stop: Arc::new(AtomicBool::new(false)),
                     next_request: AtomicU64::new(1),
                     image_busy: Arc::new(AtomicBool::new(false)),
+                    last_queued_theme: Default::default(),
                 }),
             };
             let upload = handle

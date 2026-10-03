@@ -544,7 +544,9 @@ impl Render for HerdrWindow {
                              .flex_1()
                              .min_w_0()
                              .min_h_0()
+                            .relative()
                             .child(content)
+                            .children(self.render_config_diagnostic(cx))
                             .child(
                 div()
                     .id("connection-status")
