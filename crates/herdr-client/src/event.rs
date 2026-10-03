@@ -5,6 +5,7 @@ use crate::{
     Error, Result,
     limits::POLL,
     protocol::{endpoint::EndpointServerWelcome, *},
+    surface_images::SurfaceImages,
 };
 use crossbeam_channel::{SendTimeoutError, Sender};
 use serde_json::Value;
@@ -17,9 +18,12 @@ use std::sync::{
 pub enum ClientEvent {
     Connected(EndpointServerWelcome),
     Snapshot(Arc<ClientShellSnapshot>),
-    /// Complete text baseline, including after a cell patch. Graphics assets are
-    /// still connection-relative wire data; this client does not render images.
+    /// Complete text baseline, including after a cell patch. Its graphics
+    /// scene carries placements only; the pixels arrive as `SurfaceImages`.
     Surface(Arc<PaneSurfaceFrame>),
+    /// Every image the surfaces this connection emits may place, sent before
+    /// the surface that first needs a change. Replaces the previous set.
+    SurfaceImages(Arc<SurfaceImages>),
     Response {
         request_id: String,
         response: Value,

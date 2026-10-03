@@ -14,12 +14,22 @@
 //! aim a click or a keystroke at a pane the client has already left.
 
 use crate::state::LiveState;
-use herdr_client::protocol::PaneSurfaceFrame;
+use herdr_client::{SurfaceImages, protocol::PaneSurfaceFrame};
 use std::sync::Arc;
+
+/// A frame with the pixels for the images it places.
+#[derive(Clone)]
+pub(crate) struct Picture {
+    pub(crate) frame: Arc<PaneSurfaceFrame>,
+    pub(crate) images: Arc<SurfaceImages>,
+}
 
 #[derive(Default)]
 pub(crate) struct Presentation {
     presented: Option<Arc<PaneSurfaceFrame>>,
+    /// The pixels the presented frame was shown with. A retained frame keeps
+    /// them, since the connection's own set follows the newest surface.
+    images: Arc<SurfaceImages>,
     #[cfg(feature = "integration-test")]
     pub(crate) probe: Probe,
 }
@@ -30,8 +40,11 @@ impl Presentation {
     /// for as long as it can still stand for this window's content.
     pub(crate) fn frame(&mut self, live: &LiveState) -> Option<Arc<PaneSurfaceFrame>> {
         match live.surface.clone().filter(|_| live.surface_ready()) {
-            Some(ready) => self.presented = Some(ready),
-            None if !self.retainable(live) => self.presented = None,
+            Some(ready) => {
+                self.presented = Some(ready);
+                self.images = live.surface_images.clone();
+            }
+            None if !self.retainable(live) => self.clear(),
             None => {
                 #[cfg(feature = "integration-test")]
                 {
@@ -63,6 +76,16 @@ impl Presentation {
     /// reconnect, a detach, or a switch of endpoint starts from an empty area.
     pub(crate) fn clear(&mut self) {
         self.presented = None;
+        self.images = Default::default();
+    }
+
+    /// The frame to paint now, as `frame` chooses it, with its images.
+    pub(crate) fn picture(&mut self, live: &LiveState) -> Option<Picture> {
+        let frame = self.frame(live)?;
+        Some(Picture {
+            frame,
+            images: self.images.clone(),
+        })
     }
 }
 

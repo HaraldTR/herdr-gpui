@@ -92,8 +92,10 @@ fn frame_link(frame: &FrameData, column: u16, row: u16, start: u16, end: u16) ->
         }
         text.push_str(symbol);
     }
-    // Plain URLs are row-local: the protocol doesn't distinguish soft wraps from
+    // Plain URLs are row-local: the surface doesn't distinguish soft wraps from
     // separate lines, so joining rows could silently change the destination.
+    // A daemon offering `pane.link.resolve` reads wraps from its own terminal
+    // state instead; see `crate::links`.
     match plain_url(&text, hit)? {
         (_, true) => None,
         (range, false) => web_url(&text[range]),
@@ -381,10 +383,18 @@ mod tests {
                 event.down.position = position;
                 event.up.position = position + point(px(20.), px(0.));
                 event.down.click_count = 1;
-                view.pressed_terminal_link = Some(("https://example.com/click".into(), position));
+                view.pressed_terminal_link = Some(crate::window::PressedLink {
+                    url: Some("https://example.com/click".into()),
+                    cell: None,
+                    position,
+                });
                 view.open_terminal_link(&gpui::ClickEvent::Mouse(event.clone()), window, cx);
                 event.up.position = position;
-                view.pressed_terminal_link = Some(("https://different.example/".into(), position));
+                view.pressed_terminal_link = Some(crate::window::PressedLink {
+                    url: Some("https://different.example/".into()),
+                    cell: None,
+                    position,
+                });
                 view.open_terminal_link(&gpui::ClickEvent::Mouse(event), window, cx);
             })
         });
