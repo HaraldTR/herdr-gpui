@@ -94,6 +94,10 @@ pub enum Error {
     ImageReadTimeout,
     #[error("SVG clipboard images are not supported. Use PNG, JPEG, GIF, WebP, BMP, or TIFF.")]
     ImageFormat,
+    #[error("Could not decode an image a pane placed.")]
+    PaneImageDecode(#[source] image::ImageError),
+    #[error("An image a pane placed exceeds the decoded size limit.")]
+    PaneImageLimit,
     #[error("Clipboard content exceeds the {limit}-byte limit.")]
     ClipboardSize { limit: usize },
     #[error("Clipboard text is not valid UTF-8.")]
@@ -495,6 +499,20 @@ pub enum Error {
         first: &'static str,
         second: &'static str,
     },
+    #[error("the host did not publish its keybindings")]
+    ServerKeybindingsMissing,
+    #[error("the host's keybindings exceed {max} bytes")]
+    ServerKeybindingsTooLarge { max: usize },
+    #[error("the host's keybindings are not valid TOML: {0}")]
+    ServerKeybindingsParse(#[source] toml::de::Error),
+    #[error("the host's keybindings have no [keys] table")]
+    ServerKeybindingsNoKeys,
+    #[error("devices.{0:?} is not a saved device ID")]
+    InvalidDeviceId(String),
+    #[error("devices and each devices.<id> must be tables")]
+    InvalidDevicesTable,
+    #[error("[devices] must list at most {0} devices")]
+    TooManyDevices(usize),
     #[error("theme {name:?} not found in {directories:?}")]
     ThemeNotFound {
         name: String,

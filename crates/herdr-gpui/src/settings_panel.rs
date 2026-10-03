@@ -98,6 +98,7 @@ impl HerdrWindow {
                 match result {
                     Ok(shared) => {
                         this.settings.shared = Some(shared);
+                        this.apply_sidebar_start();
                         this.settings.load_status = Some("Loaded from local file".into());
                         this.apply_shared_theme(cx);
                         this.apply_shared_agent_sort();
@@ -798,6 +799,23 @@ mod tests {
             assert_eq!(view.agent_sort, AgentSort::Grouped);
             assert!(view.agent_sort_modified);
         });
+    }
+
+    #[gpui::test]
+    fn first_shared_load_honors_sidebar_start_collapsed_once(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let load =
+            || Settings::parse_text("[ui]\nsidebar_start_collapsed = true\n").map_err(Into::into);
+        view.update(cx, |view, cx| view.load_shared_settings_with(load, cx));
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            assert!(!view.sidebar_visible);
+            view.toggle_sidebar();
+            // A config reload is not a startup.
+            view.load_shared_settings_with(load, cx);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.sidebar_visible));
     }
 
     #[gpui::test]

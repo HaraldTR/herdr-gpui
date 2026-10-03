@@ -135,6 +135,16 @@ pub(crate) enum ToastDelivery {
     System,
 }
 
+/// What collapsing the sidebar leaves, as Herdr's `ui.sidebar_collapsed_mode`
+/// chooses it: a narrow rail of status marks, or nothing.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum SidebarCollapsedMode {
+    #[default]
+    Compact,
+    Hidden,
+}
+
 // Playback paths and per-agent policy are parsed by the sound backend, not this editor.
 #[derive(Deserialize)]
 #[serde(default)]
@@ -169,6 +179,8 @@ pub(crate) struct Settings {
     pub clipboard: ClipboardToast,
     /// The agents panel's starting order until the user toggles it.
     pub agent_sort: crate::preferences::AgentSort,
+    pub sidebar_collapsed_mode: SidebarCollapsedMode,
+    pub sidebar_start_collapsed: bool,
     pub name_prompts: NamePrompts,
     palettes: [palette::Palette; 2],
     original: persistence::Snapshot,
@@ -188,6 +200,8 @@ impl std::fmt::Debug for Settings {
             .field("toast_position", &self.toast_position)
             .field("clipboard", &self.clipboard)
             .field("agent_sort", &self.agent_sort)
+            .field("sidebar_collapsed_mode", &self.sidebar_collapsed_mode)
+            .field("sidebar_start_collapsed", &self.sidebar_start_collapsed)
             .field("name_prompts", &self.name_prompts)
             .finish_non_exhaustive()
     }
@@ -215,6 +229,10 @@ struct Ui {
     toast: RawToast,
     #[serde(deserialize_with = "crate::lenient::or_default")]
     accent: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
+    sidebar_collapsed_mode: SidebarCollapsedMode,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
+    sidebar_start_collapsed: bool,
     #[serde(deserialize_with = "crate::lenient::or_default")]
     prompt_new_tab_name: Option<bool>,
     #[serde(deserialize_with = "crate::lenient::or_default")]
@@ -354,6 +372,8 @@ impl Settings {
             toast_position: toast.herdr.position,
             clipboard: toast.clipboard,
             agent_sort: parsed.ui.agent_panel_sort,
+            sidebar_collapsed_mode: parsed.ui.sidebar_collapsed_mode,
+            sidebar_start_collapsed: parsed.ui.sidebar_start_collapsed,
             name_prompts,
             palettes,
             original,
