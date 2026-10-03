@@ -12,6 +12,7 @@ use crate::{
     options::ConnectOptions,
     protocol::{endpoint::*, *},
     queue::CommandReceiver,
+    surface_images::ImageStore,
     transport::Stream,
 };
 use crossbeam_channel::{Sender, TryRecvError};
@@ -94,6 +95,7 @@ pub(crate) struct Session {
     pub(crate) encodings: SurfaceEncodings,
     pub(crate) snapshot: Option<Arc<ClientShellSnapshot>>,
     pub(crate) surface: Option<Arc<PaneSurfaceFrame>>,
+    pub(crate) images: ImageStore,
     pub(crate) pending: Option<Pending>,
 }
 
@@ -108,6 +110,7 @@ impl Session {
             encodings: SurfaceEncodings::default(),
             snapshot: None,
             surface: None,
+            images: ImageStore::default(),
             pending: None,
         }
     }
@@ -338,6 +341,7 @@ impl Session {
             encodings,
             snapshot,
             surface,
+            images,
             pending,
             ..
         } = self;
@@ -405,6 +409,9 @@ impl Session {
                         .as_ref()
                         .filter(|current| current.projection_revision == next.revision)
                 {
+                    if images.show() {
+                        emit(ClientEvent::SurfaceImages(images.published()))?;
+                    }
                     emit(ClientEvent::Surface(current.clone()))?;
                 }
             }
@@ -419,7 +426,7 @@ impl Session {
                 let scroll = surface_scroll::decode(&data)?;
                 let current = surface.as_mut().ok_or(Error::PatchBeforeBaseline)?;
                 Arc::make_mut(current).apply_scroll_patch(scroll)?;
-                emit_patched(snapshot.as_deref(), current, &mut emit)?;
+                emit_patched(snapshot.as_deref(), current, images, &mut emit)?;
             }
             ServerMessage::EndpointControl { kind, data }
                 if kind == surface_delta::MESSAGE_KIND =>
@@ -432,7 +439,7 @@ impl Session {
                     .as_deref()
                     .ok_or(Error::EncodedSurfaceBeforeBaseline)?;
                 let next = delta.reconstruct(base)?;
-                accept_surface(next, snapshot.as_deref(), surface, &mut emit)?;
+                accept_surface(next, snapshot.as_deref(), surface, images, &mut emit)?;
             }
             ServerMessage::EndpointControl { kind, data }
                 if kind == surface_reuse::MESSAGE_KIND =>
@@ -445,16 +452,16 @@ impl Session {
                     .as_deref()
                     .ok_or(Error::EncodedSurfaceBeforeBaseline)?;
                 let next = reuse.reconstruct(base)?;
-                accept_surface(next, snapshot.as_deref(), surface, &mut emit)?;
+                accept_surface(next, snapshot.as_deref(), surface, images, &mut emit)?;
             }
             ServerMessage::EndpointControl { .. } => {} // Unknown optional named controls are ignored.
             ServerMessage::PaneSurface(next) => {
-                accept_surface(next, snapshot.as_deref(), surface, &mut emit)?;
+                accept_surface(next, snapshot.as_deref(), surface, images, &mut emit)?;
             }
             ServerMessage::PaneSurfacePatch(patch) => {
                 let current = surface.as_mut().ok_or(Error::PatchBeforeBaseline)?;
                 Arc::make_mut(current).apply_patch(patch)?;
-                emit_patched(snapshot.as_deref(), current, &mut emit)?;
+                emit_patched(snapshot.as_deref(), current, images, &mut emit)?;
             }
             ServerMessage::ClientShellEndpointResponseChunk {
                 boot_id,
@@ -510,9 +517,10 @@ impl Session {
 /// Fences a complete surface on boot and revision, validates it, and retains it
 /// as the baseline whether or not its projection is current.
 fn accept_surface(
-    next: PaneSurfaceFrame,
+    mut next: PaneSurfaceFrame,
     snapshot: Option<&ClientShellSnapshot>,
     surface: &mut Option<Arc<PaneSurfaceFrame>>,
+    images: &mut ImageStore,
     emit: &mut impl FnMut(ClientEvent) -> Result<()>,
 ) -> Result<()> {
     let s = snapshot.ok_or(Error::SurfaceBeforeSnapshot)?;
@@ -527,8 +535,17 @@ fn accept_surface(
     if let Some(popup) = &next.popup {
         popup.frame.validate()?;
     }
+    let mut changed = images.receive(&mut next);
     let next = Arc::new(next);
-    if next.projection_revision == s.revision {
+    let shown = next.projection_revision == s.revision;
+    if shown {
+        changed |= images.show();
+    }
+    // Pixels precede the surface that places them.
+    if changed {
+        emit(ClientEvent::SurfaceImages(images.published()))?;
+    }
+    if shown {
         emit(ClientEvent::Surface(next.clone()))?;
     }
     *surface = Some(next);
@@ -538,9 +555,15 @@ fn accept_surface(
 fn emit_patched(
     snapshot: Option<&ClientShellSnapshot>,
     current: &Arc<PaneSurfaceFrame>,
+    images: &mut ImageStore,
     emit: &mut impl FnMut(ClientEvent) -> Result<()>,
 ) -> Result<()> {
     if snapshot.is_some_and(|s| s.revision == current.projection_revision) {
+        // A patch keeps the scene, but emitting it releases what an older
+        // surface on screen still held.
+        if images.show() {
+            emit(ClientEvent::SurfaceImages(images.published()))?;
+        }
         emit(ClientEvent::Surface(current.clone()))?;
     }
     Ok(())

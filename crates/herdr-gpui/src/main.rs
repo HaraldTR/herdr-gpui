@@ -41,6 +41,7 @@ mod input;
 mod integrations;
 mod keymap;
 mod lenient;
+mod links;
 mod local_path;
 mod log_window;
 mod login_env;

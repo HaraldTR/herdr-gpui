@@ -37,6 +37,9 @@ pub(crate) struct Notice {
     checked: Option<Instant>,
     displayed: Option<(Instant, bool)>,
     suppression_target: Option<crate::navigation::OwnedNavigationTarget>,
+    /// Handed to the OS notification center. Retained only so a click can
+    /// resolve its target through the same boot-fenced validation as a toast.
+    pub(crate) posted: bool,
 }
 
 pub(crate) fn safe_text(text: &str, limit: usize) -> String {
@@ -112,6 +115,7 @@ impl Notice {
             checked: None,
             displayed: None,
             suppression_target,
+            posted: false,
         }
     }
 
@@ -243,22 +247,30 @@ impl Toasts {
 
 /// Endpoint ownership retains the existing generation/inbox fences. This single
 /// window-wide scheduler imposes ordering and bounds, independent of host order.
+///
+/// With system delivery, daemon notices that pass the same evidence and delay
+/// policy wait for [`take_system`] instead of the in-app queue. Like Herdr, the
+/// active tab suppresses them only while this window is `focused`.
 pub(crate) fn tick(
     endpoints: &mut [crate::endpoint::Endpoint],
     selected: usize,
     config: crate::config::NotificationConfig,
     hidden: bool,
+    focused: bool,
     pending_navigation: Option<u64>,
     now: Instant,
 ) -> bool {
+    use crate::config::NotificationDelivery as Delivery;
     use herdr_client::protocol::{AgentStatus, SemanticNotificationKind as Kind};
+    let delivery = config.delivery();
+    let system = delivery == Delivery::System;
     let mut changed = false;
     for (index, endpoint) in endpoints.iter_mut().enumerate() {
         let snapshot = endpoint.live.snapshot.as_deref();
         endpoint.toasts.entries.retain_mut(|(id, n)| {
             let keep = (|| {
                 if !n.client_local
-                    && (!config.enabled
+                    && (delivery == Delivery::Off
                         || endpoint
                             .toasts
                             .enabled_since
@@ -276,6 +288,9 @@ pub(crate) fn tick(
                     if !n.initialized && now <= n.arrived + GRACE {
                         n.initialize(s);
                     }
+                }
+                if n.posted {
+                    return true;
                 }
                 if n.visible {
                     let paused = hidden || (index == selected && pending_navigation == Some(*id));
@@ -327,6 +342,7 @@ pub(crate) fn tick(
                         }
                     }
                     if index == selected
+                        && (!system || focused)
                         && snapshot.is_some_and(|s| match n.suppression_target.as_ref() {
                             Some(NavigationTarget::Tab(tab)) => {
                                 s.focused_tab_id.as_ref() == Some(tab)
@@ -356,7 +372,9 @@ pub(crate) fn tick(
                 e.toasts
                     .entries
                     .iter()
-                    .filter(move |(_, n)| n.ready == ready && !n.visible)
+                    .filter(move |(_, n)| {
+                        n.ready == ready && !n.visible && !n.posted && (n.client_local || !system)
+                    })
                     .map(move |(id, n)| (n.arrived, n.order, index, *id))
             })
             .collect();
@@ -384,6 +402,70 @@ pub(crate) fn tick(
         }
     }
     changed
+}
+
+/// A ready daemon notice for the OS notification center, already sanitized
+/// and bounded by [`Notice::new`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SystemPost {
+    pub endpoint: usize,
+    pub id: u64,
+    /// Stable per host, boot, and pane, so a newer event replaces the older
+    /// one where the platform supports it, as Herdr's TUI does.
+    pub tag: String,
+    pub title: String,
+    pub body: Option<String>,
+}
+
+/// Marks every notice [`tick`] made ready for system delivery as posted and
+/// returns them in global arrival order. Call only from the poll loop: render
+/// also ticks, but must never post.
+pub(crate) fn take_system(
+    endpoints: &mut [crate::endpoint::Endpoint],
+    config: crate::config::NotificationConfig,
+) -> Vec<SystemPost> {
+    if config.delivery() != crate::config::NotificationDelivery::System {
+        return Vec::new();
+    }
+    let mut posts = Vec::new();
+    for (index, endpoint) in endpoints.iter_mut().enumerate() {
+        for (id, n) in &mut endpoint.toasts.entries {
+            if !n.ready || n.posted || n.visible || n.client_local {
+                continue;
+            }
+            n.posted = true;
+            let boot = n.boot.as_deref().unwrap_or_default();
+            let tag = match &n.pane_id {
+                Some(pane) => format!("herdr:{}:{boot}:{pane}", endpoint.id),
+                None => format!("herdr:{}:{boot}:#{}", endpoint.id, n.order),
+            };
+            posts.push((
+                (n.arrived, n.order),
+                SystemPost {
+                    endpoint: index,
+                    id: *id,
+                    tag,
+                    title: n.title.clone(),
+                    body: n.body.clone(),
+                },
+            ));
+        }
+        // Posted notices only answer clicks; keep the newest few per host.
+        let posted = endpoint
+            .toasts
+            .entries
+            .iter()
+            .filter(|(_, n)| n.posted)
+            .count();
+        let mut excess = posted.saturating_sub(PENDING_LIMIT);
+        endpoint.toasts.entries.retain(|(_, n)| {
+            let drop = excess > 0 && n.posted;
+            excess -= usize::from(drop);
+            !drop
+        });
+    }
+    posts.sort_unstable_by_key(|(key, _)| *key);
+    posts.into_iter().map(|(_, post)| post).collect()
 }
 
 #[cfg(test)]
