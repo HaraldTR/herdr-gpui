@@ -51,7 +51,7 @@ impl HerdrWindow {
     pub(crate) fn sidebar_agents(&self) -> Vec<Row<'_>> {
         self.listed_hosts()
             .flat_map(|(index, snapshot)| {
-                sorted_agents(&snapshot.agents, self.agent_sort)
+                sorted_agents(snapshot, self.agent_sort)
                     .into_iter()
                     .map(move |agent| (index, agent.pane_id.as_str()))
             })

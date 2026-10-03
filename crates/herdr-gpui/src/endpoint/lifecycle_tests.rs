@@ -31,8 +31,15 @@ impl gpui::Render for Fixture {
 }
 
 impl Server {
+    /// The next lifecycle frame. Every connection reports the window's theme
+    /// once it has a snapshot; `window::tests` covers that, so skip it here.
     fn receive(&mut self) -> ClientMessage {
-        read_message(&mut self.stream, MAX_FRAME_SIZE).unwrap()
+        loop {
+            match read_message(&mut self.stream, MAX_FRAME_SIZE).unwrap() {
+                ClientMessage::ClientShellHostTheme { .. } => {}
+                message => return message,
+            }
+        }
     }
 
     fn respond(&mut self, request: &serde_json::Value) {

@@ -77,8 +77,9 @@ impl Shortcut {
 pub struct Keymap {
     /// Parallel to `COMMANDS`, primary shortcut first.
     shortcuts: Vec<Vec<Shortcut>>,
-    /// The keystroke that starts a chord, unless nothing can use it.
-    prefix: Option<Keystroke>,
+    /// The keystrokes that start a chord, less any nothing can use. The
+    /// first one is the prefix shown to the user.
+    prefixes: Vec<Keystroke>,
     /// Keys that move the workspace picker's selection up and down.
     navigate_up: Vec<Keystroke>,
     navigate_down: Vec<Keystroke>,
@@ -144,8 +145,12 @@ impl Keymap {
     fn layer(configured: Vec<Option<Vec<String>>>, claimed: &Claimed, keys: &DaemonKeys) -> Self {
         // Keystrokes bound directly so far, which later layers cannot take.
         let mut taken: HashSet<_> = claimed.keys().cloned().collect();
-        let prefix = (usable_prefix(&keys.prefix) && taken.insert(identity(&keys.prefix)))
-            .then(|| keys.prefix.clone());
+        let prefixes: Vec<Keystroke> = keys
+            .prefixes
+            .iter()
+            .filter(|prefix| usable_prefix(prefix) && taken.insert(identity(prefix)))
+            .cloned()
+            .collect();
         let mut chords = HashSet::new();
         let mut from_daemon = vec![Vec::new(); COMMANDS.len()];
         for (command, trigger) in &keys.bindings {
@@ -163,11 +168,14 @@ impl Keymap {
                     Shortcut::direct(keystroke.unparse())
                 }
                 Trigger::Prefixed(keystroke) => {
-                    // The prefix typed twice sends it to the terminal instead.
-                    let Some(prefix) = &prefix else {
+                    // A prefix typed after a prefix sends it to the terminal
+                    // instead.
+                    let Some(prefix) = prefixes.first() else {
                         continue;
                     };
-                    if identity(keystroke) == identity(prefix)
+                    if prefixes
+                        .iter()
+                        .any(|prefix| identity(keystroke) == identity(prefix))
                         || !chords.insert(identity(keystroke))
                     {
                         continue;
@@ -200,7 +208,7 @@ impl Keymap {
             .collect();
         Self {
             shortcuts,
-            prefix,
+            prefixes,
             navigate_up: keys.navigate_up.clone(),
             navigate_down: keys.navigate_down.clone(),
         }
@@ -237,16 +245,16 @@ impl Keymap {
             })
     }
 
-    /// The prefix as shown to the user, while chords can use it.
+    /// The first prefix as shown to the user, while chords can use one.
     pub(crate) fn prefix_label(&self) -> Option<String> {
-        self.prefix.as_ref().map(Keystroke::unparse)
+        self.prefixes.first().map(Keystroke::unparse)
     }
 
-    /// Whether `typed` is the keystroke that starts a chord.
+    /// Whether `typed` is one of the keystrokes that start a chord.
     pub(crate) fn is_prefix(&self, typed: &Keystroke) -> bool {
-        self.prefix
-            .as_ref()
-            .is_some_and(|prefix| typed_matches(typed, prefix))
+        self.prefixes
+            .iter()
+            .any(|prefix| typed_matches(typed, prefix))
     }
 
     /// The command a chord runs when `typed` follows the prefix.
@@ -333,8 +341,8 @@ impl Keymap {
             .filter_map(|trigger| match trigger {
                 Trigger::Direct(bound) => Some(bound.unparse()),
                 Trigger::Prefixed(bound) => self
-                    .prefix
-                    .as_ref()
+                    .prefixes
+                    .first()
                     .map(|prefix| format!("{} {}", prefix.unparse(), bound.unparse())),
             })
             .collect();
@@ -348,9 +356,10 @@ impl Keymap {
     /// keystroke needs a modifier so typing still reaches the terminal.
     fn runs_custom(&self, trigger: &Trigger) -> bool {
         match trigger {
-            Trigger::Prefixed(bound) => self.prefix.as_ref().is_some_and(|prefix| {
-                identity(bound) != identity(prefix) && self.chord(bound).is_none()
-            }),
+            // Any prefix typed after a prefix passes it through instead.
+            Trigger::Prefixed(bound) => {
+                !self.prefixes.is_empty() && !self.is_prefix(bound) && self.chord(bound).is_none()
+            }
             Trigger::Direct(bound) => {
                 has_modifier(bound)
                     && !self.is_prefix(bound)
@@ -437,7 +446,7 @@ mod tests {
     /// A daemon config that binds nothing, isolating the GUI layers.
     fn no_keys() -> DaemonKeys {
         DaemonKeys {
-            prefix: keystroke("ctrl-b"),
+            prefixes: vec![keystroke("ctrl-b")],
             bindings: Vec::new(),
             navigate_up: Vec::new(),
             navigate_down: Vec::new(),
@@ -584,7 +593,7 @@ mod tests {
     #[test]
     fn gui_overrides_replace_daemon_bindings() {
         let keys = DaemonKeys {
-            prefix: keystroke("ctrl-a"),
+            prefixes: vec![keystroke("ctrl-a")],
             bindings: vec![
                 (Command::Tab, Trigger::Prefixed(keystroke("c"))),
                 (Command::Tab, Trigger::Direct(keystroke("alt-t"))),
@@ -608,7 +617,7 @@ mod tests {
     #[test]
     fn daemon_keystrokes_move_from_gui_defaults_but_not_from_gui_config() {
         let keys = DaemonKeys {
-            prefix: keystroke("ctrl-a"),
+            prefixes: vec![keystroke("ctrl-a")],
             bindings: vec![
                 // cmd-d is Split Right's catalog default.
                 (Command::Zoom, Trigger::Direct(keystroke("cmd-d"))),
@@ -649,7 +658,7 @@ mod tests {
     #[test]
     fn the_prefix_yields_to_gui_config_and_typing() {
         let keys = |prefix| DaemonKeys {
-            prefix: keystroke(prefix),
+            prefixes: vec![keystroke(prefix)],
             bindings: vec![(Command::Tab, Trigger::Prefixed(keystroke("c")))],
             ..no_keys()
         };
@@ -728,7 +737,7 @@ mod tests {
         );
         // Without a usable prefix no chord can reach one.
         let keys = DaemonKeys {
-            prefix: keystroke("a"),
+            prefixes: vec![keystroke("a")],
             ..no_keys()
         };
         let keymap = Keymap::with_overrides(&BTreeMap::new(), &keys).unwrap();
@@ -778,5 +787,44 @@ mod tests {
                 "{typed}"
             );
         }
+    }
+
+    #[test]
+    fn every_prefix_arms_and_the_first_labels_chords() {
+        let keys = DaemonKeys {
+            prefixes: vec![keystroke("ctrl-space"), keystroke("ctrl-s")],
+            bindings: vec![
+                (Command::Tab, Trigger::Prefixed(keystroke("c"))),
+                // Any prefix typed after a prefix passes it through instead.
+                (Command::NextTab, Trigger::Prefixed(keystroke("ctrl-s"))),
+            ],
+            ..no_keys()
+        };
+        let keymap = Keymap::with_overrides(&BTreeMap::new(), &keys).unwrap();
+        assert!(keymap.is_prefix(&keystroke("ctrl-space")));
+        assert!(keymap.is_prefix(&keystroke("ctrl-s")));
+        assert!(!keymap.is_prefix(&keystroke("ctrl-b")));
+        let first = keystroke("ctrl-space").unparse();
+        assert_eq!(keymap.prefix_label().as_deref(), Some(first.as_str()));
+        assert_eq!(
+            list(&keymap, Command::Tab),
+            ["cmd-t".to_owned(), format!("{first} c")]
+        );
+        assert_eq!(keymap.chord(&keystroke("ctrl-s")), None);
+        assert_eq!(list(&keymap, Command::NextTab), ["cmd-shift-]"]);
+
+        // A prefix the GUI config claims, or that would swallow typing, is
+        // dropped, and the next one labels chords.
+        let keys = DaemonKeys {
+            prefixes: vec![keystroke("ctrl-b"), keystroke("a"), keystroke("ctrl-s")],
+            bindings: vec![(Command::Tab, Trigger::Prefixed(keystroke("c")))],
+            ..no_keys()
+        };
+        let keymap =
+            Keymap::with_overrides(&overrides(&[("themes", one("ctrl-b"))]), &keys).unwrap();
+        assert!(!keymap.is_prefix(&keystroke("ctrl-b")));
+        assert!(!keymap.is_prefix(&keystroke("a")));
+        assert!(keymap.is_prefix(&keystroke("ctrl-s")));
+        assert_eq!(list(&keymap, Command::Tab), ["cmd-t", "ctrl-s c"]);
     }
 }

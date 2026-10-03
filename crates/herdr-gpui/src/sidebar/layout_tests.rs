@@ -1093,6 +1093,82 @@ fn multi_host_rows_scope_duplicate_ids_and_keep_agents_when_host_collapses(
     assert!(cx.debug_bounds("agent-ssh:test-p0").is_some());
 }
 
+/// A second main checkout of the fixture repository stays a top-level parent
+/// in every row layout and on every host: both parents lead the group, each
+/// with its own fold arrow, ahead of the linked worktrees.
+#[gpui::test]
+fn duplicate_repository_parents_lead_one_group_in_every_layout_and_host(
+    cx: &mut gpui::TestAppContext,
+) {
+    for mode in crate::config::LayoutMode::ALL {
+        let (_view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = fixture_window(window, cx);
+            view.config.layout.mode = mode;
+            let mut local = snapshot(7);
+            let mut duplicate = local.workspaces[3].clone();
+            duplicate.workspace_id = "w7".into();
+            duplicate.label = "agent-launcher-copy".into();
+            duplicate.focused = false;
+            local.workspaces.push(duplicate);
+            let mut remote = crate::endpoint::Endpoint::new(
+                "ssh:test".into(),
+                "Remote".into(),
+                ConnectTarget::Ssh {
+                    target: "unused".into(),
+                    session: "default".into(),
+                },
+                true,
+            );
+            remote.live.snapshot = Some(Arc::new(local.clone()));
+            view.live.snapshot = Some(Arc::new(local));
+            view.endpoints.push(remote);
+            view
+        });
+        cx.simulate_resize(size(px(800.), px(1600.)));
+        cx.run_until_parked();
+        cx.update(|window, cx| full_draw(window, cx).clear(cx));
+        // Debug selectors must be static, so each host's rows are spelled out.
+        for (host, rows) in [
+            (
+                "local",
+                [
+                    "workspace-local-w3",
+                    "workspace-local-w7",
+                    "workspace-local-w4",
+                    "workspace-local-w5",
+                    "workspace-local-w6",
+                ],
+            ),
+            (
+                "ssh:test",
+                [
+                    "workspace-ssh:test-w3",
+                    "workspace-ssh:test-w7",
+                    "workspace-ssh:test-w4",
+                    "workspace-ssh:test-w5",
+                    "workspace-ssh:test-w6",
+                ],
+            ),
+        ] {
+            let order = rows.map(|row| {
+                cx.debug_bounds(row)
+                    .unwrap_or_else(|| panic!("{mode:?} {host}: missing {row}"))
+                    .top()
+            });
+            assert!(
+                order.windows(2).all(|pair| pair[0] < pair[1]),
+                "{mode:?} {host}: {order:?}"
+            );
+        }
+        for arrow in ["collapse-3", "collapse-7"] {
+            assert!(
+                cx.debug_bounds(arrow).is_some(),
+                "{mode:?}: missing {arrow}"
+            );
+        }
+    }
+}
+
 /// A frame that renders every view. The sidebar is a cached view, which GPUI
 /// replays without recording debug bounds; these tests measure layout, so each
 /// of their frames is a full one, as every frame was before the cache.
@@ -1115,6 +1191,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         selection: None,
         flash: None,
         configured_terminal_size: crate::config::Config::default().terminal.size,
+        gui_config_diagnostic: Default::default(),
         // Keep the original geometry fixture explicit; density-switching tests
         // above exercise all three modes independently of the default.
         config: crate::config::Config {
@@ -1219,6 +1296,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         },
         surface_signal: cx.new(|_| crate::window::SurfaceSignal),
         _sidebar_invalidation: HerdrWindow::invalidate_sidebar(cx),
+        _host_theme: HerdrWindow::observe_host_theme(cx),
         browser: crate::browser::Browser::new(cx),
         _browser_tabs: cx.observe_global::<crate::browser::Store>(|_, cx| cx.notify()),
         prefix_armed: false,
@@ -3219,6 +3297,74 @@ fn the_agents_header_toggles_between_grouped_and_priority(cx: &mut gpui::TestApp
         let view = view.read(cx);
         assert_eq!(view.agent_sort, AgentSort::Grouped);
         assert!(view.agent_sort_modified);
+    });
+}
+
+/// A plugin's agent view names the panel and decides its rows: the daemon's
+/// `agent_order` replaces the local sort, agents it leaves out stay hidden,
+/// and the local toggle neither shows nor changes while the view holds.
+#[gpui::test]
+fn a_plugin_agent_view_orders_and_filters_the_agents(cx: &mut gpui::TestAppContext) {
+    use crate::preferences::AgentSort;
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        crate::bind_keys(cx);
+        let view = cx.new(|cx| fixture_window(window, cx));
+        cx.observe(&view, |_, _, cx| cx.notify()).detach();
+        SidebarFixture(view)
+    });
+    let view = cx.update(|_, cx| fixture.read(cx).0.clone());
+    let set_view = |cx: &mut gpui::VisualTestContext, order: &[&str]| {
+        let order = order.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+        cx.update(|window, cx| {
+            view.update(cx, |view, _| {
+                let snapshot = Arc::make_mut(view.live.snapshot.as_mut().unwrap());
+                snapshot.agent_view_label = Some("review".into());
+                snapshot.agent_order = order;
+            });
+            cx.default_global::<TextProbes>().0.clear();
+            window.refresh();
+            full_draw(window, cx).clear(cx);
+        });
+    };
+    cx.simulate_resize(size(px(800.), px(600.)));
+    cx.run_until_parked();
+
+    // Grouped would paint p0 first; the view puts p1 above it.
+    set_view(cx, &["p1", "p0"]);
+    let (first, second) = (
+        cx.debug_bounds("row-agent-p1").unwrap(),
+        cx.debug_bounds("row-agent-p0").unwrap(),
+    );
+    assert!(first.top() < second.top(), "{first:?} {second:?}");
+    cx.update(|_, cx| {
+        let probes = &cx.global::<TextProbes>().0;
+        assert!(probes.contains_key("review"), "{:?}", probes.keys());
+        assert!(!probes.contains_key("grouped"), "{:?}", probes.keys());
+    });
+    // The label is the plugin's, so clicking it must not flip the local sort.
+    let sort = cx.debug_bounds("agents-sort").unwrap();
+    cx.simulate_click(sort.center(), Default::default());
+    cx.update(|_, cx| {
+        let view = view.read(cx);
+        assert_eq!(view.agent_sort, AgentSort::Grouped);
+        assert!(!view.agent_sort_modified);
+    });
+
+    // An agent the view filtered out is not listed.
+    set_view(cx, &["p1"]);
+    assert!(cx.debug_bounds("row-agent-p1").is_some());
+    assert!(cx.debug_bounds("row-agent-p0").is_none());
+
+    // No match is the view's answer, not an absence of agents.
+    set_view(cx, &[]);
+    assert!(cx.debug_bounds("row-agent-p1").is_none());
+    cx.update(|_, cx| {
+        let probes = &cx.global::<TextProbes>().0;
+        assert!(
+            probes.contains_key("no matching agents"),
+            "{:?}",
+            probes.keys()
+        );
     });
 }
 

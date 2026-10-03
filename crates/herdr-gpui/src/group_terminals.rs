@@ -182,6 +182,13 @@ impl HerdrWindow {
             .any(|parked| parked.group == group)
     }
 
+    /// Parked connections are clients of their own, each told the theme.
+    pub(crate) fn sync_group_host_theme(&self, theme: &herdr_client::HostTheme) {
+        for parked in &self.browser.terminals.parked {
+            parked.connection.sync_host_theme(&parked.live, theme);
+        }
+    }
+
     /// Cheap enough for every display frame.
     pub(crate) fn group_terminals_updated(&self) -> bool {
         self.browser
