@@ -7,7 +7,7 @@
 use crate::{Error, Result, controls::Command};
 use gpui::{Keystroke, Modifiers};
 
-/// Herdr's own fallback when `prefix` is missing or unparseable.
+/// Herdr's own fallback when `prefix` is missing or names no usable key.
 const DEFAULT_PREFIX: &str = "ctrl+b";
 
 /// A daemon `[keys]` entry can hold a list, but never an unbounded one.
@@ -135,7 +135,9 @@ pub(crate) enum Trigger {
 /// The daemon's bindings for GUI commands, in the order its table lists them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DaemonKeys {
-    pub(super) prefix: Keystroke,
+    /// Every prefix key, never empty and without duplicates. Each one arms
+    /// prefix mode; the first is the one shown in chord labels.
+    pub(super) prefixes: Vec<Keystroke>,
     pub(super) bindings: Vec<(Command, Trigger)>,
 }
 
@@ -171,12 +173,7 @@ impl DaemonKeys {
     /// Reads the daemon config's `[keys]` table; each action it leaves out,
     /// or gives a value of the wrong type, keeps Herdr's default.
     pub(crate) fn from_table(keys: Option<&toml::Table>) -> Self {
-        let prefix = keys
-            .and_then(|keys| keys.get("prefix"))
-            .and_then(toml::Value::as_str)
-            .and_then(keystroke)
-            .or_else(|| keystroke(DEFAULT_PREFIX))
-            .unwrap_or_default();
+        let prefixes = prefixes(keys);
         let mut bindings = Vec::new();
         for &(name, target, default) in ACTIONS {
             let value = keys.and_then(|keys| {
@@ -202,8 +199,37 @@ impl DaemonKeys {
                 }
             }
         }
-        Self { prefix, bindings }
+        Self { prefixes, bindings }
     }
+}
+
+/// `prefix` as Herdr reads it: one string or a list, with the published
+/// profiles' `extra_prefixes` appended. Entries this client cannot parse are
+/// dropped, later duplicates are ignored, and when nothing usable remains
+/// (an empty list included) Herdr's default applies.
+fn prefixes(keys: Option<&toml::Table>) -> Vec<Keystroke> {
+    let entries = |field: &str| -> Vec<&str> {
+        match keys.and_then(|keys| keys.get(field)) {
+            Some(toml::Value::String(entry)) => vec![entry.as_str()],
+            Some(toml::Value::Array(entries)) if entries.iter().all(toml::Value::is_str) => {
+                entries.iter().filter_map(toml::Value::as_str).collect()
+            }
+            _ => Vec::new(),
+        }
+    };
+    let mut prefixes: Vec<Keystroke> = Vec::new();
+    let entries = entries("prefix")
+        .into_iter()
+        .chain(entries("extra_prefixes"));
+    for parsed in entries.take(MAX_ENTRIES).filter_map(keystroke) {
+        if !prefixes.contains(&parsed) {
+            prefixes.push(parsed);
+        }
+    }
+    if prefixes.is_empty() {
+        prefixes.extend(keystroke(DEFAULT_PREFIX));
+    }
+    prefixes
 }
 
 /// Each binding one entry spells, with the digit it types, if any. `1..9`
@@ -370,7 +396,7 @@ mod tests {
     #[test]
     fn defaults_match_herdr() {
         let keys = DaemonKeys::default();
-        assert_eq!(keys.prefix, parsed("ctrl-b"));
+        assert_eq!(keys.prefixes, [parsed("ctrl-b")]);
         assert_eq!(bound(&keys, Command::SplitRight), [prefixed("v")]);
         assert_eq!(bound(&keys, Command::SplitDown), [prefixed("-")]);
         assert_eq!(bound(&keys, Command::Keybinds), [prefixed("?")]);
@@ -399,7 +425,7 @@ mod tests {
             switch_tab = ["prefix+1..9", "alt+1..9"]
             "#,
         );
-        assert_eq!(keys.prefix, parsed("ctrl-a"));
+        assert_eq!(keys.prefixes, [parsed("ctrl-a")]);
         assert_eq!(
             bound(&keys, Command::SplitRight),
             [
@@ -430,12 +456,14 @@ mod tests {
         let profile = r#"
             [keys]
             prefix = "ctrl+a"
+            extra_prefixes = ["ctrl+s"]
             split_vertical = ["prefix+v", "prefix+\\"]
             switch_tab = "alt+1..9"
             "#;
         let keys = DaemonKeys::from_profile(Some(profile)).unwrap();
         assert_eq!(keys, self::keys(profile));
-        assert_eq!(keys.prefix, parsed("ctrl-a"));
+        // Herdr publishes every prefix after the first as `extra_prefixes`.
+        assert_eq!(keys.prefixes, [parsed("ctrl-a"), parsed("ctrl-s")]);
         assert_eq!(
             bound(&keys, Command::TabNumber(2)),
             [Trigger::Direct(parsed("alt-2"))]
@@ -491,8 +519,8 @@ mod tests {
             reload_config = "prefix+r"
             "#,
         );
-        // Herdr falls back to ctrl+b for a prefix it cannot parse.
-        assert_eq!(keys.prefix, parsed("ctrl-b"));
+        // A prefix this client cannot express falls back to ctrl+b.
+        assert_eq!(keys.prefixes, [parsed("ctrl-b")]);
         assert!(bound(&keys, Command::Tab).is_empty());
         assert_eq!(
             bound(&keys, Command::NextTab),
@@ -511,5 +539,48 @@ mod tests {
             [Trigger::Prefixed(parsed("4"))]
         );
         assert!(bound(&keys, Command::TabNumber(1)).is_empty());
+    }
+
+    #[test]
+    fn a_prefix_list_keeps_every_key_in_order() {
+        let keys = keys(
+            r#"
+            [keys]
+            prefix = ["ctrl+space", "ctrl+s"]
+            "#,
+        );
+        assert_eq!(keys.prefixes, [parsed("ctrl-space"), parsed("ctrl-s")]);
+        // Prefixed actions do not depend on which prefix armed them.
+        assert_eq!(bound(&keys, Command::Tab), [prefixed("c")]);
+    }
+
+    #[test]
+    fn prefix_lists_follow_herdr_validation() {
+        let prefixes = |value: &str| keys(&format!("[keys]\nprefix = {value}")).prefixes;
+        // Invalid entries are dropped while valid ones survive.
+        assert_eq!(prefixes(r#"["ctrl+a", "wat", ""]"#), [parsed("ctrl-a")]);
+        // Later duplicates, however spelled, are ignored.
+        assert_eq!(
+            prefixes(r#"["ctrl+a", " Control+a ", "f12", "ctrl+a"]"#),
+            [parsed("ctrl-a"), parsed("f12")]
+        );
+        // An empty list, or one with nothing usable, keeps the default.
+        assert_eq!(prefixes("[]"), [parsed("ctrl-b")]);
+        assert_eq!(prefixes(r#"["wat", "hyper+a"]"#), [parsed("ctrl-b")]);
+        // Herdr rejects a list of anything but strings, as does a number.
+        assert_eq!(prefixes(r#"["ctrl+a", 5]"#), [parsed("ctrl-b")]);
+        assert_eq!(prefixes("5"), [parsed("ctrl-b")]);
+    }
+
+    #[test]
+    fn published_extra_prefixes_follow_the_primary() {
+        let keys = keys(
+            r#"
+            [keys]
+            prefix = "ctrl+a"
+            extra_prefixes = ["ctrl+s", "ctrl+a"]
+            "#,
+        );
+        assert_eq!(keys.prefixes, [parsed("ctrl-a"), parsed("ctrl-s")]);
     }
 }

@@ -271,8 +271,6 @@ pub(crate) fn check_pr_fences(view: &gpui::Entity<HerdrWindow>, cx: &mut gpui::V
                 .target
                 .clone();
             let local_peer = view.live.local_daemon_peer;
-            let supports_workspace_get = view.live.supports_workspace_get;
-            view.live.supports_workspace_get = true;
             for target in [
                 herdr_client::ConnectTarget::Local,
                 herdr_client::ConnectTarget::Socket("/local-or-forwarded.sock".into()),
@@ -290,19 +288,18 @@ pub(crate) fn check_pr_fences(view: &gpui::Entity<HerdrWindow>, cx: &mut gpui::V
                 );
                 view.live.local_daemon_peer = true;
                 view.refresh_workspace_pr();
-                // Menu open is cache-only, even on a newer daemon.
+                // Menu open is cache-only; the worker resolves the checkout from Git.
                 assert!(view.menu.pr.loading);
                 assert!(view.menu.pr.message.is_none());
             }
-            view.live.supports_workspace_get = false;
             view.refresh_workspace_pr();
             assert!(
                 view.menu.pr.loading,
-                "older local daemon uses Git registry worker"
+                "local daemon uses Git registry worker"
             );
             assert!(
                 view.live.dialog_response.is_none(),
-                "no workspace.get request or dialog slot registration"
+                "no daemon request or dialog slot registration"
             );
             assert!(
                 view.menu.pr_connection.is_some(),
@@ -310,7 +307,6 @@ pub(crate) fn check_pr_fences(view: &gpui::Entity<HerdrWindow>, cx: &mut gpui::V
             );
             view.endpoints[view.selected_endpoint].connection.target = connection_target;
             view.live.local_daemon_peer = local_peer;
-            view.live.supports_workspace_get = supports_workspace_get;
             view.menu.pr.clear();
         })
     });
@@ -1042,6 +1038,52 @@ fn actions_target_clicked_workspace_and_match_daemon_schemas() {
     let target = WorkspaceTarget::new(&standalone, &standalone.workspaces[3]);
     assert!(target.can_create());
     assert_eq!(target.close_label(), "Close");
+}
+
+/// A parent beside another parent of its repository closes alone, as in the
+/// TUI: a group close would take the other parent and its worktrees with it.
+/// Each parent still folds the group while linked worktrees are open.
+#[test]
+fn a_parent_beside_another_parent_closes_alone_but_still_folds() {
+    let mut snapshot = sidebar::layout_tests::snapshot(7);
+    let mut duplicate = snapshot.workspaces[3].clone();
+    duplicate.workspace_id = "w7".into();
+    duplicate.focused = false;
+    snapshot.workspaces.push(duplicate);
+    for index in [3, 7] {
+        let target = WorkspaceTarget::new(&snapshot, &snapshot.workspaces[index]);
+        let id = &snapshot.workspaces[index].workspace_id;
+        assert_eq!(target.close_label(), "Close");
+        assert_eq!(target.close_members, std::slice::from_ref(id));
+        assert_eq!(target.group_key(), Some(sidebar::layout_tests::REPO_KEY));
+        assert_eq!(
+            target
+                .request(&snapshot, WorkspaceAction::Close, "")
+                .unwrap(),
+            (
+                Method::WorkspaceClose,
+                serde_json::json!({"workspace_id": id, "close_group": false})
+            )
+        );
+    }
+    // Opening the other parent after the menu did changes what closes.
+    let target = WorkspaceTarget::new(&snapshot, &snapshot.workspaces[3]);
+    let mut single = snapshot.clone();
+    single.workspaces.pop();
+    assert!(matches!(
+        target.request(&single, WorkspaceAction::Close, ""),
+        Err(crate::Error::WorkspaceGroupChanged)
+    ));
+
+    // Without linked worktrees there is no group to fold or close.
+    snapshot
+        .workspaces
+        .retain(|w| w.workspace_id != "w4" && w.workspace_id != "w5");
+    for index in [3, 5] {
+        let target = WorkspaceTarget::new(&snapshot, &snapshot.workspaces[index]);
+        assert_eq!(target.close_label(), "Close");
+        assert_eq!(target.group_key(), None);
+    }
 }
 
 /// A linked checkout creates through its main checkout, the only source the
