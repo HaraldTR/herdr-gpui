@@ -26,8 +26,16 @@ impl FrameData {
 }
 
 impl PaneSurfaceFrame {
-    /// Apply baseline cell patches atomically. Optional delta/reuse codecs are not needed.
+    /// Apply baseline cell patches atomically. Optional codecs expand into this
+    /// same validation and commit, so every encoding shares one set of bounds.
     pub fn apply_patch(&mut self, patch: PaneSurfacePatch) -> Result<()> {
+        self.validate_patch(&patch)?;
+        self.commit_patch(patch);
+        Ok(())
+    }
+
+    /// Every check that can reject `patch`, without touching the frame.
+    pub(crate) fn validate_patch(&self, patch: &PaneSurfacePatch) -> Result<()> {
         if patch.boot_id != self.boot_id
             || patch.projection_revision != self.projection_revision
             || patch.base_surface_revision != self.surface_revision
@@ -62,6 +70,11 @@ impl PaneSurfaceFrame {
         {
             return Err(Error::PatchCursorBounds);
         }
+        Ok(())
+    }
+
+    /// Commits a patch that [`Self::validate_patch`] accepted.
+    pub(crate) fn commit_patch(&mut self, patch: PaneSurfacePatch) {
         for row in patch.rows {
             let start = usize::from(row.y) * usize::from(self.frame.width) + usize::from(row.x);
             self.frame.cells[start..start + row.cells.len()].clone_from_slice(&row.cells);
@@ -73,6 +86,5 @@ impl PaneSurfaceFrame {
         }
         self.frame.cursor = patch.cursor;
         self.surface_revision = patch.surface_revision;
-        Ok(())
     }
 }

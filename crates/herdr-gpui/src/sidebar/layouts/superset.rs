@@ -131,7 +131,7 @@ fn text_color(state: RowState, theme: &Theme) -> u32 {
 
 impl RowLayout for Superset {
     fn workspace(&self, row: WorkspaceRow<'_>, state: RowState, cx: &RowContext<'_>) -> Div {
-        let status = row.status();
+        let (status, upstream) = (row.status(), row.upstream());
         let WorkspaceRow {
             label,
             tree,
@@ -197,6 +197,10 @@ impl RowLayout for Superset {
                     })),
                 label,
             )
+            .when_some(upstream, |line, upstream| {
+                let glyph = glyph_at(cx.font, cx.font.size);
+                line.fixed(upstream.width(glyph), upstream.element(label, glyph, theme))
+            })
             .when(teleported, |line| {
                 line.fixed(dirty_size, parts::teleported(label, dirty_size, theme))
             })

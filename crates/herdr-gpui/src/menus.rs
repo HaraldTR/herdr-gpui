@@ -12,7 +12,9 @@ use crate::{Hide, HideOthers, Minimize, ShowAll};
 #[cfg(feature = "qa-menu")]
 use crate::{
     PlaySound, ShowHerdrNotDetected, ShowUpdatePreview,
-    actions::{ShowToastPreview, ShowUpdateDownloadPreview, ShowUpdateHomebrewPreview},
+    actions::{
+        RingBellPreview, ShowToastPreview, ShowUpdateDownloadPreview, ShowUpdateHomebrewPreview,
+    },
 };
 use gpui::{App, Menu, MenuItem, OsAction};
 #[cfg(feature = "qa-menu")]
@@ -213,6 +215,24 @@ pub(crate) fn menus(layout: Layout) -> Vec<Menu> {
                     },
                 ),
                 MenuItem::action(
+                    "Find",
+                    RunCommand {
+                        command: Command::Find,
+                    },
+                ),
+                MenuItem::action(
+                    "Copy Mode",
+                    RunCommand {
+                        command: Command::CopyMode,
+                    },
+                ),
+                MenuItem::action(
+                    "Open Scrollback in Editor",
+                    RunCommand {
+                        command: Command::EditScrollback,
+                    },
+                ),
+                MenuItem::action(
                     "Open Notification Target",
                     RunCommand {
                         command: Command::OpenNotificationTarget,
@@ -266,6 +286,7 @@ pub(crate) fn menus(layout: Layout) -> Vec<Menu> {
                 ),
                 MenuItem::action("Show Homebrew update progress", ShowUpdateHomebrewPreview),
                 MenuItem::action("Play Sound", PlaySound),
+                MenuItem::action("Ring Bell in 3 Seconds", RingBellPreview),
                 #[cfg(target_os = "macos")]
                 MenuItem::action(
                     "Enable badge",

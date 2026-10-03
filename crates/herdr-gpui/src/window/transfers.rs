@@ -528,28 +528,40 @@ pub(crate) mod tests {
             }
         }
 
-        /// Answers `request` with `result`, as the daemon's API would.
-        pub(crate) fn respond(&mut self, request: &serde_json::Value, result: serde_json::Value) {
-            let id = request["id"].as_str().unwrap();
-            let snapshot: ClientShellSnapshot = serde_json::from_str(include_str!(
-                "../../../herdr-protocol/tests/fixtures/endpoint-snapshot-v1.json"
-            ))
-            .unwrap();
+        /// Answers `request_id` with `response`, an endpoint envelope, and
+        /// returns the event the client reports for it, skipping events that
+        /// arrived before it.
+        pub(crate) fn respond(
+            &mut self,
+            boot_id: &str,
+            request_id: &str,
+            response: &serde_json::Value,
+        ) -> ClientEvent {
             write_message(
                 &mut self.stream,
                 &ServerMessage::ClientShellEndpointResponseChunk {
-                    boot_id: snapshot.boot_id,
-                    request_id: id.into(),
+                    boot_id: boot_id.into(),
+                    request_id: request_id.into(),
                     final_chunk: true,
-                    data: serde_json::to_vec(&serde_json::json!({"id": id, "result": result}))
-                        .unwrap(),
+                    data: serde_json::to_vec(response).unwrap(),
                 },
                 MAX_FRAME_SIZE,
             )
             .unwrap();
+            loop {
+                let event = self
+                    .client
+                    .events
+                    .recv_timeout(Duration::from_secs(3))
+                    .unwrap();
+                if matches!(&event, ClientEvent::Response { request_id: id, .. } if id == request_id)
+                {
+                    return event;
+                }
+            }
         }
 
-        fn prepare(&self, view: &mut HerdrWindow) {
+        pub(crate) fn prepare(&self, view: &mut HerdrWindow) {
             // Only the fixture's explicit nonexistent local socket is used to
             // initialize endpoint lifecycle flags. Replace its handle before
             // marking the synthetic projection as SSH; never reconnect to HOST.

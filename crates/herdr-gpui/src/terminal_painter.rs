@@ -14,6 +14,10 @@ use unicode_width::UnicodeWidthStr;
 /// a terminal's own background is meaningful, and the glyphs above it stay
 /// readable on every theme.
 const SELECTION_ALPHA: u32 = 0x59;
+/// Search matches tint like the selection, the current one strongly enough to
+/// find at a glance among the others.
+const MATCH_ALPHA: u32 = 0x4d;
+const CURRENT_MATCH_ALPHA: u32 = 0xa6;
 const REPORT_INTERVAL: Duration = Duration::from_secs(5);
 const SLOW_PAINT: Duration = Duration::from_millis(16);
 const SCROLLBAR_INSET: f32 = 1.;
@@ -35,6 +39,35 @@ fn background_extent(
         extend(grid.width, available.width, cell.width),
         extend(grid.height, available.height, cell.height),
     )
+}
+
+/// Why a span of cells is tinted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Tint {
+    Selection,
+    Match,
+    CurrentMatch,
+    /// The copy-mode cursor, drawn as a block over its cell.
+    CopyCursor,
+}
+
+impl Tint {
+    fn color(self, theme: &Theme) -> Rgba {
+        match self {
+            Self::Selection => rgba((theme.primary() << 8) | SELECTION_ALPHA),
+            Self::Match => rgba((theme.palette[3] << 8) | MATCH_ALPHA),
+            Self::CurrentMatch => rgba((theme.palette[3] << 8) | CURRENT_MATCH_ALPHA),
+            Self::CopyCursor => rgba((theme.cursor << 8) | CURRENT_MATCH_ALPHA),
+        }
+    }
+}
+
+/// Tinted cells of one row, in the grid of the frame that paints them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Highlight {
+    pub(crate) row: u16,
+    pub(crate) columns: std::ops::Range<u16>,
+    pub(crate) tint: Tint,
 }
 
 #[derive(Default)]
@@ -396,9 +429,9 @@ impl TerminalPainter {
         });
     }
 
-    /// Paints one frame, tinting the cells `selection` names in that frame's
-    /// own grid. Rows outside the frame are ignored: the selection was made
-    /// against the live surface, which a repaint may already have replaced.
+    /// Paints one frame, tinting the cells `highlights` name in that frame's
+    /// own grid. Rows outside the frame are ignored: a selection or search was
+    /// made against the live surface, which a repaint may already have replaced.
     #[allow(clippy::too_many_arguments)]
     pub fn paint_frame(
         &mut self,
@@ -407,7 +440,7 @@ impl TerminalPainter {
         available: Option<Size<Pixels>>,
         cell_width: f32,
         font: &Font,
-        selection: &[(u16, std::ops::Range<u16>)],
+        highlights: &[Highlight],
         panes: &[PaneSurfacePane],
         window: &mut Window,
         cx: &mut App,
@@ -497,7 +530,7 @@ impl TerminalPainter {
             }
             // Between the backgrounds and the glyphs, so the tint reads as chosen
             // without hiding either.
-            for (row, columns) in selection {
+            for Highlight { row, columns, tint } in highlights {
                 let (start, end) = (columns.start.min(frame.width), columns.end.min(frame.width));
                 if *row >= frame.height || start >= end {
                     continue;
@@ -514,7 +547,7 @@ impl TerminalPainter {
                             px(self.cell_height),
                         ),
                     ),
-                    rgba((self.theme.primary() << 8) | SELECTION_ALPHA),
+                    tint.color(&self.theme),
                 ));
                 #[cfg(feature = "integration-test")]
                 {

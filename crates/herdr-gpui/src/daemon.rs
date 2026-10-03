@@ -39,6 +39,7 @@ pub fn connect(
                 command.args(["--session", name]);
             }
             command.arg("server");
+            crate::login_env::apply(&mut command);
             command
         },
         matches!(
@@ -177,6 +178,13 @@ fn connect_or_start(
         ));
     }
     let mut command = command();
+    // Login-shell initialization can outlast a detach or reconnect.
+    if stop.load(Ordering::Acquire) {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            crate::Error::DaemonCancelled,
+        ));
+    }
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -363,6 +371,23 @@ mod tests {
                 panic!("attach-only targets must not launch a local daemon")
             });
         }
+    }
+
+    #[test]
+    fn cancellation_during_command_preparation_does_not_spawn() {
+        let stop = AtomicBool::new(false);
+        let error = connect_or_start(
+            &socket(),
+            &stop,
+            Duration::from_secs(1),
+            || {
+                stop.store(true, Ordering::Release);
+                Command::new("/nonexistent/must-not-spawn")
+            },
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
     }
 
     #[test]

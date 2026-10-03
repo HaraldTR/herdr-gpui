@@ -452,25 +452,29 @@ mod tests {
         })
     }
 
-    /// Moves the event reader's answer into the link mailbox, as the bridge's
-    /// reader thread does, and lets the window fold it in.
-    fn deliver(peer: &MockPeer, view: &Entity<HerdrWindow>, cx: &mut VisualTestContext) {
+    /// Answers `request` with `result`, moves the client's event into the
+    /// link mailbox as the bridge's reader thread does, and lets the window
+    /// fold it in.
+    fn answer(
+        peer: &mut MockPeer,
+        view: &Entity<HerdrWindow>,
+        cx: &mut VisualTestContext,
+        request: &serde_json::Value,
+        result: serde_json::Value,
+    ) {
+        let id = request["id"].as_str().unwrap();
+        let event = peer.respond(
+            &snapshot().boot_id,
+            id,
+            &json!({"id": id, "result": result}),
+        );
         let links = view.read_with(cx, |view, _| {
             view.endpoints[view.selected_endpoint]
                 .connection
                 .links
                 .clone()
         });
-        loop {
-            let event = peer
-                .client
-                .events
-                .recv_timeout(Duration::from_secs(3))
-                .unwrap();
-            if links.lock().unwrap().apply(event).is_none() {
-                break;
-            }
-        }
+        assert!(links.lock().unwrap().apply(event).is_none());
         cx.update(|window, cx| view.update(cx, |view, cx| view.poll_links(window, cx)));
     }
 
@@ -504,14 +508,16 @@ mod tests {
                 "content_revision": 2, "offset_from_bottom": null,
             })
         );
-        peer.respond(
+        answer(
+            &mut peer,
+            &view,
+            cx,
             &request,
             json!({"type": "pane_link_resolved", "regions": [
                 {"row": 0, "start_col": 0, "end_col": 19},
                 {"row": 1, "start_col": 0, "end_col": 11},
             ]}),
         );
-        deliver(&peer, &view, cx);
         view.read_with(cx, |view, _| {
             let link = view.hovered_daemon_link().unwrap();
             assert_eq!(
@@ -532,11 +538,13 @@ mod tests {
         assert_eq!(request["method"], "pane.link.activate");
         assert_eq!(request["params"]["viewport_row"], 1);
         assert_eq!(request["params"]["col"], 2);
-        peer.respond(
+        answer(
+            &mut peer,
+            &view,
+            cx,
             &request,
             json!({"type": "pane_link_activated", "url": URL, "handled": true}),
         );
-        deliver(&peer, &view, cx);
         assert!(cx.opened_url().is_none());
 
         // When nothing claims it, the whole wrapped address opens here.
@@ -544,11 +552,13 @@ mod tests {
         let request = peer.request();
         assert_eq!(request["method"], "pane.link.activate");
         assert!(cx.opened_url().is_none());
-        peer.respond(
+        answer(
+            &mut peer,
+            &view,
+            cx,
             &request,
             json!({"type": "pane_link_activated", "url": URL, "handled": false}),
         );
-        deliver(&peer, &view, cx);
         assert_eq!(cx.opened_url().as_deref(), Some(URL));
 
         // New pane content hides the old answer and asks again, for the
@@ -565,13 +575,15 @@ mod tests {
         // Releasing the modifier drops the hover; its answer arriving later
         // shows nothing.
         cx.simulate_mouse_move(continuation, None, Modifiers::default());
-        peer.respond(
+        answer(
+            &mut peer,
+            &view,
+            cx,
             &request,
             json!({"type": "pane_link_resolved", "regions": [
                 {"row": 1, "start_col": 0, "end_col": 11},
             ]}),
         );
-        deliver(&peer, &view, cx);
         view.read_with(cx, |view, _| {
             assert!(view.hovered_daemon_link().is_none());
             assert!(!view.terminal_link_hovered(continuation, Modifiers::default()));
