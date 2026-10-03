@@ -377,32 +377,6 @@ impl HerdrWindow {
     }
 }
 
-#[cfg(test)]
-fn checkout_input(
-    response: &serde_json::Value,
-    id: &str,
-    worktree: Option<&ClientShellWorktree>,
-    branch: Option<&str>,
-) -> crate::Result<Input> {
-    let result = &response["result"];
-    let workspace = &result["workspace"];
-    let tree = &workspace["worktree"];
-    let mut input = repository_input(worktree, branch)?;
-    if response.get("error").is_some()
-        || result["type"] != "workspace_info"
-        || workspace["workspace_id"] != id
-        || tree["repo_key"] != input.repo_key
-    {
-        return Err(crate::Error::WorkspaceCheckoutChanged);
-    }
-    let checkout = tree["checkout_path"]
-        .as_str()
-        .filter(|s| std::path::Path::new(s).is_absolute())
-        .ok_or(crate::Error::PrAbsolutePath)?;
-    input.checkout = Some(checkout.into());
-    Ok(input)
-}
-
 fn workspace_pr_inputs<'a>(
     snapshot: &'a ClientShellSnapshot,
     open: Option<&'a str>,
@@ -428,7 +402,7 @@ fn workspace_pr_inputs<'a>(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::{checkout_input, repository_input};
+    use super::repository_input;
     use herdr_client::protocol::ClientShellWorktree;
 
     #[test]
@@ -644,9 +618,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     #[ignore = "requires explicit HERDR_TEST_PR_SOCKET/REPO_KEY/BRANCH; HERDR_TEST_PR_GITHUB=1 additionally uses existing sign-in"]
     fn live_local_pr_lookup() {
-        use herdr_client::{
-            ClientEvent, ConnectOptions, ConnectTarget, Method, connect_with_connector,
-        };
+        use herdr_client::{ClientEvent, ConnectOptions, ConnectTarget, connect_with_connector};
         use std::{
             env,
             path::PathBuf,
@@ -673,19 +645,12 @@ mod tests {
         )
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(20);
-        let mut supports_workspace_get = false;
         let snapshot = loop {
             let event = client
                 .events
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                 .expect("snapshot deadline");
             match event {
-                ClientEvent::Connected(welcome) => {
-                    supports_workspace_get = welcome
-                        .methods
-                        .iter()
-                        .any(|method| method == Method::WorkspaceGet.as_str())
-                }
                 ClientEvent::Snapshot(snapshot) => break snapshot,
                 ClientEvent::Disconnected { reason } => panic!("local connection failed: {reason}"),
                 _ => {}
@@ -702,45 +667,9 @@ mod tests {
                         .is_some_and(|tree| tree.key == repo_key)
             })
             .expect("requested repository/branch not present in daemon snapshot");
-        let input = if supports_workspace_get {
-            let id = client
-                .handle
-                .request(
-                    &snapshot.boot_id,
-                    Method::WorkspaceGet,
-                    serde_json::json!({"workspace_id":workspace.workspace_id}),
-                )
-                .unwrap();
-            let response = loop {
-                let event = client
-                    .events
-                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                    .expect("workspace response deadline");
-                match event {
-                    ClientEvent::Response {
-                        request_id,
-                        response,
-                    } if request_id == id => break response,
-                    ClientEvent::Disconnected { reason } => {
-                        panic!("read-only workspace request failed: {reason}");
-                    }
-                    ClientEvent::CommandRejected { reason, .. } => {
-                        panic!("read-only workspace request failed: {reason}");
-                    }
-                    _ => {}
-                }
-            };
-            checkout_input(
-                &response,
-                &workspace.workspace_id,
-                workspace.worktree.as_ref(),
-                workspace.branch.as_deref(),
-            )
-            .unwrap()
-        } else {
-            eprintln!("Using validated Git worktree registry for older daemon.");
-            repository_input(workspace.worktree.as_ref(), workspace.branch.as_deref()).unwrap()
-        };
+        // The checkout comes from Git's worktree registry, never the daemon.
+        let input =
+            repository_input(workspace.worktree.as_ref(), workspace.branch.as_deref()).unwrap();
         client.handle.disconnect();
         crate::pull_request::local_repository(
             &input,
@@ -789,38 +718,40 @@ mod tests {
     }
 
     #[test]
-    fn checkout_response_requires_authoritative_identity_and_absolute_path() {
-        let root = std::env::temp_dir();
-        let repo_key = root.join("repo/.git").to_str().unwrap().to_owned();
-        let checkout = root.join("worktree").to_str().unwrap().to_owned();
+    fn snapshot_metadata_is_the_lookup_key_and_leaves_checkout_to_git() {
+        let repo_key = std::env::temp_dir()
+            .join("repo/.git")
+            .to_str()
+            .unwrap()
+            .to_owned();
         let tree = ClientShellWorktree {
             key: repo_key.clone(),
             label: "repo".into(),
             is_linked_worktree: true,
         };
-        let response = serde_json::json!({"result":{"type":"workspace_info", "workspace":{
-            "workspace_id":"w", "worktree":{"repo_key":repo_key, "checkout_path":checkout}
-        }}});
-        let input = checkout_input(&response, "w", Some(&tree), Some("feature")).unwrap();
-        assert_eq!(input.checkout.as_deref(), Some(checkout.as_str()));
+        let input = repository_input(Some(&tree), Some("feature")).unwrap();
+        // No daemon request supplies a path; the worker resolves it from the
+        // repository's own worktree registry.
+        assert!(input.checkout.is_none());
         assert_eq!(input.repo_key, repo_key);
         assert_eq!(input.branch, "feature");
-        let fallback = repository_input(Some(&tree), Some("feature")).unwrap();
-        assert!(fallback.checkout.is_none());
-        assert_eq!(fallback.repo_key, input.repo_key);
-        assert_eq!(fallback.branch, input.branch);
-        assert!(checkout_input(&response, "wrong", Some(&tree), Some("feature")).is_err());
+        assert!(matches!(
+            repository_input(None, Some("feature")),
+            Err(crate::Error::PrMetadata)
+        ));
         for branch in [None, Some(""), Some("bad\nbranch")] {
-            assert!(checkout_input(&response, "w", Some(&tree), branch).is_err());
+            assert!(matches!(
+                repository_input(Some(&tree), branch),
+                Err(crate::Error::PrBranch)
+            ));
         }
-        let mut bad = response.clone();
-        bad["result"]["workspace"]["worktree"]["checkout_path"] = "relative".into();
-        assert!(checkout_input(&bad, "w", Some(&tree), Some("feature")).is_err());
-        let mut bad = response.clone();
-        bad["result"]["workspace"]["worktree"]["repo_key"] = "/other/.git".into();
-        assert!(checkout_input(&bad, "w", Some(&tree), Some("feature")).is_err());
-        let mut bad = response;
-        bad["error"] = serde_json::json!({"code":"unsupported"});
-        assert!(checkout_input(&bad, "w", Some(&tree), Some("feature")).is_err());
+        let relative = ClientShellWorktree {
+            key: "repo/.git".into(),
+            ..tree
+        };
+        assert!(matches!(
+            repository_input(Some(&relative), Some("feature")),
+            Err(crate::Error::PrAbsolutePath)
+        ));
     }
 }

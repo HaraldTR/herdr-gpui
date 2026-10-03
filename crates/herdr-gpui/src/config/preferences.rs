@@ -5,6 +5,7 @@ use herdr_client::protocol::ToastHerdrPosition;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Preference {
     ConfirmClose(bool),
+    ShowSystemLoad(bool),
     NotificationEnabled(Option<bool>),
     NotificationDelay(Option<u64>),
     NotificationPosition(Option<ToastHerdrPosition>),
@@ -29,6 +30,7 @@ impl Config {
             let mut document = text.parse::<toml_edit::DocumentMut>()?;
             let (table, key, value) = match edit {
                 Preference::ConfirmClose(value) => (None, "confirm_close_tab", Some(value.into())),
+                Preference::ShowSystemLoad(value) => (None, "show_system_load", Some(value.into())),
                 Preference::NotificationEnabled(value) => {
                     (Some("notifications"), "enabled", value.map(Into::into))
                 }
@@ -130,6 +132,7 @@ mod tests {
         )?;
         for edit in [
             Preference::ConfirmClose(false),
+            Preference::ShowSystemLoad(false),
             Preference::NotificationEnabled(Some(true)),
             Preference::NotificationDelay(Some(3600)),
             Preference::NotificationPosition(Some(ToastHerdrPosition::TopLeft)),
@@ -147,6 +150,7 @@ mod tests {
         assert_eq!(table["future"].as_str(), Some("keep"));
         assert_eq!(table["notifications"]["future"].as_integer(), Some(42));
         assert_eq!(table["confirm_close_tab"].as_bool(), Some(false));
+        assert_eq!(table["show_system_load"].as_bool(), Some(false));
         assert_eq!(table["layout"]["mode"].as_str(), Some("orca"));
         assert_eq!(table["layout"]["sidebar_gap"].as_float(), Some(7.5));
         assert_eq!(

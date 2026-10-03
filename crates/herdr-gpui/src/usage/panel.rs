@@ -25,7 +25,14 @@ impl HerdrWindow {
         }
     }
 
-    /// Left and right step through the tabs, as the pointer does.
+    /// Shows `provider` in the panel and leads the status bar with it.
+    fn choose_usage(&mut self, provider: Provider) {
+        self.menu.page = Some(Page::Usage(provider));
+        self.usage.choose(provider);
+    }
+
+    /// Left and right step through the tabs, as the pointer does, so the
+    /// status bar follows the keyboard too.
     pub(crate) fn usage_key(
         &mut self,
         provider: Provider,
@@ -52,7 +59,7 @@ impl HerdrWindow {
             "right" => (index + 1) % count,
             _ => return false,
         };
-        self.menu.page = Some(Page::Usage(providers[next]));
+        self.choose_usage(providers[next]);
         cx.notify();
         true
     }
@@ -267,7 +274,7 @@ impl HerdrWindow {
                     .child(div().max_w_full().truncate().child(provider.name()))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        this.menu.page = Some(Page::Usage(provider));
+                        this.choose_usage(provider);
                         cx.notify();
                     }))
             }))
