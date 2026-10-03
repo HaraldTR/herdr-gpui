@@ -25,6 +25,8 @@ const REGISTRY_LIMIT: usize = 64;
 /// Two windows attached to the same host receive the same event. The second
 /// window's copy within this interval is a duplicate, not a new event.
 const DUPLICATE_WINDOW: Duration = Duration::from_secs(2);
+/// Long enough to switch to another app before the QA preview arrives.
+const PREVIEW_DELAY: Duration = Duration::from_secs(3);
 
 struct Posted {
     tag: SharedString,
@@ -107,53 +109,135 @@ impl HerdrWindow {
     pub(crate) fn post_system_notifications(&mut self, window: &Window, cx: &mut Context<Self>) {
         let posts =
             crate::notifications::take_system(&mut self.endpoints, self.config.notifications);
-        if posts.is_empty() || !cx.has_global::<Registry>() {
+        if posts.is_empty() {
             return;
         }
         let Some(handle) = window.window_handle().downcast::<HerdrWindow>() else {
             return;
         };
         let now = Instant::now();
-        // Windows needs an AppUserModelID to show toasts, and setting one
-        // changes taskbar grouping, so only users of system delivery get it.
-        if !cx.global::<Registry>().identity {
-            cx.set_app_identity(crate::constants::APP_ID, crate::constants::WINDOW_TITLE);
-            cx.global_mut::<Registry>().identity = true;
+        for post in posts {
+            if cx
+                .try_global::<Registry>()
+                .is_some_and(|registry| registry.duplicate(&post.tag, handle, now))
+            {
+                continue;
+            }
+            self.show_system_notification(handle, post, now, cx);
         }
-        let labelled = self.endpoints.len() > 1;
-        for SystemPost {
+    }
+
+    /// Hands one notice to the OS and records where its click goes. A no-op
+    /// without the registry, which only normal launches install.
+    fn show_system_notification(
+        &self,
+        handle: WindowHandle<HerdrWindow>,
+        post: SystemPost,
+        now: Instant,
+        cx: &mut Context<Self>,
+    ) {
+        let SystemPost {
             endpoint,
             id,
             tag,
             title,
             body: text,
-        } in posts
-        {
-            let Some(source) = self.endpoints.get(endpoint) else {
-                continue;
-            };
-            let tag = SharedString::from(tag);
-            if cx.global::<Registry>().duplicate(&tag, handle, now) {
-                continue;
-            }
-            let label = labelled.then(|| crate::notifications::safe_text(&source.label, 80));
-            let notification = SystemNotification {
-                tag: tag.clone(),
-                title: title.into(),
-                body: body(label.as_deref(), text.as_deref()),
-                actions: Vec::new(),
-            };
-            cx.global_mut::<Registry>().record(Posted {
-                tag,
-                window: handle,
-                endpoint: source.id.clone(),
-                generation: source.generation,
-                inbox: std::sync::Arc::downgrade(&source.connection.inbox),
-                id,
-                at: now,
-            });
-            cx.show_system_notification(notification);
+        } = post;
+        let Some(source) = self.endpoints.get(endpoint) else {
+            return;
+        };
+        let Some(registry) = cx.try_global::<Registry>() else {
+            return;
+        };
+        // Windows needs an AppUserModelID to show toasts, and setting one
+        // changes taskbar grouping, so only users of system delivery get it.
+        if !registry.identity {
+            cx.set_app_identity(crate::constants::APP_ID, crate::constants::WINDOW_TITLE);
+            cx.global_mut::<Registry>().identity = true;
         }
+        let label =
+            (self.endpoints.len() > 1).then(|| crate::notifications::safe_text(&source.label, 80));
+        let tag = SharedString::from(tag);
+        let notification = SystemNotification {
+            tag: tag.clone(),
+            title: title.into(),
+            body: body(label.as_deref(), text.as_deref()),
+            actions: Vec::new(),
+        };
+        cx.global_mut::<Registry>().record(Posted {
+            tag,
+            window: handle,
+            endpoint: source.id.clone(),
+            generation: source.generation,
+            inbox: std::sync::Arc::downgrade(&source.connection.inbox),
+            id,
+            at: now,
+        });
+        cx.show_system_notification(notification);
+    }
+
+    /// QA: after a delay long enough to switch away, posts a NeedsAttention
+    /// preview for the selected host's focused pane, whatever the delivery
+    /// setting, so the banner and its click can be checked by hand.
+    pub(crate) fn show_system_notification_preview(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(handle) = window.window_handle().downcast::<HerdrWindow>() else {
+            return;
+        };
+        let timer = cx.background_executor().timer(PREVIEW_DELAY);
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |view, cx| {
+                view.post_system_notification_preview(handle, cx)
+            });
+        })
+        .detach();
+    }
+
+    fn post_system_notification_preview(
+        &mut self,
+        handle: WindowHandle<HerdrWindow>,
+        cx: &mut Context<Self>,
+    ) {
+        let index = self.selected_endpoint;
+        let snapshot = self.endpoints[index].live.snapshot.clone();
+        let mut notice = crate::notifications::Notice::new(
+            herdr_client::protocol::SemanticNotification {
+                kind: herdr_client::protocol::SemanticNotificationKind::NeedsAttention,
+                title: "Needs attention".into(),
+                body: Some("QA preview: an agent is waiting for your input.".into()),
+                sound: None,
+                agent: None,
+                workspace_id: snapshot
+                    .as_ref()
+                    .and_then(|s| s.focused_workspace_id.clone()),
+                tab_id: snapshot.as_ref().and_then(|s| s.focused_tab_id.clone()),
+                pane_id: snapshot.as_ref().and_then(|s| s.focused_pane_id.clone()),
+                position: None,
+            },
+            Instant::now(),
+        )
+        .with_snapshot(snapshot.as_deref())
+        .preview();
+        // Retained like a real post, so a click resolves through the same path.
+        notice.posted = true;
+        let post = SystemPost {
+            endpoint: index,
+            id: 0,
+            tag: format!("herdr-preview:{}", self.endpoints[index].id),
+            title: notice.title.clone(),
+            body: notice.body.clone(),
+        };
+        let toasts = &mut self.endpoints[index].toasts;
+        toasts.receive([notice]);
+        let Some((id, _)) = toasts.entries.back() else {
+            return;
+        };
+        let post = SystemPost { id: *id, ..post };
+        self.show_system_notification(handle, post, Instant::now(), cx);
     }
 
     /// A click brings this window forward, then navigates like a toast click
@@ -187,7 +271,40 @@ impl HerdrWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::body;
+    use super::{PREVIEW_DELAY, body};
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    #[allow(clippy::unwrap_used)]
+    fn qa_preview_posts_for_the_focused_pane_after_the_delay(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        cx.update(|_, cx| super::install(cx));
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| window.focus(&view.focus, cx));
+            window.draw(cx).clear(cx);
+            window.dispatch_action(Box::new(crate::actions::ShowSystemNotificationPreview), cx);
+        });
+        cx.run_until_parked();
+        // Delivery is off in the fixture: the preview ignores it, but waits.
+        assert!(cx.shown_system_notifications().is_empty());
+        cx.executor().advance_clock(PREVIEW_DELAY);
+        cx.run_until_parked();
+        let shown = cx.shown_system_notifications();
+        let [shown] = shown.as_slice() else {
+            panic!("expected one notification: {shown:?}");
+        };
+        assert_eq!(shown.tag, "herdr-preview:local");
+        assert_eq!(shown.title, "Needs attention");
+        assert!(shown.body.starts_with("QA preview"));
+        view.read_with(cx, |view, _| {
+            let (_, notice) = view.endpoints[0].toasts.entries.back().unwrap();
+            assert!(notice.posted && !notice.visible);
+            assert_eq!(
+                notice.pane_id,
+                view.live.snapshot.as_ref().unwrap().focused_pane_id
+            );
+        });
+    }
 
     #[test]
     fn host_label_leads_the_body_only_when_given() {

@@ -500,6 +500,11 @@ impl Render for HerdrWindow {
             .on_action(cx.listener(|this, action: &ShowToastPreview, _, cx| {
                 this.show_toast_preview(action.kind, cx);
             }))
+            .on_action(cx.listener(
+                |this, _: &crate::actions::ShowSystemNotificationPreview, window, cx| {
+                    this.show_system_notification_preview(window, cx);
+                },
+            ))
             .on_action(cx.listener(|this, _: &PlaySound, _, _| {
                 this.sound.preview();
             }))

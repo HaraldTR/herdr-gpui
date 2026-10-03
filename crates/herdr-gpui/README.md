@@ -97,6 +97,12 @@ when available, so clicking them tests normal navigation; other previews are ine
 Creating previews does not contact the daemon or updater. Close any in-app
 panel first: toasts remain hidden while a panel is open.
 
+**Send notification in 3 seconds** waits long enough to switch to another app,
+then posts a real OS notification (see [System notifications](#system-notifications))
+for the selected host's focused pane, whatever the delivery setting. Clicking it
+tests the normal focus and navigation path. On macOS it needs the `just run`
+bundle, and the first one asks for notification permission.
+
 Spaces lists Local first, then saved hosts in the upstream catalog's order.
 Enabled hosts connect in the background with inactive terminal surfaces; disabled
 hosts remain visible. Host and repository collapse state is endpoint-scoped, and
