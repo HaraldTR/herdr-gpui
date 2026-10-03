@@ -185,6 +185,8 @@ fn connected_endpoint(id: &str) -> (Endpoint, Server) {
             Method::WorkspaceFocus,
             Method::PaneFocusDirection,
             Method::PaneZoom,
+            Method::PaneResize,
+            Method::PaneSwap,
             Method::PaneClear,
             Method::PaneClose,
             Method::TabClose,
@@ -3291,6 +3293,8 @@ fn every_focus_changing_command_fences_immediate_input_until_ack_and_surface(
         (Command::NextPane, Method::PaneFocus),
         (Command::PreviousPane, Method::PaneFocus),
         (Command::Zoom, Method::PaneZoom),
+        (Command::ResizeLeft, Method::PaneResize),
+        (Command::SwapRight, Method::PaneSwap),
         (Command::ClearPane, Method::PaneClear),
         (Command::ClosePane, Method::PaneClose),
         (Command::CloseTab, Method::TabClose),
@@ -4103,6 +4107,76 @@ fn input_held_across_gap_is_bounded_and_dropped_on_reset(cx: &mut gpui::TestAppC
         view.reset_selected();
         assert_eq!(view.pending_input.len(), 0);
     });
+}
+
+/// The daemon's custom command shortcuts and Herdr's resize mode answer
+/// typed keys with endpoint requests: a custom command's chord invokes it by
+/// ID on the focused target, and resize mode turns `h` into a resize.
+#[gpui::test]
+fn custom_command_and_resize_mode_keys_send_endpoint_requests(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let press = |key: &str, cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, cx| window.dispatch_keystroke(gpui::Keystroke::parse(key).unwrap(), cx));
+    };
+    for resize in [false, true] {
+        let (endpoint, mut server) = connected_endpoint("ssh:fixture");
+        cx.update(|_, cx| {
+            view.update(cx, |view, _| {
+                view.endpoints.truncate(1);
+                view.endpoints.push(endpoint);
+                view.selected_endpoint = 1;
+                view.options = ConnectOptions::default();
+                view.reset_selected();
+                view.activation_deadline = None;
+                // The fixture's `prefix+x` is Close Pane's chord, which wins.
+                let relabel = |snapshot: &mut Arc<ClientShellSnapshot>| {
+                    Arc::make_mut(snapshot).commands[0].binding_labels = vec!["prefix+y".into()];
+                };
+                relabel(view.live.snapshot.as_mut().unwrap());
+                let mut inbox = view.endpoints[1].connection.inbox.lock().unwrap();
+                relabel(inbox.snapshot.as_mut().unwrap());
+                drop(inbox);
+                assert!(view.input_ready());
+            })
+        });
+        let keys: &[&str] = if resize {
+            &["ctrl-b", "r", "h"]
+        } else {
+            &["ctrl-b", "y"]
+        };
+        for key in keys {
+            press(key, cx);
+        }
+        let ClientMessage::ClientShellEndpointRequest { request, .. } = server.receive() else {
+            panic!("missing command");
+        };
+        let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        let focused = snapshot();
+        if resize {
+            assert_eq!(request["method"], Method::PaneResize.as_str());
+            assert_eq!(
+                request["params"],
+                serde_json::json!({"pane_id": focused.focused_pane_id, "direction": "left"})
+            );
+            assert!(view.read_with(cx, |view, _| view.resize_mode));
+            press("escape", cx);
+            assert!(view.read_with(cx, |view, _| !view.resize_mode));
+        } else {
+            assert_eq!(request["method"], Method::CommandInvoke.as_str());
+            assert_eq!(
+                request["params"],
+                serde_json::json!({
+                    "command_id": "command-v1",
+                    "workspace_id": focused.focused_workspace_id,
+                    "tab_id": focused.focused_tab_id,
+                    "pane_id": focused.focused_pane_id,
+                })
+            );
+        }
+    }
 }
 
 #[gpui::test]

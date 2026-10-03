@@ -354,13 +354,7 @@ impl HerdrWindow {
         let target = self.live.snapshot.as_ref().map(|snapshot| {
             if !workspaces_only {
                 entries.extend(snapshot.commands.iter().map(|command| {
-                    let mut bindings = command.binding_labels.clone();
-                    if !command.binding_label.is_empty()
-                        && !bindings.contains(&command.binding_label)
-                    {
-                        bindings.push(command.binding_label.clone());
-                    }
-                    bindings.retain(|binding| !binding.is_empty());
+                    let bindings = self.keymap().custom_labels(command);
                     Entry {
                         label: command
                             .description
@@ -368,14 +362,7 @@ impl HerdrWindow {
                             .filter(|s| !s.trim().is_empty())
                             .unwrap_or(&command.command_id)
                             .clone(),
-                        detail: if bindings.is_empty() {
-                            String::new()
-                        } else {
-                            format!(
-                                "Daemon bindings: {} (not GUI shortcuts)",
-                                bindings.join(", ")
-                            )
-                        },
+                        detail: bindings.join(", "),
                         badge: "Herdr command",
                         action: Action::Configured(command.command_id.clone(), command.action),
                         parent: None,
@@ -481,6 +468,39 @@ impl HerdrWindow {
         }
     }
 
+    /// Runs a daemon custom command on the focused workspace, tab, and pane,
+    /// as choosing it in the palette does; a shortcut has no palette to
+    /// report a refusal in, so it reads as a local error instead.
+    pub(crate) fn invoke_custom_command(
+        &mut self,
+        id: &str,
+        action: ClientShellCommandAction,
+        cx: &mut Context<Self>,
+    ) {
+        if self.activation_deadline.is_some()
+            || !self.endpoints[self.selected_endpoint].surface_requested()
+        {
+            return;
+        }
+        let result = (|| {
+            if !self.input_ready() {
+                return Err(Error::PaletteConnectionNotReady);
+            }
+            let snapshot = self.live.snapshot.as_ref().ok_or(Error::NoSnapshot)?;
+            Target::capture(snapshot).invocation(snapshot, id, action)
+        })();
+        match result {
+            Ok(params) => {
+                self.request_focus_change(Method::CommandInvoke.as_str(), None, |handle, boot| {
+                    handle.request(boot, Method::CommandInvoke, params)
+                });
+                self.marked.clear();
+            }
+            Err(error) => self.local_error = Some(error.to_string()),
+        }
+        cx.notify();
+    }
+
     /// Checks a Go To destination against its host's current snapshot, and
     /// reports whether that host is the selected one. Another host is selected
     /// by the navigation itself, which waits for its surface when needed.
@@ -518,6 +538,17 @@ impl HerdrWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Herdr's navigate-mode keys move a Go To list as its arrows do.
+        let step = match event.keystroke.key.as_str() {
+            "up" => Some(true),
+            "down" => Some(false),
+            _ => self
+                .menu
+                .palette
+                .as_ref()
+                .filter(|palette| palette.workspaces_only)
+                .and_then(|_| self.keymap().navigates_workspace(&event.keystroke)),
+        };
         let Some(palette) = &mut self.menu.palette else {
             return;
         };
@@ -530,17 +561,12 @@ impl HerdrWindow {
                 window.prevent_default();
                 self.dismiss_menu(window, cx);
             }
-            "up" | "down" if !palette.filtered.is_empty() => {
+            _ if !palette.filtered.is_empty() && step.is_some() => {
+                let up = step == Some(true);
                 cx.stop_propagation();
                 window.prevent_default();
                 let count = palette.filtered.len();
-                palette.selected = (palette.selected
-                    + if event.keystroke.key == "up" {
-                        count - 1
-                    } else {
-                        1
-                    })
-                    % count;
+                palette.selected = (palette.selected + if up { count - 1 } else { 1 }) % count;
                 palette
                     .scroll
                     .scroll_to_item(palette.selected, ScrollStrategy::Center);

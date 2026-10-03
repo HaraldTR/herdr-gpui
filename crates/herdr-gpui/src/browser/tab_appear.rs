@@ -44,6 +44,9 @@ struct Strip {
 #[derive(Default)]
 pub(crate) struct TabAppear {
     strips: HashMap<GroupId, Strip>,
+    /// Set by `hold`: motions that start from then on start held too.
+    #[cfg(test)]
+    held: bool,
 }
 
 impl TabAppear {
@@ -51,6 +54,10 @@ impl TabAppear {
     /// strip is seen its tabs are taken as they are; after that, a new tab
     /// grows in and a missing one shrinks out where it stood.
     pub(crate) fn observe(&mut self, group: GroupId, tabs: Vec<Listed>, now: Instant) {
+        #[cfg(test)]
+        let start = if self.held { held_start() } else { now };
+        #[cfg(not(test))]
+        let start = now;
         let Some(strip) = self.strips.get_mut(&group) else {
             self.strips.insert(
                 group,
@@ -63,7 +70,7 @@ impl TabAppear {
         };
         for tab in &tabs {
             if !strip.tabs.iter().any(|old| old.pick == tab.pick) {
-                strip.growing.insert(tab.pick.clone(), now);
+                strip.growing.insert(tab.pick.clone(), start);
                 // A tab that comes back is no longer leaving.
                 strip.leaving.retain(|leaving| leaving.pick != tab.pick);
             }
@@ -75,7 +82,7 @@ impl TabAppear {
                     label: old.label.clone(),
                     index,
                     width: old.width,
-                    since: now,
+                    since: start,
                 });
             }
         }
@@ -115,11 +122,14 @@ impl TabAppear {
         self.strips.retain(|group, _| live(*group));
     }
 
-    /// Holds every moving tab where it started, for tests whose frames are
-    /// too slow to catch one mid-way.
+    /// Holds every moving tab where it started, and every one that starts
+    /// later, for tests whose frames are too slow to catch one mid-way.
+    /// Holding a motion only once it has begun would race the frame that
+    /// begins it: on a slow machine that frame can outlast the motion.
     #[cfg(test)]
     pub(crate) fn hold(&mut self) {
-        let later = Instant::now() + std::time::Duration::from_secs(3600);
+        self.held = true;
+        let later = held_start();
         for strip in self.strips.values_mut() {
             for since in strip.growing.values_mut() {
                 *since = later;
@@ -129,6 +139,12 @@ impl TabAppear {
             }
         }
     }
+}
+
+/// When a held motion starts: far enough ahead that it never moves.
+#[cfg(test)]
+fn held_start() -> Instant {
+    Instant::now() + std::time::Duration::from_secs(3600)
 }
 
 #[cfg(test)]

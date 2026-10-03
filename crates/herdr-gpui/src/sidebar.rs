@@ -7,6 +7,7 @@ mod hover;
 mod layout;
 mod layouts;
 mod metrics;
+mod order;
 pub(crate) mod preview;
 mod rail;
 mod render;
@@ -35,6 +36,8 @@ pub(crate) use {
     view::SidebarView,
     workspaces::workspace_label,
 };
+
+pub(crate) use order::step as sidebar_step;
 
 #[cfg(any(test, feature = "integration-test"))]
 pub(crate) use metrics::LABEL_WIDTH;

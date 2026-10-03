@@ -2,7 +2,9 @@
 //! `controls::COMMANDS`, then the daemon config's `[keys]` table (prefix
 //! chords included), with the GUI config file's `[keybindings]` table layered
 //! on top. The palette, keybindings page, menu bar, GPUI keymap, and prefix
-//! mode all read this one resolved answer.
+//! mode all read this one resolved answer. The daemon's `[[keys.command]]`
+//! shortcuts arrive with each snapshot instead, so they are matched against
+//! this answer when typed rather than resolved into it.
 
 mod daemon;
 
@@ -14,6 +16,7 @@ use crate::{
 };
 use daemon::Trigger;
 use gpui::{KeybindingKeystroke, Keystroke, Modifiers};
+use herdr_client::protocol::ClientShellCommand;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -77,6 +80,9 @@ pub struct Keymap {
     /// The keystrokes that start a chord, less any nothing can use. The
     /// first one is the prefix shown to the user.
     prefixes: Vec<Keystroke>,
+    /// Keys that move the workspace picker's selection up and down.
+    navigate_up: Vec<Keystroke>,
+    navigate_down: Vec<Keystroke>,
 }
 
 impl Default for Keymap {
@@ -203,6 +209,8 @@ impl Keymap {
         Self {
             shortcuts,
             prefixes,
+            navigate_up: keys.navigate_up.clone(),
+            navigate_down: keys.navigate_down.clone(),
         }
     }
 
@@ -264,6 +272,116 @@ impl Keymap {
             })
             .map(|(info, _)| info.command)
     }
+
+    /// Whether `typed`, alone or after the prefix as `prefixed` says, is one
+    /// of `command`'s shortcuts.
+    pub(crate) fn triggers(&self, command: Command, typed: &Keystroke, prefixed: bool) -> bool {
+        COMMANDS
+            .iter()
+            .position(|info| info.command == command)
+            .and_then(|index| self.shortcuts.get(index))
+            .into_iter()
+            .flatten()
+            .any(|shortcut| match (&shortcut.chord, prefixed) {
+                (Some(chord), true) => typed_matches(typed, chord),
+                (None, false) => Keystroke::parse(&shortcut.label)
+                    .is_ok_and(|bound| typed_matches(typed, &bound)),
+                _ => false,
+            })
+    }
+
+    /// Whether `typed` moves the workspace picker's selection: `Some(true)`
+    /// up, `Some(false)` down. A bare character would be typing into its
+    /// search field instead, and the picker keeps Escape, Enter, and Tab, so
+    /// only other keys that cannot be text count.
+    pub(crate) fn navigates_workspace(&self, typed: &Keystroke) -> Option<bool> {
+        let text_safe = |bound: &&Keystroke| {
+            has_modifier(bound)
+                || (bound.key.chars().nth(1).is_some()
+                    && !matches!(bound.key.as_str(), "escape" | "enter" | "tab"))
+        };
+        let matches = |keys: &[Keystroke]| {
+            keys.iter()
+                .filter(text_safe)
+                .any(|bound| typed_matches(typed, bound))
+        };
+        if matches(&self.navigate_up) {
+            Some(true)
+        } else if matches(&self.navigate_down) {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// The daemon custom command `typed` runs, alone or after the prefix as
+    /// `prefixed` says.
+    pub(crate) fn custom_command<'a>(
+        &self,
+        commands: &'a [ClientShellCommand],
+        typed: &Keystroke,
+        prefixed: bool,
+    ) -> Option<&'a ClientShellCommand> {
+        // Matching first keeps ordinary typing from checking every trigger
+        // against the whole keymap.
+        commands.iter().find(|command| {
+            custom_triggers(command)
+                .filter(|trigger| match trigger {
+                    Trigger::Prefixed(bound) => prefixed && typed_matches(typed, bound),
+                    Trigger::Direct(bound) => !prefixed && typed_matches(typed, bound),
+                })
+                .any(|trigger| self.runs_custom(&trigger))
+        })
+    }
+
+    /// A daemon custom command's shortcuts as this keymap shows them.
+    pub(crate) fn custom_labels(&self, command: &ClientShellCommand) -> Vec<String> {
+        let mut labels: Vec<String> = custom_triggers(command)
+            .filter(|trigger| self.runs_custom(trigger))
+            .filter_map(|trigger| match trigger {
+                Trigger::Direct(bound) => Some(bound.unparse()),
+                Trigger::Prefixed(bound) => self
+                    .prefixes
+                    .first()
+                    .map(|prefix| format!("{} {}", prefix.unparse(), bound.unparse())),
+            })
+            .collect();
+        labels.dedup();
+        labels
+    }
+
+    /// Whether a custom command's trigger can run it here. Herdr resolves
+    /// its own actions before custom commands, so a keystroke this keymap
+    /// already binds, or the prefix itself, never reaches one, and a direct
+    /// keystroke needs a modifier so typing still reaches the terminal.
+    fn runs_custom(&self, trigger: &Trigger) -> bool {
+        match trigger {
+            // Any prefix typed after a prefix passes it through instead.
+            Trigger::Prefixed(bound) => {
+                !self.prefixes.is_empty() && !self.is_prefix(bound) && self.chord(bound).is_none()
+            }
+            Trigger::Direct(bound) => {
+                has_modifier(bound)
+                    && !self.is_prefix(bound)
+                    && !self.bindings().any(|(_, label)| {
+                        Keystroke::parse(label)
+                            .is_ok_and(|label| identity(&label) == identity(bound))
+                    })
+            }
+        }
+    }
+}
+
+/// The triggers a custom command's daemon labels spell, as Herdr writes
+/// them (`prefix+g`, `ctrl+alt+g`). `binding_label` is only for display: it
+/// drops the `prefix+` that tells a chord from a direct keystroke.
+fn custom_triggers(command: &ClientShellCommand) -> impl Iterator<Item = Trigger> + '_ {
+    command
+        .binding_labels
+        .iter()
+        .take(MAX_KEYSTROKES)
+        .flat_map(|label| daemon::triggers(label))
+        .map(|(_, trigger)| trigger)
 }
 
 /// GPUI's own matching, so a shifted symbol such as `?` matches however the
@@ -330,6 +448,8 @@ mod tests {
         DaemonKeys {
             prefixes: vec![keystroke("ctrl-b")],
             bindings: Vec::new(),
+            navigate_up: Vec::new(),
+            navigate_down: Vec::new(),
         }
     }
 
@@ -479,6 +599,7 @@ mod tests {
                 (Command::Tab, Trigger::Direct(keystroke("alt-t"))),
                 (Command::SplitRight, Trigger::Prefixed(keystroke("v"))),
             ],
+            ..no_keys()
         };
         let keymap =
             Keymap::with_overrides(&overrides(&[("new_tab", one("cmd-y"))]), &keys).unwrap();
@@ -512,6 +633,7 @@ mod tests {
                 // The prefix typed twice passes it through instead.
                 (Command::PreviousTab, Trigger::Prefixed(keystroke("ctrl-a"))),
             ],
+            ..no_keys()
         };
         let keymap = Keymap::with_overrides(&overrides(&[("about", one("cmd-e"))]), &keys).unwrap();
         // Daemon keystrokes read in GPUI's platform spelling (`super-d` on Linux).
@@ -538,6 +660,7 @@ mod tests {
         let keys = |prefix| DaemonKeys {
             prefixes: vec![keystroke(prefix)],
             bindings: vec![(Command::Tab, Trigger::Prefixed(keystroke("c")))],
+            ..no_keys()
         };
         // cmd-b is Toggle Sidebar's catalog default; the prefix takes it.
         let keymap = Keymap::with_overrides(&BTreeMap::new(), &keys("cmd-b")).unwrap();
@@ -562,6 +685,110 @@ mod tests {
         }
     }
 
+    fn custom(id: &str, labels: &[&str]) -> ClientShellCommand {
+        ClientShellCommand {
+            command_id: id.into(),
+            binding_label: labels.join(" / "),
+            binding_labels: labels.iter().map(|label| (*label).to_owned()).collect(),
+            action: herdr_client::protocol::ClientShellCommandAction::Shell,
+            description: None,
+        }
+    }
+
+    #[test]
+    fn custom_commands_bind_after_the_keymap() {
+        let keymap = Keymap::default();
+        let commands = [
+            custom("git", &["prefix+y", "ctrl+alt+g"]),
+            // Herdr's own chord for New Tab, which the keymap keeps.
+            custom("shadowed", &["prefix+c", "cmd+t"]),
+            // A bare key would swallow typing, and the prefix is the prefix.
+            custom("typing", &["u", "ctrl+b"]),
+            custom("legacy", &[]),
+        ];
+        let find = |typed: &str, prefixed: bool| {
+            keymap
+                .custom_command(&commands, &keystroke(typed), prefixed)
+                .map(|command| command.command_id.as_str())
+        };
+        assert_eq!(find("y", true), Some("git"));
+        assert_eq!(find("ctrl-alt-g", false), Some("git"));
+        assert_eq!(find("y", false), None);
+        // Herdr's `goto` holds the prefix and g.
+        assert_eq!(find("g", true), None);
+        assert_eq!(find("ctrl-alt-g", true), None);
+        assert_eq!(find("c", true), None);
+        assert_eq!(find("cmd-t", false), None);
+        assert_eq!(find("u", false), None);
+        assert_eq!(find("ctrl-b", false), None);
+        assert_eq!(
+            keymap.custom_labels(&commands[0]),
+            ["ctrl-b y", "ctrl-alt-g"]
+        );
+        assert!(keymap.custom_labels(&commands[2]).is_empty());
+        // `binding_label` drops `prefix+`, so it alone binds nothing.
+        let mut old = custom("old", &[]);
+        old.binding_label = "g".into();
+        assert!(keymap.custom_labels(&old).is_empty());
+        assert!(
+            keymap
+                .custom_command(&[old], &keystroke("g"), true)
+                .is_none()
+        );
+        // Without a usable prefix no chord can reach one.
+        let keys = DaemonKeys {
+            prefixes: vec![keystroke("a")],
+            ..no_keys()
+        };
+        let keymap = Keymap::with_overrides(&BTreeMap::new(), &keys).unwrap();
+        assert!(
+            keymap
+                .custom_command(&commands, &keystroke("y"), true)
+                .is_none()
+        );
+        assert_eq!(keymap.custom_labels(&commands[0]), ["ctrl-alt-g"]);
+    }
+
+    #[test]
+    fn triggers_tell_chords_from_direct_keystrokes() {
+        let keys = DaemonKeys {
+            bindings: vec![
+                (Command::ResizeMode, Trigger::Prefixed(keystroke("r"))),
+                (Command::ResizeMode, Trigger::Direct(keystroke("alt-r"))),
+            ],
+            ..no_keys()
+        };
+        let keymap = Keymap::with_overrides(&BTreeMap::new(), &keys).unwrap();
+        assert!(keymap.triggers(Command::ResizeMode, &keystroke("r"), true));
+        assert!(!keymap.triggers(Command::ResizeMode, &keystroke("r"), false));
+        assert!(keymap.triggers(Command::ResizeMode, &keystroke("alt-r"), false));
+        assert!(!keymap.triggers(Command::ResizeMode, &keystroke("alt-r"), true));
+        assert!(!keymap.triggers(Command::Zoom, &keystroke("r"), true));
+    }
+
+    #[test]
+    fn navigate_keys_never_take_typing_or_picker_keys() {
+        let keys = DaemonKeys {
+            navigate_up: ["k", "ctrl-p", "pageup", "enter"].map(keystroke).to_vec(),
+            navigate_down: vec![keystroke("ctrl-n")],
+            ..no_keys()
+        };
+        let keymap = Keymap::with_overrides(&BTreeMap::new(), &keys).unwrap();
+        assert_eq!(keymap.navigates_workspace(&keystroke("ctrl-p")), Some(true));
+        assert_eq!(keymap.navigates_workspace(&keystroke("pageup")), Some(true));
+        assert_eq!(
+            keymap.navigates_workspace(&keystroke("ctrl-n")),
+            Some(false)
+        );
+        for typed in ["k", "enter", "up"] {
+            assert_eq!(
+                keymap.navigates_workspace(&keystroke(typed)),
+                None,
+                "{typed}"
+            );
+        }
+    }
+
     #[test]
     fn every_prefix_arms_and_the_first_labels_chords() {
         let keys = DaemonKeys {
@@ -571,6 +798,7 @@ mod tests {
                 // Any prefix typed after a prefix passes it through instead.
                 (Command::NextTab, Trigger::Prefixed(keystroke("ctrl-s"))),
             ],
+            ..no_keys()
         };
         let keymap = Keymap::with_overrides(&BTreeMap::new(), &keys).unwrap();
         assert!(keymap.is_prefix(&keystroke("ctrl-space")));
@@ -590,6 +818,7 @@ mod tests {
         let keys = DaemonKeys {
             prefixes: vec![keystroke("ctrl-b"), keystroke("a"), keystroke("ctrl-s")],
             bindings: vec![(Command::Tab, Trigger::Prefixed(keystroke("c")))],
+            ..no_keys()
         };
         let keymap =
             Keymap::with_overrides(&overrides(&[("themes", one("ctrl-b"))]), &keys).unwrap();
