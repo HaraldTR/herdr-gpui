@@ -24,6 +24,12 @@ impl HerdrWindow {
                 return;
             }
             let _ = view.update(cx, |this, cx| {
+                if !matches!(
+                    event.keystroke.key.as_str(),
+                    "shift" | "shiftleft" | "shiftright"
+                ) {
+                    this.shift_taps.cancel();
+                }
                 this.prefix_keystroke(&event.keystroke, window, cx);
             });
         })

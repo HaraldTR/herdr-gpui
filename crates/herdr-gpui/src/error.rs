@@ -24,6 +24,22 @@ fn daemon_error_message(error: &serde_json::Value) -> &str {
 pub enum Error {
     #[error("Could not finish saving Settings: {0}")]
     SettingsSave(#[source] std::sync::Arc<Error>),
+    #[error("palette.project_roots must contain at most 16 nonempty paths of at most 8192 bytes")]
+    PaletteProjectRoots,
+    #[error("Project paths must be absolute UTF-8 paths without control characters")]
+    PaletteProjectPath,
+    #[error("Project path references an unset environment variable: {0}")]
+    PaletteProjectVariable(String),
+    #[error("Project discovery reached its directory limit; narrow palette.project_roots")]
+    PaletteProjectLimit,
+    #[error("Project directory is no longer available")]
+    PaletteProjectRemoved,
+    #[error("The local connection changed. Reopen the palette.")]
+    PaletteLocalChanged,
+    #[error("Unexpected workspace creation response. Review workspace state before retrying.")]
+    PaletteProjectResponse,
+    #[error("Workspace directories changed. Select the project again.")]
+    PaletteProjectStateChanged,
     #[error("Invalid saved window geometry or too many saved windows")]
     InvalidWindowState,
     #[error("Sound configuration exceeds 1 MiB")]

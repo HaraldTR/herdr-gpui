@@ -1,6 +1,8 @@
+mod accessibility;
 mod links;
 mod selection;
 pub(crate) mod splits;
+pub(crate) use accessibility::Transcript;
 pub(crate) use links::link_at;
 pub(crate) use selection::{MAX_SELECTION_BYTES, Selection};
 

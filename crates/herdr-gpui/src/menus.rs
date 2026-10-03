@@ -566,7 +566,7 @@ mod tests {
             cx.run_until_parked();
         };
 
-        // A released selection is already copied; the terminal only pastes.
+        // Without a highlighted selection, the terminal only pastes.
         cx.update(|window, cx| view.read(cx).focus.clone().focus(window, cx));
         assert_eq!(available(cx), ["Paste"]);
 

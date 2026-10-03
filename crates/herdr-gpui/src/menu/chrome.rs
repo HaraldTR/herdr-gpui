@@ -44,6 +44,7 @@ impl HerdrWindow {
     }
 
     pub(crate) fn open_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.shift_taps.cancel();
         self.finish_font_size_edit(true, cx);
         if !self.cancel_theme_preview(cx) {
             return false;
@@ -122,7 +123,7 @@ impl HerdrWindow {
             "increase font size",
             "decrease font size",
             "reset font size",
-            "commands",
+            "command palette",
             "workspaces",
             "reload GUI config",
             "app updates",
@@ -171,8 +172,8 @@ impl HerdrWindow {
                 self.set_terminal_font_size(size, cx);
                 self.dismiss_menu(window, cx);
             }
-            "commands" => self.open_palette(false, window, cx),
-            "workspaces" => self.open_palette(true, window, cx),
+            "command palette" => self.open_palette(crate::palette::Filter::All, window, cx),
+            "workspaces" => self.open_palette(crate::palette::Filter::Navigation, window, cx),
             "update ready" | "what's new" => self.menu.page = Some(Page::Update),
             "app updates" => self.open_app_update(false, window, cx),
             "preview app update" => self.open_app_update(true, window, cx),
