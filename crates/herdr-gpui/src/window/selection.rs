@@ -1,11 +1,34 @@
-//! Selecting terminal cells with the pointer and copying them. The gesture is
-//! client-local: it reads the live surface the client already has, never sends
-//! input to the daemon, and writes the clipboard only when the user releases a
-//! selection they made.
+//! Selecting terminal cells with the pointer and copying them. The gesture
+//! never sends input to the daemon and writes the clipboard only when the user
+//! releases a selection they made. A drag held past a pane's top or bottom
+//! scrolls the pane, and a selection reaching rows the pane no longer shows is
+//! read back with `pane.selection.read`; everything else is copied from the
+//! painted cells.
 
 use super::HerdrWindow;
-use crate::terminal::Selection;
+use crate::{scrollback::Inbox, terminal::Selection};
 use gpui::{ClipboardItem, Context, Pixels, Point};
+use herdr_client::{
+    Method,
+    scrollback::{ScrollbackResponse, SelectionReadParams},
+};
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+
+/// How often a drag held past a pane's edge scrolls it by another step.
+const AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// What a drag needs beyond the selection itself: where the pointer last was,
+/// so the selection can follow the pane as it scrolls under a still pointer,
+/// and the copy the daemon is reading for a released selection.
+#[derive(Default)]
+pub(crate) struct Follow {
+    pointer: Option<Point<Pixels>>,
+    scrolled: Option<Instant>,
+    read: Option<(Arc<Mutex<Inbox>>, String)>,
+}
 
 impl HerdrWindow {
     /// Starts a selection under the pointer, discarding the previous one. A
@@ -17,6 +40,8 @@ impl HerdrWindow {
         clicks: usize,
         cx: &mut Context<Self>,
     ) {
+        // A click hands the terminal back from copy mode.
+        self.leave_copy_mode(cx);
         let cleared = self.selection.take().is_some();
         if let Some(surface) = self.selectable_surface(position) {
             let (x, y) = Self::terminal_offset(self.bounds, position);
@@ -51,6 +76,7 @@ impl HerdrWindow {
         if !selection.dragging() {
             return false;
         }
+        self.selection_follow.pointer = Some(position);
         if selection.extend(surface, x, y, cell_width, cell_height) {
             cx.notify();
         }
@@ -78,6 +104,7 @@ impl HerdrWindow {
         {
             return false;
         }
+        self.selection_follow.pointer = None;
         let selected = !self.selection_is_empty();
         if selected && !self.copy_on_select() {
             cx.notify();
@@ -118,11 +145,196 @@ impl HerdrWindow {
     }
 
     fn finish_copy(&mut self, selected: bool, cx: &mut Context<Self>) {
+        if selected && self.read_offscreen_selection() {
+            self.selection = None;
+            cx.notify();
+            return;
+        }
         let copied = selected && self.copy_selection(cx);
         // The gesture is over either way: nothing stays highlighted behind it.
         self.selection = None;
         if copied && self.config.clipboard_toast.enabled {
             self.show_flash(super::Flash::success("copied to clipboard"), cx);
+        }
+        cx.notify();
+    }
+
+    /// Asks the daemon for a selection that reaches rows the pane does not
+    /// show. `false` when the painted cells hold all of it.
+    fn read_offscreen_selection(&mut self) -> bool {
+        let cell_height = self.config.terminal.line_height();
+        let (Some(selection), Some(surface)) = (&self.selection, self.live.surface.as_deref())
+        else {
+            return false;
+        };
+        let Some((pane_id, range)) =
+            selection.offscreen_range(surface, self.cell_width, cell_height)
+        else {
+            return false;
+        };
+        let params = SelectionReadParams {
+            pane_id: pane_id.to_owned(),
+            anchor: range.start,
+            cursor: range.end,
+            // An explicit selection reads the live terminal: output since the
+            // frame on screen must not refuse the copy.
+            content_revision: None,
+        };
+        let connection = &self.endpoints[self.selected_endpoint].connection;
+        let result = if !self.live.supports_selection_read {
+            Err(crate::Error::SelectionOffscreen)
+        } else if let (Some(handle), Some(snapshot)) = (&connection.handle, &self.live.snapshot) {
+            let inbox = connection.scrollback.clone();
+            let sent = inbox
+                .try_lock()
+                .map_err(|_| crate::Error::ConnectionBusy)
+                .and_then(|mut mailbox| {
+                    Ok(mailbox.send(|| handle.read_selection(&snapshot.boot_id, &params))?)
+                });
+            sent.map(|request| (inbox, request))
+        } else {
+            Err(crate::Error::NotConnected)
+        };
+        match result {
+            Ok((inbox, request)) => self.await_selection_read(inbox, request),
+            Err(error) => self.local_error = Some(format!("Selection not copied: {error}")),
+        }
+        true
+    }
+
+    /// Copies what `request` reads once it comes back. A read still waiting
+    /// is given up: the newer selection is the one the user wants.
+    pub(super) fn await_selection_read(&mut self, inbox: Arc<Mutex<Inbox>>, request: String) {
+        if let Some((inbox, request)) = self.selection_follow.read.replace((inbox, request))
+            && let Ok(mut inbox) = inbox.try_lock()
+        {
+            inbox.discard(&request);
+        }
+    }
+
+    /// Runs every tick while a drag or a daemon read is under way: scrolls a
+    /// pane the pointer is held past, keeps the selection under the pointer
+    /// as the pane moves, and copies a read that has come back.
+    pub(crate) fn follow_selection(&mut self, cx: &mut Context<Self>) {
+        self.finish_selection_read(cx);
+        let Some(pointer) = self.selection_follow.pointer else {
+            return;
+        };
+        if !self.selection.as_ref().is_some_and(Selection::dragging) {
+            self.selection_follow.pointer = None;
+            return;
+        }
+        // The pane may have scrolled under a pointer that has not moved.
+        self.extend_selection(pointer, cx);
+        let now = Instant::now();
+        if self.live.drag_request.is_some()
+            || self
+                .selection_follow
+                .scrolled
+                .is_some_and(|last| now.saturating_duration_since(last) < AUTOSCROLL_INTERVAL)
+        {
+            return;
+        }
+        let Some((pane_id, offset)) = self.selection_autoscroll(pointer) else {
+            return;
+        };
+        let connection = &self.endpoints[self.selected_endpoint].connection;
+        let (Some(handle), Some(snapshot)) = (&connection.handle, &self.live.snapshot) else {
+            return;
+        };
+        // One scroll in flight at a time, registered like a scrollbar drag's.
+        let Ok(mut state) = connection.inbox.try_lock() else {
+            return;
+        };
+        match handle.request(
+            &snapshot.boot_id,
+            Method::PaneScroll,
+            serde_json::json!({"pane_id": pane_id, "offset_from_bottom": offset}),
+        ) {
+            Ok(request) => {
+                state.drag_request = Some(request.clone());
+                self.live.drag_request = Some(request);
+                self.selection_follow.scrolled = Some(now);
+            }
+            Err(error) => {
+                drop(state);
+                self.local_error = Some(format!("Scroll not sent: {error}"));
+                self.selection_follow.pointer = None;
+                cx.notify();
+            }
+        }
+    }
+
+    /// The pane under a pane selection and the offset one step further in the
+    /// direction the pointer is held past its edge, faster the further out.
+    fn selection_autoscroll(&self, pointer: Point<Pixels>) -> Option<(String, u64)> {
+        let selection = self.selection.as_ref()?;
+        let pane_id = selection.pane_id()?;
+        let surface = self.live.surface.as_deref()?;
+        let pane = surface.panes.iter().find(|pane| pane.pane_id == pane_id)?;
+        let scroll = pane.scroll?;
+        let cell_height = self.config.terminal.line_height();
+        let (_, y) = Self::terminal_offset(self.bounds, pointer);
+        let top = f32::from(pane.inner_rect.y) * cell_height;
+        let bottom = top + f32::from(pane.inner_rect.height) * cell_height;
+        let rows = |distance: f32| ((distance / cell_height).ceil() as u64).clamp(1, 5);
+        let offset = if y < top {
+            scroll
+                .offset_from_bottom
+                .saturating_add(rows(top - y))
+                .min(scroll.max_offset_from_bottom)
+        } else if y >= bottom {
+            scroll
+                .offset_from_bottom
+                .saturating_sub(rows(y - bottom + 1.))
+        } else {
+            return None;
+        };
+        (offset != scroll.offset_from_bottom).then(|| (pane_id.to_owned(), offset))
+    }
+
+    /// Copies a selection the daemon has read back, once.
+    fn finish_selection_read(&mut self, cx: &mut Context<Self>) {
+        let Some((inbox, request)) = &self.selection_follow.read else {
+            return;
+        };
+        let answer = match inbox.try_lock() {
+            Ok(mut inbox) => inbox.take(request),
+            Err(_) => return,
+        };
+        let Some(answer) = answer else {
+            // A replaced connection never answers its old mailbox.
+            if !Arc::ptr_eq(
+                inbox,
+                &self.endpoints[self.selected_endpoint].connection.scrollback,
+            ) {
+                self.selection_follow.read = None;
+            }
+            return;
+        };
+        self.selection_follow.read = None;
+        match answer {
+            Ok(ScrollbackResponse::PaneSelection(selection))
+                if selection.text.len() <= crate::terminal::MAX_SELECTION_BYTES =>
+            {
+                cx.write_to_clipboard(ClipboardItem::new_string(selection.text));
+                if self.config.clipboard_toast.enabled {
+                    self.show_flash(super::Flash::success("copied to clipboard"), cx);
+                }
+            }
+            Ok(ScrollbackResponse::PaneSelection(_)) => {
+                self.local_error = Some(format!(
+                    "Selection not copied: {}",
+                    crate::Error::SelectionSize
+                ));
+            }
+            Ok(_) => {
+                self.local_error = Some(format!(
+                    "Selection not copied: {}",
+                    herdr_client::Error::ResponseType
+                ));
+            }
+            Err(error) => self.local_error = Some(format!("Selection not copied: {error}")),
         }
         cx.notify();
     }
@@ -758,5 +970,127 @@ mod tests {
             assert_eq!(clipboard(cx), Some(expected.into()));
             view.read_with(cx, |view, _| assert!(view.selection.is_none()));
         }
+    }
+
+    /// A drag held above a scrollable pane scrolls it one request at a time,
+    /// and a selection that ends up reaching rows off the screen is read
+    /// from the daemon on release instead of from the painted cells.
+    #[gpui::test]
+    fn a_drag_past_the_pane_scrolls_and_copies_through_the_daemon(cx: &mut TestAppContext) {
+        use crate::window::MockPeer;
+        use serde_json::{Value, json};
+        let mut peer = MockPeer::advertising(&["pane.scroll", "pane.selection.read"]);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = fixture_window(window, cx);
+            peer.prepare(&mut view);
+            view.live.supports_selection_read = true;
+            let frame = surface(&["x"; 24], 80);
+            let live = Arc::make_mut(view.live.surface.as_mut().unwrap());
+            live.frame = frame.frame;
+            live.panes[0].mouse_reporting = false;
+            live.panes[0].scroll = Some(PaneSurfaceScrollMetrics {
+                offset_from_bottom: 0,
+                max_offset_from_bottom: 100,
+                viewport_rows: 24,
+            });
+            view
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        let (origin, cell) = view.read_with(cx, |view, _| {
+            (
+                view.bounds.origin,
+                (view.cell_width, view.config.terminal.line_height()),
+            )
+        });
+        let at = |column: f32, row: f32| origin + point(px(column * cell.0), px(row * cell.1));
+        let next_request = |peer: &mut MockPeer| -> Value {
+            loop {
+                if let ClientMessage::ClientShellEndpointRequest { request, .. } = peer.receive() {
+                    let request: Value = serde_json::from_str(&request).unwrap();
+                    if matches!(
+                        request["method"].as_str(),
+                        Some("pane.scroll" | "pane.selection.read")
+                    ) {
+                        return request;
+                    }
+                    let id = request["id"].as_str().unwrap();
+                    peer.respond("boot-v1", id, &json!({"id": id, "result": {"type": "ok"}}));
+                }
+            }
+        };
+
+        // Press on row 5 (content row 105) and hold the pointer two rows
+        // above the pane.
+        cx.simulate_mouse_down(at(3.2, 5.5), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(at(3.2, -1.5), MouseButton::Left, Modifiers::default());
+        view.update(cx, |view, cx| view.follow_selection(cx));
+        let scroll = next_request(&mut peer);
+        assert_eq!(scroll["method"], "pane.scroll");
+        assert_eq!(
+            scroll["params"],
+            json!({"pane_id": "w1:p1", "offset_from_bottom": 2})
+        );
+        // The next step waits for this one's answer.
+        view.update(cx, |view, cx| {
+            view.selection_follow.scrolled = None;
+            view.follow_selection(cx);
+            assert!(view.live.drag_request.is_some());
+        });
+
+        // The daemon answers, having scrolled the pane well up by now: the
+        // selection follows the still pointer to the new top row, 45 rows
+        // above where it started.
+        let id = scroll["id"].as_str().unwrap();
+        peer.respond("boot-v1", id, &json!({"id": id, "result": {"type": "ok"}}));
+        view.update(cx, |view, cx| {
+            view.live.drag_request = None;
+            let live = Arc::make_mut(view.live.surface.as_mut().unwrap());
+            live.panes[0].scroll.as_mut().unwrap().offset_from_bottom = 40;
+            view.selection_follow.scrolled = None;
+            view.follow_selection(cx);
+        });
+        // Still held above the pane, it keeps going from where the pane is.
+        let again = next_request(&mut peer);
+        assert_eq!(again["params"]["offset_from_bottom"], 42);
+        let id = again["id"].as_str().unwrap();
+        peer.respond("boot-v1", id, &json!({"id": id, "result": {"type": "ok"}}));
+        cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("before".into())));
+        cx.simulate_mouse_up(at(3.2, -1.5), MouseButton::Left, Modifiers::default());
+        let read = next_request(&mut peer);
+        assert_eq!(read["method"], "pane.selection.read");
+        assert_eq!(
+            read["params"],
+            json!({
+                "pane_id": "w1:p1",
+                "anchor": {"row": 60, "col": 0},
+                "cursor": {"row": 105, "col": 2},
+            })
+        );
+        view.read_with(cx, |view, _| assert!(view.selection.is_none()));
+
+        // The answer, delivered as the connection's reader does, is copied.
+        let id = read["id"].as_str().unwrap();
+        let event = peer.respond(
+            "boot-v1",
+            id,
+            &json!({"id": id, "result": {"type": "pane_selection",
+                "pane_id": "w1:p1", "text": "from the history"}}),
+        );
+        let inbox = view.read_with(cx, |view, _| {
+            view.endpoints[0].connection.scrollback.clone()
+        });
+        assert!(inbox.lock().unwrap().apply(event).is_none());
+        view.update(cx, |view, cx| view.follow_selection(cx));
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
+            Some("from the history".into())
+        );
+        view.read_with(cx, |view, _| {
+            assert!(view.flash.is_some());
+            assert!(view.selection_follow.read.is_none());
+        });
     }
 }

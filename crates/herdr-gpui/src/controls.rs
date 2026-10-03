@@ -19,6 +19,9 @@ pub enum Command {
     PreviousPane,
     Zoom,
     ClearPane,
+    Find,
+    CopyMode,
+    EditScrollback,
     ClosePane,
     CloseTab,
     TabNumber(u8),
@@ -159,6 +162,24 @@ pub const COMMANDS: &[CommandInfo] = &[
         name: "clear_pane",
         label: "Clear Pane",
         shortcuts: &["cmd-k"],
+    },
+    CommandInfo {
+        command: Command::Find,
+        name: "find",
+        label: "Find",
+        shortcuts: &["cmd-f"],
+    },
+    CommandInfo {
+        command: Command::CopyMode,
+        name: "copy_mode",
+        label: "Copy Mode",
+        shortcuts: &["cmd-shift-c"],
+    },
+    CommandInfo {
+        command: Command::EditScrollback,
+        name: "edit_scrollback",
+        label: "Open Scrollback in Editor",
+        shortcuts: &[],
     },
     CommandInfo {
         command: Command::ClosePane,
@@ -412,6 +433,10 @@ pub fn request(command: Command, snapshot: &ClientShellSnapshot) -> Option<(Meth
             json!({"pane_id": pane?.pane_id, "mode": "toggle"}),
         ),
         Command::ClearPane => (Method::PaneClear, json!({"pane_id": pane?.pane_id})),
+        Command::EditScrollback => (
+            Method::PaneEditScrollback,
+            json!({"pane_id": pane?.pane_id}),
+        ),
         Command::ClosePane => (Method::PaneClose, json!({"pane_id": pane?.pane_id})),
         Command::CloseTab => (Method::TabClose, json!({"tab_id": tab?.tab_id})),
         Command::TabNumber(number) => {
@@ -423,6 +448,8 @@ pub fn request(command: Command, snapshot: &ClientShellSnapshot) -> Option<(Meth
         }
         Command::NewWindow
         | Command::NewWorktree
+        | Command::Find
+        | Command::CopyMode
         | Command::ToggleSidebar
         | Command::IncreaseFontSize
         | Command::DecreaseFontSize
@@ -459,7 +486,7 @@ mod tests {
     #[test]
     fn catalog_has_all_native_commands_and_gpui_shortcuts() {
         use Command::*;
-        let expected: [(Command, &[&str]); 45] = [
+        let expected: [(Command, &[&str]); 48] = [
             (OpenNotificationTarget, &["cmd-alt-n"]),
             (Logs, &[]),
             (NewWindow, &["cmd-alt-shift-n"]),
@@ -478,6 +505,9 @@ mod tests {
             (PreviousPane, &["cmd-alt-["]),
             (Zoom, &["cmd-shift-enter"]),
             (ClearPane, &["cmd-k"]),
+            (Find, &["cmd-f"]),
+            (CopyMode, &["cmd-shift-c"]),
+            (EditScrollback, &[]),
             (ClosePane, &["cmd-w"]),
             (CloseTab, &["cmd-shift-w"]),
             (TabNumber(1), &["cmd-1"]),
@@ -554,6 +584,8 @@ mod tests {
             Command::Logs,
             Command::NewWindow,
             Command::NewWorktree,
+            Command::Find,
+            Command::CopyMode,
             Command::ToggleSidebar,
             Command::IncreaseFontSize,
             Command::DecreaseFontSize,
@@ -602,6 +634,13 @@ mod tests {
         assert_eq!(
             request(Command::ClearPane, &s),
             Some((Method::PaneClear, json!({"pane_id": s.focused_pane_id})))
+        );
+        assert_eq!(
+            request(Command::EditScrollback, &s),
+            Some((
+                Method::PaneEditScrollback,
+                json!({"pane_id": s.focused_pane_id})
+            ))
         );
         assert_eq!(
             request(Command::ClosePane, &s),
