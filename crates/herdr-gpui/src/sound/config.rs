@@ -10,20 +10,31 @@ use std::{
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct Document {
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     ui: Ui,
 }
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct Ui {
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     sound: SoundConfig,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     toast: Toast,
 }
 
 #[derive(Deserialize)]
 #[serde(default)]
 struct Toast {
+    /// Herdr refuses a delay over an hour and keeps its default, so this does too.
+    #[serde(deserialize_with = "delay")]
     delay_seconds: u64,
+}
+
+fn delay<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    Ok(crate::lenient::value(deserializer)?
+        .filter(|delay: &u64| *delay <= 3600)
+        .unwrap_or(1))
 }
 impl Default for Toast {
     fn default() -> Self {
@@ -42,10 +53,15 @@ enum AgentSetting {
 #[derive(Deserialize)]
 #[serde(default)]
 pub(super) struct SoundConfig {
+    #[serde(deserialize_with = "crate::lenient::or_true")]
     enabled: bool,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     path: Option<PathBuf>,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     done_path: Option<PathBuf>,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     request_path: Option<PathBuf>,
+    #[serde(deserialize_with = "crate::lenient::entries")]
     agents: HashMap<String, AgentSetting>,
 }
 
@@ -154,9 +170,6 @@ impl Settings {
 
     fn parse(text: &str, path: &Path) -> Result<Self> {
         let document: Document = toml::from_str(text)?;
-        if document.ui.toast.delay_seconds > 3600 {
-            return Err(Error::SoundDelay);
-        }
         Ok(Self {
             sound: document.ui.sound,
             delay: document.ui.toast.delay_seconds,
@@ -272,21 +285,46 @@ mod tests {
     }
 
     #[test]
-    fn typed_validation_and_bounded_reads_preserve_sources() {
-        assert!(matches!(
-            Settings::parse("[ui.toast]\ndelay_seconds = 3601", Path::new("x")),
-            Err(Error::SoundDelay)
-        ));
+    fn values_from_a_newer_herdr_fall_back_one_by_one() {
+        // Herdr owns this file: a value this build cannot read keeps its own
+        // default and every other setting still applies.
         for text in [
-            "[ui.sound]\nenabled = 'yes'",
-            "[ui.sound.agents]\nclaude = 'yes'",
+            "[ui.toast]\ndelay_seconds = 3601",
             "[ui.toast]\ndelay_seconds = -1",
+            "[ui.toast]\ndelay_seconds = '2'",
+            "[ui]\ntoast = 'later'",
         ] {
-            assert!(matches!(
-                Settings::parse(text, Path::new("x")),
-                Err(Error::Toml(_))
-            ));
+            assert_eq!(
+                Settings::parse(text, Path::new("x")).unwrap().delay,
+                1,
+                "{text}"
+            );
         }
+        let settings = Settings::parse(
+            "[ui.toast]\ndelay_seconds = 5\n[ui.sound]\nenabled = 'yes'\n\
+             done_path = 'done.mp3'\nrequest_path = 7\nfuture = true\n\
+             [ui.sound.agents]\nclaude = 'always'\ndroid = 'on'\ncodex = 'off'",
+            Path::new("/local/config.toml"),
+        )
+        .unwrap();
+        assert_eq!(settings.delay, 5);
+        assert!(settings.sound.enabled);
+        assert_eq!(
+            settings.path_for(Sound::Done),
+            Some("/local/done.mp3".into())
+        );
+        assert_eq!(settings.path_for(Sound::Request), None);
+        // The unreadable agent setting keeps its default; the others apply.
+        assert!(settings.sound.allows(Some("claude")));
+        assert!(settings.sound.allows(Some("droid")));
+        assert!(!settings.sound.allows(Some("codex")));
+        let settings = Settings::parse("ui = 3", Path::new("x")).unwrap();
+        assert!(settings.sound.enabled);
+        assert_eq!(settings.delay, 1);
+    }
+
+    #[test]
+    fn bounded_reads_preserve_sources() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("config.toml");
         assert_eq!(Settings::load_path(&path).unwrap().delay, 1);
@@ -377,7 +415,7 @@ mod tests {
             sounds.recv_timeout(Duration::from_secs(3)).unwrap(),
             Some("/local/new.mp3".into())
         );
-        loads.send(Err(Error::SoundDelay)).unwrap();
+        loads.send(Err(Error::SoundConfigSize)).unwrap();
         service.reload.store(true, Ordering::Release);
         wait_loaded(3);
         send();
