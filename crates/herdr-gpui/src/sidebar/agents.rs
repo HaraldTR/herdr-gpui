@@ -54,11 +54,30 @@ pub(super) fn status_priority(status: AgentStatus) -> u8 {
 }
 
 /// The agents of one endpoint in the order the panel paints them.
+///
+/// A plugin's agent view (`agent.view.set`) is authoritative while the daemon
+/// names it: the panel shows exactly the panes in `agent_order`, in that
+/// order, so agents its filter excluded stay hidden and an empty order means
+/// none match. Upstream's client keys this on the label, not on the order
+/// being non-empty, and drops ids the snapshot has no agent for. Without a
+/// view the local sort applies.
 pub(super) fn sorted_agents(
-    agents: &[ClientShellAgent],
+    snapshot: &ClientShellSnapshot,
     sort: crate::preferences::AgentSort,
 ) -> Vec<&ClientShellAgent> {
-    let mut ordered: Vec<_> = agents.iter().collect();
+    if snapshot.agent_view_label.is_some() {
+        return snapshot
+            .agent_order
+            .iter()
+            .filter_map(|pane_id| {
+                snapshot
+                    .agents
+                    .iter()
+                    .find(|agent| agent.pane_id == *pane_id)
+            })
+            .collect();
+    }
+    let mut ordered: Vec<_> = snapshot.agents.iter().collect();
     if sort == crate::preferences::AgentSort::Priority {
         ordered.sort_by_key(|agent| {
             (
@@ -273,7 +292,7 @@ pub(super) fn status_style(status: AgentStatus, theme: &Theme) -> (f32, bool, u3
 
 #[cfg(test)]
 mod tests {
-    use super::{Indicators, status_indicator};
+    use super::{Indicators, sorted_agents, status_indicator};
     use crate::{config::FontConfig, herdr_settings::IndicatorStyle};
     use gpui::{Styled, rgb};
     use herdr_client::protocol::AgentStatus;
@@ -342,5 +361,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn ordered(
+        snapshot: &herdr_client::protocol::ClientShellSnapshot,
+        sort: crate::preferences::AgentSort,
+    ) -> Vec<&str> {
+        sorted_agents(snapshot, sort)
+            .into_iter()
+            .map(|agent| agent.pane_id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_plugin_view_order_replaces_the_local_sort_and_filters() {
+        use crate::preferences::AgentSort;
+        let mut snapshot = crate::sidebar::layout_tests::snapshot(2);
+        snapshot.agents[1].agent_status = AgentStatus::Blocked;
+        // Without a view the order is local, even when the daemon sent one.
+        snapshot.agent_order = vec!["p1".into()];
+        assert_eq!(ordered(&snapshot, AgentSort::Grouped), ["p0", "p1"]);
+        assert_eq!(ordered(&snapshot, AgentSort::Priority), ["p1", "p0"]);
+
+        snapshot.agent_view_label = Some("review".into());
+        snapshot.agent_order = vec!["p1".into(), "gone".into(), "p0".into()];
+        for sort in [AgentSort::Grouped, AgentSort::Priority] {
+            // A pane the snapshot no longer lists as an agent is skipped.
+            assert_eq!(ordered(&snapshot, sort), ["p1", "p0"]);
+        }
+        snapshot.agents[1].agent_status = AgentStatus::Idle;
+        snapshot.agent_order = vec!["p0".into()];
+        assert_eq!(ordered(&snapshot, AgentSort::Priority), ["p0"]);
+        snapshot.agent_order.clear();
+        assert!(ordered(&snapshot, AgentSort::Grouped).is_empty());
     }
 }

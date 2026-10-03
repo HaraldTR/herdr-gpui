@@ -1,7 +1,6 @@
 //! `[usage]` display switches and provider settings.
 
 use super::{model::Provider, registry};
-use crate::{Error, Result};
 use secrecy::SecretString;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -57,28 +56,39 @@ impl ProviderSettings {
 }
 
 impl UsageConfig {
-    /// Rejects unknown provider ids and setting names, so a typo reads as an
-    /// error rather than as a provider that silently never shows.
-    pub fn validate(&self) -> Result<()> {
-        for id in self.show_providers.iter().chain(&self.hide_providers) {
-            registry::find(id).ok_or_else(|| Error::UnknownUsageProvider(id.clone()))?;
+    /// Drops provider ids and setting names this build does not know and
+    /// returns their key paths, so a config naming a provider from a newer
+    /// build still loads.
+    pub fn retain_known(&mut self) -> Vec<String> {
+        let mut unknown = Vec::new();
+        for (key, ids) in [
+            ("show_providers", &mut self.show_providers),
+            ("hide_providers", &mut self.hide_providers),
+        ] {
+            ids.retain(|id| {
+                let known = registry::find(id).is_some();
+                if !known {
+                    unknown.push(format!("usage.{key}.{id}"));
+                }
+                known
+            });
         }
-        for (id, settings) in &self.providers {
-            let provider =
-                registry::find(id).ok_or_else(|| Error::UnknownUsageProvider(id.clone()))?;
+        self.providers.retain(|id, settings| {
+            let Some(provider) = registry::find(id) else {
+                unknown.push(format!("usage.providers.{id}"));
+                return false;
+            };
             let declared = provider.service().meta().settings;
-            if let Some(name) = settings
-                .0
-                .keys()
-                .find(|name| !declared.iter().any(|setting| setting.name == name.as_str()))
-            {
-                return Err(Error::UnknownUsageSetting {
-                    provider: id.clone(),
-                    setting: name.clone(),
-                });
-            }
-        }
-        Ok(())
+            settings.0.retain(|name, _| {
+                let known = declared.iter().any(|setting| setting.name == name.as_str());
+                if !known {
+                    unknown.push(format!("usage.providers.{id}.{name}"));
+                }
+                known
+            });
+            true
+        });
+        unknown
     }
 
     pub fn settings(&self, provider: Provider) -> Option<&ProviderSettings> {

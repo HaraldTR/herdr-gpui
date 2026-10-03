@@ -1330,6 +1330,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         selection: None,
         flash: None,
         configured_terminal_size: crate::config::Config::default().terminal.size,
+        gui_config_diagnostic: Default::default(),
         // Keep the original geometry fixture explicit; density-switching tests
         // above exercise all three modes independently of the default.
         config: crate::config::Config {
@@ -3434,6 +3435,74 @@ fn the_agents_header_toggles_between_grouped_and_priority(cx: &mut gpui::TestApp
         let view = view.read(cx);
         assert_eq!(view.agent_sort, AgentSort::Grouped);
         assert!(view.agent_sort_modified);
+    });
+}
+
+/// A plugin's agent view names the panel and decides its rows: the daemon's
+/// `agent_order` replaces the local sort, agents it leaves out stay hidden,
+/// and the local toggle neither shows nor changes while the view holds.
+#[gpui::test]
+fn a_plugin_agent_view_orders_and_filters_the_agents(cx: &mut gpui::TestAppContext) {
+    use crate::preferences::AgentSort;
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        crate::bind_keys(cx);
+        let view = cx.new(|cx| fixture_window(window, cx));
+        cx.observe(&view, |_, _, cx| cx.notify()).detach();
+        SidebarFixture(view)
+    });
+    let view = cx.update(|_, cx| fixture.read(cx).0.clone());
+    let set_view = |cx: &mut gpui::VisualTestContext, order: &[&str]| {
+        let order = order.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+        cx.update(|window, cx| {
+            view.update(cx, |view, _| {
+                let snapshot = Arc::make_mut(view.live.snapshot.as_mut().unwrap());
+                snapshot.agent_view_label = Some("review".into());
+                snapshot.agent_order = order;
+            });
+            cx.default_global::<TextProbes>().0.clear();
+            window.refresh();
+            full_draw(window, cx).clear(cx);
+        });
+    };
+    cx.simulate_resize(size(px(800.), px(600.)));
+    cx.run_until_parked();
+
+    // Grouped would paint p0 first; the view puts p1 above it.
+    set_view(cx, &["p1", "p0"]);
+    let (first, second) = (
+        cx.debug_bounds("row-agent-p1").unwrap(),
+        cx.debug_bounds("row-agent-p0").unwrap(),
+    );
+    assert!(first.top() < second.top(), "{first:?} {second:?}");
+    cx.update(|_, cx| {
+        let probes = &cx.global::<TextProbes>().0;
+        assert!(probes.contains_key("review"), "{:?}", probes.keys());
+        assert!(!probes.contains_key("grouped"), "{:?}", probes.keys());
+    });
+    // The label is the plugin's, so clicking it must not flip the local sort.
+    let sort = cx.debug_bounds("agents-sort").unwrap();
+    cx.simulate_click(sort.center(), Default::default());
+    cx.update(|_, cx| {
+        let view = view.read(cx);
+        assert_eq!(view.agent_sort, AgentSort::Grouped);
+        assert!(!view.agent_sort_modified);
+    });
+
+    // An agent the view filtered out is not listed.
+    set_view(cx, &["p1"]);
+    assert!(cx.debug_bounds("row-agent-p1").is_some());
+    assert!(cx.debug_bounds("row-agent-p0").is_none());
+
+    // No match is the view's answer, not an absence of agents.
+    set_view(cx, &[]);
+    assert!(cx.debug_bounds("row-agent-p1").is_none());
+    cx.update(|_, cx| {
+        let probes = &cx.global::<TextProbes>().0;
+        assert!(
+            probes.contains_key("no matching agents"),
+            "{:?}",
+            probes.keys()
+        );
     });
 }
 

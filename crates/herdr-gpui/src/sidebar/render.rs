@@ -70,6 +70,8 @@ impl HerdrWindow {
         agents = agents.track_scroll(&self.sidebar_scroll[1]);
         let multi = self.endpoints.len() > 1;
         let mut agent_count = 0;
+        // A plugin view hid every agent, rather than there being none.
+        let mut filtered = false;
         // Child positions of the highlighted rows, for the one-time reveal below.
         // Agent rows are counted by `agent_count`, which indexes that list.
         let mut space_rows = 0usize;
@@ -502,7 +504,8 @@ impl HerdrWindow {
             if !self.config.show_agents {
                 continue;
             }
-            for agent in sorted_agents(&snapshot.agents, self.agent_sort) {
+            filtered |= snapshot.agent_view_label.is_some();
+            for agent in sorted_agents(snapshot, self.agent_sort) {
                 let lines = if agents_custom {
                     let Some(lines) = tokens::agent_rows(
                         &self.config.sidebar_layout.agents,
@@ -592,7 +595,11 @@ impl HerdrWindow {
                     .px(px(content_x))
                     .text_color(rgb(theme.muted))
                     .truncate()
-                    .child("no agents"),
+                    .child(label_text(if filtered {
+                        "no matching agents"
+                    } else {
+                        "no agents"
+                    })),
             );
         }
         div()
