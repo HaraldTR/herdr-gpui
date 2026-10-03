@@ -82,6 +82,73 @@ impl CopySearchResult {
     }
 }
 
+/// A copy-mode motion the daemon resolves against the terminal's own text:
+/// word classes, line ends, and paragraphs, which a client cannot know from
+/// the painted cells alone. Spellings match Herdr's `PaneCopyMotion`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyMotion {
+    LineEnd,
+    FirstNonBlank,
+    NextWordStart,
+    PreviousWordStart,
+    NextWordEnd,
+    NextBigWordStart,
+    PreviousBigWordStart,
+    NextBigWordEnd,
+    PreviousParagraph,
+    NextParagraph,
+}
+
+/// `pane.copy_motion` parameters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyMotionParams {
+    pub pane_id: String,
+    pub cursor: TextPoint,
+    pub motion: CopyMotion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_revision: Option<u64>,
+}
+
+/// `pane.copy_motion` result: where the motion lands. A motion with nowhere
+/// to go answers the cursor it was given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyMotionResult {
+    pub pane_id: String,
+    pub cursor: TextPoint,
+    pub content_revision: u64,
+}
+
+/// `pane.selection.read` parameters: the cells from `anchor` to `cursor`,
+/// both inclusive, in either order. Without a revision the daemon reads its
+/// live terminal, which is what an explicit selection wants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelectionReadParams {
+    pub pane_id: String,
+    pub anchor: TextPoint,
+    pub cursor: TextPoint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_revision: Option<u64>,
+}
+
+/// `pane.selection.read` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelectionResult {
+    pub pane_id: String,
+    pub text: String,
+}
+
+/// The result of any scrollback method, by its `type` tag.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ScrollbackResponse {
+    PaneCopySearch(CopySearchResult),
+    PaneCopyMotion(CopyMotionResult),
+    PaneSelection(SelectionResult),
+    /// `pane.edit_scrollback` answers a bare acknowledgement.
+    Ok {},
+}
+
 /// An endpoint error code this client acts on. Codes are open-ended on the
 /// wire, so anything else is kept verbatim for display.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,12 +175,6 @@ impl From<String> for EndpointErrorCode {
 struct ErrorBody {
     code: String,
     message: String,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ResponseResult {
-    PaneCopySearch(CopySearchResult),
 }
 
 #[derive(Deserialize)]
@@ -148,11 +209,39 @@ impl ClientHandle {
             serde_json::to_value(params)?,
         )
     }
+
+    /// Queues `pane.copy_motion`.
+    pub fn copy_motion(&self, boot_id: &str, params: &CopyMotionParams) -> Result<String> {
+        self.request(
+            boot_id,
+            Method::PaneCopyMotion,
+            serde_json::to_value(params)?,
+        )
+    }
+
+    /// Queues `pane.selection.read`.
+    pub fn read_selection(&self, boot_id: &str, params: &SelectionReadParams) -> Result<String> {
+        self.request(
+            boot_id,
+            Method::PaneSelectionRead,
+            serde_json::to_value(params)?,
+        )
+    }
+
+    /// Queues `pane.edit_scrollback`, which the daemon honors only for its
+    /// focused pane: it opens the pane's history in the user's editor.
+    pub fn edit_scrollback(&self, boot_id: &str, pane_id: &str) -> Result<String> {
+        self.request(
+            boot_id,
+            Method::PaneEditScrollback,
+            serde_json::json!({ "pane_id": pane_id }),
+        )
+    }
 }
 
-/// Decodes the response envelope of a `pane.copy_search` request: its result,
-/// or the endpoint error it carried.
-pub fn decode_copy_search(response: &Value) -> Result<CopySearchResult> {
+/// Decodes the response envelope of a scrollback request: its result, or
+/// the endpoint error it carried.
+pub fn decode_response(response: &Value) -> Result<ScrollbackResponse> {
     let envelope = Envelope::deserialize(response).map_err(Error::ResponseSchema)?;
     if let Some(ErrorBody { code, message }) = envelope.error {
         return Err(Error::Endpoint {
@@ -161,8 +250,14 @@ pub fn decode_copy_search(response: &Value) -> Result<CopySearchResult> {
         });
     }
     let result = envelope.result.ok_or(Error::ResponseMissingResult)?;
-    match ResponseResult::deserialize(result).map_err(Error::ResponseSchema)? {
-        ResponseResult::PaneCopySearch(result) => Ok(result),
+    ScrollbackResponse::deserialize(result).map_err(Error::ResponseSchema)
+}
+
+/// Decodes the answer to a `pane.copy_search` request.
+pub fn decode_copy_search(response: &Value) -> Result<CopySearchResult> {
+    match decode_response(response)? {
+        ScrollbackResponse::PaneCopySearch(result) => Ok(result),
+        _ => Err(Error::ResponseType),
     }
 }
 
@@ -293,8 +388,14 @@ mod tests {
 
     #[test]
     fn malformed_or_foreign_results_are_schema_errors() {
+        assert!(matches!(
+            decode_copy_search(&json!({"id": "x", "result": {"type": "pane_selection",
+                "pane_id": "p", "text": ""}}))
+            .unwrap_err(),
+            Error::ResponseType
+        ));
         for response in [
-            json!({"id": "x", "result": {"type": "pane_selection", "pane_id": "p", "text": ""}}),
+            json!({"id": "x", "result": {"type": "pane_future", "pane_id": "p"}}),
             json!({"id": "x", "result": {"type": "pane_copy_search", "pane_id": "p"}}),
             json!({"id": "x", "result": {"type": "pane_copy_search", "pane_id": "p",
                 "content_revision": 2, "matches": [{"start": {"row": -1, "col": 0},
@@ -329,6 +430,75 @@ mod tests {
                 code: EndpointErrorCode::QueryTooLarge,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn motion_and_selection_params_serialize_as_the_daemon_schema() {
+        let motion = CopyMotionParams {
+            pane_id: "p".into(),
+            cursor: point(4, 2),
+            motion: CopyMotion::PreviousBigWordStart,
+            content_revision: Some(6),
+        };
+        assert_eq!(
+            serde_json::to_value(&motion).unwrap(),
+            json!({"pane_id": "p", "cursor": {"row": 4, "col": 2},
+                "motion": "previous_big_word_start", "content_revision": 6})
+        );
+        let read = SelectionReadParams {
+            pane_id: "p".into(),
+            anchor: point(1, 0),
+            cursor: point(9, 79),
+            content_revision: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&read).unwrap(),
+            json!({"pane_id": "p", "anchor": {"row": 1, "col": 0},
+                "cursor": {"row": 9, "col": 79}})
+        );
+        for (motion, name) in [
+            (CopyMotion::LineEnd, "line_end"),
+            (CopyMotion::FirstNonBlank, "first_non_blank"),
+            (CopyMotion::NextWordStart, "next_word_start"),
+            (CopyMotion::PreviousWordStart, "previous_word_start"),
+            (CopyMotion::NextWordEnd, "next_word_end"),
+            (CopyMotion::NextBigWordStart, "next_big_word_start"),
+            (CopyMotion::NextBigWordEnd, "next_big_word_end"),
+            (CopyMotion::PreviousParagraph, "previous_paragraph"),
+            (CopyMotion::NextParagraph, "next_paragraph"),
+        ] {
+            assert_eq!(serde_json::to_value(motion).unwrap(), json!(name));
+        }
+    }
+
+    #[test]
+    fn every_scrollback_result_decodes_by_its_tag() {
+        let decoded = |result: Value| decode_response(&json!({"id": "x", "result": result}));
+        assert_eq!(
+            decoded(json!({"type": "pane_copy_motion", "pane_id": "p",
+                "cursor": {"row": 3, "col": 7}, "content_revision": 4}))
+            .unwrap(),
+            ScrollbackResponse::PaneCopyMotion(CopyMotionResult {
+                pane_id: "p".into(),
+                cursor: point(3, 7),
+                content_revision: 4,
+            })
+        );
+        assert_eq!(
+            decoded(json!({"type": "pane_selection", "pane_id": "p", "text": "a\nb"})).unwrap(),
+            ScrollbackResponse::PaneSelection(SelectionResult {
+                pane_id: "p".into(),
+                text: "a\nb".into(),
+            })
+        );
+        assert_eq!(
+            decoded(json!({"type": "ok"})).unwrap(),
+            ScrollbackResponse::Ok {}
+        );
+        assert!(matches!(
+            decoded(json!({"type": "pane_copy_motion", "pane_id": "p"})).unwrap_err(),
+            Error::ResponseSchema(_)
         ));
     }
 }

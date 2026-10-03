@@ -1447,6 +1447,25 @@ Windows setup) nothing is saved and the window says so.
   makes the search case-sensitive, as Herdr's copy mode does. Text typed in
   the bar, IME composition included, never reaches the terminal. Daemons that
   do not advertise the method report why instead of opening the bar.
+- Cmd-Shift-C (`copy_mode`) puts the focused pane in keyboard copy mode, as
+  Herdr's `prefix+[` does in the TUI: a block cursor starts at the terminal
+  cursor and walks the whole scrollback, and nothing typed reaches the
+  program. `h` `j` `k` `l` and the arrows step, `0`/Home goes to the line
+  start, `g`/`G` to the top of history or the last row, and Ctrl-U/D/B/F or
+  Page Up/Down page. The text-aware motions `w` `b` `e` `W` `B` `E` `$` `^`
+  `{` `}` come from the daemon's `pane.copy_motion`, so words and paragraphs
+  mean what they mean in Herdr. `v` or Space marks by cell and `V` by line.
+  `y` or Enter copies the selection through `pane.selection.read`. Escape
+  clears a selection or leaves, as does `q`. Leaving scrolls the pane back to
+  where it was.
+- A mouse selection dragged past a pane's top or bottom edge scrolls the
+  pane, and the selection stays with its text as the pane moves. A selection
+  that reaches rows off the screen is copied through `pane.selection.read`;
+  one that fits the screen is still copied from the painted cells.
+- **Open Scrollback in Editor** (`edit_scrollback`, in the pane menu,
+  Terminal menu, and palette) asks Herdr to open the pane's history in the
+  configured editor, through `pane.edit_scrollback`. It is offered only by
+  daemons that advertise the method.
 - Cmd-W closes the focused pane and Cmd-Shift-W closes the focused tab only after
   a confirmation dialog (a tab asks only while an agent in it is working or
   blocked, and never with `confirm_close_tab = false`). **Cancel is selected by default**: Enter alone cancels;

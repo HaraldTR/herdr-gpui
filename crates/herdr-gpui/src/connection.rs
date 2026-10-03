@@ -17,8 +17,8 @@ pub(crate) struct ConnectionBridge {
     pub inbox: Arc<Mutex<LiveState>>,
     pub drained: Arc<AtomicBool>,
     pub integrations: Arc<Mutex<IntegrationInbox>>,
-    /// Find answers, fenced with the connection like the main inbox.
-    pub find: Arc<Mutex<crate::find::Inbox>>,
+    /// Scrollback answers, fenced with the connection like the main inbox.
+    pub scrollback: Arc<Mutex<crate::scrollback::Inbox>>,
     sound_cancel: Arc<AtomicBool>,
 }
 
@@ -79,7 +79,7 @@ impl ConnectionBridge {
             inbox: Arc::new(Mutex::new(state)),
             drained: Arc::new(AtomicBool::new(true)),
             integrations: Arc::default(),
-            find: Arc::default(),
+            scrollback: Arc::default(),
         }
     }
 
@@ -101,7 +101,7 @@ impl ConnectionBridge {
         self.inbox = Arc::new(Mutex::new(state));
         self.drained = Arc::new(AtomicBool::new(true));
         self.integrations = Arc::default();
-        self.find = Arc::default();
+        self.scrollback = Arc::default();
     }
 
     pub fn detach(&mut self, active: bool) {
@@ -171,7 +171,7 @@ impl ConnectionBridge {
                 let inbox = self.inbox.clone();
                 let drained = self.drained.clone();
                 let integrations = self.integrations.clone();
-                let find = self.find.clone();
+                let scrollback = self.scrollback.clone();
                 // Drain ordered events even while GPUI is busy; retain only coherent state.
                 spawn(Box::new(move || {
                     while let Ok(event) = client.events.recv() {
@@ -184,8 +184,8 @@ impl ConnectionBridge {
                             Ok(mut integrations) => integrations.apply(event),
                             Err(_) => Some(event),
                         };
-                        let event = event.and_then(|event| match find.lock() {
-                            Ok(mut find) => find.apply(event),
+                        let event = event.and_then(|event| match scrollback.lock() {
+                            Ok(mut scrollback) => scrollback.apply(event),
                             Err(_) => Some(event),
                         });
                         if let Some(event) = event

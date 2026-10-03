@@ -238,6 +238,8 @@ pub enum Error {
     ResponseSchema(#[source] serde_json::Error),
     #[error("endpoint response carried neither a result nor an error")]
     ResponseMissingResult,
+    #[error("endpoint answered with a result of another method")]
+    ResponseType,
 }
 
 impl Error {

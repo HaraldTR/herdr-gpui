@@ -304,6 +304,8 @@ impl HerdrWindow {
                 | Command::Zoom
                 | Command::ClearPane
                 | Command::Find
+                | Command::CopyMode
+                | Command::EditScrollback
                 | Command::ClosePane
                 | Command::CloseTab
                 | Command::NewBrowserTab

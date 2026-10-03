@@ -47,6 +47,8 @@ pub(crate) enum Tint {
     Selection,
     Match,
     CurrentMatch,
+    /// The copy-mode cursor, drawn as a block over its cell.
+    CopyCursor,
 }
 
 impl Tint {
@@ -55,6 +57,7 @@ impl Tint {
             Self::Selection => rgba((theme.primary() << 8) | SELECTION_ALPHA),
             Self::Match => rgba((theme.palette[3] << 8) | MATCH_ALPHA),
             Self::CurrentMatch => rgba((theme.palette[3] << 8) | CURRENT_MATCH_ALPHA),
+            Self::CopyCursor => rgba((theme.cursor << 8) | CURRENT_MATCH_ALPHA),
         }
     }
 }
