@@ -139,6 +139,9 @@ impl HerdrWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A new press goes wherever this decides; only the pane branch at the
+        // end holds it again for its release.
+        self.held_keys.forget(&event.keystroke.key);
         // A keystroke bubbling out of the find field is the field's: an
         // unhandled one is still on its way to the field's IME.
         if self.find_focused(window, cx) {
@@ -161,8 +164,20 @@ impl HerdrWindow {
             .config
             .option_as_alt
             .sends_alt(cx.keyboard_layout().id());
-        // Only the pane branch below holds a key for its release.
-        self.held_keys.forget(&event.keystroke.key);
+        let modifiers = event.keystroke.modifiers;
+        if event.keystroke.key.eq_ignore_ascii_case("c")
+            && (modifiers.platform != modifiers.control)
+            && !modifiers.alt
+            && !modifiers.shift
+            && self.copy_retained_selection(cx)
+        {
+            // Herdr's retained-selection copy: Ctrl-C copies instead of
+            // interrupting the pane while a kept selection is showing.
+            cx.stop_propagation();
+            window.prevent_default();
+            return;
+        }
+        self.clear_retained_selection(cx);
         if event.keystroke.key == "escape"
             && (self.cancel_workspace_drag(cx) | self.cancel_tab_drag(cx))
         {

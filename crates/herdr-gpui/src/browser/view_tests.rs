@@ -514,15 +514,14 @@ fn a_tab_that_opens_grows_into_the_strip(cx: &mut gpui::TestAppContext) {
     let tab = cx.debug_bounds("tab-t0").unwrap();
     assert!(tab.size.width >= gpui::px(crate::TAB_WIDTH));
     view.read_with(cx, |view, _| assert!(!view.tabs_growing()));
+    // Held from before it starts, so no frame can outrun it: narrow and clear.
+    cx.update(|_, cx| view.update(cx, |view, _| view.browser.appear.hold()));
     cx.update(|_, cx| {
         let scope = scope(&view.read(cx).endpoints[0]);
         Store::update(cx, |store| store.open(scope, "w0", None, None));
     });
     draw(cx);
     view.read_with(cx, |view, _| assert!(view.tabs_growing()));
-    // Held where it started: narrow and clear.
-    cx.update(|_, cx| view.update(cx, |view, _| view.browser.appear.hold()));
-    draw(cx);
     let growing = cx.debug_bounds("browser-tab-0").unwrap();
     assert!(
         growing.size.width < gpui::px(crate::TAB_WIDTH / 2.),
@@ -533,11 +532,10 @@ fn a_tab_that_opens_grows_into_the_strip(cx: &mut gpui::TestAppContext) {
     cx.update(|_, cx| view.update(cx, |view, _| view.browser.appear = Default::default()));
     draw(cx);
     let whole = cx.debug_bounds("browser-tab-0").unwrap();
+    cx.update(|_, cx| view.update(cx, |view, _| view.browser.appear.hold()));
     cx.update(|_, cx| Store::update(cx, |store| store.close(crate::browser::TabId::test(0))));
     draw(cx);
     assert!(cx.debug_bounds("browser-tab-0").is_none());
-    cx.update(|_, cx| view.update(cx, |view, _| view.browser.appear.hold()));
-    draw(cx);
     let leaving = cx.debug_bounds("leaving-tab").unwrap();
     assert_eq!(leaving.left(), whole.left());
     // Its measured width, within a pixel or two of the tab it replaces.

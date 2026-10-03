@@ -389,6 +389,28 @@ impl HerdrWindow {
         }
     }
 
+    /// Opens the focused workspace's rename or close dialog, as its menu's
+    /// row would. Closing confirms here as it does from the menu.
+    pub(crate) fn open_focused_workspace_dialog(
+        &mut self,
+        action: WorkspaceAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = self
+            .live
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.focused_workspace_id.clone())
+        else {
+            return;
+        };
+        self.open_workspace_menu(&id, Point::default(), window, cx);
+        if self.menu.page == Some(Page::Workspace) {
+            self.open_workspace_dialog(action, window, cx);
+        }
+    }
+
     /// Asks for a name before `command` creates a tab or workspace, when the
     /// local Herdr config's `ui.prompt_new_tab_name` or
     /// `ui.prompt_new_workspace_name` says to. Returns whether the dialog

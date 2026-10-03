@@ -33,6 +33,8 @@ pub(crate) use transfers::tests::Peer as MockPeer;
 
 #[cfg(test)]
 mod font_size_tests;
+#[cfg(test)]
+mod key_action_tests;
 #[cfg(all(test, feature = "integration-test"))]
 mod resize_tests;
 #[cfg(test)]
@@ -192,6 +194,9 @@ pub(crate) struct HerdrWindow {
     pub(crate) _browser_tabs: Subscription,
     /// The daemon's prefix was typed, so the next keystroke completes a chord.
     pub(crate) prefix_armed: bool,
+    /// Herdr's resize mode: direction keys resize the focused pane until
+    /// Escape, Enter, or the mode's own shortcut ends it.
+    pub(crate) resize_mode: bool,
     /// The selected device's server keymap, when it opted into one.
     pub(crate) server_keys: Option<server_keys::ServerKeymap>,
     pub(crate) _prefix_interceptor: Subscription,
@@ -598,6 +603,7 @@ impl HerdrWindow {
             // Another window, or an agent, may open or close a tab.
             _browser_tabs: cx.observe_global::<crate::browser::Store>(|_, cx| cx.notify()),
             prefix_armed: false,
+            resize_mode: false,
             server_keys: None,
             _prefix_interceptor: Self::intercept_prefix(window, cx),
             _activation: cx.observe_window_activation(window, |this, window, cx| {
@@ -607,7 +613,11 @@ impl HerdrWindow {
                 } else {
                     this.disarm_prefix();
                     this.cancel_terminal_mouse(cx);
-                    this.selection = None;
+                    // A drag cut short is dropped; a selection kept for an
+                    // explicit copy outlives a trip to another window.
+                    if this.selection.as_ref().is_some_and(Selection::dragging) {
+                        this.selection = None;
+                    }
                     this.pressed_terminal_link = None;
                 }
                 this.report_focus();
