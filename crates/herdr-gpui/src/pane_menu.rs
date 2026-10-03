@@ -65,6 +65,18 @@ mod tests {
                 json!({"pane_id":"inactive", "mode":"off"})
             )
         );
+        // The focused pane takes the menu's pane's place.
+        assert_eq!(
+            Action::Swap.request(&target).unwrap(),
+            (
+                Method::PaneSwap,
+                json!({"source_pane_id": original.focused_pane_id, "target_pane_id":"inactive"})
+            )
+        );
+        let focused =
+            Target::capture(&original, original.focused_pane_id.as_deref().unwrap()).unwrap();
+        assert!(focused.focused.is_none());
+        assert!(Action::Swap.request(&focused).is_none());
         assert_eq!(
             Action::RightClick.request(&target).unwrap(),
             (
@@ -135,10 +147,11 @@ mod tests {
             "pane-menu-4",
             "pane-menu-5",
             "pane-menu-6",
+            "pane-menu-7",
         ] {
             assert!(cx.debug_bounds(selector).is_some());
         }
-        assert!(cx.debug_bounds("pane-menu-7").is_none());
+        assert!(cx.debug_bounds("pane-menu-8").is_none());
         cx.simulate_keystrokes("enter cmd-t cmd-w cmd-b");
         view.read_with(cx, |v, _| {
             assert_eq!(v.menu.page, Some(Page::Pane));
@@ -555,6 +568,9 @@ struct Target {
     /// Whether the pane's tab was zoomed when the menu opened, so the zoom
     /// row says what it will do and asks Herdr for exactly that.
     zoomed: bool,
+    /// The focused pane when it is another one in the same tab, which "Swap
+    /// with focused pane" trades places with.
+    focused: Option<String>,
     /// Herdr routes this pane's right-clicks to its application, as seen when
     /// the menu opened; the toggle asks for the other routing.
     right_click_passthrough: bool,
@@ -567,6 +583,14 @@ impl Target {
             .tabs
             .iter()
             .any(|tab| tab.tab_id == pane.tab_id && tab.zoomed);
+        let focused = snapshot.focused_pane_id.as_ref().filter(|focused| {
+            **focused != pane.pane_id
+                && snapshot.panes.iter().any(|p| {
+                    p.pane_id == **focused
+                        && p.tab_id == pane.tab_id
+                        && p.workspace_id == pane.workspace_id
+                })
+        });
         let target = Self {
             boot: snapshot.boot_id.clone(),
             workspace: pane.workspace_id.clone(),
@@ -574,6 +598,7 @@ impl Target {
             pane: pane.pane_id.clone(),
             label: pane.label.clone().unwrap_or_default(),
             zoomed,
+            focused: focused.cloned(),
             right_click_passthrough: pane.right_click_passthrough,
         };
         target.validate(snapshot).ok()?;
@@ -609,6 +634,7 @@ enum Action {
     Rename,
     SplitRight,
     SplitDown,
+    Swap,
     Zoom,
     EditScrollback,
     RightClick,
@@ -625,6 +651,12 @@ impl Action {
                     "direction": if matches!(self, Self::SplitRight) { "right" } else { "down" },
                     "focus": true,
                 }),
+            ),
+            // The focused pane moves to this one's place and keeps focus,
+            // as Herdr's directional swaps move it.
+            Self::Swap => (
+                Method::PaneSwap,
+                json!({"source_pane_id": target.focused.as_ref()?, "target_pane_id": target.pane}),
             ),
             // An explicit mode, so a zoom another client changed meanwhile
             // leaves the pane as the row promised rather than flipping it.
@@ -648,6 +680,7 @@ impl Action {
             Self::Rename => "Rename",
             Self::SplitRight => "Split Right",
             Self::SplitDown => "Split Down",
+            Self::Swap => "Swap with Focused Pane",
             Self::Zoom if target.zoomed => "Unzoom",
             Self::Zoom => "Zoom",
             Self::EditScrollback => "Open Scrollback in Editor",
@@ -658,15 +691,26 @@ impl Action {
     }
 }
 
-const ACTIONS: [Action; 7] = [
+const ACTIONS: [Action; 8] = [
     Action::Rename,
     Action::SplitRight,
     Action::SplitDown,
+    Action::Swap,
     Action::Zoom,
     Action::EditScrollback,
     Action::RightClick,
     Action::Close,
 ];
+
+impl PaneMenu {
+    /// The rows this menu offers: a swap needs another pane to trade with.
+    fn actions(&self) -> Vec<Action> {
+        ACTIONS
+            .into_iter()
+            .filter(|action| !matches!(action, Action::Swap) || self.target.focused.is_some())
+            .collect()
+    }
+}
 
 pub(super) struct PaneMenu {
     target: Target,
@@ -730,6 +774,35 @@ impl HerdrWindow {
             pending: None,
             error: None,
         });
+    }
+
+    /// Opens the focused pane's rename dialog, as its menu's "Rename" row
+    /// would, at the pane's top-left corner.
+    pub(super) fn rename_focused_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .live
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.focused_pane_id.clone())
+        else {
+            return;
+        };
+        let origin = self.bounds.origin;
+        let anchor = self
+            .live
+            .surface
+            .as_ref()
+            .and_then(|surface| surface.panes.iter().find(|pane| pane.pane_id == id))
+            .map_or(origin, |pane| {
+                point(
+                    origin.x + px(f32::from(pane.rect.x) * self.cell_width),
+                    origin.y + px(f32::from(pane.rect.y) * self.config.terminal.line_height()),
+                )
+            });
+        self.open_pane_menu(&id, anchor, window, cx);
+        if self.menu.page == Some(Page::Pane) {
+            self.activate_pane_menu(Action::Rename, window, cx);
+        }
     }
 
     fn validate_pane_target(&self) -> crate::Result<&Target> {
@@ -975,17 +1048,21 @@ impl HerdrWindow {
                 self.submit_pane_rename(window, cx)
             }
             "up" | "down" if self.menu.page == Some(Page::Pane) => {
+                let count = pane.actions().len();
                 pane.selected = Some(match (pane.selected, key) {
-                    (None, "up") => ACTIONS.len() - 1,
+                    (None, "up") => count - 1,
                     (None, _) => 0,
-                    (Some(i), "up") => (i + ACTIONS.len() - 1) % ACTIONS.len(),
-                    (Some(i), _) => (i + 1) % ACTIONS.len(),
+                    (Some(i), "up") => (i + count - 1) % count,
+                    (Some(i), _) => (i + 1) % count,
                 });
                 cx.notify();
             }
             "enter" => {
-                if let Some(index) = pane.selected {
-                    self.activate_pane_menu(ACTIONS[index], window, cx);
+                if let Some(action) = pane
+                    .selected
+                    .and_then(|index| pane.actions().get(index).copied())
+                {
+                    self.activate_pane_menu(action, window, cx);
                 }
             }
             _ => {}
@@ -998,7 +1075,7 @@ impl HerdrWindow {
         };
         let mut body = div().flex().flex_col();
         if self.menu.page == Some(Page::Pane) {
-            for (index, action) in ACTIONS.into_iter().enumerate() {
+            for (index, action) in pane.actions().into_iter().enumerate() {
                 body = body.child(
                     div()
                         .id(("pane-menu-action", index))

@@ -470,6 +470,23 @@ impl HerdrWindow {
         });
     }
 
+    /// Opens the focused tab's rename dialog, as its menu's "Rename" row
+    /// would, just below the tab strip.
+    pub(super) fn rename_focused_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .live
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.focused_tab_id.clone())
+        else {
+            return;
+        };
+        self.open_tab_menu(&id, None, self.bounds.origin, window, cx);
+        if self.menu.page == Some(Page::Tab) {
+            self.activate_tab_menu(Action::Rename, window, cx);
+        }
+    }
+
     fn validate_tab_target(&self) -> crate::Result<&Target> {
         if !self.menu_target_current() {
             return Err(crate::Error::StaleConnection);

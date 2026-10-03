@@ -8,6 +8,7 @@ use crate::{
     browser::{Fold, GroupId, Leaving, Listed, Pick, Shown, Slot, ThumbDrag},
     controls::Command,
     fonts::StyledFont,
+    herdr_settings::TabBarPosition,
     sidebar::{Indicators, status_indicator},
 };
 use gpui::{prelude::*, *};
@@ -710,8 +711,33 @@ impl HerdrWindow {
             .into_any_element()
     }
 
-    /// One group: its strip above what it shows. Pressing anywhere in it
-    /// makes it the group in use.
+    /// Where Herdr's shared config puts the tab row.
+    fn tab_bar_position(&self) -> TabBarPosition {
+        self.settings
+            .shared
+            .as_ref()
+            .map(|shared| shared.tab_bar_position)
+            .unwrap_or_default()
+    }
+
+    /// Whether `group`'s strip steps aside under Herdr's
+    /// `hide_tab_bar_when_single_tab`: only when the window is not split, so
+    /// every group keeps the strip that names it and takes dropped tabs, and
+    /// only while the strip would list one tab at most, browser tabs counted.
+    pub(super) fn strip_hidden(&self, group: GroupId, cx: &App) -> bool {
+        self.settings
+            .shared
+            .as_ref()
+            .is_some_and(|shared| shared.hide_tab_bar_when_single_tab)
+            && !self.is_split()
+            && self.folding_groups().is_empty()
+            && !self.tab_drag_in(group)
+            && self.group_tabs(group, cx).len() <= 1
+    }
+
+    /// One group: its strip above or below what it shows, as Herdr's
+    /// `tab_bar_position` places it. Pressing anywhere in it makes it the
+    /// group in use.
     pub(super) fn render_group(
         &mut self,
         slot: Slot,
@@ -719,7 +745,9 @@ impl HerdrWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let strip = self.render_tab_strip(slot, window, cx);
+        let strip =
+            (!self.strip_hidden(slot.id, cx)).then(|| self.render_tab_strip(slot, window, cx));
+        let bottom = self.tab_bar_position() == TabBarPosition::Bottom;
         let share = (self.is_split() || !self.folding_groups().is_empty())
             .then(|| self.group_share(slot.id));
         let opened = self.group_opened(slot.id);
@@ -743,8 +771,11 @@ impl HerdrWindow {
                     this.activate_group(slot.id, window, cx);
                 }
             }))
-            .child(strip)
-            .child(body);
+            .map(|column| match (strip, bottom) {
+                (Some(strip), false) => column.child(strip).child(body),
+                (Some(strip), true) => column.child(body).child(strip),
+                (None, _) => column.child(body),
+            });
         div()
             .flex()
             .justify_end()
@@ -774,6 +805,9 @@ impl HerdrWindow {
             .border_l_1()
             .border_color(rgb(self.theme.active))
             .bg(rgb(self.theme.background))
+            .when(self.tab_bar_position() == TabBarPosition::Bottom, |group| {
+                group.justify_end()
+            })
             .child(
                 div()
                     .flex_none()
@@ -1343,5 +1377,125 @@ mod tests {
         let carried = cx.debug_bounds("tab-w1:t1").unwrap();
         assert!(carried.right() <= right + px(0.5), "{carried:?}");
         cx.simulate_keystrokes("escape");
+    }
+
+    /// A window over `tabs` in one workspace, with Herdr's shared `ui` config.
+    fn shared_tabs<'a>(
+        cx: &'a mut TestAppContext,
+        tabs: &[&str],
+        ui: &str,
+    ) -> (Entity<HerdrWindow>, &'a mut VisualTestContext) {
+        let tabs: Vec<String> = tabs.iter().map(|id| (*id).to_owned()).collect();
+        let shared = crate::herdr_settings::Settings::parse_text(&format!("[ui]\n{ui}")).unwrap();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let mut view = crate::sidebar::layout_tests::fixture_window(window, cx);
+            let mut snapshot: herdr_client::protocol::ClientShellSnapshot = serde_json::from_str(
+                include_str!("../../../herdr-protocol/tests/fixtures/endpoint-snapshot-v1.json"),
+            )
+            .unwrap();
+            let first = snapshot.tabs[0].clone();
+            snapshot.tabs = tabs
+                .iter()
+                .map(|id| {
+                    let mut tab = first.clone();
+                    tab.tab_id = id.clone();
+                    tab.label = format!("tab {id}");
+                    tab.focused = *id == tabs[0];
+                    tab
+                })
+                .collect();
+            snapshot.focused_tab_id = Some(tabs[0].clone());
+            view.live.snapshot = Some(Arc::new(snapshot));
+            view.live.status = crate::state::ConnectionStatus::Connected;
+            view.settings.shared = Some(shared);
+            view
+        });
+        cx.simulate_resize(size(px(1200.), px(600.)));
+        draw(cx);
+        draw(cx);
+        (view, cx)
+    }
+
+    #[gpui::test]
+    fn the_strip_sits_below_the_group_when_herdr_puts_it_at_the_bottom(cx: &mut TestAppContext) {
+        let (_, cx) = shared_tabs(cx, &["a", "b"], "tab_bar_position = 'bottom'");
+        let group = cx.debug_bounds("group").unwrap();
+        let tab = cx.debug_bounds("tab-a").unwrap();
+        let new_tab = cx.debug_bounds("new-tab").unwrap();
+        assert!(
+            (group.bottom() - new_tab.bottom()).abs() <= px(0.5),
+            "{group:?} {new_tab:?}"
+        );
+        assert!(tab.top() > group.top() + px(100.), "{group:?} {tab:?}");
+
+        let (_, cx) = shared_tabs(&mut cx.cx, &["a", "b"], "tab_bar_position = 'top'");
+        let group = cx.debug_bounds("group").unwrap();
+        let tab = cx.debug_bounds("tab-a").unwrap();
+        assert!(
+            (group.top() - tab.top()).abs() <= px(0.5),
+            "{group:?} {tab:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn a_lone_tab_hides_the_strip_only_when_herdr_asks_and_the_window_is_not_split(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = shared_tabs(cx, &["a"], "hide_tab_bar_when_single_tab = true");
+        assert!(cx.debug_bounds("new-tab").is_none());
+        assert!(cx.debug_bounds("tab-a").is_none());
+        assert!(cx.debug_bounds("group").is_some());
+
+        // A second tab, Herdr's or a page's, brings the strip back.
+        view.update(cx, |view, _| {
+            let mut snapshot = (**view.live.snapshot.as_ref().unwrap()).clone();
+            let mut second = snapshot.tabs[0].clone();
+            second.tab_id = "b".into();
+            second.focused = false;
+            snapshot.tabs.push(second);
+            view.live.snapshot = Some(Arc::new(snapshot));
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("tab-a").is_some());
+        assert!(cx.debug_bounds("tab-b").is_some());
+
+        // Split, every group keeps its strip, even one listing a single tab.
+        let (view, cx) = shared_tabs(&mut cx.cx, &["a"], "hide_tab_bar_when_single_tab = true");
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                let group = view.group_slots()[0].id;
+                view.split_group(group, window, cx);
+            })
+        });
+        draw(cx);
+        assert!(view.read_with(cx, |view, _| view.is_split()));
+        assert!(cx.debug_bounds("new-tab").is_some());
+        assert!(cx.debug_bounds("g1-new-tab").is_some());
+
+        // Without the setting, a lone tab keeps its strip.
+        let (_, cx) = shared_tabs(&mut cx.cx, &["a"], "");
+        assert!(cx.debug_bounds("tab-a").is_some());
+    }
+
+    #[gpui::test]
+    fn a_bottom_strip_still_reorders_by_dragging(cx: &mut TestAppContext) {
+        let (view, cx) = shared_tabs(
+            cx,
+            &["a", "b", "c"],
+            "tab_bar_position = 'bottom'\nhide_tab_bar_when_single_tab = true",
+        );
+        view.update(cx, |view, _| view.live.supports_tab_move = true);
+        let a = cx.debug_bounds("tab-a").unwrap();
+        let b = cx.debug_bounds("tab-b").unwrap();
+        cx.simulate_mouse_down(a.center(), MouseButton::Left, Modifiers::default());
+        let over = point(a.center().x + b.size.width / 2. + px(4.), a.center().y);
+        for _ in 0..2 {
+            cx.simulate_mouse_move(over, MouseButton::Left, Modifiers::default());
+            draw(cx);
+        }
+        assert_eq!(target(&view, cx), Some((2, "before c".into())));
+        cx.simulate_mouse_up(over, MouseButton::Left, Modifiers::default());
+        draw(cx);
+        view.read_with(cx, |view, _| assert!(view.tab_drag.is_none()));
     }
 }
