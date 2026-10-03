@@ -16,6 +16,7 @@ actions!(
         ShowAll,
         Minimize,
         PlaySound,
+        RingBellPreview,
         ShowHerdrNotDetected,
         ShowLogs,
         CheckForUpdates,
@@ -70,6 +71,11 @@ pub(crate) struct SetLayout {
 pub(crate) struct ShowToastPreview {
     pub(crate) kind: herdr_client::protocol::SemanticNotificationKind,
 }
+
+/// QA: posts an OS notification for the focused pane after a short delay.
+#[derive(Clone, PartialEq, serde::Deserialize, Action)]
+#[action(no_json)]
+pub(crate) struct ShowSystemNotificationPreview;
 
 #[cfg(any(target_os = "macos", test))]
 #[derive(Clone, PartialEq, serde::Deserialize, Action)]

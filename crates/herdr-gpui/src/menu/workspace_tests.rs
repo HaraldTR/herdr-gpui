@@ -4,6 +4,16 @@ use super::{WorkspaceAction, WorkspaceTarget, state::Deletion};
 use crate::{HerdrWindow, dialog_input::DialogInput, sidebar};
 use herdr_client::Method;
 
+/// Presses the open workspace dialog's submit, for `endpoint::lifecycle_tests`.
+#[cfg(unix)]
+pub(crate) fn submit_dialog(
+    view: &mut HerdrWindow,
+    window: &mut gpui::Window,
+    cx: &mut gpui::Context<HerdrWindow>,
+) {
+    view.submit_workspace_dialog(window, cx);
+}
+
 /// The workspace a menu currently targets, for tests outside this module.
 pub(crate) fn target_id(view: &HerdrWindow) -> Option<&str> {
     view.menu.target.as_ref().map(|target| target.id.as_str())
@@ -271,8 +281,6 @@ pub(crate) fn check_pr_fences(view: &gpui::Entity<HerdrWindow>, cx: &mut gpui::V
                 .target
                 .clone();
             let local_peer = view.live.local_daemon_peer;
-            let supports_workspace_get = view.live.supports_workspace_get;
-            view.live.supports_workspace_get = true;
             for target in [
                 herdr_client::ConnectTarget::Local,
                 herdr_client::ConnectTarget::Socket("/local-or-forwarded.sock".into()),
@@ -290,19 +298,18 @@ pub(crate) fn check_pr_fences(view: &gpui::Entity<HerdrWindow>, cx: &mut gpui::V
                 );
                 view.live.local_daemon_peer = true;
                 view.refresh_workspace_pr();
-                // Menu open is cache-only, even on a newer daemon.
+                // Menu open is cache-only; the worker resolves the checkout from Git.
                 assert!(view.menu.pr.loading);
                 assert!(view.menu.pr.message.is_none());
             }
-            view.live.supports_workspace_get = false;
             view.refresh_workspace_pr();
             assert!(
                 view.menu.pr.loading,
-                "older local daemon uses Git registry worker"
+                "local daemon uses Git registry worker"
             );
             assert!(
                 view.live.dialog_response.is_none(),
-                "no workspace.get request or dialog slot registration"
+                "no daemon request or dialog slot registration"
             );
             assert!(
                 view.menu.pr_connection.is_some(),
@@ -310,7 +317,6 @@ pub(crate) fn check_pr_fences(view: &gpui::Entity<HerdrWindow>, cx: &mut gpui::V
             );
             view.endpoints[view.selected_endpoint].connection.target = connection_target;
             view.live.local_daemon_peer = local_peer;
-            view.live.supports_workspace_get = supports_workspace_get;
             view.menu.pr.clear();
         })
     });
@@ -1044,6 +1050,52 @@ fn actions_target_clicked_workspace_and_match_daemon_schemas() {
     assert_eq!(target.close_label(), "Close");
 }
 
+/// A parent beside another parent of its repository closes alone, as in the
+/// TUI: a group close would take the other parent and its worktrees with it.
+/// Each parent still folds the group while linked worktrees are open.
+#[test]
+fn a_parent_beside_another_parent_closes_alone_but_still_folds() {
+    let mut snapshot = sidebar::layout_tests::snapshot(7);
+    let mut duplicate = snapshot.workspaces[3].clone();
+    duplicate.workspace_id = "w7".into();
+    duplicate.focused = false;
+    snapshot.workspaces.push(duplicate);
+    for index in [3, 7] {
+        let target = WorkspaceTarget::new(&snapshot, &snapshot.workspaces[index]);
+        let id = &snapshot.workspaces[index].workspace_id;
+        assert_eq!(target.close_label(), "Close");
+        assert_eq!(target.close_members, std::slice::from_ref(id));
+        assert_eq!(target.group_key(), Some(sidebar::layout_tests::REPO_KEY));
+        assert_eq!(
+            target
+                .request(&snapshot, WorkspaceAction::Close, "")
+                .unwrap(),
+            (
+                Method::WorkspaceClose,
+                serde_json::json!({"workspace_id": id, "close_group": false})
+            )
+        );
+    }
+    // Opening the other parent after the menu did changes what closes.
+    let target = WorkspaceTarget::new(&snapshot, &snapshot.workspaces[3]);
+    let mut single = snapshot.clone();
+    single.workspaces.pop();
+    assert!(matches!(
+        target.request(&single, WorkspaceAction::Close, ""),
+        Err(crate::Error::WorkspaceGroupChanged)
+    ));
+
+    // Without linked worktrees there is no group to fold or close.
+    snapshot
+        .workspaces
+        .retain(|w| w.workspace_id != "w4" && w.workspace_id != "w5");
+    for index in [3, 5] {
+        let target = WorkspaceTarget::new(&snapshot, &snapshot.workspaces[index]);
+        assert_eq!(target.close_label(), "Close");
+        assert_eq!(target.group_key(), None);
+    }
+}
+
 /// A linked checkout creates through its main checkout, the only source the
 /// daemon accepts, but starts the new branch from its own branch.
 #[test]
@@ -1184,4 +1236,56 @@ fn rename_trims_unicode_whitespace_and_rejects_blank_labels() {
             serde_json::json!({"workspace_id": "w3", "label": "new label"})
         )
     );
+}
+
+#[test]
+fn new_tab_and_workspace_names_follow_herdr() {
+    use super::workspace::chosen_label;
+    let mut snapshot = sidebar::layout_tests::snapshot(7);
+    let target = WorkspaceTarget::new(&snapshot, &snapshot.workspaces[3]);
+    assert_eq!(
+        target
+            .request(&snapshot, WorkspaceAction::NewTab, "ignored")
+            .unwrap(),
+        (
+            Method::TabCreate,
+            serde_json::json!({"workspace_id": "w3", "focus": true})
+        )
+    );
+    assert_eq!(
+        target
+            .request(&snapshot, WorkspaceAction::NewWorkspace, "ignored")
+            .unwrap(),
+        (
+            Method::WorkspaceCreate,
+            serde_json::json!({"focus": true, "source_workspace_id": "w3"})
+        )
+    );
+    // A proposal left alone, or cleared, lets the daemon choose the name.
+    assert_eq!(chosen_label("  Build  ", Some("2")), Some("Build"));
+    assert_eq!(chosen_label(" 2 ", Some("2")), None);
+    assert_eq!(chosen_label(" \t", Some("2")), None);
+    assert_eq!(chosen_label("2", None), Some("2"));
+    snapshot.workspaces.retain(|w| w.workspace_id != "w3");
+    assert!(matches!(
+        target.request(&snapshot, WorkspaceAction::NewTab, ""),
+        Err(crate::Error::StaleWorkspace)
+    ));
+}
+
+#[test]
+fn proposed_names_match_herdr_without_touching_the_daemon_host() {
+    use super::workspace::{suggested_tab_name, suggested_workspace_name};
+    let snapshot = sidebar::layout_tests::snapshot(7);
+    let tabs = snapshot
+        .tabs
+        .iter()
+        .filter(|tab| tab.workspace_id == "w3")
+        .count();
+    assert_eq!(suggested_tab_name(&snapshot, "w3"), (tabs + 1).to_string());
+    assert_eq!(suggested_tab_name(&snapshot, "missing"), "1");
+    assert_eq!(suggested_workspace_name("/home/me/code/herdr"), "herdr");
+    assert_eq!(suggested_workspace_name("/home/me/code/herdr/"), "herdr");
+    assert_eq!(suggested_workspace_name("/"), "/");
+    assert_eq!(suggested_workspace_name(""), "workspace");
 }

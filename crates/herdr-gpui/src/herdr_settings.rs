@@ -107,6 +107,24 @@ pub(crate) enum IndicatorStyle {
     Symbols,
 }
 
+/// Whether interactive creation asks for a name first, as Herdr's
+/// `ui.prompt_new_tab_name` and `ui.prompt_new_workspace_name` decide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NamePrompts {
+    pub tab: bool,
+    pub workspace: bool,
+}
+
+/// Herdr's defaults, also used before the shared config has loaded.
+impl Default for NamePrompts {
+    fn default() -> Self {
+        Self {
+            tab: true,
+            workspace: false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum ToastDelivery {
@@ -121,6 +139,7 @@ pub(crate) enum ToastDelivery {
 #[derive(Deserialize)]
 #[serde(default)]
 struct Sound {
+    #[serde(deserialize_with = "crate::lenient::or_true")]
     enabled: bool,
 }
 
@@ -150,6 +169,7 @@ pub(crate) struct Settings {
     pub clipboard: ClipboardToast,
     /// The agents panel's starting order until the user toggles it.
     pub agent_sort: crate::preferences::AgentSort,
+    pub name_prompts: NamePrompts,
     palettes: [palette::Palette; 2],
     original: persistence::Snapshot,
 }
@@ -168,6 +188,7 @@ impl std::fmt::Debug for Settings {
             .field("toast_position", &self.toast_position)
             .field("clipboard", &self.clipboard)
             .field("agent_sort", &self.agent_sort)
+            .field("name_prompts", &self.name_prompts)
             .finish_non_exhaustive()
     }
 }
@@ -175,34 +196,57 @@ impl std::fmt::Debug for Settings {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct Parsed {
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     theme: palette::ThemeConfig,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     ui: Ui,
 }
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct Ui {
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     agent_panel_sort: crate::preferences::AgentSort,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     status_indicators: IndicatorStyle,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     sound: Sound,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     toast: RawToast,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     accent: Option<String>,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
+    prompt_new_tab_name: Option<bool>,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
+    prompt_new_workspace_name: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct RawToast {
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     delivery: Option<ToastDelivery>,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     enabled: Option<bool>,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     delay_seconds: Option<u64>,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     herdr: HerdrToast,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     clipboard: ClipboardToast,
 }
 
 #[derive(Deserialize)]
 #[serde(default)]
 struct HerdrToast {
+    #[serde(deserialize_with = "bottom_right")]
     position: ToastPosition,
+}
+
+fn bottom_right<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ToastPosition, D::Error> {
+    Ok(crate::lenient::value(deserializer)?.unwrap_or(ToastPosition::BottomRight))
 }
 
 impl Default for HerdrToast {
@@ -216,7 +260,9 @@ impl Default for HerdrToast {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub(crate) struct ClipboardToast {
+    #[serde(deserialize_with = "crate::lenient::or_true")]
     pub enabled: bool,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
     pub position: ClipboardPosition,
 }
 
@@ -270,11 +316,20 @@ impl Settings {
             return Err(Error::TooLarge);
         }
         let parsed: Parsed = toml::from_str(original.text.as_deref().unwrap_or(""))?;
+        let defaults = NamePrompts::default();
+        let name_prompts = NamePrompts {
+            tab: parsed.ui.prompt_new_tab_name.unwrap_or(defaults.tab),
+            workspace: parsed
+                .ui
+                .prompt_new_workspace_name
+                .unwrap_or(defaults.workspace),
+        };
         let toast = parsed.ui.toast;
-        let delay = toast.delay_seconds.unwrap_or(1);
-        if delay > 3600 {
-            return Err(Error::ToastDelay);
-        }
+        // Herdr refuses a longer delay and keeps its default, so this does too.
+        let delay = toast
+            .delay_seconds
+            .filter(|delay| *delay <= 3600)
+            .unwrap_or(1);
         let theme_name = parsed.theme.name.as_deref().unwrap_or("catppuccin");
         let legacy_accent = parsed
             .ui
@@ -299,6 +354,7 @@ impl Settings {
             toast_position: toast.herdr.position,
             clipboard: toast.clipboard,
             agent_sort: parsed.ui.agent_panel_sort,
+            name_prompts,
             palettes,
             original,
         })

@@ -62,6 +62,13 @@ fn defaults_and_path_precedence_without_environment_mutation() -> anyhow::Result
     assert_eq!(settings.toast_position, ToastPosition::BottomRight);
     assert!(settings.clipboard.enabled);
     assert_eq!(settings.clipboard.position, ClipboardPosition::BottomCenter);
+    assert_eq!(
+        settings.name_prompts,
+        NamePrompts {
+            tab: true,
+            workspace: false
+        }
+    );
     let temp = tempfile::tempdir()?;
     let missing = temp.path().join("missing/config.toml");
     assert_eq!(
@@ -111,22 +118,88 @@ position = "top-center"
 }
 
 #[test]
-fn strict_known_fields_and_typed_sources() -> anyhow::Result<()> {
+fn name_prompts_follow_both_ui_keys() -> anyhow::Result<()> {
+    let flipped = parsed("[ui]\nprompt_new_tab_name = false\nprompt_new_workspace_name = true")?;
+    assert_eq!(
+        flipped.name_prompts,
+        NamePrompts {
+            tab: false,
+            workspace: true
+        }
+    );
+    // Each key keeps its own default when only the other is set.
+    assert_eq!(
+        parsed("[ui]\nprompt_new_workspace_name = true")?.name_prompts,
+        NamePrompts {
+            tab: true,
+            workspace: true
+        }
+    );
+    // A value this build cannot read keeps Herdr's default.
+    assert_eq!(
+        parsed("[ui]\nprompt_new_tab_name = 'no'")?.name_prompts,
+        NamePrompts::default()
+    );
+    Ok(())
+}
+
+#[test]
+fn values_from_a_newer_herdr_fall_back_one_by_one() -> anyhow::Result<()> {
+    // Each value this build cannot read keeps its own default.
     for text in [
-        "[ui]\nstatus_indicators = 'bad'",
+        "[ui]\nstatus_indicators = 'bars'",
         "[ui]\nagent_panel_sort = 'grouped'",
         "[ui.sound]\nenabled = 'true'",
         "[theme]\nauto_switch = 1",
         "[theme.custom]\nred = 123",
+        "[theme.custom]\naccent = 123",
         "[ui.toast]\ndelay_seconds = -1",
+        "[ui.toast]\ndelay_seconds = 3601",
+        "[ui.toast]\ndelivery = 'pager'",
         "[ui.toast.herdr]\nposition = 'top-center'",
+        "[ui.toast.clipboard]\nposition = 'middle'\nenabled = 2",
+        "theme = 'catppuccin'",
+        "ui = 1",
     ] {
-        assert!(matches!(parsed(text), Err(Error::Parse(_))), "{text}");
+        let settings = parsed(text)?;
+        let defaults = parsed("")?;
+        assert_eq!(settings.indicators, defaults.indicators, "{text}");
+        assert_eq!(settings.agent_sort, defaults.agent_sort, "{text}");
+        assert_eq!(settings.sound_enabled, defaults.sound_enabled, "{text}");
+        assert_eq!(settings.toast_delivery, defaults.toast_delivery, "{text}");
+        assert_eq!(settings.toast_delay_seconds, 1, "{text}");
+        assert_eq!(settings.toast_position, defaults.toast_position, "{text}");
+        assert_eq!(
+            settings.clipboard.enabled, defaults.clipboard.enabled,
+            "{text}"
+        );
+        assert_eq!(
+            settings.clipboard.position, defaults.clipboard.position,
+            "{text}"
+        );
+        assert_eq!(settings.theme_name, defaults.theme_name, "{text}");
+        assert_eq!(settings.palettes, defaults.palettes, "{text}");
     }
-    assert!(matches!(
-        parsed("[ui.toast]\ndelay_seconds = 3601"),
-        Err(Error::ToastDelay)
-    ));
+    // Readable neighbours of an unreadable value still apply.
+    let settings = parsed(
+        "[theme]\nname = 'nord'\nauto_switch = 'sometimes'\n\
+         [ui]\nstatus_indicators = 'symbols'\nfuture = 1\n\
+         [ui.toast]\nenabled = true\ndelivery = 'pager'\ndelay_seconds = 9\n\
+         [ui.toast.herdr]\nposition = 'top-left'\n\
+         [ui.toast.clipboard]\nenabled = false\nposition = 'middle'",
+    )?;
+    assert_eq!(settings.theme_name, "nord");
+    assert_eq!(settings.indicators, IndicatorStyle::Symbols);
+    assert_eq!(settings.toast_delivery, ToastDelivery::Herdr);
+    assert_eq!(settings.toast_delay_seconds, 9);
+    assert_eq!(settings.toast_position, ToastPosition::TopLeft);
+    assert!(!settings.clipboard.enabled);
+    assert_eq!(settings.clipboard.position, ClipboardPosition::BottomCenter);
+    Ok(())
+}
+
+#[test]
+fn malformed_toml_keeps_typed_sources() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("config.toml");
     fs::write(&path, "[broken")?;

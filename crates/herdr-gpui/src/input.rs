@@ -72,6 +72,10 @@ impl EntityInputHandler for HerdrWindow {
             }
             return;
         }
+        if self.copy_mode_active() {
+            self.copy_mode_text(text, cx);
+            return;
+        }
         #[cfg(feature = "integration-test")]
         {
             self.input_probe.text += 1;
@@ -97,7 +101,8 @@ impl EntityInputHandler for HerdrWindow {
             }
             return;
         }
-        if !self.input_ready() {
+        // Copy mode has no composition: a key it does not know types nothing.
+        if !self.input_ready() || self.copy_mode_active() {
             return;
         }
         self.marked = text.into();

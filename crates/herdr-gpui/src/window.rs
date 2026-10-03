@@ -5,7 +5,10 @@
 
 mod clipboard;
 mod commands;
+mod config_diagnostic;
+mod copy_mode;
 mod file_drop;
+mod find;
 mod flash;
 pub(crate) use flash::Flash;
 mod image_source;
@@ -17,6 +20,7 @@ mod pending_input;
 mod prefix;
 mod render;
 mod selection;
+pub(crate) mod system_notifications;
 mod tab_drag;
 mod tab_strip;
 mod toasts;
@@ -51,6 +55,7 @@ use std::time::Duration;
 
 pub(crate) struct HerdrWindow {
     pub(crate) sound: crate::sound::Service,
+    pub(crate) bell: crate::bell::Bell,
     pub(crate) updater: updater::Updater,
     pub(crate) update_preview: Option<updater::State>,
     pub(crate) config: config::Config,
@@ -58,6 +63,8 @@ pub(crate) struct HerdrWindow {
     /// write straight to `config.terminal.size`, so this is what Reset Font
     /// Size restores; a session adjustment never reaches disk.
     pub(crate) configured_terminal_size: f32,
+    /// Unknown keys in the GUI config, ignored but reported; follows `config`.
+    pub(crate) gui_config_diagnostic: crate::config_diagnostic::ConfigDiagnostic,
     pub(crate) theme: config::Theme,
     pub(crate) config_load: Option<Task<()>>,
     pub(crate) settings: crate::settings_panel::SettingsPanel,
@@ -104,6 +111,11 @@ pub(crate) struct HerdrWindow {
     /// The terminal cells the pointer is choosing. A release copies them and
     /// clears this, so a highlight only ever belongs to a drag in progress.
     pub(crate) selection: Option<Selection>,
+    pub(crate) selection_follow: selection::Follow,
+    /// The find bar, over the pane it searches.
+    pub(crate) find: Option<find::FindBar>,
+    /// Keyboard copy mode, when it holds the keyboard.
+    pub(crate) copy_mode: Option<copy_mode::CopyModeState>,
     /// The brief message over the terminal, and when it stops showing.
     pub(crate) flash: Option<(Flash, std::time::Instant)>,
     /// The frame on screen, kept across the gap between two projections.
@@ -126,6 +138,7 @@ pub(crate) struct HerdrWindow {
     pub(crate) teleport_follow: Option<crate::teleport::Follow>,
     pub(crate) git: git::Git,
     pub(crate) usage: crate::usage::Usage,
+    pub(crate) system_load: crate::system_load::SystemLoad,
     pub(crate) install_warning_shown: bool,
     pub(crate) collapsed_repos: std::collections::HashSet<String>,
     pub(crate) sidebar_visible: bool,
@@ -163,6 +176,7 @@ pub(crate) struct HerdrWindow {
     /// the window while the cached sidebar keeps its layout.
     pub(crate) surface_signal: Entity<SurfaceSignal>,
     pub(crate) _sidebar_invalidation: Subscription,
+    pub(crate) _host_theme: Subscription,
     /// Browser tabs this window shows, and its pages for them.
     pub(crate) browser: crate::browser::Browser,
     pub(crate) _browser_tabs: Subscription,
@@ -199,6 +213,26 @@ impl HerdrWindow {
                 cx.notify();
             });
         })
+    }
+
+    /// Theme and appearance changes all notify this view, so each one reaches
+    /// the daemon without every place that sets a theme having to report it.
+    pub(crate) fn observe_host_theme(cx: &mut Context<Self>) -> Subscription {
+        cx.observe_self(|this, cx| this.sync_host_theme(cx))
+    }
+
+    /// Tell every connection the terminal theme. Only queues, never waits:
+    /// each handle skips a theme it already queued.
+    pub(crate) fn sync_host_theme(&self, cx: &App) {
+        let light = matches!(
+            cx.window_appearance(),
+            WindowAppearance::Light | WindowAppearance::VibrantLight
+        );
+        let theme = crate::connection::host_theme(&self.theme, light);
+        for endpoint in &self.endpoints {
+            endpoint.connection.sync_host_theme(&endpoint.live, &theme);
+        }
+        self.sync_group_host_theme(&theme);
     }
 
     /// Runs every display frame while the window draws, so a new surface is
@@ -269,6 +303,8 @@ impl HerdrWindow {
         };
         let old_tab = focused_tab(&self.live);
         self.poll_endpoints(cx);
+        self.post_system_notifications(window, cx);
+        self.ring_bell(window);
         self.poll_integrations(cx);
         if self.settings.task.is_none() {
             let mut reload = false;
@@ -296,12 +332,18 @@ impl HerdrWindow {
             self.redraw_terminal(cx);
         }
         self.reconcile_group_terminals(cx);
+        // After polling: a connection that just got its first snapshot, or a
+        // reconnect, is told the theme without waiting for it to change.
+        self.sync_host_theme(cx);
         self.save_group_layouts(cx);
         self.poll_browser(window, cx);
         self.offer_browser_skill(window, cx);
         self.poll_sessions(cx);
         self.flush_scrollbar(cx);
         self.flush_split(cx);
+        self.poll_find(window, cx);
+        self.follow_selection(cx);
+        self.poll_copy_mode(cx);
         #[cfg(target_os = "macos")]
         crate::app_badge::sync(window.window_handle().window_id(), &self.endpoints, cx);
         self.cancel_stale_image();
@@ -335,6 +377,9 @@ impl HerdrWindow {
         if self.update_usage() {
             cx.notify();
         }
+        if self.update_system_load() {
+            cx.notify();
+        }
         if self.live.missing_installation && !self.install_warning_shown {
             self.install_warning_shown = true;
             self.show_install_modal(window, cx);
@@ -361,6 +406,37 @@ impl HerdrWindow {
             self.active,
             std::time::Instant::now(),
         )
+    }
+
+    /// CPU and memory are sampled for every enabled host: this machine
+    /// always, a remote host while it is connected, so a dropped host is not
+    /// dialled every few seconds.
+    fn update_system_load(&mut self) -> bool {
+        let hosts = self
+            .config
+            .show_system_load
+            .then_some(self.endpoints.iter().enumerate())
+            .into_iter()
+            .flatten()
+            .filter(|(index, endpoint)| {
+                let live = if *index == self.selected_endpoint {
+                    &self.live
+                } else {
+                    &endpoint.live
+                };
+                endpoint.enabled
+                    && (live.status.is_connected()
+                        || !matches!(endpoint.connection.target, ConnectTarget::Ssh { .. }))
+            })
+            .map(|(_, endpoint)| crate::usage::Host::from(&endpoint.connection.target));
+        self.system_load.poll(hosts)
+    }
+
+    /// The machine the selected endpoint runs on.
+    pub(crate) fn selected_host(&self) -> Option<crate::usage::Host> {
+        self.endpoints
+            .get(self.selected_endpoint)
+            .map(|endpoint| crate::usage::Host::from(&endpoint.connection.target))
     }
 
     pub(crate) fn new(
@@ -414,9 +490,15 @@ impl HerdrWindow {
         } = appearance;
         let mut this = Self {
             sound: crate::sound::Service::default(),
+            bell: crate::bell::Bell::default(),
             updater: updater::Updater::default(),
             update_preview: None,
             configured_terminal_size: config.terminal.size,
+            gui_config_diagnostic: {
+                let mut diagnostic = crate::config_diagnostic::ConfigDiagnostic::default();
+                diagnostic.sync(config.diagnostic().as_deref());
+                diagnostic
+            },
             config,
             theme,
             config_load: None,
@@ -462,6 +544,9 @@ impl HerdrWindow {
             pending_input: Default::default(),
             file_transfer: None,
             selection: None,
+            selection_follow: Default::default(),
+            find: None,
+            copy_mode: None,
             flash: None,
             presentation: Default::default(),
             painter: Default::default(),
@@ -476,6 +561,7 @@ impl HerdrWindow {
             teleport_follow: None,
             git: git::Git::default(),
             usage: Default::default(),
+            system_load: Default::default(),
             install_warning_shown: false,
             collapsed_repos: Default::default(),
             sidebar_visible: true,
@@ -500,6 +586,7 @@ impl HerdrWindow {
             sidebar_view,
             surface_signal: cx.new(|_| SurfaceSignal),
             _sidebar_invalidation: Self::invalidate_sidebar(cx),
+            _host_theme: Self::observe_host_theme(cx),
             browser: crate::browser::Browser::new(cx),
             // Another window, or an agent, may open or close a tab.
             _browser_tabs: cx.observe_global::<crate::browser::Store>(|_, cx| cx.notify()),

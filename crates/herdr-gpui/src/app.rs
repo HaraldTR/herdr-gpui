@@ -65,7 +65,7 @@ pub(crate) fn open_window(
             display_id,
             window_min_size: Some(size(px(640.), px(400.))),
             titlebar: Some(titlebar::options(WINDOW_TITLE)),
-            app_id: Some("so.pen.herdr-gpui".into()),
+            app_id: Some(crate::constants::APP_ID.into()),
             ..Default::default()
         },
         |window, cx| {
@@ -221,6 +221,7 @@ pub(crate) fn run() -> std::process::ExitCode {
             // Only the user's own app answers agents; native test modes stay private.
             if mode == LaunchMode::Normal {
                 crate::control::install(cx);
+                crate::window::system_notifications::install(cx);
             }
             cx.set_global(appearance);
             app_icon::install();
