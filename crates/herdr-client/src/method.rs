@@ -22,6 +22,7 @@ pub enum Method {
     PaneEditScrollback,
     PaneFocus,
     PaneFocusDirection,
+    PaneInputSet,
     PaneLinkActivate,
     PaneLinkResolve,
     PaneRename,
@@ -63,6 +64,7 @@ impl Method {
             Self::PaneEditScrollback => "pane.edit_scrollback",
             Self::PaneFocus => "pane.focus",
             Self::PaneFocusDirection => "pane.focus_direction",
+            Self::PaneInputSet => "pane.input.set",
             Self::PaneLinkActivate => "pane.link.activate",
             Self::PaneLinkResolve => "pane.link.resolve",
             Self::PaneRename => "pane.rename",
@@ -151,6 +153,13 @@ mod tests {
         assert!(
             !Method::ReleaseNotesDismiss.advertised_in(&["product_announcement.dismiss".into()])
         );
+    }
+
+    #[test]
+    fn pane_input_set_wire_name() {
+        assert_eq!(Method::PaneInputSet.as_str(), "pane.input.set");
+        assert!(Method::PaneInputSet.advertised_in(&["pane.input.set".into()]));
+        assert!(!Method::PaneInputSet.advertised_in(&["pane.input".into()]));
     }
 
     #[test]
@@ -246,6 +255,7 @@ mod tests {
         Method::PaneEditScrollback,
         Method::PaneFocus,
         Method::PaneFocusDirection,
+        Method::PaneInputSet,
         Method::PaneLinkActivate,
         Method::PaneLinkResolve,
         Method::PaneRename,
@@ -288,6 +298,7 @@ mod tests {
                 | Method::PaneEditScrollback
                 | Method::PaneFocus
                 | Method::PaneFocusDirection
+                | Method::PaneInputSet
                 | Method::PaneLinkActivate
                 | Method::PaneLinkResolve
                 | Method::PaneRename

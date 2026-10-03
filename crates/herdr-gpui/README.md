@@ -360,12 +360,14 @@ Selecting a different device does not change which settings apply:
 
 | Scope | Settings | Source |
 | --- | --- | --- |
-| GUI-wide | Theme and palette overrides, indicator style, sound, toast delivery and clipboard toast, sidebar agent rows (`state_text`), and `[keys]` including the prefix | Local `config.toml`, under `config-gpui.toml` overrides |
+| GUI-wide | Theme and palette overrides, indicator style, sound, toast delivery and clipboard toast, sidebar agent rows (`state_text`), sidebar collapsing (`sidebar_collapsed_mode`, `sidebar_start_collapsed`), and `[keys]` including the prefix | Local `config.toml`, under `config-gpui.toml` overrides |
 | Per host | Worktree directory and custom commands, plus pane defaults and integrations, which the daemon applies itself | That host's daemon, through its snapshot |
 
 Keybindings stay local on an SSH device, as with Herdr's default
-`--remote-keybindings local`. The GUI has no equivalent of
-`--remote-keybindings server`, and it never reads a remote host's `config.toml`.
+`--remote-keybindings local`. **Use server keybindings** in a device's
+right-click menu is the equivalent of `--remote-keybindings server`: that
+device's published `[keys]` profile applies while it is selected (see
+Supported below). The GUI never reads a remote host's `config.toml`.
 
 Shared saves preserve comments and unknown keys, reject conflicting external
 edits and unsafe paths, and run off the UI thread. Symlinked config files and
@@ -777,10 +779,19 @@ native-frame appearance also remains unverified by these macOS tests.
 ## Terminal Selection And Copy
 
 Mouse-aware applications receive clicks, button releases, drags, and pointer
-motion. Hold Shift to select/copy locally instead, or Shift-right-click for the
-GUI pane menu. In applications without mouse reporting, selection and the pane
-menu work without Shift. A forwarded drag stays in the pane or popup where it
-started, including when the pointer moves outside it.
+motion. Hold Shift to select/copy locally instead. In applications without mouse
+reporting, selection works without Shift. A forwarded drag stays in the pane or
+popup where it started, including when the pointer moves outside it.
+
+Right-click opens the GUI pane menu unless Herdr routes that pane's right-clicks
+to the application (`herdr pane input --right-click pane`, or **Send
+Right-Clicks to Pane** in the pane menu). The routing belongs to the daemon, so
+the TUI and every other client follow the same setting. A routed pane passes a
+plain right-click to a mouse-aware application; right-click with Shift, Control,
+Option, or Command still opens the menu, where **Open This Menu on
+Right-Click** switches the pane back. A routed pane whose application has mouse
+reporting off opens the menu, since nothing would receive the click. A
+mouse-aware popup has no pane menu and keeps its right-clicks.
 
 Drag across the terminal to select cells; releasing the button copies them, drops
 the highlight, and shows the `copied to clipboard` flash described under
@@ -1553,7 +1564,8 @@ Windows setup) nothing is saved and the window says so.
   the menu without sending terminal input.
 - Click workspace, tab, agent, or a visible split pane to focus through the API.
 - Right-click a visible pane, including an inactive split, for Rename, Split
-  Right, Split Down, Toggle Zoom, and Close without first focusing it. Actions
+  Right, Split Down, Toggle Zoom, right-click routing, and Close without first
+  focusing it. Actions
   retain the clicked pane/tab/workspace and daemon boot, and reject stale
   membership or a changed connection. Rename uses an IME-aware native field,
   trims surrounding whitespace, and clears the custom label when blank. It
@@ -1656,6 +1668,17 @@ Windows setup) nothing is saved and the window says so.
   prefix. Herdr validates its own file, so a daemon entry the GUI cannot
   express (a `hyper` modifier, a direct key without cmd, ctrl, alt, or fn) is
   skipped rather than rejected. Saving either file rebinds live.
+- Saved SSH devices use these local keybindings too, as `herdr --remote` does
+  by default. **Use server keybindings** in a device's right-click menu opts
+  that device into the `[keys]` profile its server publishes, like
+  `herdr --remote-keybindings server`: its prefix, actions, and indexed keys
+  replace the local daemon `[keys]` while that device is selected, and moving
+  to another host switches back. The GUI's own `[keybindings]` still apply on
+  top. The choice is saved per device in `config-gpui.local.toml` as
+  `[devices.<id>] keybindings = "server"`. A server that publishes no profile,
+  or one that cannot be read, leaves the device on local keys, and the menu
+  says why. Only keybindings follow the server; themes, sidebar, and toasts
+  stay local, and no remote config file is read.
 - Cmd-B toggles sidebar visibility locally without changing daemon state.
   Cmd-, opens Settings; Cmd-/ opens the grouped native shortcut reference.
   Native shortcut labels and keycaps come from the shared `controls::COMMANDS`
