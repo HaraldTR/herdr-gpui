@@ -180,8 +180,14 @@ fn a_wanted_host_is_sampled_and_a_dropped_one_forgotten() {
     // Only this machine: a remote host would start a real `ssh`.
     let mut load = SystemLoad::default();
     let local = Host::Local;
-    assert!(!load.poll([local.clone()]));
-    assert!(load.get(&local).is_some());
+    // The first poll drains whatever the new worker already sent, so it
+    // reports a change exactly when a sample (or error) has arrived.
+    let changed = load.poll([local.clone()]);
+    let reading = load.get(&local).unwrap();
+    assert_eq!(
+        changed,
+        reading.latest().is_some() || reading.error().is_some()
+    );
     let deadline = Instant::now() + Duration::from_secs(10);
     while load.get(&local).and_then(Reading::latest).is_none() {
         assert!(Instant::now() < deadline, "this machine never answered");
