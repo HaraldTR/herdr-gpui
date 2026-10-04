@@ -274,7 +274,7 @@ fn run_remote(
 /// Runs `command` with a deadline, keeping at most `PROBE_OUTPUT_LIMIT` bytes
 /// of stdout and discarding stderr.
 #[cfg(unix)]
-fn run(
+pub(crate) fn run(
     command: &mut Command,
     timeout: Duration,
     cancelled: impl Fn() -> bool,

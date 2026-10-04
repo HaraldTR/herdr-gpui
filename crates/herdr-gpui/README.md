@@ -206,20 +206,25 @@ device has its own GitHub sign-in, the confirmation also offers to delete it,
 since its account panel goes away with the device. Local has no such menu.
 
 **Forward port…** in the same menu forwards one of the host's ports, such as a
-dev server an agent started there, to this computer through its own
-`ssh -N -L 127.0.0.1:<local>:localhost:<remote>` child. The local port keeps the
-remote number when it is free, privileged ports move up by 10000 (80 becomes
-10080), and a port already in use falls back to one the system picks. The menu
-lists the host's forwards as connecting, listening (with **Open**, which shows
-`http://localhost:<local>/` in a browser tab), or ended with the reason; a flash
-reports each change. Nothing reconnects: a forward ends when you stop it, when
-its host is disabled or removed, when the window closes, or when the app quits,
-and stays ended until you forward the port again. A dropped Herdr connection
-leaves it running. The child uses the bridge's noninteractive SSH policy but
-never a `ControlPath` master, which would keep the forward after the child is
-killed, so hosts that authenticate only through a master cannot forward. It
-still applies `LocalForward`/`RemoteForward` entries from your SSH config, as
-`ssh -N` would. Forwarding needs a Unix client, like every saved SSH device.
+dev server an agent started there, to this computer. Each forward has its own
+`ssh -N` master on a private control socket, which is then asked to listen with
+`ssh -O forward -L 127.0.0.1:<local>:localhost:<remote>`. That request succeeds
+only once this forward's own SSH holds the port, so a port another local
+process took first is never shown as forwarded. The local port keeps the remote
+number when it can, privileged ports move up by 10000 (80 becomes 10080), and a
+refused port falls back once to one the system picks. The menu lists the host's
+forwards as connecting, listening (with **Open**, which shows
+`http://127.0.0.1:<local>/` in a browser tab; the address rather than
+`localhost`, since SSH listens on IPv4 loopback only), or ended with the
+reason, and a flash reports each change. Nothing reconnects: a forward ends
+when you stop it, when its host is disabled or removed, when the window closes,
+or when the app quits, and stays ended until you forward the port again. A
+dropped Herdr connection leaves it running. The master uses the bridge's
+noninteractive SSH policy but never a master of yours, which would keep the
+forward after it is stopped, so hosts that authenticate only through a master
+cannot forward. It still applies `LocalForward`/`RemoteForward` entries from
+your SSH config, as `ssh -N` would. Forwarding needs a Unix client, like every
+saved SSH device.
 
 The label is optional: an empty one names the device after its SSH target as
 typed, such as `user@host` or an address. Once the device is saved, the dialog

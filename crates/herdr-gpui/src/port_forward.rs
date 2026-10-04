@@ -1,4 +1,4 @@
-//! Remote ports this window forwards to localhost, each through its own
+//! Remote ports this window forwards to this machine, each through its own
 //! `ssh -N -L` child (see [`herdr_client::PortForward`]), keyed by the saved
 //! host's SSH target and the remote port. The UI thread only starts and stops
 //! forwards and takes their reports on later ticks. Nothing reconnects: a
@@ -41,12 +41,14 @@ impl Forward {
         &self.state
     }
 
-    /// The page to open for a listening forward.
+    /// The page to open for a listening forward. The address, not
+    /// `localhost`: SSH listens on IPv4 loopback only, and a browser trying
+    /// `::1` first would reach whatever else listens there.
     pub fn url(&self) -> Option<crate::browser::WebUrl> {
         let State::Listening { local_port } = self.state else {
             return None;
         };
-        crate::browser::WebUrl::try_from(format!("http://localhost:{local_port}/").as_str()).ok()
+        crate::browser::WebUrl::try_from(format!("http://127.0.0.1:{local_port}/").as_str()).ok()
     }
 
     /// Applies one worker report, returning what the user should be told.
@@ -98,7 +100,7 @@ impl Notice {
             Self::Listening {
                 remote_port,
                 local_port,
-            } => format!("Forwarding port {remote_port} to localhost:{local_port}"),
+            } => format!("Forwarding port {remote_port} to 127.0.0.1:{local_port}"),
             Self::Ended {
                 remote_port,
                 reason,
@@ -248,9 +250,9 @@ mod tests {
         };
         assert_eq!(forward.url(), None);
         let notice = forward.apply(ForwardEvent::Listening { local_port: 10080 });
-        assert_eq!(notice.text(), "Forwarding port 80 to localhost:10080");
+        assert_eq!(notice.text(), "Forwarding port 80 to 127.0.0.1:10080");
         assert_eq!(forward.state, State::Listening { local_port: 10080 });
-        assert_eq!(forward.url().unwrap().as_str(), "http://localhost:10080/");
+        assert_eq!(forward.url().unwrap().as_str(), "http://127.0.0.1:10080/");
 
         let notice = forward.apply(ForwardEvent::Ended(herdr_client::Error::ForwardSpawn(
             std::io::Error::new(std::io::ErrorKind::NotFound, "no ssh"),

@@ -596,7 +596,7 @@ impl HerdrWindow {
             let port = remote_port.get();
             let (status, ended) = match forward.state() {
                 State::Starting => ("connecting…".to_owned(), None),
-                State::Listening { local_port } => (format!("→ localhost:{local_port}"), None),
+                State::Listening { local_port } => (format!("→ 127.0.0.1:{local_port}"), None),
                 State::Ended(reason) => ("ended".to_owned(), Some(reason.clone())),
             };
             let button = |id: &'static str, label: &'static str| {

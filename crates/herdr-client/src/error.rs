@@ -211,8 +211,12 @@ pub enum Error {
     ForwardSpawn(#[source] io::Error),
     #[error("no local port is free to forward to")]
     ForwardLocalPort(#[source] io::Error),
-    #[error("SSH did not open the local port in time; check host trust and authentication")]
+    #[error("could not create the port forward's private control directory")]
+    ForwardControl(#[source] io::Error),
+    #[error("SSH did not connect in time; check host trust and authentication")]
     ForwardTimeout,
+    #[error("SSH could not listen on a local port ({0})")]
+    ForwardRefused(std::process::ExitStatus),
     /// Stderr is discarded, as for every SSH child: it can carry banners or secrets.
     #[error("SSH port forward ended ({0}); check host trust, authentication, and the network")]
     ForwardExit(std::process::ExitStatus),
@@ -300,7 +304,9 @@ impl Error {
             Self::Cancelled | Self::SshCancelled => io::ErrorKind::Interrupted,
             Self::EventReceiverDropped | Self::Disconnected => io::ErrorKind::BrokenPipe,
             Self::SocketClosed | Self::SshClosed => io::ErrorKind::UnexpectedEof,
-            Self::ForwardSpawn(error) | Self::ForwardLocalPort(error) => error.kind(),
+            Self::ForwardSpawn(error)
+            | Self::ForwardLocalPort(error)
+            | Self::ForwardControl(error) => error.kind(),
             Self::HealthTimeout
             | Self::SshTimeout
             | Self::SessionDeleteTimeout
