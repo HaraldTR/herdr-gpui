@@ -187,3 +187,13 @@ fn budgets_drop_leftmost_text_first_then_share_the_rest() {
     assert_eq!(budgets(&row, fixed, 0), [Some(1), None, None, Some(2)]);
     assert_eq!(budgets(&[], fixed, 5), Vec::<Option<usize>>::new());
 }
+
+#[test]
+fn budgets_give_wide_state_labels_their_display_width() {
+    // An emoji state label occupies two cells; a one-cell budget clips it to "…".
+    let row = [
+        ResolvedToken::unstyled(TokenKind::Text("🟡".into(), TextRole::Status)),
+        ResolvedToken::unstyled(TokenKind::Text("~".into(), TextRole::Workspace)),
+    ];
+    assert_eq!(budgets(&row, |_| 0, 30), [Some(2), Some(1)]);
+}

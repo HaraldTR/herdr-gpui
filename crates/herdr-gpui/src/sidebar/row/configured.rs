@@ -17,6 +17,7 @@ use crate::{
 };
 use gpui::{prelude::*, *};
 use herdr_client::protocol::AgentStatus;
+use unicode_width::UnicodeWidthStr;
 
 /// What colors a configured row's tokens: the row they paint and its state.
 #[derive(Clone, Copy)]
@@ -145,6 +146,14 @@ fn token_line(row: &[ResolvedToken], look: TokenLook, width: f32, cx: &RowContex
                             .child(label_text(&format!("{arrow}{count}")))
                     }),
             ),
+            // Only text the budget cuts short truncates. An emoji's font is wider
+            // than two estimated glyphs, so a label that fits by its display
+            // width may overhang its cell slightly rather than collapse to "…".
+            TokenKind::Text(text, _) if text.width() <= *budget => cell
+                .whitespace_nowrap()
+                .font_weight(weight)
+                .text_color(rgb(color))
+                .child(shared_label_text(text.clone())),
             TokenKind::Text(text, _) => cell
                 .truncate()
                 .font_weight(weight)

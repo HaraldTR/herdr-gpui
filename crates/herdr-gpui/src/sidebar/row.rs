@@ -15,6 +15,7 @@ use crate::config::{FontConfig, Theme};
 use gpui::{prelude::*, *};
 use herdr_client::protocol::AgentStatus;
 use std::sync::Arc;
+use unicode_width::UnicodeWidthStr;
 
 mod badge;
 mod configured;
@@ -186,10 +187,7 @@ pub(super) fn name_line(
     let glyph = glyph_width(font);
     let separator = 3. * glyph;
     let separators = segments.len().saturating_sub(1);
-    let lengths: Vec<usize> = segments
-        .iter()
-        .map(|(text, _)| text.chars().count())
-        .collect();
+    let lengths: Vec<usize> = segments.iter().map(|(text, _)| text.width()).collect();
     let available = (width - separators as f32 * separator).max(0.);
     let budgets = segment_budgets(&lengths, (available / glyph).floor() as usize);
     // The last segment takes the rounding remainder, so one segment fills the
@@ -358,7 +356,7 @@ pub(super) fn row(
     // the same way it yields to a badge, and like the badge it is clipped to
     // the room left rather than painting past the row.
     let status_width = status_text.map_or(0., |text| {
-        (text.chars().count() as f32 * glyph_width(font))
+        (text.width() as f32 * glyph_width(font))
             .ceil()
             .min((available - pr_reserve - gap).max(0.))
     });

@@ -340,7 +340,9 @@ fn user_bindings_precede_defaults() {
         .unwrap();
     assert_eq!(keys.bindings[first].0, Command::ReloadConfig);
     assert_eq!(bound(&keys, Command::ResizeMode), [prefixed("r")]);
-    let keymap = super::super::Keymap::with_overrides(&Default::default(), &keys).unwrap();
+    let keymap =
+        super::super::Keymap::with_overrides(&Default::default(), &Default::default(), &keys)
+            .unwrap();
     assert_eq!(keymap.chord(&parsed("r")), Some(Command::ReloadConfig));
 }
 

@@ -392,6 +392,7 @@ fn config_reload_rebinds_the_keymap(cx: &mut gpui::TestAppContext) {
                 let config = Config {
                     keybindings: Keymap::with_overrides(
                         &overrides,
+                        &Default::default(),
                         &crate::keymap::DaemonKeys::default(),
                     )?,
                     ..Config::default()

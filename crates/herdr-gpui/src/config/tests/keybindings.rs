@@ -206,3 +206,32 @@ fn daemon_keys_layer_under_gui_keybindings() -> anyhow::Result<()> {
     assert_eq!(shortcuts(&load()?, Command::Tab), ["cmd-t", "ctrl-b c"]);
     Ok(())
 }
+
+#[test]
+fn pane_keys_reach_the_keymap_as_written() -> anyhow::Result<()> {
+    let config = Config::parse(
+        "[pane_keys]\n\"cmd-k\" = \"ctrl-l\"\n\"cmd-.\" = \"alt-.\"\n\"cmd-left\" = \"\"\n",
+    )?;
+    let keymap = &config.keybindings;
+    let sent = |typed| {
+        keymap
+            .pane_key(&gpui::Keystroke::parse(typed).unwrap_or_default())
+            .map(|sent| sent.unparse())
+    };
+    assert_eq!(sent("cmd-k").as_deref(), Some("ctrl-l"));
+    assert_eq!(sent("cmd-.").as_deref(), Some("alt-."));
+    assert_eq!(sent("cmd-left"), None);
+    assert_eq!(keymap.primary(crate::controls::Command::ClearPane), "");
+    assert_eq!(config.pane_keys.len(), 3);
+    assert!(config.unknown_keys.is_empty(), "{:?}", config.unknown_keys);
+    assert!(matches!(
+        Config::parse(
+            "[pane_keys]\n\"cmd-k\" = \"ctrl-l\"\n[keybindings]\nclear_pane = \"cmd-k\"\n"
+        ),
+        Err(Error::PaneKeyBound {
+            command: "clear_pane",
+            ..
+        })
+    ));
+    Ok(())
+}

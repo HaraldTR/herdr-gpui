@@ -8,6 +8,7 @@ use crate::config::{AgentLayout, AgentToken, Rows, SpaceLayout, SpaceToken, Toke
 use gpui::SharedString;
 use herdr_client::protocol::{AgentStatus, ClientShellAgent, ClientShellSnapshot};
 use std::collections::HashMap;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ResolvedToken {
@@ -201,7 +202,7 @@ pub(super) fn budgets(
     let fixed: Vec<usize> = row.iter().map(|token| fixed_width(&token.kind)).collect();
     let flexible: Vec<usize> = row
         .iter()
-        .map(|token| token.kind.text().map_or(0, |text| text.chars().count()))
+        .map(|token| token.kind.text().map_or(0, |text| text.width()))
         .collect();
     let minimum = |active: &[bool]| -> usize {
         (0..row.len())

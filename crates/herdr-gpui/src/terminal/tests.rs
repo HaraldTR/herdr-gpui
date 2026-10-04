@@ -544,6 +544,37 @@ fn special_keys_and_text_are_separate() {
 }
 
 #[test]
+fn a_pane_key_sends_its_target_held_as_typed() {
+    let typed = KeyDownEvent {
+        keystroke: Keystroke::parse("cmd-left").unwrap(),
+        is_held: true,
+        prefer_character_input: false,
+    };
+    assert_eq!(key_input(&typed, true), None);
+    let Some(ClientPaneInputEvent::Key {
+        code,
+        modifiers,
+        kind,
+        ..
+    }) = pane_key_input(&typed, &Keystroke::parse("ctrl-a").unwrap())
+    else {
+        panic!("no key sent");
+    };
+    assert_eq!(
+        (code, modifiers, kind),
+        (ClientKeyCode::Char('a'), 2, ClientKeyKind::Repeat)
+    );
+    // Alt-modified targets are sent whatever option_as_alt says.
+    assert!(reaches_pane(&Keystroke::parse("alt-b").unwrap()));
+    for unsendable in ["cmd-a", "a", "shift-a"] {
+        assert!(
+            !reaches_pane(&Keystroke::parse(unsendable).unwrap()),
+            "{unsendable}"
+        );
+    }
+}
+
+#[test]
 fn alt_characters_reach_the_pane_as_shortcuts() {
     let alt = |s| {
         key_input(

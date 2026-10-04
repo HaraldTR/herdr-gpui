@@ -5,7 +5,7 @@
 use crate::{
     Error, Result,
     contrast::Contrast,
-    keymap::{Binding, DaemonKeys, Keymap},
+    keymap::{Binding, DaemonKeys, Keymap, PaneKeys},
 };
 mod files;
 mod fonts;
@@ -88,6 +88,9 @@ pub struct Config {
     /// The `[keybindings]` table `keybindings` was built from, kept so a
     /// device's server keys can be layered under the same GUI overrides.
     pub(crate) keybinding_overrides: BTreeMap<String, Binding>,
+    /// The `[pane_keys]` table `keybindings` was built from, for the same
+    /// reason.
+    pub(crate) pane_keys: PaneKeys,
     /// Per saved device, by catalog profile ID.
     pub(crate) devices: BTreeMap<String, DeviceSettings>,
     pub palette: crate::palette::PaletteConfig,
@@ -277,6 +280,7 @@ impl Default for Config {
             sidebar_layout: SidebarLayout::default(),
             keybindings: Keymap::default(),
             keybinding_overrides: BTreeMap::new(),
+            pane_keys: PaneKeys::new(),
             devices: BTreeMap::new(),
             unknown_keys: Vec::new(),
             palette: crate::palette::PaletteConfig::default(),
@@ -313,6 +317,7 @@ struct Settings {
     bell: BellConfig,
     layout: Layout,
     keybindings: BTreeMap<String, Binding>,
+    pane_keys: PaneKeys,
     devices: BTreeMap<String, DeviceSettings>,
     palette: crate::palette::PaletteConfig,
 }
@@ -584,8 +589,10 @@ impl Config {
             return Err(Error::InvalidSidebarGap);
         }
         config.layout = settings.layout;
-        config.keybindings = Keymap::with_overrides(&settings.keybindings, &base.keys)?;
+        config.keybindings =
+            Keymap::with_overrides(&settings.keybindings, &settings.pane_keys, &base.keys)?;
         config.keybinding_overrides = settings.keybindings;
+        config.pane_keys = settings.pane_keys;
         if settings.devices.len() > MAX_DEVICES {
             return Err(Error::TooManyDevices(MAX_DEVICES));
         }

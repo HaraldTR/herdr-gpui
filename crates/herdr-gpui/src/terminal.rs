@@ -360,12 +360,31 @@ pub fn viewport(width: f32, height: f32, cell_width: f32, cell_height: f32) -> C
 // `alt_keys` claims Alt-modified characters as shortcuts instead; without it
 // macOS Option-P commits `π` and the shortcut never reaches the pane.
 pub fn key_input(event: &KeyDownEvent, alt_keys: bool) -> Option<ClientPaneInputEvent> {
-    key_code(&event.keystroke, alt_keys).map(|code| ClientPaneInputEvent::Key {
+    keystroke_input(&event.keystroke, event.is_held, alt_keys)
+}
+
+/// A `[pane_keys]` press: the pane receives `sent`, held as `event` is.
+pub fn pane_key_input(event: &KeyDownEvent, sent: &Keystroke) -> Option<ClientPaneInputEvent> {
+    keystroke_input(sent, event.is_held, true)
+}
+
+/// Whether a pane can receive `keystroke` as a key event, so `[pane_keys]`
+/// never names one that would silently send nothing.
+pub(crate) fn reaches_pane(keystroke: &Keystroke) -> bool {
+    key_code(keystroke, true).is_some()
+}
+
+fn keystroke_input(
+    keystroke: &Keystroke,
+    is_held: bool,
+    alt_keys: bool,
+) -> Option<ClientPaneInputEvent> {
+    key_code(keystroke, alt_keys).map(|code| ClientPaneInputEvent::Key {
         code,
-        modifiers: u8::from(event.keystroke.modifiers.shift)
-            | (u8::from(event.keystroke.modifiers.control) << 1)
-            | (u8::from(event.keystroke.modifiers.alt) << 2),
-        kind: if event.is_held {
+        modifiers: u8::from(keystroke.modifiers.shift)
+            | (u8::from(keystroke.modifiers.control) << 1)
+            | (u8::from(keystroke.modifiers.alt) << 2),
+        kind: if is_held {
             ClientKeyKind::Repeat
         } else {
             ClientKeyKind::Press
