@@ -38,7 +38,6 @@ const SNAPSHOT: &str =
     include_str!("../../herdr-protocol/tests/fixtures/endpoint-snapshot-v1.json");
 const WELCOME: &str = include_str!("../../herdr-protocol/tests/fixtures/endpoint-welcome-v1.json");
 
-#[path = "clipboard_tests.rs"]
 mod clipboard_tests;
 #[path = "surface_encoding_tests.rs"]
 mod surface_encoding_tests;
