@@ -27,30 +27,32 @@ fn one_palette_combines_navigation_actions_commands_and_projects(cx: &mut TestAp
                 label: "herdr".into(),
             });
             view.prepare_palette_entries(&mut palette);
+            view.menu.palette = Some(palette);
+            view.rank_palette(Selection::Keep, cx);
             for filter in Filter::ALL {
-                palette.filter = filter;
-                palette.filter("");
+                view.set_palette_filter(filter, cx);
+                let palette = view.menu.palette.as_ref().unwrap();
                 assert!(!palette.filtered.is_empty());
                 assert!(
                     palette
                         .filtered
                         .iter()
-                        .all(|index| filter.accepts(&palette.entries[*index].action))
+                        .all(|hit| filter.accepts(&palette.entries[hit.index].action))
                 );
             }
-            palette.filter = Filter::All;
-            palette.filter("build");
+            view.set_palette_filter(Filter::All, cx);
+            view.filter_palette("build", cx);
+            let palette = view.menu.palette.as_ref().unwrap();
             assert!(matches!(
-                palette.entries[palette.filtered[0]].action,
+                palette.selected_entry().unwrap().action,
                 Action::Configured(..)
             ));
-            palette.filter("projects herdr");
-            assert_eq!(palette.filtered.len(), 1);
+            view.filter_palette("projects herdr", cx);
+            let palette = view.menu.palette.as_ref().unwrap();
             assert!(matches!(
-                palette.entries[palette.filtered[0]].action,
+                palette.selected_entry().unwrap().action,
                 Action::Project(_)
             ));
-            view.menu.palette = Some(palette);
         })
     });
 }
@@ -61,8 +63,8 @@ fn metadata_refresh_preserves_selection_and_command_invocation_context(cx: &mut 
     cx.update(|window, cx| {
         view.update(cx, |view, cx| {
             view.open_palette(Filter::All, window, cx);
-            let palette = view.menu.palette.as_mut().unwrap();
-            palette.filter("Settings");
+            view.filter_palette("Settings", cx);
+            let palette = view.menu.palette.as_ref().unwrap();
             let selected = palette.selected_identity();
             let captured = palette.target.as_ref().unwrap().workspace.clone();
             Arc::make_mut(view.live.snapshot.as_mut().unwrap()).focused_workspace_id = None;
@@ -88,7 +90,7 @@ fn project_loading_is_incremental_and_config_changes_rescan_without_losing_query
         view.update(cx, |view, cx| {
             view.config.palette.project_roots = vec![root.path().to_string_lossy().into_owned()];
             view.open_palette(Filter::All, window, cx);
-            let palette = view.menu.palette.as_mut().unwrap();
+            let palette = view.menu.palette.as_ref().unwrap();
             assert!(palette.loading_projects);
             assert!(
                 palette
@@ -96,7 +98,7 @@ fn project_loading_is_incremental_and_config_changes_rescan_without_losing_query
                     .iter()
                     .any(|entry| matches!(entry.action, Action::Native(_)))
             );
-            palette.filter("herdr");
+            view.filter_palette("herdr", cx);
         })
     });
     cx.run_until_parked();
@@ -227,5 +229,80 @@ fn composition_does_not_activate_or_dismiss_the_palette(cx: &mut TestAppContext)
             );
             assert!(view.menu.palette.is_none());
         })
+    });
+}
+
+#[gpui::test]
+fn large_lists_rank_in_the_background_and_keep_shown_rows_until_done(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(fixture_window);
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.open_palette(Filter::All, window, cx);
+            let mut palette = view.menu.palette.take().unwrap();
+            palette.projects.projects = (0..search::INLINE_CANDIDATES)
+                .map(|index| projects::Project {
+                    path: format!("/projects/p{index}").into(),
+                    label: format!("p{index}"),
+                })
+                .collect();
+            let shown = palette.entries.clone();
+            view.prepare_palette_entries(&mut palette);
+            view.menu.palette = Some(palette);
+            view.rank_palette(Selection::Keep, cx);
+            view.filter_palette("missing", cx);
+            view.filter_palette("p511", cx);
+            // Rows still index the entries they were ranked from.
+            let palette = view.menu.palette.as_ref().unwrap();
+            assert!(Arc::ptr_eq(&palette.entries, &shown));
+            assert!(palette.match_task.is_some());
+            assert!(
+                palette
+                    .filtered
+                    .iter()
+                    .all(|hit| hit.index < palette.entries.len())
+            );
+        })
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        let palette = view.menu.palette.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&palette.entries, &palette.pending));
+        assert!(palette.match_task.is_none());
+        let entry = palette.selected_entry().unwrap();
+        assert_eq!(entry.label.as_ref(), "p511");
+        assert_eq!(palette.filtered[0].highlights.label, vec![0..4]);
+    });
+}
+
+#[gpui::test]
+fn closing_the_palette_drops_an_unfinished_ranking(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(fixture_window);
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.open_palette(Filter::All, window, cx);
+            let mut palette = view.menu.palette.take().unwrap();
+            palette.projects.projects = (0..=search::INLINE_CANDIDATES)
+                .map(|index| projects::Project {
+                    path: format!("/projects/p{index}").into(),
+                    label: format!("p{index}"),
+                })
+                .collect();
+            view.prepare_palette_entries(&mut palette);
+            view.menu.palette = Some(palette);
+            view.rank_palette(Selection::Keep, cx);
+            view.dismiss_menu(window, cx);
+            view.open_palette(Filter::Commands, window, cx);
+        })
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        let palette = view.menu.palette.as_ref().unwrap();
+        assert!(palette.projects.projects.is_empty());
+        assert!(
+            palette
+                .filtered
+                .iter()
+                .all(|hit| !matches!(palette.entries[hit.index].action, Action::Project(_)))
+        );
     });
 }
