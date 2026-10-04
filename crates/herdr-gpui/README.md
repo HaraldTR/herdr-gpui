@@ -1286,6 +1286,12 @@ request.
   their numbers carry over when switching, and the choice is remembered.
   Side by side, drag the line between the halves to give either more room
   (each keeps at least a fifth); a double-click on it evens them again.
+- A list of the changed files sits left of the diff, as on a pull request:
+  grouped under their folders, each with how it changed (A, M, D, R),
+  its added and removed lines, and how many notes are queued on it.
+  Clicking one brings it to the top of the diff, in either layout, and the
+  file at the top of the diff is marked. The list resizes by its right edge
+  and its width is remembered.
 - Code is coloured by its language, chosen by file extension from the
   grammars bundled with [syntect](https://github.com/trishume/syntect).
   Removed lines are read in the old file's order and added lines in the new

@@ -34,10 +34,14 @@ pub(crate) enum PanelDrag {
     SettingsNavigation,
     /// The line between a side-by-side diff's halves.
     DiffSides,
+    /// The review's list of changed files.
+    ReviewFiles,
 }
 
 /// The notes panel beside a review or an annotated page.
 pub(crate) const NOTES: PanelWidth = PanelWidth::new(300., 220.);
+/// The review's list of changed files.
+pub(crate) const REVIEW_FILES: PanelWidth = PanelWidth::new(240., 160.);
 /// The settings window's section list.
 pub(crate) const SETTINGS_NAVIGATION: PanelWidth = PanelWidth::new(184., 150.);
 
@@ -170,35 +174,68 @@ fn grip(
 }
 
 impl crate::HerdrWindow {
-    /// The notes panels' width in this window.
+    /// The notes panels' width in this window, for a page's panel, which
+    /// slides open at this width; only builds that show pages have one.
+    #[cfg(any(target_os = "macos", windows))]
     pub(crate) fn notes_panel_width(&self) -> f32 {
         self.notes_width.width(self.viewport_width)
     }
 
-    /// Makes a notes panel resizable by its left edge. The review's and a
-    /// page's panels share one width, saved with the window's chrome when
-    /// a drag ends.
-    pub(crate) fn resizable_notes(
+    /// The window's own width for a panel `drag` resizes, and the side the
+    /// panel sits on; `None` for a panel another window owns.
+    fn window_panel(&mut self, drag: PanelDrag) -> Option<(&mut PanelWidth, Side)> {
+        match drag {
+            PanelDrag::ReviewNotes => Some((&mut self.notes_width, Side::Right)),
+            #[cfg(any(target_os = "macos", windows))]
+            PanelDrag::PageNotes => Some((&mut self.notes_width, Side::Right)),
+            PanelDrag::ReviewFiles => Some((&mut self.review_files_width, Side::Left)),
+            PanelDrag::SettingsNavigation | PanelDrag::DiffSides => None,
+        }
+    }
+
+    /// `window_panel` to read while drawing.
+    fn panel_at(&self, drag: PanelDrag) -> Option<(PanelWidth, Side)> {
+        match drag {
+            PanelDrag::ReviewNotes => Some((self.notes_width, Side::Right)),
+            #[cfg(any(target_os = "macos", windows))]
+            PanelDrag::PageNotes => Some((self.notes_width, Side::Right)),
+            PanelDrag::ReviewFiles => Some((self.review_files_width, Side::Left)),
+            PanelDrag::SettingsNavigation | PanelDrag::DiffSides => None,
+        }
+    }
+
+    /// Makes a window panel resizable by the edge facing its content, at
+    /// `width`. Its width is saved with the window's chrome when a drag
+    /// ends; the review's and a page's notes share one.
+    pub(crate) fn resizable_panel(
         &self,
         panel: Stateful<Div>,
         id: &'static str,
         drag: PanelDrag,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let save = |this: &mut Self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>| {
-            if this.notes_width.take_unsaved() {
-                this.save_chrome();
-            }
+        let Some((width, side)) = self.panel_at(drag) else {
+            return panel;
         };
+        let width = width.width(self.viewport_width);
+        let save =
+            move |this: &mut Self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>| {
+                if this
+                    .window_panel(drag)
+                    .is_some_and(|(width, _)| width.take_unsaved())
+                {
+                    this.save_chrome();
+                }
+            };
         panel
             .relative()
-            .w(px(self.notes_panel_width()))
+            .w(px(width))
             .on_drag_move(
                 cx.listener(move |this, event: &DragMoveEvent<PanelDrag>, _, cx| {
                     if *event.drag(cx) == drag
-                        && this
-                            .notes_width
-                            .drag(Side::Right, event.bounds, event.event.position.x)
+                        && this.window_panel(drag).is_some_and(|(width, side)| {
+                            width.drag(side, event.bounds, event.event.position.x)
+                        })
                     {
                         cx.notify();
                     }
@@ -208,11 +245,14 @@ impl crate::HerdrWindow {
             .on_mouse_up_out(MouseButton::Left, cx.listener(save))
             .child(handle(
                 id,
-                Side::Right,
+                side,
                 drag,
-                cx.listener(|this, _, _, cx| {
-                    this.notes_width.reset();
-                    if this.notes_width.take_unsaved() {
+                cx.listener(move |this, _, _, cx| {
+                    let reset = this.window_panel(drag).is_some_and(|(width, _)| {
+                        width.reset();
+                        width.take_unsaved()
+                    });
+                    if reset {
                         this.save_chrome();
                     }
                     cx.notify();

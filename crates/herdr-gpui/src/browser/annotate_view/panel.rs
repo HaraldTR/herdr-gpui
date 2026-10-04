@@ -232,7 +232,7 @@ impl HerdrWindow {
                         ))),
                 )
             });
-        self.resizable_notes(
+        self.resizable_panel(
             panel,
             "annotations-resize",
             crate::panel_resize::PanelDrag::PageNotes,

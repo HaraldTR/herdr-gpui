@@ -391,6 +391,51 @@ impl Diff {
     }
 }
 
+/// A changed file as the file list shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FileEntry {
+    /// Index into [`Diff::files`].
+    pub file: usize,
+    /// The row of its header, to jump to.
+    pub header: usize,
+    pub added: u32,
+    pub removed: u32,
+    /// How the file changed, as its header says: "new", "deleted",
+    /// "untracked", "too large to show"; empty when edited.
+    pub status: String,
+}
+
+impl Diff {
+    /// The changed files in order, with their counts, worked out once per
+    /// load.
+    pub(crate) fn file_entries(&self) -> Vec<FileEntry> {
+        let mut entries: Vec<FileEntry> = Vec::with_capacity(self.files.len());
+        for (row, line) in self.rows.iter().enumerate() {
+            match line.kind {
+                Kind::File => entries.push(FileEntry {
+                    file: line.file,
+                    header: row,
+                    added: 0,
+                    removed: 0,
+                    status: line.text.clone(),
+                }),
+                Kind::Added => {
+                    if let Some(entry) = entries.last_mut() {
+                        entry.added = entry.added.saturating_add(1);
+                    }
+                }
+                Kind::Removed => {
+                    if let Some(entry) = entries.last_mut() {
+                        entry.removed = entry.removed.saturating_add(1);
+                    }
+                }
+                Kind::Hunk | Kind::Context | Kind::Meta => {}
+            }
+        }
+        entries
+    }
+}
+
 /// Where each file header and numbered line of a [`Diff`] is.
 #[derive(Debug, Default)]
 pub(crate) struct RowIndex {

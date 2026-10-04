@@ -7,6 +7,7 @@ fn the_notes_width_round_trips_and_a_damaged_one_is_forgotten() {
     let path = directory.0.join("preferences.json");
     let chrome = Chrome {
         notes_width: Some(420.),
+        review_files_width: Some(280.),
         ..Chrome::default()
     };
     write_chrome(&path, chrome).unwrap();

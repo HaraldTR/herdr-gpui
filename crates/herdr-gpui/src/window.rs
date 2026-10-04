@@ -157,6 +157,8 @@ pub(crate) struct HerdrWindow {
     pub(crate) deliveries: crate::agent_notes::Deliveries,
     /// The notes panel beside a review or an annotated page; both share it.
     pub(crate) notes_width: crate::panel_resize::PanelWidth,
+    /// The review's list of changed files.
+    pub(crate) review_files_width: crate::panel_resize::PanelWidth,
     /// The window's width at its last render, which caps side panels.
     pub(crate) viewport_width: f32,
     pub(crate) usage: crate::usage::Usage,
@@ -299,6 +301,9 @@ impl HerdrWindow {
         }
         if self.notes_width.chosen().is_none() {
             self.notes_width.restore(chrome.notes_width);
+        }
+        if self.review_files_width.chosen().is_none() {
+            self.review_files_width.restore(chrome.review_files_width);
         }
         if !self.agent_sort_modified
             && let Some(sort) = chrome.agent_sort
@@ -604,6 +609,7 @@ impl HerdrWindow {
             git: git::Git::default(),
             deliveries: Default::default(),
             notes_width: crate::panel_resize::NOTES,
+            review_files_width: crate::panel_resize::REVIEW_FILES,
             viewport_width: 0.,
             usage: Default::default(),
             system_load: Default::default(),

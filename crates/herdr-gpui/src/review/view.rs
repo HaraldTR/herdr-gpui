@@ -2,7 +2,7 @@
 //! the line the user picked, and the queued notes with Send. Git runs on the
 //! background executor; nothing reaches an agent until the user presses Send.
 use super::{
-    diff::{Loaded, RowIndex, Scope, SplitRow},
+    diff::{FileEntry, Loaded, RowIndex, Scope, SplitRow},
     notes::{self, MAX_NOTES, Note},
 };
 use crate::{
@@ -13,6 +13,7 @@ use gpui::{prelude::*, *};
 use herdr_client::protocol::ClientShellSnapshot;
 use std::{collections::HashMap, sync::Arc};
 
+mod files;
 mod rows;
 mod scrollbar;
 
@@ -83,6 +84,10 @@ pub(crate) struct Review {
     split: Vec<SplitRow>,
     /// The share of a side-by-side row the old side takes.
     split_ratio: f32,
+    /// The changed files, and the file list's lines with their folders.
+    files: Vec<FileEntry>,
+    file_items: Vec<files::FileItem>,
+    files_scroll: UniformListScrollHandle,
     /// Where the loaded rows are, to mark notes without a scan.
     index: RowIndex,
     agent: Option<Agent>,
@@ -106,6 +111,8 @@ impl Review {
     fn set_loaded(&mut self, loaded: Loaded) {
         self.split = loaded.diff.split_rows();
         self.index = loaded.diff.index();
+        self.files = loaded.diff.file_entries();
+        self.file_items = files::file_items(&loaded.diff, &self.files);
         self.state = State::Loaded(Arc::new(loaded));
     }
 
@@ -165,6 +172,9 @@ impl HerdrWindow {
                     layout: Layout::default(),
                     split: Vec::new(),
                     split_ratio: rows::EVEN_SPLIT,
+                    files: Vec::new(),
+                    file_items: Vec::new(),
+                    files_scroll: UniformListScrollHandle::new(),
                     index: RowIndex::default(),
                     agent: None,
                     endpoint,
@@ -266,6 +276,9 @@ impl HerdrWindow {
             layout: Layout::default(),
             split: Vec::new(),
             split_ratio: rows::EVEN_SPLIT,
+            files: Vec::new(),
+            file_items: Vec::new(),
+            files_scroll: UniformListScrollHandle::new(),
             index: RowIndex::default(),
             agent,
             endpoint: self.selected_endpoint,
@@ -574,6 +587,9 @@ impl HerdrWindow {
                     .flex_1()
                     .min_h_0()
                     .flex()
+                    .when(!review.files.is_empty(), |row| {
+                        row.child(self.render_review_files(review, cx))
+                    })
                     .child(div().flex_1().min_w_0().flex().flex_col().child(body))
                     .child(self.render_review_notes(review, cx)),
             )
@@ -784,7 +800,7 @@ impl HerdrWindow {
                         ),
                 )
             });
-        self.resizable_notes(
+        self.resizable_panel(
             panel,
             "review-notes-resize",
             crate::panel_resize::PanelDrag::ReviewNotes,
