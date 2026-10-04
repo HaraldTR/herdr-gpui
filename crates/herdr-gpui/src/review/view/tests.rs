@@ -107,6 +107,11 @@ fn notes_on_lines_reach_the_agent_that_made_the_changes(cx: &mut gpui::TestAppCo
         assert!(review.draft.is_none());
     });
     cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+    // Every row spans the list, whatever its text, so tints line up.
+    let file = cx.debug_bounds("review-row-0").unwrap();
+    let added = cx.debug_bounds("review-row-4").unwrap();
+    assert_eq!(file.size.width, added.size.width);
+    assert!(file.size.width > gpui::px(400.));
 
     // The agent is working: the notes wait for it, and the queue is
     // emptied at once so Send cannot repeat them.

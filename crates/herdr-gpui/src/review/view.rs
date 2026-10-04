@@ -504,6 +504,8 @@ impl HerdrWindow {
                     div()
                         .id(("review-row", index))
                         .debug_selector(move || format!("review-row-{index}"))
+                        // Tints and the file header span the list, not the text.
+                        .w_full()
                         .h(px(line_height))
                         .flex()
                         .items_center()
