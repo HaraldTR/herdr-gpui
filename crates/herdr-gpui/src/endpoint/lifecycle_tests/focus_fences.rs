@@ -108,7 +108,7 @@ fn every_focus_changing_command_fences_immediate_input_until_ack_and_surface(
         Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
     });
     let view = fixture.update(cx, |fixture, _| fixture.0.clone());
-    for (command, method, confirm_close_tab, explicit_tab) in [
+    for (command, method, confirm_close, explicit_tab) in [
         (Command::SplitRight, Method::PaneSplit),
         (Command::SplitDown, Method::PaneSplit),
         (Command::Tab, Method::TabCreate),
@@ -138,6 +138,7 @@ fn every_focus_changing_command_fences_immediate_input_until_ack_and_surface(
     .into_iter()
     .map(|(command, method)| (command, method, true, None))
     .chain([
+        (Command::ClosePane, Method::PaneClose, false, None),
         (Command::CloseTab, Method::TabClose, false, None),
         (Command::CloseTab, Method::TabClose, false, Some("inactive")),
     ]) {
@@ -150,7 +151,8 @@ fn every_focus_changing_command_fences_immediate_input_until_ack_and_surface(
                 view.options = ConnectOptions::default();
                 view.reset_selected();
                 view.activation_deadline = None;
-                view.config.confirm_close_tab = confirm_close_tab;
+                view.config.confirm_close_tab = confirm_close;
+                view.config.confirm_close_pane = confirm_close;
                 assert!(view.input_ready());
                 if let Some(id) = explicit_tab {
                     let snapshot = Arc::make_mut(view.live.snapshot.as_mut().unwrap());
@@ -187,7 +189,7 @@ fn every_focus_changing_command_fences_immediate_input_until_ack_and_surface(
                         );
                         crate::menu::workspace_tests::submit_dialog(view, window, cx);
                     }
-                    Command::ClosePane | Command::CloseTab if confirm_close_tab => {
+                    Command::ClosePane | Command::CloseTab if confirm_close => {
                         view.close_confirmation_key(&key("tab"), window, cx);
                         view.close_confirmation_key(&key("enter"), window, cx);
                     }
@@ -207,7 +209,7 @@ fn every_focus_changing_command_fences_immediate_input_until_ack_and_surface(
                     }
                     _ => {}
                 }
-                if !confirm_close_tab {
+                if !confirm_close {
                     assert!(view.menu.page.is_none());
                 }
                 assert!(!view.input_ready(), "{method} must fence immediately");

@@ -323,7 +323,7 @@ Accepted saves survive closing Settings. Family and size edits preserve configur
 fallbacks and unrelated settings in `config-gpui.local.toml`. General retains
 browser-skill installation/removal and configuration paths.
 
-General provides switches for **Show usage**, **Confirm tab close**, and the
+General provides switches for **Show usage**, **Confirm tab close**, **Confirm pane close**, and the
 clipboard copied notification, plus all six clipboard positions. Notifications
 provides a native in-app switch, a bounded delay stepper (0-3600 seconds), and
 four corner choices. Each notification and clipboard field has a **Follow shared**
@@ -432,9 +432,11 @@ written to disk, so a reload or a restart returns to the configured size.
 A tab asks before closing only while one of its agents is working or blocked
 on a prompt; tabs whose agents are idle or done, or that have none, close at
 once. Set top-level `confirm_close_tab = false` to never ask for tabs
-(including their running processes), and `show_agents = false` to hide the Agents
-section and give Spaces the full sidebar height. Both default to `true`. Pane
-closures still ask for confirmation. Saved edits apply automatically. The
+(including their running processes), `confirm_close_pane = false` to close
+panes without asking, and `show_agents = false` to hide the Agents
+section and give Spaces the full sidebar height. All three default to `true`.
+The pane dialog's **Do not ask again** checkbox (click it or press Space) saves
+`confirm_close_pane = false` to `config-gpui.local.toml` once the close is sent. Saved edits apply automatically. The
 **Show agents** control in **Settings > Appearance > Sidebar layout** saves
 `show_agents` immediately, independently of the layout draft saved on close.
 
@@ -1726,8 +1728,10 @@ Windows setup) nothing is saved and the window says so.
   daemons that advertise the method.
 - Cmd-W closes the focused pane and Cmd-Shift-W closes the focused tab only after
   a confirmation dialog (a tab asks only while an agent in it is working or
-  blocked, and never with `confirm_close_tab = false`). **Cancel is selected by default**: Enter alone cancels;
-  Tab then Enter selects and confirms Close. Closing can terminate running
+  blocked, and never with `confirm_close_tab = false`; a pane never asks with
+  `confirm_close_pane = false`). **Cancel is selected by default**: Enter alone cancels;
+  Tab then Enter selects and confirms Close. In the pane dialog, Space toggles
+  **Do not ask again**. Closing can terminate running
   processes, unlike quitting the GUI, which only detaches.
 - Double-tap Shift or press Cmd-Shift-P to open the unified **Command Palette**:
   workspaces on connected hosts, agents and terminal panes, native GUI actions,
