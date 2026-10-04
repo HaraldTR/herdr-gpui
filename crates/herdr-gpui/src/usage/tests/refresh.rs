@@ -1,11 +1,6 @@
 use super::*;
 use crate::usage::{Host, Message, Usage};
-use std::time::Instant;
-
-fn begin(usage: &mut Usage, host: &Host, now: Instant) {
-    usage.host = Some(host.clone());
-    usage.begin(host.clone(), now);
-}
+use std::{collections::HashSet, time::Instant};
 
 #[test]
 fn a_failed_refresh_keeps_the_last_numbers_and_says_why() {
@@ -13,7 +8,14 @@ fn a_failed_refresh_keeps_the_last_numbers_and_says_why() {
     let (claude, codex) = (provider("claude"), provider("codex"));
     let local = Host::Local;
     let mut usage = Usage::default();
-    assert!(usage.poll(Some(local.clone()), &UsageConfig::default(), 0, false, now));
+    assert!(usage.poll(
+        Some(local.clone()),
+        &UsageConfig::default(),
+        &HashSet::new(),
+        0,
+        false,
+        now,
+    ));
     assert!(
         usage.current().is_none(),
         "an inactive window reads nothing"
@@ -46,11 +48,13 @@ fn a_failed_refresh_keeps_the_last_numbers_and_says_why() {
                 provider: codex,
                 report: None,
                 error: Some(Error::UsageRejected.to_string()),
+                access: None,
             },
             Reading {
                 provider: claude,
                 report: Some(report(claude, 20.)),
                 error: Some(Error::UsageRateLimited.to_string()),
+                access: None,
             },
         ],
         "registry order, whatever order answers came in"
@@ -100,11 +104,18 @@ fn each_host_keeps_its_own_answer_within_a_bound() {
         usage.apply(Message::Done(host, Ok(())), now);
     }
     let config = UsageConfig::default();
-    usage.poll(Some(Host::Local), &config, 0, false, now);
+    usage.poll(Some(Host::Local), &config, &HashSet::new(), 0, false, now);
     assert_eq!(usage.current().unwrap().readings.len(), 1);
-    usage.poll(None, &config, 0, false, now);
+    usage.poll(None, &config, &HashSet::new(), 0, false, now);
     assert!(usage.current().is_none());
-    usage.poll(Some(remote.clone()), &config, 0, false, now);
+    usage.poll(
+        Some(remote.clone()),
+        &config,
+        &HashSet::new(),
+        0,
+        false,
+        now,
+    );
     for index in 0..super::super::HOST_LIMIT * 2 {
         usage.begin(Host::Ssh(format!("host-{index}")), now);
     }
@@ -115,7 +126,14 @@ fn each_host_keeps_its_own_answer_within_a_bound() {
         "the shown host survives trimming"
     );
     // A new config makes every host due.
-    usage.poll(Some(remote.clone()), &config, 1, false, now);
+    usage.poll(
+        Some(remote.clone()),
+        &config,
+        &HashSet::new(),
+        1,
+        false,
+        now,
+    );
     assert!(usage.entries.values().all(|entry| entry.due == Some(now)));
 }
 
@@ -147,6 +165,7 @@ fn live_local_usage() {
     super::super::read(
         &Host::Local,
         &UsageConfig::default(),
+        &HashSet::new(),
         &mut jar,
         |provider, report| {
             match report {

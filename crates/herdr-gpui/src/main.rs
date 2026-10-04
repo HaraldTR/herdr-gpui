@@ -58,6 +58,7 @@ mod pane_menu;
 mod port_forward;
 mod preferences;
 mod presentation;
+mod processes;
 mod progress;
 mod pull_request;
 mod release_notes;

@@ -336,6 +336,10 @@ pub enum Error {
     UsageNotSignedIn,
     #[error("This account has no plan with usage limits to show.")]
     UsageNoPlan,
+    #[error("Reading this sign-in needs Keychain access, which macOS asks for.")]
+    UsageKeychainAccess,
+    #[error("Keychain access was denied, so this sign-in cannot be read.")]
+    UsageKeychainDenied,
     #[error("Usage request mixes this machine's settings with the remote host's sign-in.")]
     UsageMixedSecrets,
     #[error("Usage command failed: {0}.")]
@@ -372,6 +376,22 @@ pub enum Error {
     ForwardDuplicate(u16),
     #[error("At most {0} ports can be forwarded at once.")]
     ForwardLimit(usize),
+    #[error("Could not ask Herdr which process the pane runs.")]
+    ProcessesQuery(#[source] herdr_client::Error),
+    #[error("Herdr's answer about the pane's process was not understood.")]
+    ProcessesAnswer(#[source] serde_json::Error),
+    #[error("Herdr did not name a process for this pane.")]
+    ProcessesNoRoot,
+    #[error("The pane's process has exited.")]
+    ProcessesRootExited,
+    #[error("The herdr executable's path is not valid UTF-8.")]
+    ProcessesExecutable,
+    #[error("Still ending the last processes. Try again in a moment.")]
+    ProcessesBusy,
+    #[error("The process list stopped updating. Reopen it to try again.")]
+    ProcessesStopped,
+    #[error("Could not start watching the pane's processes.")]
+    ProcessesWorker(#[source] io::Error),
     #[error("{0}")]
     Update(#[from] UpdateError),
     #[error("{0}")]

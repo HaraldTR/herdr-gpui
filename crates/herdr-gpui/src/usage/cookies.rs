@@ -6,10 +6,13 @@
 //! keychain ("Chrome Safe Storage" and the like), so the first read asks the
 //! user for Keychain access. The key is kept for the life of the worker so it
 //! asks once. Safari's store needs Full Disk Access; without it Safari is
-//! skipped quietly.
+//! skipped quietly. Other apps' Keychain items the user refused are kept
+//! here too, so a denied prompt is not shown again on every refresh; pressing
+//! Allow in the panel again forgets them so macOS can ask once more.
 
+use super::model::Provider;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -19,6 +22,9 @@ use zeroize::Zeroizing;
 pub(super) struct CookieJar {
     /// Each browser's cookie key once read, or None when it cannot be.
     keys: HashMap<&'static str, Option<Zeroizing<[u8; 16]>>>,
+    /// Keychain items another app owns that could not be read on this
+    /// machine, usually because the user denied the prompt.
+    refused: HashSet<(Provider, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,6 +35,27 @@ pub(super) struct Cookie {
 }
 
 impl CookieJar {
+    pub(super) fn refused(&self, provider: Provider, item: &str) -> bool {
+        self.refused.contains(&(provider, item.to_owned()))
+    }
+
+    pub(super) fn refuse(&mut self, provider: Provider, item: String) {
+        self.refused.insert((provider, item));
+    }
+
+    /// Whether some browser's cookie key could not be read, which on a Mac
+    /// almost always means its Keychain prompt was denied.
+    pub(super) fn key_refused(&self) -> bool {
+        self.keys.values().any(Option::is_none)
+    }
+
+    /// Forgets what `provider` was refused, and which browser keys could not
+    /// be read, so the next read asks macOS again.
+    pub(super) fn forgive(&mut self, provider: Provider) {
+        self.refused.retain(|(refused, _)| *refused != provider);
+        self.keys.retain(|_, key| key.is_some());
+    }
+
     /// `name=value; …` for cookies of `domains` (and their subdomains) from the
     /// first browser that has them all, or any of them when `names` is empty.
     pub fn header(&mut self, domains: &[&str], names: &[&str]) -> Option<String> {

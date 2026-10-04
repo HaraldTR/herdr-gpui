@@ -202,6 +202,12 @@ pub(crate) fn run() -> std::process::ExitCode {
     } else {
         crate::browser::Store::default()
     };
+    // Nor with usage Keychain grants, so a fixture never makes macOS ask.
+    let keychain_grants = if mode == LaunchMode::Normal {
+        crate::usage::KeychainGrants::load()
+    } else {
+        crate::usage::KeychainGrants::default()
+    };
     // Nor with saved editor groups, which they would overwrite.
     let group_layouts = if mode == LaunchMode::Normal {
         crate::browser::Layouts::load()
@@ -218,6 +224,7 @@ pub(crate) fn run() -> std::process::ExitCode {
             browser_tabs.install(cx);
             group_layouts.install(cx);
             agent_skill.install_global(cx);
+            keychain_grants.install(cx);
             // Only the user's own app answers agents; native test modes stay private.
             if mode == LaunchMode::Normal {
                 crate::control::install(cx);
