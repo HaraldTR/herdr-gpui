@@ -264,7 +264,7 @@ impl HerdrWindow {
                 host: (multi && endpoint_id != crate::endpoint::LOCAL)
                     .then_some(endpoint.label.as_str()),
             };
-            let host = crate::usage::Host::from(&endpoint.connection.target);
+            let daemon = crate::listening_ports::Daemon::from(&endpoint.connection.target);
             let live = if selected { &self.live } else { &endpoint.live };
             let Some(snapshot) = &live.snapshot else {
                 continue;
@@ -420,7 +420,7 @@ impl HerdrWindow {
                         )
                     });
                 let ports = (self.config.show_listening_ports && !removing_row)
-                    .then(|| self.listening_ports.get(&host, &workspace.workspace_id))
+                    .then(|| self.listening_ports.get(&daemon, &workspace.workspace_id))
                     .filter(|ports| !ports.is_empty())
                     .map(|ports| {
                         // Under the label column, clear of the status dot.
@@ -443,7 +443,7 @@ impl HerdrWindow {
                             .text_size(px((font.size * 0.85).round()))
                             .child(crate::listening_ports::chips(
                                 ports,
-                                &host,
+                                daemon.host(),
                                 (&endpoint_id, &workspace.workspace_id),
                                 theme,
                                 (font.size * 0.85).round(),

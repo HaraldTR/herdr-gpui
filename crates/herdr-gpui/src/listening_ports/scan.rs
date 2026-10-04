@@ -20,9 +20,12 @@ pub(crate) const MAX_PORTS: usize = 32;
 const MAX_PROCESS: usize = 32;
 /// Workspace ids are short daemon tokens such as `w7V`.
 const MAX_WORKSPACE_ID: usize = 64;
+/// Longer socket paths than any Unix socket can have are not trusted.
+const MAX_SOCKET: usize = 1024;
 
 /// Prints `L <pid> <address:port> <process>` per listening socket, then
-/// `E <pid> <workspace>` for each listener started inside a Herdr pane, or
+/// `E <pid> <workspace> <api socket>` for each listener started inside a
+/// Herdr pane, the socket naming which daemon's pane that was, or
 /// `N` when the host has neither `ss` nor `lsof`. Linux prefers `ss`, which
 /// is quicker; macOS has only `lsof`. Both list only this user's processes
 /// with their owners, so another user's servers never show. The step runs in
@@ -49,12 +52,14 @@ fi
 printf '%s\n' "$herdr_ports"
 for herdr_pid in $(printf '%s\n' "$herdr_ports" | awk '$1 == "L" { print $2 }' | sort -un | head -n 128); do
     if [ -r "/proc/$herdr_pid/environ" ]; then
-        herdr_workspace=$(tr '\0' '\n' < "/proc/$herdr_pid/environ" | grep -m 1 '^HERDR_WORKSPACE_ID=')
+        herdr_env=$(tr '\0' '\n' < "/proc/$herdr_pid/environ")
     else
-        herdr_workspace=$(ps -E -ww -o command= -p "$herdr_pid" 2>/dev/null | tr ' ' '\n' | grep -m 1 '^HERDR_WORKSPACE_ID=')
+        herdr_env=$(ps -E -ww -o command= -p "$herdr_pid" 2>/dev/null | tr ' ' '\n')
     fi
+    herdr_workspace=$(printf '%s\n' "$herdr_env" | sed -n 's/^HERDR_WORKSPACE_ID=//p' | head -n 1)
+    herdr_socket=$(printf '%s\n' "$herdr_env" | sed -n 's/^HERDR_SOCKET_PATH=//p' | head -n 1)
     if [ -n "$herdr_workspace" ]; then
-        printf 'E %s %s\n' "$herdr_pid" "${herdr_workspace#HERDR_WORKSPACE_ID=}"
+        printf 'E %s %s %s\n' "$herdr_pid" "$herdr_workspace" "$herdr_socket"
     fi
 done
 true"#;
@@ -144,13 +149,21 @@ fn ssh_host(target: &str) -> Option<String> {
     (!host.is_empty() && !host.contains(['/', ':', '[', ']'])).then(|| host.to_owned())
 }
 
-/// Each workspace's ports, by workspace id, lowest port first.
-pub(crate) type Ports = HashMap<String, Vec<Port>>;
+/// The pane a listener was started in: its workspace, and the JSON API
+/// socket of the daemon that owns it, empty when the process did not say.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) struct Owner {
+    pub workspace: String,
+    pub socket: String,
+}
+
+/// Each workspace's ports, by owner, lowest port first.
+pub(crate) type Ports = HashMap<Owner, Vec<Port>>;
 
 /// Parses what [`COMMAND`] printed.
 pub(crate) fn parse(text: &str) -> Result<Ports> {
     let mut listeners: Vec<(u32, Port)> = Vec::new();
-    let mut workspaces: HashMap<u32, &str> = HashMap::new();
+    let mut owners: HashMap<u32, Owner> = HashMap::new();
     for line in text.lines() {
         let mut words = line.splitn(4, ' ');
         match words.next() {
@@ -172,8 +185,22 @@ pub(crate) fn parse(text: &str) -> Result<Ports> {
                 let plain = !workspace.is_empty()
                     && workspace.len() <= MAX_WORKSPACE_ID
                     && workspace.chars().all(|c| c.is_ascii_graphic() && c != '=');
+                // Paths are compared, never opened; an unusable one is unknown.
+                let socket = words
+                    .next()
+                    .map(str::trim_end)
+                    .filter(|socket| {
+                        socket.len() <= MAX_SOCKET && !socket.chars().any(char::is_control)
+                    })
+                    .unwrap_or_default();
                 if let (Ok(pid), true) = (pid.parse(), plain) {
-                    workspaces.insert(pid, workspace);
+                    owners.insert(
+                        pid,
+                        Owner {
+                            workspace: workspace.to_owned(),
+                            socket: socket.to_owned(),
+                        },
+                    );
                 }
             }
             _ => {}
@@ -181,10 +208,10 @@ pub(crate) fn parse(text: &str) -> Result<Ports> {
     }
     let mut ports = Ports::new();
     for (pid, port) in listeners {
-        let Some(workspace) = workspaces.get(&pid) else {
+        let Some(owner) = owners.get(&pid) else {
             continue;
         };
-        let list = ports.entry((*workspace).to_owned()).or_default();
+        let list = ports.entry(owner.clone()).or_default();
         match list.iter_mut().find(|known| known.number == port.number) {
             // IPv4 and IPv6 sockets of one server share its number.
             Some(known) => {

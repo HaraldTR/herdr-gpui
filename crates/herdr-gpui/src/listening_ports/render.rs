@@ -21,8 +21,8 @@ impl HerdrWindow {
             .as_ref()?
             .focused_workspace_id
             .as_deref()?;
-        let host = Host::from(&endpoint.connection.target);
-        let ports = self.listening_ports.get(&host, workspace);
+        let daemon = super::Daemon::from(&endpoint.connection.target);
+        let ports = self.listening_ports.get(&daemon, workspace);
         if ports.is_empty() {
             return None;
         }
@@ -35,7 +35,7 @@ impl HerdrWindow {
                 .px(px(6.))
                 .child(chips(
                     ports,
-                    &host,
+                    daemon.host(),
                     (&endpoint.id, workspace),
                     &self.theme,
                     14.,

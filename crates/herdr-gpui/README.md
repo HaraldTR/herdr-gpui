@@ -470,7 +470,9 @@ chips on a line under the workspace's sidebar row and, for the focused
 workspace, in the status bar. Clicking one opens the page in a browser tab of
 that workspace (`http://localhost:<port>` on this machine). A port belongs to
 a workspace when its process inherited the `HERDR_WORKSPACE_ID` Herdr sets in
-every pane, so system services and servers started outside Herdr never show.
+every pane, so system services and servers started outside Herdr never show,
+and its `HERDR_SOCKET_PATH` names the same daemon, so two sessions on one
+machine never claim each other's servers.
 Every five seconds each host runs `ss -ltnp` (Linux) or `lsof -iTCP
 -sTCP:LISTEN` (macOS) in its own shell, this machine's locally and a connected
 remote host's over SSH, listing only your own processes. A remote server opens

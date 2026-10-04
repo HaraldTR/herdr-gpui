@@ -18,10 +18,12 @@ use crate::{
     system_load::Stop,
     usage::{Host, Shell},
 };
+use herdr_client::ConnectTarget;
 pub(crate) use render::chips;
 pub(crate) use scan::{Port, Ports, parse};
 use std::{
     collections::HashMap,
+    path::{Path, PathBuf},
     sync::{Arc, mpsc},
     thread,
     time::{Duration, Instant},
@@ -34,6 +36,74 @@ const RETRY: Duration = Duration::from_secs(30);
 const STEP_TIMEOUT: Duration = Duration::from_secs(15);
 /// Hosts are few; an unbounded endpoint list still cannot start more workers.
 const HOST_LIMIT: usize = 16;
+
+/// The daemon an endpoint shows. A port is listed under one of its
+/// workspaces only when the port's pane belongs to this daemon, so two
+/// sessions on one machine never claim each other's servers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Daemon {
+    host: Host,
+    identity: Option<Identity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Identity {
+    /// This machine's daemon, by the client socket the endpoint dials.
+    Client(PathBuf),
+    /// A remote daemon, by its session name; its paths are the remote's own.
+    Session(String),
+}
+
+impl From<&ConnectTarget> for Daemon {
+    fn from(target: &ConnectTarget) -> Self {
+        let identity = match target {
+            ConnectTarget::Ssh { session, .. } => Some(Identity::Session(session.clone())),
+            local => local.socket_path().ok().map(Identity::Client),
+        };
+        Self {
+            host: Host::from(target),
+            identity,
+        }
+    }
+}
+
+impl Daemon {
+    pub(crate) fn host(&self) -> &Host {
+        &self.host
+    }
+
+    /// Whether a pane whose `HERDR_SOCKET_PATH` was `socket` is this daemon's.
+    /// A pane that did not say, from an older Herdr, is given the benefit of
+    /// the doubt, as is a daemon whose socket cannot be named.
+    fn owns(&self, socket: &str) -> bool {
+        let (false, Some(identity)) = (socket.is_empty(), &self.identity) else {
+            return true;
+        };
+        let api = Path::new(socket);
+        match identity {
+            Identity::Client(client) => client_socket(api).as_deref() == Some(client.as_path()),
+            Identity::Session(name) => session_name(api) == Some(name.as_str()),
+        }
+    }
+}
+
+/// The client socket a daemon serves beside its API socket, `herdr.sock`
+/// beside `herdr-client.sock`, as herdr-client's discovery derives it.
+fn client_socket(api: &Path) -> Option<PathBuf> {
+    let stem = api.file_stem()?.to_str()?;
+    Some(api.parent()?.join(format!("{stem}-client.sock")))
+}
+
+/// `…/sessions/<name>/herdr.sock` belongs to session `name`; the socket in
+/// the configuration root belongs to `default`.
+fn session_name(api: &Path) -> Option<&str> {
+    let directory = api.parent()?;
+    if directory.parent()?.file_name()? == "sessions" {
+        directory.file_name()?.to_str()
+    } else {
+        Some("default")
+    }
+}
 
 /// The shell a host is scanned through.
 fn open(host: &Host) -> Result<Shell> {
@@ -180,12 +250,17 @@ pub(crate) struct ListeningPorts {
 }
 
 impl ListeningPorts {
-    /// The ports `workspace` listens on, lowest first.
-    pub fn get(&self, host: &Host, workspace: &str) -> &[Port] {
+    /// The ports `workspace` of `daemon` listens on, lowest first.
+    pub fn get(&self, daemon: &Daemon, workspace: &str) -> &[Port] {
         self.monitors
-            .get(host)
-            .and_then(|monitor| monitor.reading.ports.get(workspace))
-            .map_or(&[], Vec::as_slice)
+            .get(&daemon.host)
+            .and_then(|monitor| {
+                monitor.reading.ports.iter().find_map(|(owner, ports)| {
+                    (owner.workspace == workspace && daemon.owns(&owner.socket))
+                        .then_some(ports.as_slice())
+                })
+            })
+            .unwrap_or_default()
     }
 
     /// Shows `ports` for `host` as if a scan had found them, with no worker.

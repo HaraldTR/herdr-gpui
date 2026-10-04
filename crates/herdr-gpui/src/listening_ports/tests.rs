@@ -1,11 +1,28 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::{
-    ListeningPorts, Reading,
+    Daemon, ListeningPorts, Reading,
     scan::{Bind, MAX_PORTS, Port, Ports, parse},
 };
 use crate::{Error, usage::Host};
+use herdr_client::ConnectTarget;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+/// The ports one workspace was found with, whichever daemon it named.
+fn of<'a>(ports: &'a Ports, workspace: &str) -> &'a [Port] {
+    ports
+        .iter()
+        .find(|(owner, _)| owner.workspace == workspace)
+        .map(|(_, ports)| ports.as_slice())
+        .unwrap()
+}
+
+fn remote(session: &str) -> Daemon {
+    Daemon::from(&ConnectTarget::Ssh {
+        target: "devbox".into(),
+        session: session.into(),
+    })
+}
 
 fn port(number: u16, bind: Bind, process: &str) -> Port {
     Port {
@@ -30,7 +47,7 @@ fn listeners_belong_to_the_workspace_their_process_names() {
     )
     .unwrap();
     assert_eq!(
-        ports["w7V"],
+        of(&ports, "w7V"),
         [
             port(3000, Bind::Loopback, "Google Chrome He"),
             // Both sockets of one server are one port, the wider kept.
@@ -38,7 +55,7 @@ fn listeners_belong_to_the_workspace_their_process_names() {
         ]
     );
     assert_eq!(
-        ports["wE"],
+        of(&ports, "wE"),
         [port(
             8080,
             Bind::Address(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5))),
@@ -60,7 +77,7 @@ fn ss_addresses_parse_like_lsof_ones() {
          E 1 w1\nE 2 w1\nE 3 w1\nE 4 w1\n",
     )
     .unwrap();
-    let binds: Vec<(u16, Bind)> = ports["w1"]
+    let binds: Vec<(u16, Bind)> = of(&ports, "w1")
         .iter()
         .map(|port| (port.number, port.bind))
         .collect();
@@ -99,7 +116,7 @@ fn malformed_and_untrusted_lines_are_dropped() {
     let ports = parse(&text).unwrap();
     assert_eq!(ports.len(), 1);
     // Control characters are stripped from the name; the rest is display text.
-    assert_eq!(ports["w1"], [port(81, Bind::Any, "[31mred")]);
+    assert_eq!(of(&ports, "w1"), [port(81, Bind::Any, "[31mred")]);
 }
 
 #[test]
@@ -117,7 +134,7 @@ fn each_workspace_keeps_its_lowest_ports_only() {
     }
     text.push_str("E 1 w1\n");
     let ports = parse(&text).unwrap();
-    let numbers: Vec<u16> = ports["w1"].iter().map(|port| port.number).collect();
+    let numbers: Vec<u16> = of(&ports, "w1").iter().map(|port| port.number).collect();
     assert_eq!(numbers.len(), MAX_PORTS);
     assert_eq!(numbers.first(), Some(&1001));
     assert!(numbers.windows(2).all(|pair| pair[0] < pair[1]));
@@ -184,19 +201,24 @@ fn only_a_different_scan_changes_what_is_shown() {
 #[test]
 fn seeded_hosts_are_looked_up_by_workspace_and_forgotten_when_dropped() {
     let mut ports = ListeningPorts::default();
-    let host = Host::Ssh("devbox".into());
+    let daemon = remote("default");
+    let host = daemon.host().clone();
     ports.seed(host.clone(), parse("L 1 *:3000 node\nE 1 w1\n").unwrap());
-    assert_eq!(ports.get(&host, "w1").len(), 1);
-    assert!(ports.get(&host, "w2").is_empty());
-    assert!(ports.get(&Host::Local, "w1").is_empty());
+    assert_eq!(ports.get(&daemon, "w1").len(), 1);
+    assert!(ports.get(&daemon, "w2").is_empty());
+    assert!(
+        ports
+            .get(&Daemon::from(&ConnectTarget::Local), "w1")
+            .is_empty()
+    );
     // A host still wanted keeps its reading; no worker is started for it.
     assert!(!ports.poll([host.clone(), host.clone()]));
-    assert_eq!(ports.get(&host, "w1").len(), 1);
+    assert_eq!(ports.get(&daemon, "w1").len(), 1);
     assert!(
         ports.poll(std::iter::empty()),
         "dropping shown ports is a change"
     );
-    assert!(ports.get(&host, "w1").is_empty());
+    assert!(ports.get(&daemon, "w1").is_empty());
     assert!(!ports.poll(std::iter::empty()));
 }
 
@@ -229,4 +251,73 @@ fn this_machine_lists_a_socket_this_process_holds() {
         output.stdout
     );
     parse(&output.stdout).unwrap();
+}
+
+#[test]
+fn listeners_name_the_daemon_whose_pane_started_them() {
+    let ports = parse(
+        "L 1 *:3000 node\n\
+         L 2 *:4000 vite\n\
+         L 3 *:5000 api\n\
+         E 1 w1 /home/me/.config/herdr/sessions/my work/herdr.sock\n\
+         E 2 w2 \n\
+         E 3 w3 /bad\u{7}/herdr.sock\n",
+    )
+    .unwrap();
+    let socket = |workspace: &str| {
+        ports
+            .keys()
+            .find(|owner| owner.workspace == workspace)
+            .map(|owner| owner.socket.as_str())
+    };
+    // Paths may hold spaces; the socket is the rest of the line.
+    assert_eq!(
+        socket("w1"),
+        Some("/home/me/.config/herdr/sessions/my work/herdr.sock")
+    );
+    assert_eq!(socket("w2"), Some(""));
+    assert_eq!(socket("w3"), Some(""), "control characters are not a path");
+}
+
+#[test]
+fn two_sessions_on_one_host_keep_their_own_ports() {
+    let mut ports = ListeningPorts::default();
+    let found = parse(
+        "L 1 *:3000 web\n\
+         L 2 *:4000 api\n\
+         L 3 *:5000 old\n\
+         E 1 w1 /home/me/.config/herdr/herdr.sock\n\
+         E 2 w1 /home/me/.config/herdr/sessions/work/herdr.sock\n\
+         E 3 w9\n",
+    )
+    .unwrap();
+    ports.seed(Host::Ssh("devbox".into()), found);
+    let numbers = |daemon: &Daemon, workspace: &str| -> Vec<u16> {
+        ports
+            .get(daemon, workspace)
+            .iter()
+            .map(|port| port.number)
+            .collect()
+    };
+    // One workspace id in two sessions: each session sees only its own.
+    assert_eq!(numbers(&remote("default"), "w1"), [3000]);
+    assert_eq!(numbers(&remote("work"), "w1"), [4000]);
+    assert!(numbers(&remote("other"), "w1").is_empty());
+    // A pane that did not name its daemon is shown to any of them.
+    assert_eq!(numbers(&remote("work"), "w9"), [5000]);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_local_daemon_owns_the_api_socket_beside_its_client_socket() {
+    let daemon = Daemon::from(&ConnectTarget::Socket(
+        "/cfg/herdr/sessions/work/herdr-client.sock".into(),
+    ));
+    assert!(daemon.owns("/cfg/herdr/sessions/work/herdr.sock"));
+    assert!(!daemon.owns("/cfg/herdr/herdr.sock"));
+    assert!(!daemon.owns("/cfg/herdr-dev/sessions/work/herdr.sock"));
+    assert!(daemon.owns(""));
+    let custom = Daemon::from(&ConnectTarget::Socket("/run/x/dev-client.sock".into()));
+    assert!(custom.owns("/run/x/dev.sock"));
+    assert!(!custom.owns("/run/x/herdr.sock"));
 }
