@@ -7,6 +7,7 @@ fn at(side: Side, number: u32, code: &str) -> Anchor {
         side,
         number,
         code: code.into(),
+        before: (side == Side::Removed).then(|| "HEAD".into()),
     }
 }
 
@@ -28,17 +29,29 @@ fn the_prompt_places_and_quotes_each_note() {
         .unwrap(),
     ];
     let text = prompt("/work/repo", &notes);
-    assert!(
-        text.starts_with(
-            "Review notes on the uncommitted changes in /work/repo, from Herdr GPUI.\n"
-        )
-    );
+    assert!(text.starts_with("Review notes on your changes in /work/repo, from Herdr GPUI.\n"));
     assert!(text.contains(
         "\n1. On `src/lib.rs:42` (added line)\n   Code: `` let x = `y`; ``\n   Note: Use a constant here\n"
     ));
     assert!(text.contains(
-        "\n2. On `src/lib.rs:7` (removed line, numbered as before the change)\n   Code: `keep_me();`\n"
+        "\n2. On `src/lib.rs:7` (removed line, numbered as in HEAD)\n   Code: `keep_me();`\n"
     ));
+    // A branch review names the base the removed line counts in.
+    let branch = Note::new(
+        Anchor::Line {
+            path: "src/lib.rs".into(),
+            side: Side::Removed,
+            number: 3,
+            code: "old();".into(),
+            before: Some("origin/main at 1a2b3c4".into()),
+        },
+        "Keep it",
+    )
+    .unwrap();
+    assert!(
+        prompt("/work/repo", &[branch])
+            .contains("(removed line, numbered as in origin/main at 1a2b3c4)")
+    );
     assert!(text.contains("\n3. On `README.md` as a whole\n   Note: Document the flag\n"));
     assert!(text.ends_with("Address each note in the working tree.\n"));
     assert!(!text.chars().any(|c| c.is_control() && c != '\n'));

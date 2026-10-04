@@ -217,6 +217,10 @@ pub enum Error {
     GitPullRequestBase,
     #[error("Git worker stopped. Retry the operation.")]
     GitWorker,
+    #[error(
+        "No base branch to compare with: neither the pull request's base nor origin/HEAD, main, or master exists locally."
+    )]
+    ReviewNoBase,
     #[error("Could not {operation}.")]
     GitProcess {
         operation: &'static str,

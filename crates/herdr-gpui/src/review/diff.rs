@@ -1,6 +1,6 @@
-//! The working tree's changes as rows to review: `git diff HEAD` parsed into
-//! files, hunks and numbered lines, plus untracked files shown as wholly
-//! added. File contents are untrusted: every row is stripped of control and
+//! The working tree's changes as rows to review: `git diff` against HEAD, or
+//! against where the branch left its base, parsed into files, hunks and
+//! numbered lines, plus untracked files shown as wholly added. File contents are untrusted: every row is stripped of control and
 //! direction-override characters and bounded before it is drawn or quoted.
 use crate::{notifications::safe_text, pull_request::Input};
 use std::{
@@ -49,6 +49,33 @@ pub(crate) struct Diff {
     pub rows: Vec<Row>,
     /// Rows were left out to stay within bounds.
     pub truncated: bool,
+    /// The revision removed lines are numbered in, as a prompt names it.
+    pub before: String,
+}
+
+/// One line of the side-by-side view, as indices into [`Diff::rows`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SplitRow {
+    /// A file header, hunk header or remark, across both sides.
+    Across(usize),
+    /// A removed line beside the added line that replaced it; an unchanged
+    /// line is the same row on both sides.
+    Sides {
+        left: Option<usize>,
+        right: Option<usize>,
+    },
+}
+
+/// Which changes a review shows. Either way the diff ends at the working
+/// tree, so added and unchanged lines carry the numbers the files have now.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Scope {
+    /// What is not committed yet: against HEAD.
+    #[default]
+    Uncommitted,
+    /// Everything the branch adds, as its pull request will: against the
+    /// merge base with the base branch, uncommitted work included.
+    Branch,
 }
 
 /// Which version of a file a line number counts in.
@@ -70,6 +97,8 @@ pub(crate) enum Anchor {
         side: Side,
         number: u32,
         code: String,
+        /// For a removed line, the revision its number counts in.
+        before: Option<String>,
     },
 }
 
@@ -253,7 +282,50 @@ impl Diff {
             side,
             number,
             code: row.text.clone(),
+            before: (side == Side::Removed).then(|| self.before.clone()),
         })
+    }
+
+    /// The rows side by side: each run of removed lines is paired, in order,
+    /// with the added lines that follow it, and the longer side runs on alone.
+    pub(crate) fn split_rows(&self) -> Vec<SplitRow> {
+        let mut split = Vec::with_capacity(self.rows.len());
+        let (mut removed, mut added) = (Vec::new(), Vec::new());
+        let flush =
+            |split: &mut Vec<SplitRow>, removed: &mut Vec<usize>, added: &mut Vec<usize>| {
+                for index in 0..removed.len().max(added.len()) {
+                    split.push(SplitRow::Sides {
+                        left: removed.get(index).copied(),
+                        right: added.get(index).copied(),
+                    });
+                }
+                removed.clear();
+                added.clear();
+            };
+        for (index, row) in self.rows.iter().enumerate() {
+            match row.kind {
+                // Removals after additions start a new pairing.
+                Kind::Removed if !added.is_empty() => {
+                    flush(&mut split, &mut removed, &mut added);
+                    removed.push(index);
+                }
+                Kind::Removed => removed.push(index),
+                Kind::Added => added.push(index),
+                Kind::Context => {
+                    flush(&mut split, &mut removed, &mut added);
+                    split.push(SplitRow::Sides {
+                        left: Some(index),
+                        right: Some(index),
+                    });
+                }
+                Kind::File | Kind::Hunk | Kind::Meta => {
+                    flush(&mut split, &mut removed, &mut added);
+                    split.push(SplitRow::Across(index));
+                }
+            }
+        }
+        flush(&mut split, &mut removed, &mut added);
+        split
     }
 
     /// The row a note with `anchor` belongs on, to mark it there.
@@ -262,11 +334,88 @@ impl Diff {
     }
 }
 
-/// The changes in a checkout, and where it is.
+/// The changes in a checkout, where it is, and what they were taken against.
 #[derive(Debug)]
 pub(crate) struct Loaded {
     pub checkout: String,
+    pub scope: Scope,
+    /// The ref the branch is compared with, for `Scope::Branch`.
+    pub base: Option<String>,
     pub diff: Diff,
+}
+
+/// A branch name a ref can be built from: nothing Git would read as an
+/// option, a range, or a pattern. Pull request data is remote text.
+fn plain_branch(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 255
+        && !name.starts_with(['-', '/', '.'])
+        && !name.contains("..")
+        && !name
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || "~^:?*[\\@{".contains(c))
+}
+
+/// Refs the base may be, most specific first: the pull request's base, the
+/// remote's default branch, then the usual names. Full ref names, so none can
+/// be taken for an option.
+fn base_candidates(hint: Option<&str>, remote_head: Option<&str>) -> Vec<String> {
+    let mut names: Vec<&str> = hint.into_iter().filter(|name| plain_branch(name)).collect();
+    if let Some(head) = remote_head
+        .and_then(|head| head.strip_prefix("refs/remotes/origin/"))
+        .filter(|name| plain_branch(name))
+    {
+        names.push(head);
+    }
+    names.extend(["main", "master"]);
+    let mut refs = Vec::new();
+    for name in names {
+        for candidate in [
+            format!("refs/remotes/origin/{name}"),
+            format!("refs/heads/{name}"),
+        ] {
+            if !refs.contains(&candidate) {
+                refs.push(candidate);
+            }
+        }
+    }
+    refs
+}
+
+/// The first candidate that exists, shortened for display, and where HEAD
+/// left it. Reads local refs only; nothing is fetched.
+fn branch_base(
+    checkout: &str,
+    hint: Option<&str>,
+    deadline: Instant,
+) -> crate::Result<(String, String)> {
+    let never = || false;
+    let remote_head = crate::git::git(
+        checkout,
+        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+        "read the remote's default branch",
+        deadline,
+        &never,
+    )
+    .ok();
+    for candidate in base_candidates(hint, remote_head.as_deref()) {
+        let merge_base = crate::git::git(
+            checkout,
+            &["merge-base", "HEAD", &candidate],
+            "find where the branch started",
+            deadline,
+            &never,
+        );
+        if let Ok(commit) = merge_base {
+            let label = candidate
+                .strip_prefix("refs/remotes/")
+                .or_else(|| candidate.strip_prefix("refs/heads/"))
+                .unwrap_or(&candidate)
+                .to_owned();
+            return Ok((label, commit));
+        }
+    }
+    Err(crate::Error::ReviewNoBase)
 }
 
 /// Whether `name`, as `git ls-files` printed it, stays inside the checkout.
@@ -297,12 +446,22 @@ fn untracked_text(path: &Path) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-/// Reads the focused checkout's uncommitted changes. Blocking: it runs Git
-/// and reads files, so it belongs on a background thread.
-pub(crate) fn load(input: &Input) -> crate::Result<Loaded> {
+/// Reads the focused checkout's changes in `scope`; `base_hint` names the
+/// pull request's base branch when one is known. Blocking: it runs Git and
+/// reads files, so it belongs on a background thread.
+pub(crate) fn load(input: &Input, scope: Scope, base_hint: Option<&str>) -> crate::Result<Loaded> {
     let deadline = Instant::now() + LOAD_TIMEOUT;
     let never = || false;
     let checkout = crate::pull_request::local_checkout(input, deadline, &never)?;
+    let (base, revision, before) = match scope {
+        Scope::Uncommitted => (None, "HEAD".to_owned(), "HEAD".to_owned()),
+        Scope::Branch => {
+            let (label, commit) = branch_base(&checkout, base_hint, deadline)?;
+            let short: String = commit.chars().take(7).collect();
+            let before = format!("{label} at {short}");
+            (Some(label), commit, before)
+        }
+    };
     // Explicit prefixes and no external tools, whatever the user configured.
     let text = crate::git::git(
         &checkout,
@@ -315,7 +474,7 @@ pub(crate) fn load(input: &Input) -> crate::Result<Loaded> {
             "--no-textconv",
             "--src-prefix=a/",
             "--dst-prefix=b/",
-            "HEAD",
+            &revision,
             "--",
         ],
         "read working tree changes",
@@ -323,6 +482,7 @@ pub(crate) fn load(input: &Input) -> crate::Result<Loaded> {
         &never,
     )?;
     let mut diff = Diff::parse(&text);
+    diff.before = before;
     let untracked = crate::git::git(
         &checkout,
         &["ls-files", "--others", "--exclude-standard", "-z"],
@@ -338,7 +498,12 @@ pub(crate) fn load(input: &Input) -> crate::Result<Loaded> {
         let contents = untracked_text(&Path::new(&checkout).join(name));
         diff.add_untracked(name, contents.as_deref());
     }
-    Ok(Loaded { checkout, diff })
+    Ok(Loaded {
+        checkout,
+        scope,
+        base,
+        diff,
+    })
 }
 
 #[cfg(test)]

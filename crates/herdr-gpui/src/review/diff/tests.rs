@@ -66,7 +66,8 @@ fn rows_are_numbered_per_side_and_cleaned() {
 
 #[test]
 fn notes_anchor_to_a_line_on_its_own_side_or_a_whole_file() {
-    let diff = Diff::parse(SAMPLE);
+    let mut diff = Diff::parse(SAMPLE);
+    diff.before = "main at 1a2b3c4".into();
     let anchor = |text: &str| {
         let index = diff.rows.iter().position(|row| row.text == text).unwrap();
         diff.anchor(index)
@@ -78,6 +79,8 @@ fn notes_anchor_to_a_line_on_its_own_side_or_a_whole_file() {
             side: Side::Removed,
             number: 11,
             code: "    let b = 2;".into(),
+            // Only a removed line's number depends on what the diff is against.
+            before: Some("main at 1a2b3c4".into()),
         })
     );
     assert_eq!(
@@ -87,6 +90,7 @@ fn notes_anchor_to_a_line_on_its_own_side_or_a_whole_file() {
             side: Side::Unchanged,
             number: 13,
             code: "    done();".into(),
+            before: None,
         })
     );
     assert_eq!(anchor("@@ -10,4 +10,5 @@ fn main() {"), None);
@@ -153,3 +157,7 @@ fn untracked_links_and_binaries_are_not_read() {
     assert!(untracked_text(&dir.path().join("link")).is_none());
     assert!(untracked_text(&dir.path().join("missing")).is_none());
 }
+
+mod branch;
+
+mod split;

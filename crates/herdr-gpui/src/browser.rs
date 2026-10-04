@@ -41,7 +41,7 @@ pub(crate) use location::{LocalFile, Location};
 pub(crate) use native::Pages;
 pub(crate) use store::{Scope, Store, Tab, TabId};
 pub(crate) use tab_appear::{Leaving, Listed};
-pub(crate) use tab_scroll::ThumbDrag;
+pub(crate) use tab_scroll::{Thumb, ThumbDrag};
 pub(crate) use view::Browser;
 #[cfg(test)]
 pub(crate) use view::scope;

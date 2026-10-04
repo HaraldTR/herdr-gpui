@@ -2,7 +2,7 @@
 //! the line the user picked, and the queued notes with Send. Git runs on the
 //! background executor; nothing reaches an agent until the user presses Send.
 use super::{
-    diff::{Kind, Loaded},
+    diff::{Loaded, Scope, SplitRow},
     notes::{self, MAX_NOTES, Note},
 };
 use crate::{
@@ -13,8 +13,21 @@ use gpui::{prelude::*, *};
 use herdr_client::protocol::ClientShellSnapshot;
 use std::{collections::HashMap, sync::Arc};
 
+mod rows;
+mod scrollbar;
+
 /// The notes column beside the diff.
 const NOTES_WIDTH: f32 = 300.;
+
+/// How the diff is drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Layout {
+    /// One column, removed lines above the ones that replaced them.
+    #[default]
+    Unified,
+    /// Before on the left, after on the right.
+    Split,
+}
 
 /// The agent the notes go back to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,6 +78,12 @@ enum State {
 pub(crate) struct Review {
     /// The checkout under review; notes belong to it.
     checkout: Input,
+    /// Which of its changes show; kept between looks.
+    scope: Scope,
+    /// How they are drawn; kept between looks.
+    layout: Layout,
+    /// The loaded rows paired for the side-by-side view.
+    split: Vec<SplitRow>,
     agent: Option<Agent>,
     /// The endpoint the agent's daemon was on when the review opened.
     endpoint: usize,
@@ -76,11 +95,27 @@ pub(crate) struct Review {
     marks: HashMap<usize, usize>,
     input: Entity<SearchInput>,
     scroll: UniformListScrollHandle,
+    /// Where on the scrollbar's thumb the pointer took hold of it.
+    grab: f32,
     /// Numbers loads, so only the latest one lands.
     request: u64,
 }
 
 impl Review {
+    fn set_loaded(&mut self, loaded: Loaded) {
+        self.split = loaded.diff.split_rows();
+        self.state = State::Loaded(Arc::new(loaded));
+    }
+
+    /// How many rows the list draws in the current layout.
+    fn row_count(&self) -> usize {
+        match (self.loaded(), self.layout) {
+            (None, _) => 0,
+            (Some(loaded), Layout::Unified) => loaded.diff.rows.len(),
+            (Some(_), Layout::Split) => self.split.len(),
+        }
+    }
+
     fn loaded(&self) -> Option<&Arc<Loaded>> {
         match &self.state {
             State::Loaded(loaded) => Some(loaded),
@@ -124,6 +159,9 @@ impl HerdrWindow {
                 });
                 Review {
                     checkout: checkout.clone(),
+                    scope: Scope::default(),
+                    layout: Layout::default(),
+                    split: Vec::new(),
                     agent: None,
                     endpoint,
                     state: State::Loading,
@@ -132,6 +170,7 @@ impl HerdrWindow {
                     marks: HashMap::new(),
                     input,
                     scroll: UniformListScrollHandle::new(),
+                    grab: 0.,
                     request: 0,
                 }
             }
@@ -139,9 +178,6 @@ impl HerdrWindow {
         let mut review = Review {
             agent,
             endpoint,
-            state: State::Loading,
-            draft: None,
-            request: review.request + 1,
             ..review
         };
         review.refresh_marks();
@@ -149,12 +185,26 @@ impl HerdrWindow {
         review
             .input
             .update(cx, |input, cx| input.set_appearance(ui, theme, cx));
-        let request = review.request;
         self.menu.review = Some(review);
         self.menu.page = Some(Page::Review);
+        self.load_review(cx);
+    }
+
+    /// Reads the review's changes again in its scope, off the UI thread.
+    /// Only the latest read lands.
+    fn load_review(&mut self, cx: &mut Context<Self>) {
+        // The pull request's base, when GitHub reported one for this branch.
+        let base_hint = self.git_pull_request().map(|pr| pr.base_ref_name.clone());
+        let Some(review) = self.menu.review.as_mut() else {
+            return;
+        };
+        review.request += 1;
+        review.state = State::Loading;
+        review.draft = None;
+        let (request, checkout, scope) = (review.request, review.checkout.clone(), review.scope);
         let loading = cx
             .background_executor()
-            .spawn(async move { super::diff::load(&checkout) });
+            .spawn(async move { super::diff::load(&checkout, scope, base_hint.as_deref()) });
         cx.spawn(async move |this, cx| {
             let result = loading.await;
             this.update(cx, |this, cx| {
@@ -165,6 +215,18 @@ impl HerdrWindow {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Shows uncommitted changes or the whole branch; queued notes stay.
+    pub(crate) fn set_review_scope(&mut self, scope: Scope, cx: &mut Context<Self>) {
+        let Some(review) = self.menu.review.as_mut() else {
+            return;
+        };
+        if review.scope == scope {
+            return;
+        }
+        review.scope = scope;
+        self.load_review(cx);
     }
 
     /// Opens the dialog on `loaded` as if Git had just read it.
@@ -179,6 +241,9 @@ impl HerdrWindow {
         let agent = self.live.snapshot.as_deref().and_then(pick_agent);
         let mut review = Review {
             checkout,
+            scope: loaded.scope,
+            layout: Layout::default(),
+            split: Vec::new(),
             agent,
             endpoint: self.selected_endpoint,
             state: State::Loading,
@@ -187,9 +252,10 @@ impl HerdrWindow {
             marks: HashMap::new(),
             input,
             scroll: UniformListScrollHandle::new(),
+            grab: 0.,
             request: 1,
         };
-        review.state = State::Loaded(Arc::new(loaded));
+        review.set_loaded(loaded);
         self.menu.review = Some(review);
         self.menu.page = Some(Page::Review);
     }
@@ -203,13 +269,13 @@ impl HerdrWindow {
         else {
             return;
         };
-        review.state = match result {
-            Ok(loaded) => State::Loaded(Arc::new(loaded)),
+        match result {
+            Ok(loaded) => review.set_loaded(loaded),
             Err(error) => {
                 tracing::warn!(%error, "Could not read the changes to review");
-                State::Failed(error.to_string())
+                review.state = State::Failed(error.to_string());
             }
-        };
+        }
         review.refresh_marks();
     }
 
@@ -366,14 +432,24 @@ impl HerdrWindow {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("Review changes"),
             )
+            .child(self.render_review_scope(review.scope, cx))
             .child(
                 div()
+                    .debug_selector(|| "review-against".into())
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .text_color(rgb(theme.muted))
-                    .child(review.checkout.branch.clone()),
+                    .child(
+                        match review.loaded().and_then(|loaded| loaded.base.as_deref()) {
+                            Some(base) if review.scope == Scope::Branch => {
+                                format!("{} against {base}", review.checkout.branch)
+                            }
+                            _ => review.checkout.branch.clone(),
+                        },
+                    ),
             )
+            .child(self.render_review_layout(review.layout, cx))
             .child(
                 div()
                     .debug_selector(|| "review-destination".into())
@@ -396,10 +472,13 @@ impl HerdrWindow {
             State::Loaded(loaded) if loaded.diff.rows.is_empty() => div()
                 .p_3()
                 .text_color(rgb(theme.muted))
-                .child("No uncommitted changes")
+                .child(match loaded.scope {
+                    Scope::Uncommitted => "No uncommitted changes",
+                    Scope::Branch => "No changes on this branch",
+                })
                 .into_any_element(),
             State::Loaded(loaded) => {
-                let count = loaded.diff.rows.len();
+                let count = review.row_count();
                 let truncated = loaded.diff.truncated;
                 div()
                     .flex_1()
@@ -409,16 +488,19 @@ impl HerdrWindow {
                     .text_font(&self.config.terminal)
                     .text_size(px(self.config.terminal.size))
                     .child(
-                        uniform_list(
-                            "review-diff",
-                            count,
-                            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                                this.review_rows(range, line_height, cx)
-                            }),
-                        )
-                        .track_scroll(&review.scroll)
-                        .flex_1()
-                        .min_h_0(),
+                        self.review_scroll_area(
+                            uniform_list(
+                                "review-diff",
+                                count,
+                                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                                    this.review_rows(range, line_height, cx)
+                                }),
+                            )
+                            .track_scroll(&review.scroll)
+                            .flex_1()
+                            .min_h_0(),
+                            cx,
+                        ),
                     )
                     .when(truncated, |list| {
                         list.child(
@@ -450,112 +532,43 @@ impl HerdrWindow {
             .into_any_element()
     }
 
-    fn review_rows(
-        &mut self,
-        range: std::ops::Range<usize>,
-        line_height: f32,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
+    /// The switch between uncommitted changes and the whole branch.
+    fn render_review_scope(&self, current: Scope, cx: &mut Context<Self>) -> Div {
         let theme = &self.theme;
-        let Some(review) = self.menu.review.as_ref() else {
-            return Vec::new();
-        };
-        let Some(loaded) = review.loaded().cloned() else {
-            return Vec::new();
-        };
-        let number = |value: Option<u32>| {
+        let segment = |id: &'static str, label: &'static str, scope: Scope| {
+            let chosen = scope == current;
             div()
-                .flex_none()
-                .w(px(44.))
-                .pr_1()
-                .flex()
-                .justify_end()
-                .text_color(rgb(theme.muted))
-                .child(value.map(|value| value.to_string()).unwrap_or_default())
+                .id(id)
+                .debug_selector(move || id.into())
+                .px_2()
+                .rounded(px(crate::config::corners::CONTROL))
+                .cursor_pointer()
+                .when(chosen, |segment| {
+                    segment
+                        .bg(rgb(theme.active))
+                        .text_color(rgb(theme.foreground))
+                })
+                .when(!chosen, |segment| {
+                    segment
+                        .text_color(rgb(theme.muted))
+                        .hover(|segment| segment.text_color(rgb(theme.foreground)))
+                })
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.set_review_scope(scope, cx);
+                }))
         };
-        let tint = |color: u32| rgba((color << 8) | 0x2c);
-        range
-            .filter_map(|index| {
-                let row = loaded.diff.rows.get(index)?;
-                let noteable = matches!(
-                    row.kind,
-                    Kind::File | Kind::Added | Kind::Removed | Kind::Context
-                );
-                let mark = review.marks.get(&index).copied();
-                let drafting = review.draft == Some(index);
-                let (sign, background, text) = match row.kind {
-                    Kind::Added => ("+", Some(tint(theme.palette[2])), theme.foreground),
-                    Kind::Removed => ("-", Some(tint(theme.palette[1])), theme.foreground),
-                    Kind::Context => (" ", None, theme.foreground),
-                    Kind::Hunk | Kind::Meta => ("", None, theme.muted),
-                    Kind::File => ("", Some(rgb(theme.active)), theme.foreground),
-                };
-                let content = if row.kind == Kind::File {
-                    let name = loaded.diff.files.get(row.file).cloned().unwrap_or_default();
-                    if row.text.is_empty() {
-                        name
-                    } else {
-                        format!("{name} ({})", row.text)
-                    }
-                } else {
-                    row.text.clone()
-                };
-                Some(
-                    div()
-                        .id(("review-row", index))
-                        .debug_selector(move || format!("review-row-{index}"))
-                        // Tints and the file header span the list, not the text.
-                        .w_full()
-                        .h(px(line_height))
-                        .flex()
-                        .items_center()
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .when_some(background, |row, background| row.bg(background))
-                        .when(drafting, |row| row.bg(rgb(theme.active)))
-                        .text_color(rgb(text))
-                        .when(noteable, |row| {
-                            row.cursor_pointer()
-                                .hover(|row| row.bg(rgb(theme.active)))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.begin_review_note(index, window, cx);
-                                }))
-                        })
-                        .child(
-                            div()
-                                .flex_none()
-                                .w(px(20.))
-                                .flex()
-                                .justify_center()
-                                .when_some(mark, |slot, mark| {
-                                    slot.child(
-                                        div()
-                                            .size(px(16.))
-                                            .rounded_full()
-                                            .bg(rgb(theme.palette[3]))
-                                            .text_color(rgb(theme.text_on(theme.palette[3])))
-                                            .text_size(px(10.))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .child(mark.to_string()),
-                                    )
-                                }),
-                        )
-                        .when(row.kind != Kind::File, |line| {
-                            line.child(number(row.old))
-                                .child(number(row.new))
-                                .child(div().flex_none().w(px(16.)).child(sign))
-                        })
-                        .when(row.kind == Kind::File, |line| {
-                            line.font_weight(FontWeight::SEMIBOLD).pl_1()
-                        })
-                        .child(div().min_w_0().child(content))
-                        .into_any_element(),
-                )
-            })
-            .collect()
+        div()
+            .flex()
+            .flex_none()
+            .gap_1()
+            .child(segment(
+                "review-scope-uncommitted",
+                "Uncommitted",
+                Scope::Uncommitted,
+            ))
+            .child(segment("review-scope-branch", "Branch", Scope::Branch))
     }
 
     fn render_review_notes(&self, review: &Review, cx: &mut Context<Self>) -> Stateful<Div> {

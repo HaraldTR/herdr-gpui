@@ -153,6 +153,8 @@ impl AssetSource for Icons {
             "icons/split.svg" => include_bytes!("../../../assets/icons/split.svg"),
             "icons/more.svg" => include_bytes!("../../../assets/icons/more.svg"),
             "icons/zoom.svg" => include_bytes!("../../../assets/icons/zoom.svg"),
+            "icons/diff-unified.svg" => include_bytes!("../../../assets/icons/diff-unified.svg"),
+            "icons/diff-split.svg" => include_bytes!("../../../assets/icons/diff-split.svg"),
             _ => match crate::usage::icon(path) {
                 Some(bytes) => bytes,
                 None => return Ok(None),
@@ -193,6 +195,8 @@ impl AssetSource for Icons {
             "icons/split.svg",
             "icons/more.svg",
             "icons/zoom.svg",
+            "icons/diff-unified.svg",
+            "icons/diff-split.svg",
         ]
         .into_iter()
         .chain(AgentIcon::ALL.iter().map(|icon| icon.path()))
@@ -230,7 +234,7 @@ mod tests {
         assert!(Icons.load("unknown.svg").unwrap().is_none());
         assert_eq!(
             Icons.list("icons/").unwrap().len(),
-            30 + AgentIcon::ALL.len() + crate::usage::icon_paths().count()
+            32 + AgentIcon::ALL.len() + crate::usage::icon_paths().count()
         );
     }
 

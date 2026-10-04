@@ -65,6 +65,8 @@ fn window<'a>(
 fn changes() -> Loaded {
     Loaded {
         checkout: "/work/repo".into(),
+        scope: super::Scope::Uncommitted,
+        base: None,
         diff: super::super::diff::Diff::parse(
             "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,2 +1,2 @@\n fn a() {}\n-fn b() {}\n+fn b() { todo!() }\n",
         ),
@@ -135,7 +137,7 @@ fn notes_on_lines_reach_the_agent_that_made_the_changes(cx: &mut gpui::TestAppCo
         });
     });
     let text = kept(cx).unwrap();
-    assert!(text.starts_with("Review notes on the uncommitted changes in /work/repo"));
+    assert!(text.starts_with("Review notes on your changes in /work/repo"));
     assert!(text.contains(
         "\n1. On `src/lib.rs:2` (added line)\n   Code: `fn b() { todo!() }`\n   Note: Implement this\n"
     ), "{text}");
@@ -197,3 +199,7 @@ fn notes_go_to_the_focused_agent_or_the_workspace_s_first() {
     assert_eq!(unnamed.unwrap().label, "the agent");
     assert!(pick_agent(&snapshot(base(None, vec![agent("w0:p1", "w0", None)]))).is_none());
 }
+
+mod layout;
+mod scope;
+mod scrollbar;
