@@ -152,6 +152,8 @@ pub(crate) struct HerdrWindow {
     pub(crate) git: git::Git,
     pub(crate) usage: crate::usage::Usage,
     pub(crate) system_load: crate::system_load::SystemLoad,
+    /// Remote ports forwarded to this machine; they end with the window.
+    pub(crate) port_forwards: crate::port_forward::PortForwards,
     pub(crate) install_warning_shown: bool,
     pub(crate) collapsed_repos: std::collections::HashSet<String>,
     /// Expanded; collapsed leaves the rail or nothing, as Herdr's
@@ -405,6 +407,7 @@ impl HerdrWindow {
         if self.update_system_load() {
             cx.notify();
         }
+        self.update_port_forwards(cx);
         if self.live.missing_installation && !self.install_warning_shown {
             self.install_warning_shown = true;
             self.show_install_modal(window, cx);
@@ -456,6 +459,33 @@ impl HerdrWindow {
             })
             .map(|(_, endpoint)| crate::usage::Host::from(&endpoint.connection.target));
         self.system_load.poll(hosts)
+    }
+
+    /// Forwards outlive a dropped connection, since SSH may still reach the
+    /// host, but end once their host is removed or disabled. A report the
+    /// user did not just ask for is flashed.
+    pub(crate) fn update_port_forwards(&mut self, cx: &mut Context<Self>) {
+        let endpoints = &self.endpoints;
+        let mut changed = self.port_forwards.retain_hosts(|target| {
+            endpoints.iter().any(|endpoint| {
+                endpoint.enabled
+                    && endpoint
+                        .saved_ssh()
+                        .is_some_and(|(saved, _)| saved == target)
+            })
+        });
+        let notices = self.port_forwards.poll();
+        if let Some(notice) = notices.last() {
+            let flash = match notice {
+                crate::port_forward::Notice::Listening { .. } => Flash::success(notice.text()),
+                crate::port_forward::Notice::Ended { .. } => Flash::warning(notice.text()),
+            };
+            self.show_flash(flash, cx);
+            changed = true;
+        }
+        if changed {
+            cx.notify();
+        }
     }
 
     /// The machine the selected endpoint runs on.
@@ -591,6 +621,7 @@ impl HerdrWindow {
             git: git::Git::default(),
             usage: Default::default(),
             system_load: Default::default(),
+            port_forwards: Default::default(),
             install_warning_shown: false,
             collapsed_repos: Default::default(),
             sidebar_visible: true,
@@ -648,6 +679,13 @@ impl HerdrWindow {
                 cx.notify();
             }),
         };
+        // Quitting need not drop this window, so its SSH children are killed
+        // here rather than left forwarding after the app is gone.
+        cx.on_app_quit(|this, _| {
+            this.port_forwards.stop_all();
+            async {}
+        })
+        .detach();
         #[cfg(feature = "integration-test")]
         if sidebar_test {
             this._poll = Task::ready(());

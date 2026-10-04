@@ -366,6 +366,12 @@ pub enum Error {
     SystemLoadUnsupported(String),
     #[error("CPU and memory output was not understood.")]
     SystemLoadOutput,
+    #[error("Enter a port number from 1 to 65535.")]
+    ForwardPort,
+    #[error("Port {0} is already forwarded from this host.")]
+    ForwardDuplicate(u16),
+    #[error("At most {0} ports can be forwarded at once.")]
+    ForwardLimit(usize),
     #[error("{0}")]
     Update(#[from] UpdateError),
     #[error("{0}")]

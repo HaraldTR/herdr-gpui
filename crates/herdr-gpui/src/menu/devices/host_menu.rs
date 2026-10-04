@@ -9,18 +9,22 @@ use crate::{
     search_input::SearchInput,
 };
 use gpui::{prelude::*, *};
+use std::num::NonZeroU16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
     Rename,
     /// Toggles `[devices.<id>] keybindings` between local and server.
     ServerKeybindings,
+    /// Forwards one of the host's listening ports to this computer.
+    ForwardPort,
     Remove,
 }
 
-const ACTIONS: [(Action, &str); 3] = [
+const ACTIONS: [(Action, &str); 4] = [
     (Action::Rename, "Rename…"),
     (Action::ServerKeybindings, "Use server keybindings"),
+    (Action::ForwardPort, "Forward port…"),
     (Action::Remove, "Remove device…"),
 ];
 
@@ -36,7 +40,7 @@ pub(crate) struct HostMenu {
     /// Also delete the device's own GitHub sign-in. Offered only when it has
     /// one, since its account panel disappears with the device.
     forget_github: bool,
-    /// The new name while renaming.
+    /// The new name while renaming, or the port to forward.
     input: Option<Entity<SearchInput>>,
     renaming: bool,
     error: Option<String>,
@@ -116,6 +120,19 @@ impl HerdrWindow {
                 self.menu.page = Some(Page::RenameDevice);
             }
             Action::ServerKeybindings => self.toggle_server_keybindings(cx),
+            Action::ForwardPort => {
+                let input = cx.new(SearchInput::new);
+                input.update(cx, |input, cx| {
+                    input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
+                    input.set_placeholder("3000", cx);
+                    window.focus(&input.focus, cx);
+                });
+                if let Some(host) = &mut self.menu.host {
+                    host.input = Some(input);
+                    host.error = None;
+                }
+                self.menu.page = Some(Page::ForwardPort);
+            }
             Action::Remove => self.menu.page = Some(Page::RemoveDevice),
         }
         cx.notify();
@@ -136,6 +153,71 @@ impl HerdrWindow {
             move || Config::save_device_keybindings(&profile, source),
             cx,
         );
+    }
+
+    /// Starts the forward and returns to the host's menu, which shows it
+    /// connecting; a refused port keeps the dialog open and says why.
+    fn submit_forward_port(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(host) = &mut self.menu.host else {
+            return;
+        };
+        let Some(input) = &host.input else {
+            return;
+        };
+        if input.read(cx).is_composing() {
+            return;
+        }
+        let started = crate::port_forward::parse_port(input.read(cx).text())
+            .and_then(|port| self.port_forwards.start(&host.target, port));
+        match started {
+            Ok(()) => {
+                host.input = None;
+                host.error = None;
+                host.selected = None;
+                self.menu.page = Some(Page::Host);
+                window.focus(&self.menu.focus, cx);
+            }
+            Err(error) => host.error = Some(error.to_string()),
+        }
+        cx.notify();
+    }
+
+    /// Whether the open host menu has forwarded ports to list.
+    pub(in crate::menu) fn host_menu_lists_forwards(&self) -> bool {
+        self.menu
+            .host
+            .as_ref()
+            .is_some_and(|host| self.port_forwards.for_host(&host.target).next().is_some())
+    }
+
+    /// Opens a listening forward's page in a browser tab.
+    fn open_forward(
+        &mut self,
+        remote_port: NonZeroU16,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(host) = &self.menu.host else {
+            return;
+        };
+        let url = self
+            .port_forwards
+            .for_host(&host.target)
+            .find(|forward| forward.remote_port() == remote_port)
+            .and_then(crate::port_forward::Forward::url);
+        if let Some(url) = url {
+            self.dismiss_menu(window, cx);
+            self.open_browser_tab(Some(url), window, cx);
+        }
+    }
+
+    /// Stops a forward, or dismisses one that ended.
+    fn stop_forward(&mut self, remote_port: NonZeroU16, cx: &mut Context<Self>) {
+        if let Some(host) = &self.menu.host
+            && self.port_forwards.stop(&host.target, remote_port)
+        {
+            cx.notify();
+        }
     }
 
     /// Rename in the background and close once the catalog has the new name;
@@ -282,9 +364,9 @@ impl HerdrWindow {
             return;
         };
         let key = event.keystroke.key.as_str();
-        // The name field owns typing and composition; only its submit and
-        // cancel keys belong to the menu.
-        if self.menu.page == Some(Page::RenameDevice)
+        // The name and port fields own typing and composition; only their
+        // submit and cancel keys belong to the menu.
+        if matches!(self.menu.page, Some(Page::RenameDevice | Page::ForwardPort))
             && !host.renaming
             && (host
                 .input
@@ -300,6 +382,9 @@ impl HerdrWindow {
             "escape" => self.dismiss_menu(window, cx),
             "enter" if self.menu.page == Some(Page::RenameDevice) => {
                 self.submit_rename_device(window, cx)
+            }
+            "enter" if self.menu.page == Some(Page::ForwardPort) => {
+                self.submit_forward_port(window, cx)
             }
             "enter" if self.menu.page == Some(Page::RemoveDevice) => {
                 self.confirm_remove_device(window, cx)
@@ -409,10 +494,13 @@ impl HerdrWindow {
                     );
                 }
             }
-            return body;
+            return body.child(self.render_forwards(host, cx));
         }
         if self.menu.page == Some(Page::RenameDevice) {
             return self.render_rename_device(host, cx);
+        }
+        if self.menu.page == Some(Page::ForwardPort) {
+            return self.render_forward_port(host, cx);
         }
         let github = self.host_has_github(&host.id);
         body = body
@@ -477,6 +565,192 @@ impl HerdrWindow {
                     ),
             );
         body
+    }
+
+    /// The host's forwarded ports, each with its state and the actions it
+    /// allows. Nothing at all when there are none.
+    fn render_forwards(&self, host: &HostMenu, cx: &mut Context<Self>) -> Div {
+        use crate::port_forward::State;
+        let theme = &self.theme;
+        let small = px(self.config.ui.size * 0.85);
+        let mut section = div().debug_selector(|| "host-forwards".into());
+        let mut any = false;
+        for forward in self.port_forwards.for_host(&host.target) {
+            if !any {
+                section = section
+                    .mt(px(4.))
+                    .pt(px(4.))
+                    .border_t_1()
+                    .border_color(rgb(theme.active))
+                    .child(
+                        div()
+                            .px(px(8.))
+                            .py(px(4.))
+                            .text_size(small)
+                            .text_color(rgb(theme.muted))
+                            .child("Forwarded ports"),
+                    );
+                any = true;
+            }
+            let remote_port = forward.remote_port();
+            let port = remote_port.get();
+            let (status, ended) = match forward.state() {
+                State::Starting => ("connecting…".to_owned(), None),
+                State::Listening { local_port } => (format!("→ localhost:{local_port}"), None),
+                State::Ended(reason) => ("ended".to_owned(), Some(reason.clone())),
+            };
+            let button = |id: &'static str, label: &'static str| {
+                div()
+                    .id((id, usize::from(port)))
+                    .debug_selector(move || format!("{id}-{port}"))
+                    .flex_none()
+                    .px(px(6.))
+                    .py(px(2.))
+                    .rounded(px(crate::config::corners::CONTROL))
+                    .cursor_pointer()
+                    .hover(|button| button.bg(rgb(theme.active)))
+                    .child(label)
+            };
+            let row = div()
+                .debug_selector(move || format!("host-forward-{port}"))
+                .min_h(px(self.config.ui.line_height() + 8.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(port.to_string())
+                        .child(
+                            div()
+                                .text_size(small)
+                                .text_color(if ended.is_some() {
+                                    crate::menu::danger(theme)
+                                } else {
+                                    rgb(theme.muted)
+                                })
+                                .child(status),
+                        ),
+                )
+                .when(forward.url().is_some(), |row| {
+                    row.child(button("host-forward-open", "Open").on_click(cx.listener(
+                        move |this, _, window, cx| this.open_forward(remote_port, window, cx),
+                    )))
+                })
+                .child(
+                    button(
+                        "host-forward-stop",
+                        if ended.is_some() { "Dismiss" } else { "Stop" },
+                    )
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.stop_forward(remote_port, cx)),
+                    ),
+                );
+            section = section.child(row).when_some(ended, |section, reason| {
+                section.child(
+                    div()
+                        .px(px(8.))
+                        .pb(px(4.))
+                        .text_size(small)
+                        .text_color(rgb(theme.muted))
+                        .child(reason),
+                )
+            });
+        }
+        section
+    }
+
+    /// A centered modal like Rename: the remote port in the body, Forward in
+    /// the footer.
+    fn render_forward_port(&self, host: &HostMenu, cx: &mut Context<Self>) -> Div {
+        let theme = &self.theme;
+        let header = div()
+            .debug_selector(|| "forward-port-header".into())
+            .flex_none()
+            .p(px(16.))
+            .border_b_1()
+            .border_color(rgb(theme.active))
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(self.config.ui.size * 1.35))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Forward port"),
+            )
+            .child(
+                div()
+                    .id("forward-port-close")
+                    .px_2()
+                    .py_1()
+                    .cursor_pointer()
+                    .rounded(px(crate::config::corners::CONTROL))
+                    .hover(|s| s.bg(rgb(theme.active)))
+                    .child("Close")
+                    .on_click(cx.listener(|this, _, window, cx| this.dismiss_menu(window, cx))),
+            );
+        let body = div()
+            .debug_selector(|| "forward-port".into())
+            .min_h_0()
+            .p(px(16.))
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(div().text_color(rgb(theme.muted)).child(format!(
+                "Reach a port that a program on {} listens on from this computer, \
+                 over SSH. It stays forwarded until you stop it.",
+                host.label
+            )))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child("Remote port")
+                    .when_some(host.input.clone(), |field, input| field.child(input)),
+            )
+            .when_some(host.error.clone(), |body, error| {
+                body.child(
+                    div()
+                        .debug_selector(|| "forward-port-error".into())
+                        .text_color(crate::menu::danger(theme))
+                        .child(error),
+                )
+            });
+        let footer = div()
+            .flex_none()
+            .p(px(16.))
+            .border_t_1()
+            .border_color(rgb(theme.active))
+            .flex()
+            .justify_end()
+            .child(
+                div()
+                    .id("forward-port-submit")
+                    .debug_selector(|| "forward-port-submit".into())
+                    .p(px(8.))
+                    .rounded(px(crate::config::corners::CONTROL))
+                    .bg(rgb(theme.active))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(theme.active).blend(rgba((theme.foreground << 8) | 0x20))))
+                    .child("Forward")
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.submit_forward_port(window, cx)),
+                    ),
+            );
+        div()
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .child(header)
+            .child(body)
+            .child(footer)
     }
 
     /// A centered modal like Add Device: header with the title and Close,
@@ -870,5 +1144,144 @@ mod tests {
         });
         cx.simulate_keystrokes("escape");
         assert!(view.read_with(cx, |view, _| view.menu.page.is_none()));
+    }
+
+    /// The dialog takes typing, refuses what is not a port, and closes on
+    /// Escape. A port already forwarded is refused without starting SSH.
+    #[gpui::test]
+    fn forwarding_a_port_asks_for_one_and_refuses_bad_or_repeated_ports(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            crate::bind_keys(cx);
+            let mut view = fixture_window(window, cx);
+            add_host(&mut view);
+            view.port_forwards
+                .fixture("penso@box", 3000, crate::port_forward::State::Starting);
+            view
+        });
+        cx.simulate_resize(size(px(800.), px(600.)));
+        view.update_in(cx, |view, window, cx| {
+            view.open_host_menu(HOST, point(px(10.), px(10.)), window, cx)
+        });
+        if cfg!(windows) {
+            assert!(view.read_with(cx, |view, _| view.menu.page.is_none()));
+            return;
+        }
+        assert_eq!(ACTIONS[2].0, Action::ForwardPort);
+        cx.simulate_keystrokes("down down down enter");
+        let input = view.read_with(cx, |view, _| {
+            assert_eq!(view.menu.page, Some(Page::ForwardPort));
+            host(view).input.clone().unwrap()
+        });
+        cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+        let panel = cx.debug_bounds("menu-panel").unwrap();
+        assert!((panel.center().x - px(400.)).abs() <= px(2.));
+        assert!(cx.debug_bounds("forward-port-submit").is_some());
+        // Row keys are typing here.
+        cx.simulate_input("down");
+        cx.update(|_, cx| assert_eq!(input.read(cx).text(), "down"));
+        cx.simulate_keystrokes("enter");
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.menu.page, Some(Page::ForwardPort));
+            assert_eq!(
+                host(view).error.as_deref(),
+                Some("Enter a port number from 1 to 65535.")
+            );
+        });
+        cx.update(|_, cx| input.update(cx, |input, cx| input.set_text_selected("3000", cx)));
+        cx.simulate_keystrokes("enter");
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                host(view).error.as_deref(),
+                Some("Port 3000 is already forwarded from this host.")
+            );
+            assert_eq!(view.port_forwards.for_host("penso@box").count(), 1);
+        });
+        cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+        assert!(cx.debug_bounds("forward-port-error").is_some());
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(cx, |view, _| view.menu.page.is_none()));
+    }
+
+    /// The menu lists only its own host's forwards, offers Open only once a
+    /// forward listens, and Stop ends one.
+    #[gpui::test]
+    fn the_menu_lists_the_host_forwards_and_stops_one(cx: &mut TestAppContext) {
+        use crate::port_forward::State;
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = fixture_window(window, cx);
+            add_host(&mut view);
+            view.port_forwards
+                .fixture("penso@box", 3000, State::Listening { local_port: 3000 });
+            view.port_forwards.fixture(
+                "penso@box",
+                80,
+                State::Ended("SSH port forward ended".into()),
+            );
+            view.port_forwards.fixture("other", 5000, State::Starting);
+            view
+        });
+        cx.simulate_resize(size(px(800.), px(600.)));
+        view.update_in(cx, |view, window, cx| {
+            view.open_host_menu(HOST, point(px(10.), px(10.)), window, cx)
+        });
+        if cfg!(windows) {
+            return;
+        }
+        let draw = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+        };
+        draw(cx);
+        assert!(cx.debug_bounds("host-forward-3000").is_some());
+        assert!(cx.debug_bounds("host-forward-80").is_some());
+        assert!(cx.debug_bounds("host-forward-5000").is_none());
+        assert!(cx.debug_bounds("host-forward-open-3000").is_some());
+        assert!(cx.debug_bounds("host-forward-open-80").is_none());
+        assert!(cx.debug_bounds("host-forward-stop-80").is_some());
+        // The forwards sit below the actions, and widen the menu to fit.
+        assert!(
+            cx.debug_bounds("host-menu-3").unwrap().bottom()
+                <= cx.debug_bounds("host-forward-3000").unwrap().top()
+        );
+        assert_eq!(cx.debug_bounds("menu-panel").unwrap().size.width, px(260.));
+        let stop = cx.debug_bounds("host-forward-stop-3000").unwrap();
+        cx.simulate_click(stop.center(), Modifiers::default());
+        view.read_with(cx, |view, _| {
+            let ports: Vec<u16> = view
+                .port_forwards
+                .for_host("penso@box")
+                .map(|forward| forward.remote_port().get())
+                .collect();
+            assert_eq!(ports, [80]);
+            assert_eq!(view.menu.page, Some(Page::Host));
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("host-forward-3000").is_none());
+    }
+
+    /// Forwards survive a dropped connection but not their host being
+    /// disabled or removed.
+    #[gpui::test]
+    fn forwards_end_with_their_host(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = fixture_window(window, cx);
+            add_host(&mut view);
+            view.port_forwards
+                .fixture("penso@box", 3000, crate::port_forward::State::Starting);
+            view
+        });
+        view.update(cx, |view, cx| {
+            view.update_port_forwards(cx);
+            assert_eq!(view.port_forwards.for_host("penso@box").count(), 1);
+            view.endpoints[1].enabled = false;
+            view.update_port_forwards(cx);
+            assert_eq!(view.port_forwards.for_host("penso@box").count(), 0);
+
+            view.endpoints[1].enabled = true;
+            view.port_forwards
+                .fixture("penso@box", 3000, crate::port_forward::State::Starting);
+            view.endpoints.truncate(1);
+            view.update_port_forwards(cx);
+            assert_eq!(view.port_forwards.for_host("penso@box").count(), 0);
+        });
     }
 }

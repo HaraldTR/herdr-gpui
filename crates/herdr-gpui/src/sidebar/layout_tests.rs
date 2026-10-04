@@ -1505,6 +1505,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         git: Default::default(),
         usage: Default::default(),
         system_load: Default::default(),
+        port_forwards: Default::default(),
         sidebar_visible: true,
         sidebar_start_pending: true,
         device_filter: None,
