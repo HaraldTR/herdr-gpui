@@ -85,6 +85,7 @@ mod window;
 mod window_state;
 mod worktree;
 mod worktree_banner;
+mod worktree_scripts;
 
 #[cfg(feature = "integration-test")]
 mod performance;

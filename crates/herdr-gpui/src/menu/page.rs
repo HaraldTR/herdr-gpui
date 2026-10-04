@@ -40,6 +40,8 @@ pub(crate) enum Page {
     Dialog(WorkspaceAction),
     /// Moving a linked worktree to another host.
     Teleport,
+    /// Asks whether to trust a repository's worktree script before it runs.
+    WorktreeScript,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +73,8 @@ pub(crate) enum WorkspaceMenuAction {
     GoToTeleported,
     /// Forget that this checkout's work was teleported away.
     ClearTeleported,
+    /// Run one of the repository's worktree scripts in a new tab.
+    Script(crate::worktree_scripts::ScriptKind),
 }
 
 impl WorkspaceMenuAction {
@@ -91,6 +95,8 @@ impl WorkspaceMenuAction {
             Self::Teleport | Self::GoToTeleported => "icons/teleport.svg",
             Self::TeleportBack => "icons/teleport-back.svg",
             Self::ClearTeleported => "icons/x.svg",
+            Self::Script(crate::worktree_scripts::ScriptKind::Setup) => "icons/refresh.svg",
+            Self::Script(_) => "icons/play.svg",
             Self::PullRequest => return None,
         })
     }

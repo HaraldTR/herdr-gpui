@@ -1,0 +1,256 @@
+//! A repository's `.herdr/worktree.toml`, read from a checkout on the
+//! endpoint's host.
+//!
+//! The file is repository content, so it is untrusted data: reading and
+//! parsing it never runs anything. Its digest is what the user trusts.
+
+use super::ScriptKind;
+use herdr_client::{ConnectTarget, ScriptHost, ScriptLimits, run_script, shell_quote};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use std::{
+    io::{self, Read},
+    path::Path,
+    sync::atomic::AtomicBool,
+    time::Duration,
+};
+
+/// Where the scripts live, relative to a checkout.
+pub(crate) const PATH: &str = ".herdr/worktree.toml";
+/// Larger files are refused rather than truncated.
+pub(crate) const MAX_BYTES: u64 = 64 * 1024;
+/// What the remote reader prints before the file, so an empty file is told
+/// apart from a missing one.
+const PRESENT: &[u8] = b"present\n";
+const REMOTE_IDLE: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct File {
+    #[serde(default)]
+    scripts: Scripts,
+}
+
+/// The `[scripts]` table. Unknown keys are refused, so a misspelled script
+/// is reported instead of silently never running.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Scripts {
+    setup: Option<String>,
+    run: Option<String>,
+    archive: Option<String>,
+}
+
+impl Scripts {
+    /// The script for `kind`, when it has anything to run.
+    pub(crate) fn get(&self, kind: ScriptKind) -> Option<&str> {
+        match kind {
+            ScriptKind::Setup => self.setup.as_deref(),
+            ScriptKind::Run => self.run.as_deref(),
+            ScriptKind::Archive => self.archive.as_deref(),
+        }
+        .filter(|script| !script.trim().is_empty())
+    }
+}
+
+/// A parsed file and the digest trust is granted to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Config {
+    pub(crate) scripts: Scripts,
+    /// SHA-256 of the file's bytes, in lowercase hex.
+    pub(crate) digest: String,
+}
+
+impl Config {
+    pub(crate) fn parse(bytes: &[u8]) -> crate::Result<Self> {
+        if bytes.len() as u64 > MAX_BYTES {
+            return Err(crate::Error::WorktreeScriptsSize { limit: MAX_BYTES });
+        }
+        let text = std::str::from_utf8(bytes).map_err(crate::Error::WorktreeScriptsEncoding)?;
+        let file: File = toml::from_str(text).map_err(crate::Error::WorktreeScriptsParse)?;
+        // Scripts travel to the pane as environment values, which cannot hold NUL.
+        if [ScriptKind::Setup, ScriptKind::Run, ScriptKind::Archive]
+            .into_iter()
+            .filter_map(|kind| file.scripts.get(kind))
+            .any(|script| script.contains('\0'))
+        {
+            return Err(crate::Error::WorktreeScriptsNul);
+        }
+        let digest = Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        Ok(Self {
+            scripts: file.scripts,
+            digest,
+        })
+    }
+}
+
+/// Read and parse the file in `checkout` on `target`'s host. `None` when the
+/// repository has none. Blocking: call only on a background executor.
+///
+/// Local, named-session, and socket endpoints share this machine's files; an
+/// SSH endpoint's checkout is read with `cat` over the endpoint's SSH policy.
+pub(crate) fn read(
+    target: &ConnectTarget,
+    checkout: &str,
+    cancelled: &AtomicBool,
+) -> crate::Result<Option<Config>> {
+    let bytes = match target {
+        ConnectTarget::Ssh { target, .. } => read_remote(target, checkout, cancelled)?,
+        ConnectTarget::Local | ConnectTarget::Session { .. } | ConnectTarget::Socket(_) => {
+            read_local(&Path::new(checkout).join(PATH))?
+        }
+    };
+    bytes.as_deref().map(Config::parse).transpose()
+}
+
+fn read_local(path: &Path) -> crate::Result<Option<Vec<u8>>> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(crate::Error::WorktreeScriptsRead(error)),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(crate::Error::WorktreeScriptsRead)?;
+    Ok(Some(bytes))
+}
+
+fn read_remote(
+    target: &str,
+    checkout: &str,
+    cancelled: &AtomicBool,
+) -> crate::Result<Option<Vec<u8>>> {
+    let path = format!("{}/{PATH}", checkout.trim_end_matches('/'));
+    let body = format!(
+        "p={}\nif [ -f \"$p\" ]; then printf 'present\\n'; cat -- \"$p\"; fi\n",
+        shell_quote(&path)
+    );
+    let mut output = Vec::new();
+    run_script(
+        ScriptHost::Ssh(target),
+        &body,
+        io::empty(),
+        &mut output,
+        ScriptLimits {
+            // One byte past the limit, so an oversized file is reported as such.
+            output: PRESENT.len() as u64 + MAX_BYTES + 1,
+            idle: REMOTE_IDLE,
+        },
+        cancelled,
+    )
+    .map_err(crate::Error::WorktreeScriptsRemote)?;
+    Ok(remote_bytes(output))
+}
+
+/// The file's bytes from the remote reader's output, `None` when it was absent.
+fn remote_bytes(mut output: Vec<u8>) -> Option<Vec<u8>> {
+    output.starts_with(PRESENT).then(|| {
+        output.drain(..PRESENT.len());
+        output
+    })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_scripts_and_skips_blank_ones() {
+        let config = Config::parse(
+            br#"[scripts]
+setup = """
+cp "$HERDR_ROOT_PATH/.env" .env
+npm ci
+"""
+run = "npm run dev"
+archive = "  "
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.scripts.get(ScriptKind::Setup),
+            Some("cp \"$HERDR_ROOT_PATH/.env\" .env\nnpm ci\n")
+        );
+        assert_eq!(config.scripts.get(ScriptKind::Run), Some("npm run dev"));
+        assert_eq!(config.scripts.get(ScriptKind::Archive), None);
+        assert_eq!(config.digest.len(), 64);
+        assert!(config.digest.bytes().all(|b| b.is_ascii_hexdigit()));
+        // An empty file is a valid file with nothing to run.
+        assert_eq!(Config::parse(b"").unwrap().scripts, Scripts::default());
+    }
+
+    #[test]
+    fn digest_follows_every_byte_of_the_file() {
+        let a = Config::parse(b"[scripts]\nrun = \"make\"\n").unwrap();
+        let b = Config::parse(b"[scripts]\nrun = \"make\" \n").unwrap();
+        assert_eq!(a.scripts, b.scripts);
+        assert_ne!(a.digest, b.digest);
+        assert_eq!(
+            a.digest,
+            Config::parse(b"[scripts]\nrun = \"make\"\n")
+                .unwrap()
+                .digest
+        );
+    }
+
+    #[test]
+    fn refuses_unknown_keys_bad_encoding_nul_and_oversized_files() {
+        assert!(matches!(
+            Config::parse(b"[scripts]\nsetpu = \"x\"\n"),
+            Err(crate::Error::WorktreeScriptsParse(_))
+        ));
+        assert!(matches!(
+            Config::parse(b"[other]\n"),
+            Err(crate::Error::WorktreeScriptsParse(_))
+        ));
+        assert!(matches!(
+            Config::parse(b"[scripts]\nrun = \"\xff\"\n"),
+            Err(crate::Error::WorktreeScriptsEncoding(_))
+        ));
+        assert!(matches!(
+            Config::parse(b"[scripts]\nrun = \"a\\u0000b\"\n"),
+            Err(crate::Error::WorktreeScriptsNul)
+        ));
+        let large = vec![b'#'; MAX_BYTES as usize + 1];
+        assert!(matches!(
+            Config::parse(&large),
+            Err(crate::Error::WorktreeScriptsSize { limit: MAX_BYTES })
+        ));
+    }
+
+    #[test]
+    fn local_reads_tell_a_missing_file_from_a_present_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let checkout = dir.path().to_str().unwrap();
+        assert_eq!(
+            read(&ConnectTarget::Local, checkout, &AtomicBool::new(false)).unwrap(),
+            None
+        );
+        std::fs::create_dir(dir.path().join(".herdr")).unwrap();
+        std::fs::write(dir.path().join(PATH), "[scripts]\nrun = \"make\"\n").unwrap();
+        let config = read(&ConnectTarget::Local, checkout, &AtomicBool::new(false))
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.scripts.get(ScriptKind::Run), Some("make"));
+        std::fs::write(dir.path().join(PATH), vec![b'#'; MAX_BYTES as usize + 1]).unwrap();
+        assert!(matches!(
+            read(&ConnectTarget::Local, checkout, &AtomicBool::new(false)),
+            Err(crate::Error::WorktreeScriptsSize { .. })
+        ));
+    }
+
+    #[test]
+    fn remote_output_marks_presence() {
+        assert_eq!(remote_bytes(Vec::new()), None);
+        assert_eq!(remote_bytes(b"present\n".to_vec()), Some(Vec::new()));
+        assert_eq!(
+            remote_bytes(b"present\n[scripts]\n".to_vec()),
+            Some(b"[scripts]\n".to_vec())
+        );
+    }
+}

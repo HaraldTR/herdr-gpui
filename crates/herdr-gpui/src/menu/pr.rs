@@ -598,9 +598,9 @@ mod tests {
             window.draw(cx).clear(cx);
         });
         // GPUI retains removed debug selectors; measure the remaining action panel.
-        // Five action rows and the target header: no PR section or stale metadata.
+        // Six action rows and the target header: no PR section or stale metadata.
         let rows = cx.update(|_, cx| view.read(cx).workspace_menu_actions().len());
-        assert_eq!(rows, 5);
+        assert_eq!(rows, 6);
         let panel = cx.debug_bounds("menu-panel").unwrap().size.height;
         let header = cx
             .debug_bounds("workspace-menu-header")

@@ -1478,6 +1478,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         update_preview: None,
         daemon_text: Default::default(),
         removal: None,
+        worktree_script: None,
         teleport: None,
         teleport_marks: crate::teleport::Marks::detached(),
         teleport_follow: None,
@@ -2035,7 +2036,8 @@ fn check_sidebar(fixture: Entity<SidebarFixture>, cx: &mut gpui::VisualTestConte
             assert!(panel.left() >= px(0.) && panel.right() <= px(width));
             assert!(panel.bottom() <= px(600.));
             let open_row = cx.debug_bounds("workspace-menu-Open worktree...").unwrap();
-            // Preserve the content budget apart from the action row and target header.
+            // Preserve the content budget apart from the Open worktree and Run
+            // script rows and the target header.
             let row_height = cx.update(|_, cx| px(view.read(cx).config.ui.line_height() + 12.));
             let header_height = cx
                 .debug_bounds("workspace-menu-header")
@@ -2045,7 +2047,7 @@ fn check_sidebar(fixture: Entity<SidebarFixture>, cx: &mut gpui::VisualTestConte
                 + px(4.);
             assert!((open_row.size.height - row_height).abs() <= px(1.));
             assert!(
-                panel.size.height < px(320.) + row_height + header_height,
+                panel.size.height < px(320.) + row_height * 2. + header_height,
                 "PR menu should size to its content: {panel:?}"
             );
             assert!(cx.debug_bounds("workspace-pr").is_some());

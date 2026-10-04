@@ -662,6 +662,8 @@ impl HerdrWindow {
             panel = panel.child(self.render_about(cx));
         } else if page == Page::AgentSkill {
             panel = panel.child(self.render_agent_skill_offer(cx));
+        } else if page == Page::WorktreeScript {
+            panel = panel.child(self.render_worktree_script(cx));
         } else if page == Page::Install {
             panel = panel
                 .child(div().p(px(8.)).child("Herdr must be installed"))
@@ -1016,6 +1018,9 @@ impl HerdrWindow {
                     }
                     "enter" if this.menu.page == Some(Page::AgentSkill) => {
                         this.install_browser_skill(window, cx);
+                    }
+                    "enter" if this.menu.page == Some(Page::WorktreeScript) => {
+                        this.trust_worktree_script(window, cx);
                     }
                     "enter" if this.menu.page == Some(Page::Install) => {
                         cx.open_url(crate::about::WEBSITE);

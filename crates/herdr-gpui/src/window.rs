@@ -143,6 +143,8 @@ pub(crate) struct HerdrWindow {
     pub(crate) menu: menu::MenuState,
     /// A `worktree.remove` queued after its dialog closed.
     pub(crate) removal: Option<menu::Removal>,
+    /// The worktree script being located, read, trusted, or opened.
+    pub(crate) worktree_script: Option<crate::worktree_scripts::Job>,
     /// A teleport being set up or under way; a move outlives its dialog.
     pub(crate) teleport: Option<crate::teleport::Teleport>,
     /// Checkouts this client teleported away from, marked in the sidebar.
@@ -376,6 +378,7 @@ impl HerdrWindow {
         self.update_workspace_dialog(window, cx);
         self.poll_teleport(window, cx);
         self.poll_device_setup(window, cx);
+        self.poll_worktree_script(window, cx);
         self.poll_worktree_source(cx);
         self.poll_hover_menu(std::time::Instant::now(), window, cx);
         if self.tick_flash(std::time::Instant::now()) {
@@ -585,6 +588,7 @@ impl HerdrWindow {
             local_error: error,
             menu: menu::MenuState::new(cx),
             removal: None,
+            worktree_script: None,
             teleport: None,
             teleport_marks: crate::teleport::Marks::start(),
             teleport_follow: None,

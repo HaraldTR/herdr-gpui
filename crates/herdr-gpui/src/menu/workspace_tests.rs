@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
-use super::{WorkspaceAction, WorkspaceTarget, state::Deletion};
-use crate::{HerdrWindow, dialog_input::DialogInput, sidebar};
+use super::{WorkspaceAction, WorkspaceMenuAction, WorkspaceTarget, state::Deletion};
+use crate::{HerdrWindow, dialog_input::DialogInput, sidebar, worktree_scripts::ArchiveCheck};
 use herdr_client::Method;
 
 /// Presses the open workspace dialog's submit, for `endpoint::lifecycle_tests`.
@@ -63,9 +63,9 @@ pub(crate) fn submit_focus_change(
     }
     if action == WorkspaceAction::DeleteWorktree {
         view.menu.deletion = Some(Deletion {
-            pending: None,
             path: Some("/fixture/checkout".into()),
-            force: false,
+            archive: ArchiveCheck::Read(None),
+            ..Deletion::new(None, false)
         });
     }
     if action == WorkspaceAction::OpenWorktree {
@@ -533,9 +533,9 @@ fn workspace_dialog_sections_and_buttons_stay_inside_the_panel(cx: &mut gpui::Te
                         // Ready to confirm: the daemon has named the
                         // checkout and nothing is in flight.
                         view.menu.deletion = Some(Deletion {
-                            pending: None,
                             path: Some("/endpoint/.herdr/worktrees/agent-launcher/child".into()),
-                            force: true,
+                            archive: ArchiveCheck::Read(None),
+                            ..Deletion::new(None, true)
                         });
                     } else {
                         // The creation waits on the daemon here, so its
@@ -782,13 +782,19 @@ fn deletion_lookup_names_the_checkout_and_reports_errors(cx: &mut gpui::TestAppC
         let mut menu = super::MenuState::new(cx);
         menu.target = Some(WorkspaceTarget::new(&snapshot, &snapshot.workspaces[4]));
         menu.page = Some(super::Page::Dialog(WorkspaceAction::DeleteWorktree));
-        menu.deletion = Some(Deletion { pending: Some("list".into()), path: None, force: false });
-        let lookup = serde_json::json!({"result":{"type":"worktree_list", "worktrees":[{"open_workspace_id":"w4", "path":"/daemon/checkout", "is_linked_worktree":true, "is_bare":false}]}});
+        menu.deletion = Some(Deletion::new(Some("list".into()), false));
+        let lookup = serde_json::json!({"result":{"type":"worktree_list", "worktrees":[{"open_workspace_id":"w4", "path":"/daemon/checkout", "is_linked_worktree":true, "is_bare":false}, {"path":"/daemon/main", "is_linked_worktree":false, "is_bare":false}]}});
         menu.apply_deletion_response("unrelated", Ok(lookup.clone()));
         assert!(menu.deletion.as_ref().unwrap().path.is_none());
         menu.apply_deletion_response("list", Ok(lookup));
-        let deletion = menu.deletion.as_ref().unwrap();
+        let deletion = menu.deletion.as_mut().unwrap();
         assert_eq!(deletion.path.as_deref(), Some("/daemon/checkout"));
+        assert_eq!(deletion.root.as_deref(), Some("/daemon/main"));
+        // Confirming also waits to know whether an archive script runs first.
+        assert!(!deletion.ready());
+        deletion.archive = ArchiveCheck::Reading;
+        assert!(!deletion.ready());
+        deletion.archive = ArchiveCheck::Read(None);
         assert!(deletion.ready());
         // The dialog only ever awaits the lookup, so a removal reply here is
         // not something it can act on.
@@ -803,7 +809,7 @@ fn deletion_lookup_names_the_checkout_and_reports_errors(cx: &mut gpui::TestAppC
         menu.apply_deletion_response("broken", Err(std::sync::Arc::new(crate::Error::Client(herdr_client::Error::UnsupportedMethod))));
         assert_eq!(menu.error.as_deref(), Some("method not advertised by endpoint"));
         // A reply arriving after the menu closed changes nothing.
-        menu.deletion = Some(Deletion { pending: Some("late".into()), path: None, force: false });
+        menu.deletion = Some(Deletion::new(Some("late".into()), false));
         menu.reset();
         menu.apply_deletion_response("late", Err(std::sync::Arc::new(crate::Error::Client(herdr_client::Error::Disconnected))));
         assert!(menu.deletion.is_none());
@@ -923,9 +929,9 @@ fn deletion_dialog_confirms_without_a_text_field(cx: &mut gpui::TestAppContext) 
             assert!(view.menu.input.is_none());
             view.menu.error = None;
             view.menu.deletion = Some(Deletion {
-                pending: None,
                 path: Some("/daemon/checkout".into()),
-                force: false,
+                archive: ArchiveCheck::Read(None),
+                ..Deletion::new(None, false)
             });
             cx.notify();
         })
@@ -960,7 +966,7 @@ fn deletion_fails_closed_on_lookup_and_does_not_force_generic_errors(
         ] {
             let mut menu = super::MenuState::new(cx);
             menu.target = Some(WorkspaceTarget::new(&snapshot, &snapshot.workspaces[4]));
-            menu.deletion = Some(Deletion { pending: Some("id".into()), path: None, force: false });
+            menu.deletion = Some(Deletion::new(Some("id".into()), false));
             menu.apply_deletion_response("id", Ok(response));
             assert!(menu.error.is_some());
             let deletion = menu.deletion.as_ref().unwrap();
@@ -1288,4 +1294,173 @@ fn proposed_names_match_herdr_without_touching_the_daemon_host() {
     assert_eq!(suggested_workspace_name("/home/me/code/herdr/"), "herdr");
     assert_eq!(suggested_workspace_name("/"), "/");
     assert_eq!(suggested_workspace_name(""), "workspace");
+}
+
+/// The menu target's delete dialog, its checkout read from `dir`.
+fn delete_with_scripts(
+    view: &mut HerdrWindow,
+    dir: &std::path::Path,
+    window: &mut gpui::Window,
+    cx: &mut gpui::Context<HerdrWindow>,
+) {
+    view.open_workspace_menu("w1", Default::default(), window, cx);
+    view.menu.page = Some(super::Page::Dialog(WorkspaceAction::DeleteWorktree));
+    view.menu.deletion = Some(Deletion {
+        path: Some(dir.to_str().unwrap().into()),
+        root: Some("/repo".into()),
+        ..Deletion::new(None, false)
+    });
+    view.read_archive_script(cx);
+    assert!(!view.menu.deletion.as_ref().unwrap().ready());
+}
+
+#[gpui::test]
+fn every_git_checkout_offers_its_scripts(cx: &mut gpui::TestAppContext) {
+    use crate::worktree_scripts::ScriptKind;
+    let (view, cx) = cx.add_window_view(sidebar::layout_tests::fixture_window);
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.live.status = crate::state::ConnectionStatus::Connected;
+            let items = |view: &HerdrWindow| -> Vec<_> {
+                view.workspace_items()
+                    .into_iter()
+                    .map(|(action, _)| action)
+                    .collect()
+            };
+            // A main checkout runs, a linked one also sets up, a plain folder neither.
+            for (id, run, setup) in [
+                ("w3", true, false),
+                ("w4", true, true),
+                ("w0", false, false),
+            ] {
+                view.open_workspace_menu(id, Default::default(), window, cx);
+                let actions = items(view);
+                assert_eq!(
+                    actions.contains(&WorkspaceMenuAction::Script(ScriptKind::Run)),
+                    run,
+                    "{id}"
+                );
+                assert_eq!(
+                    actions.contains(&WorkspaceMenuAction::Script(ScriptKind::Setup)),
+                    setup,
+                    "{id}"
+                );
+                view.dismiss_menu(window, cx);
+            }
+        })
+    });
+}
+
+/// An archive script is reviewed before removal, and declining it still
+/// removes the checkout as its button says, through the ordinary request.
+#[gpui::test]
+fn an_untrusted_archive_script_is_asked_about_before_removal(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    crate::worktree_scripts::tests::write_scripts(
+        dir.path(),
+        "[scripts]\narchive = \"docker compose down\"\n",
+    );
+    let mut peer = crate::window::MockPeer::advertising(&["worktree.remove", "tab.create"]);
+    let (view, cx) = cx.add_window_view(sidebar::layout_tests::fixture_window);
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            crate::worktree_scripts::tests::connect(view, &peer);
+            delete_with_scripts(view, dir.path(), window, cx);
+        })
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("dialog-archive-script").is_some());
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            assert!(view.menu.deletion.as_ref().unwrap().ready());
+            view.submit_workspace_dialog(window, cx);
+            // Nothing is removed while the question is open.
+            assert!(view.menu.page.is_none() && view.removal.is_none());
+            view.poll_worktree_script(window, cx);
+            assert_eq!(view.menu.page, Some(super::Page::WorktreeScript));
+            view.skip_worktree_script(window, cx);
+            assert!(view.removal.as_ref().unwrap().pending.is_some());
+        })
+    });
+    let removal = peer.request();
+    assert_eq!(removal["method"], "worktree.remove");
+    assert_eq!(removal["params"]["workspace_id"], "w1");
+    assert_eq!(removal["params"]["force"], false);
+}
+
+/// A trusted archive script removes nothing itself: its tab runs the script
+/// and only then the pane's own `herdr worktree remove`.
+#[gpui::test]
+fn a_trusted_archive_script_runs_in_a_tab_instead_of_removing(cx: &mut gpui::TestAppContext) {
+    use crate::worktree_scripts::{Trust, read_config};
+    let dir = tempfile::tempdir().unwrap();
+    crate::worktree_scripts::tests::write_scripts(
+        dir.path(),
+        "[scripts]\narchive = \"docker compose down\"\n",
+    );
+    let config = read_config(
+        &herdr_client::ConnectTarget::Local,
+        dir.path().to_str().unwrap(),
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap()
+    .unwrap();
+    let mut peer = crate::window::MockPeer::advertising(&["worktree.remove", "tab.create"]);
+    let (view, cx) = cx.add_window_view(sidebar::layout_tests::fixture_window);
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            crate::worktree_scripts::tests::connect(view, &peer);
+            cx.default_global::<Trust>()
+                .grant(crate::worktree_scripts::Grant {
+                    endpoint: view.endpoints[0].id.clone(),
+                    repo_key: "repo/main".into(),
+                    digest: config.digest.clone(),
+                });
+            delete_with_scripts(view, dir.path(), window, cx);
+        })
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.submit_workspace_dialog(window, cx);
+            assert!(view.menu.page.is_none() && view.removal.is_none());
+        })
+    });
+    let tab = peer.request();
+    assert_eq!(tab["method"], "tab.create");
+    assert_eq!(tab["params"]["label"], "archive");
+    assert_eq!(
+        tab["params"]["env"]["HERDR_WORKTREE_SCRIPT"],
+        "docker compose down"
+    );
+    assert_eq!(tab["params"]["env"]["HERDR_ROOT_PATH"], "/repo");
+}
+
+/// Creating a worktree starts its setup script, asking first; opening an
+/// existing checkout does not.
+#[gpui::test]
+fn a_created_worktree_offers_its_setup_script(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    crate::worktree_scripts::tests::write_scripts(dir.path(), "[scripts]\nsetup = \"npm ci\"\n");
+    let created = serde_json::json!({"result":{"type":"worktree_created","workspace":{"workspace_id":"w1",
+        "worktree":{"checkout_path":dir.path().to_str().unwrap(),"repo_root":"/repo","repo_key":"repo/main","repo_name":"main"}}}});
+    let peer = crate::window::MockPeer::new();
+    let (view, cx) = cx.add_window_view(sidebar::layout_tests::fixture_window);
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            crate::worktree_scripts::tests::connect(view, &peer);
+            view.open_workspace_menu("w1", Default::default(), window, cx);
+            view.menu.page = Some(super::Page::Dialog(WorkspaceAction::NewWorktree));
+            view.apply_creation_response(Ok(created), window, cx);
+            assert!(view.menu.page.is_none());
+        })
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.poll_worktree_script(window, cx);
+            assert_eq!(view.menu.page, Some(super::Page::WorktreeScript));
+            assert!(view.local_error.is_none());
+        })
+    });
 }

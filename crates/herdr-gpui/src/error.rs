@@ -378,6 +378,28 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     Client(#[from] herdr_client::Error),
+    #[error(".herdr/worktree.toml exceeds {limit} bytes")]
+    WorktreeScriptsSize { limit: u64 },
+    #[error(".herdr/worktree.toml is not valid UTF-8")]
+    WorktreeScriptsEncoding(#[source] std::str::Utf8Error),
+    #[error(".herdr/worktree.toml: {0}")]
+    WorktreeScriptsParse(#[source] toml::de::Error),
+    #[error(".herdr/worktree.toml scripts must not contain NUL bytes")]
+    WorktreeScriptsNul,
+    #[error("Could not read .herdr/worktree.toml: {0}")]
+    WorktreeScriptsRead(#[source] io::Error),
+    #[error("Could not read .herdr/worktree.toml on the host: {0}")]
+    WorktreeScriptsRemote(#[source] herdr_client::Error),
+    #[error("The daemon did not identify this workspace's checkout")]
+    WorktreeScriptsCheckout,
+    #[error("Another worktree script is still starting")]
+    WorktreeScriptsBusy,
+    #[error("{0}")]
+    WorktreeScriptsRequest(#[source] std::sync::Arc<Error>),
+    #[error("Unexpected daemon response while opening the script's tab")]
+    WorktreeScriptsResponse,
+    #[error("This workspace is not a Git checkout Herdr knows yet")]
+    WorktreeScriptsNotGit,
     #[error("neither XDG_STATE_HOME nor HOME is set")]
     MissingStateRoot,
     #[error("{} exceeds {limit} bytes", path.display())]
