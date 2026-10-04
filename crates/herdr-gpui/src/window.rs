@@ -386,6 +386,7 @@ impl HerdrWindow {
         }
         self.poll_tab_rename(window, cx);
         self.poll_pane_rename(window, cx);
+        self.poll_pane_processes(cx);
         if old_pane
             != self
                 .live

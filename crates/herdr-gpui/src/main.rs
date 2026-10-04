@@ -57,6 +57,7 @@ mod palette;
 mod pane_menu;
 mod preferences;
 mod presentation;
+mod processes;
 mod progress;
 mod pull_request;
 mod release_notes;

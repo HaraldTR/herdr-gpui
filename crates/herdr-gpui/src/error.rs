@@ -370,6 +370,22 @@ pub enum Error {
     SystemLoadUnsupported(String),
     #[error("CPU and memory output was not understood.")]
     SystemLoadOutput,
+    #[error("Could not ask Herdr which process the pane runs.")]
+    ProcessesQuery(#[source] herdr_client::Error),
+    #[error("Herdr's answer about the pane's process was not understood.")]
+    ProcessesAnswer(#[source] serde_json::Error),
+    #[error("Herdr did not name a process for this pane.")]
+    ProcessesNoRoot,
+    #[error("The pane's process has exited.")]
+    ProcessesRootExited,
+    #[error("The herdr executable's path is not valid UTF-8.")]
+    ProcessesExecutable,
+    #[error("Still ending the last processes. Try again in a moment.")]
+    ProcessesBusy,
+    #[error("The process list stopped updating. Reopen it to try again.")]
+    ProcessesStopped,
+    #[error("Could not start watching the pane's processes.")]
+    ProcessesWorker(#[source] io::Error),
     #[error("{0}")]
     Update(#[from] UpdateError),
     #[error("{0}")]
