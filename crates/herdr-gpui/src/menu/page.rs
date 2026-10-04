@@ -32,6 +32,10 @@ pub(crate) enum Page {
     Group,
     Pane,
     RenamePane,
+    /// The processes under the pane menu's pane.
+    PaneProcesses,
+    /// Confirming the processes chosen there should end.
+    KillProcesses,
     Workspace,
     GitHub,
     /// Titlebar Git actions for the focused checkout, and its commit dialog.

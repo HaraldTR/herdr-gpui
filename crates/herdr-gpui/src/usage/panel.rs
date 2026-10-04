@@ -2,7 +2,9 @@
 //! the selected host, its account, every limit with its pace, whatever else
 //! its service reports, and links to the service's own pages.
 
-use super::{Reading, model::Provider, render::ago, service::Service, ui::Ui};
+use super::{
+    Access, KeychainGrants, Reading, model::Provider, render::ago, service::Service, ui::Ui,
+};
 use crate::{menu::Page, window::HerdrWindow};
 use gpui::{prelude::*, *};
 use std::time::{Instant, SystemTime};
@@ -156,7 +158,9 @@ impl HerdrWindow {
                         .children(account.plan.map(|plan| div().text_size(small).child(plan))),
                 ),
         );
+        // A sign-in waiting on Keychain access is explained below instead.
         let errors = reading
+            .filter(|r| r.access.is_none())
             .and_then(|r| r.error.clone())
             .into_iter()
             .chain(entry.and_then(|entry| entry.error.clone()));
@@ -175,9 +179,15 @@ impl HerdrWindow {
             font_size: font.size,
             now,
         };
+        let access = reading.and_then(|r| r.access);
+        if let Some(access) = access {
+            view = view
+                .child(rule())
+                .child(self.usage_access(provider, access, cx));
+        }
         if let Some(report) = reading.and_then(|r| r.report.as_ref()) {
             view = view.child(rule()).child(service.render(report, &ui, cx));
-        } else if !service.meta().settings.is_empty() {
+        } else if access.is_none() && !service.meta().settings.is_empty() {
             // Nothing to show yet: say what would sign it in.
             view = view.child(rule()).child(setup(service, &ui));
         }
@@ -278,6 +288,56 @@ impl HerdrWindow {
                         cx.notify();
                     }))
             }))
+    }
+
+    /// Why the sign-in is not read yet, and the one control that makes macOS
+    /// ask, so the prompt only ever follows the user's own click.
+    fn usage_access(
+        &self,
+        provider: Provider,
+        access: Access,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = &self.theme;
+        let name = provider.name();
+        let (text, label) = match access {
+            Access::Needed => (
+                format!(
+                    "{name}'s sign-in is kept in the macOS Keychain, so reading it makes macOS ask \
+                     for permission. Choose Always Allow to see these numbers at launch without \
+                     being asked again."
+                ),
+                "Allow Keychain Access",
+            ),
+            Access::Denied => (
+                format!(
+                    "macOS was not allowed to share {name}'s sign-in. Try again to have macOS \
+                     ask once more."
+                ),
+                "Try Again",
+            ),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px(px(8.))
+                    .py(px(4.))
+                    .text_size(px(self.config.ui.size * 0.9))
+                    .text_color(rgb(theme.muted))
+                    .child(text),
+            )
+            .child(self.usage_action(
+                "usage-allow-keychain",
+                "icons/lock.svg",
+                label,
+                cx.listener(move |this, _, _, cx| {
+                    KeychainGrants::grant(provider, cx);
+                    this.usage.allow(provider, Instant::now());
+                    cx.notify();
+                }),
+            ))
     }
 
     fn usage_action(

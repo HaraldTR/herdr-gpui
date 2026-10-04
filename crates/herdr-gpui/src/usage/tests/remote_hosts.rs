@@ -58,7 +58,7 @@ fn remote_secrets_stay_on_the_host() {
     let mut exec = Exec::Remote(host.shell());
     let mut jar = CookieJar::default();
     let codex = provider("codex");
-    let mut probe = Probe::new(&mut exec, codex, None, &mut jar, false);
+    let mut probe = Probe::new(&mut exec, codex, None, &mut jar, Consent::Quiet);
     assert!(probe.is_remote());
     let auth = probe
         .file(&HostPath::env_or("CODEX_HOME", ".codex", "auth.json"))
