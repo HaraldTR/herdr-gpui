@@ -60,6 +60,7 @@ fn edge_backgrounds_reach_the_canvas_without_stretching_popups(cx: &mut TestAppC
                         &[],
                         &[],
                         None,
+                        None,
                         window,
                         cx,
                     );
@@ -195,6 +196,7 @@ fn blank_cells_paint_decorations_without_shaping(cx: &mut TestAppContext) {
                         &[],
                         &[],
                         None,
+                        None,
                         window,
                         cx,
                     );
@@ -221,12 +223,12 @@ fn spans_cover_skip_cells_and_resolved_colors_without_crossing_rows() {
     row[2].modifier = 64;
     row[3].bg = 0x02123456;
     assert_eq!(
-        background_spans(&row, &theme).collect::<Vec<_>>(),
+        background_spans(&row, 0..row.len(), &theme).collect::<Vec<_>>(),
         vec![(0, 2, BACKGROUND), (2, 4, 0x123456)]
     );
-    assert_eq!(background_spans(&[], &theme).count(), 0);
+    assert_eq!(background_spans(&[], 0..0, &theme).count(), 0);
     for cells in row.chunks(2) {
-        let expanded: Vec<_> = background_spans(cells, &theme)
+        let expanded: Vec<_> = background_spans(cells, 0..cells.len(), &theme)
             .flat_map(|(a, b, color)| (a..b).map(move |_| color))
             .collect();
         assert_eq!(
@@ -248,7 +250,7 @@ fn wide_continuation_cells_take_the_glyph_background() {
     row[1].bg = 0x02000000;
     row[3].bg = 0x02000000;
     assert_eq!(
-        background_spans(&row, &theme).collect::<Vec<_>>(),
+        background_spans(&row, 0..row.len(), &theme).collect::<Vec<_>>(),
         vec![(0, 2, 0x373737), (2, 3, BACKGROUND), (3, 4, 0)]
     );
     // Halfwidth katakana with a voiced or semi-voiced mark is two columns
@@ -259,7 +261,7 @@ fn wide_continuation_cells_take_the_glyph_background() {
         row[1].bg = 0x02000000;
         row[3].bg = 0x02000000;
         assert_eq!(
-            background_spans(&row, &theme).collect::<Vec<_>>(),
+            background_spans(&row, 0..row.len(), &theme).collect::<Vec<_>>(),
             vec![(0, 2, 0x373737), (2, 3, BACKGROUND), (3, 4, 0)],
             "{kana}"
         );
@@ -284,7 +286,7 @@ fn spans_and_styles_use_custom_theme() {
         },
     ];
     assert_eq!(
-        background_spans(&row, &theme).collect::<Vec<_>>(),
+        background_spans(&row, 0..row.len(), &theme).collect::<Vec<_>>(),
         vec![(0, 2, theme.background)]
     );
     assert_eq!(cell_colors(&row[0], &theme).0, theme.foreground);
@@ -341,6 +343,7 @@ fn terminal_graphics_bypass_fonts_but_keep_decorations_and_skip_cells(cx: &mut T
                         &[],
                         &[],
                         None,
+                        None,
                         window,
                         cx,
                     );
@@ -349,7 +352,9 @@ fn terminal_graphics_bypass_fonts_but_keep_decorations_and_skip_cells(cx: &mut T
                     assert_eq!(after.shapes, before.shapes);
                     assert_eq!(after.glyphs, before.glyphs);
                     assert_eq!(after.decorations - before.decorations, 2);
-                    let backgrounds = background_spans(&frame.cells, &painter.theme).count();
+                    let backgrounds =
+                        background_spans(&frame.cells, 0..frame.cells.len(), &painter.theme)
+                            .count();
                     assert_eq!(after.quads - before.quads, backgrounds + 7);
                 }
                 frame.cells[0] = cell("a");
@@ -361,6 +366,7 @@ fn terminal_graphics_bypass_fonts_but_keep_decorations_and_skip_cells(cx: &mut T
                     &font("Menlo"),
                     &[],
                     &[],
+                    None,
                     None,
                     window,
                     cx,

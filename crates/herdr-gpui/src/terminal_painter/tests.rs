@@ -5,6 +5,9 @@ mod cells;
 mod composition;
 mod diagnostics;
 mod glyph_cache;
+// Paint counts are recorded only with the integration-test feature.
+#[cfg(feature = "integration-test")]
+mod layers;
 mod placed_images;
 
 fn cell(symbol: &str) -> CellData {

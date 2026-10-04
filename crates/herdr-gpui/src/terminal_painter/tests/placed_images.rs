@@ -90,6 +90,7 @@ fn placed_images_decode_off_thread_then_paint_in_z_order(cx: &mut TestAppContext
                         &font("Menlo"),
                         &[],
                         &[],
+                        None,
                         Some(PlacedImages {
                             placements: &placements,
                             images: &images,
