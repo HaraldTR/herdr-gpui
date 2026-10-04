@@ -32,6 +32,10 @@ mod clipboard;
 mod sidebar_fixture;
 pub use sidebar_fixture::start_sidebar;
 
+#[path = "smoke_notifications.rs"]
+mod notifications;
+use notifications::start_notifications;
+
 #[cfg(target_os = "macos")]
 #[path = "smoke_preferences.rs"]
 mod preferences;
@@ -575,6 +579,67 @@ async fn second_window(first: WindowHandle<HerdrWindow>, cx: &mut AsyncApp) -> R
                 ))
             );
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn key(name: &str, window: &mut Window, cx: &mut App) -> Result<()> {
+    if !window.dispatch_keystroke(Keystroke::parse(name)?, cx) {
+        bail!("unhandled CJK fixture key {name}");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn wait<T>(
+    handle: WindowHandle<HerdrWindow>,
+    cx: &mut AsyncApp,
+    label: &str,
+    mut inspect: impl FnMut(&Entity<HerdrWindow>, &mut Window, &mut App) -> Result<Option<T>>,
+) -> Result<T> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let result =
+            AnyWindowHandle::from(handle).update(cx, |root, window, cx| -> Result<_> {
+                let view = root
+                    .downcast::<HerdrWindow>()
+                    .map_err(|_| anyhow!("unexpected window root"))?;
+                window.focus(&view.read(cx).focus.clone(), cx);
+                window.refresh();
+                window.draw(cx).clear(cx);
+                let state = view.read(cx);
+                if state.local_error.is_some()
+                    || state.live.error.is_some()
+                    || !state.live.status.is_connected()
+                {
+                    bail!(
+                        "CJK fixture connection failed: {:?} {:?}",
+                        state.local_error,
+                        state.live.error
+                    );
+                }
+                inspect(&view, window, cx)
+            })??;
+        if let Some(result) = result {
+            return Ok(result);
+        }
+        if Instant::now() >= deadline {
+            // This harness only connects to the parent's isolated synthetic shell.
+            handle.update(cx, |view, _, _| {
+                if let Some(surface) = &view.live.surface {
+                    for row in surface.frame.cells.chunks(usize::from(surface.frame.width)) {
+                        eprintln!(
+                            "fixture row: {:?}",
+                            row.iter().map(|c| c.symbol.as_str()).collect::<String>()
+                        );
+                    }
+                }
+            })?;
+            bail!("timed out waiting for {label}");
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(50))
+            .await;
     }
 }
 

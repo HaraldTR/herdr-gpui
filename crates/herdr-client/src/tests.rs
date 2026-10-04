@@ -33,14 +33,13 @@ mod handshake;
 mod health;
 mod host_themes;
 mod session_state;
+mod surface_encoding;
 mod surfaces;
 const SNAPSHOT: &str =
     include_str!("../../herdr-protocol/tests/fixtures/endpoint-snapshot-v1.json");
 const WELCOME: &str = include_str!("../../herdr-protocol/tests/fixtures/endpoint-welcome-v1.json");
 
 mod clipboard_tests;
-#[path = "surface_encoding_tests.rs"]
-mod surface_encoding_tests;
 
 fn send(stream: &mut Stream, message: ServerMessage) {
     write_message(stream, &message, MAX_GRAPHICS_FRAME_SIZE).unwrap();

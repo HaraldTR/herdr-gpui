@@ -90,16 +90,6 @@ fn oauth_responses_deserialize_directly_to_redacted_secrets() {
     );
 }
 #[test]
-fn expired_token_reply_is_not_persisted() {
-    let mut auth = waiting();
-    auth.flow.as_mut().unwrap().deadline = Instant::now();
-    deliver(&mut auth, Ok(Reply::Token(credential("expired-secret"))));
-    auth.poll_with_store(|_| panic!("expired token must never be stored"));
-    assert!(!auth.busy());
-    assert!(auth.code().is_none());
-    assert!(auth.message.as_ref().unwrap().contains("expired"));
-}
-#[test]
 fn pr_rate_limits_have_bounded_account_wide_cooldowns() {
     let now = std::time::UNIX_EPOCH + Duration::from_secs(1000);
     let mut headers = ureq::http::HeaderMap::new();

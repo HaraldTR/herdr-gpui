@@ -49,41 +49,6 @@ fn geometry_and_frame_reader_limits() {
 }
 
 #[test]
-fn response_boot_id_correlation_and_assembly_limits() {
-    for case in ["boot", "id", "limit"] {
-        let (client, mut server, worker) = test_client();
-        handshake(&mut server);
-        event(&client);
-        event(&client);
-        let id = client.handle.focus_pane("boot-v1", "w1:p1").unwrap();
-        receive(&mut server);
-        let data = match case {
-            "limit" => vec![b' '; MAX_RESPONSE_BYTES + 1],
-            "id" => br#"{"id":"wrong","result":{}}"#.to_vec(),
-            _ => vec![],
-        };
-        send(
-            &mut server,
-            ServerMessage::ClientShellEndpointResponseChunk {
-                boot_id: if case == "boot" { "stale" } else { "boot-v1" }.into(),
-                request_id: id,
-                final_chunk: true,
-                data,
-            },
-        );
-        let error = worker.join().unwrap().unwrap_err().to_string();
-        assert!(
-            error.contains(match case {
-                "boot" => "boot mismatch",
-                "id" => "ID mismatch",
-                _ => "limit exceeded",
-            }),
-            "{error}"
-        );
-    }
-}
-
-#[test]
 fn frame_reader_accepts_read_trait_objects_and_preserves_partial_state() {
     struct Fragmented {
         bytes: io::Cursor<Vec<u8>>,
@@ -133,5 +98,57 @@ fn frame_reader_accepts_read_trait_objects_and_preserves_partial_state() {
             reader.poll(input).unwrap_err().kind(),
             io::ErrorKind::UnexpectedEof
         );
+    }
+}
+
+#[test]
+fn read_batches_bound_progress_and_stop_on_the_first_idle_read() {
+    struct Input {
+        bytes: io::Cursor<Vec<u8>>,
+        calls: usize,
+        idle: Option<io::ErrorKind>,
+    }
+    impl Read for Input {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            self.calls += 1;
+            if let Some(kind) = self.idle {
+                return Err(kind.into());
+            }
+            self.bytes.read(bytes)
+        }
+    }
+    let expected = ServerMessage::Graphics {
+        bytes: vec![17; 2 * 1024 * 1024],
+    };
+    let mut input = Input {
+        bytes: io::Cursor::new(encode_message(&expected, MAX_GRAPHICS_FRAME_SIZE).unwrap()),
+        calls: 0,
+        idle: None,
+    };
+    let mut reader = FrameReader::new();
+    assert!(reader.poll_batch(&mut input).unwrap().is_none());
+    assert!((1..=128).contains(&input.calls));
+    assert!(reader.bytes.len() <= 1024 * 1024);
+    let partial = reader.bytes.len();
+    for kind in [
+        io::ErrorKind::WouldBlock,
+        io::ErrorKind::TimedOut,
+        io::ErrorKind::Interrupted,
+    ] {
+        input.idle = Some(kind);
+        input.calls = 0;
+        assert!(reader.poll_batch(&mut input).unwrap().is_none());
+        assert_eq!(input.calls, 1);
+        assert_eq!(reader.bytes.len(), partial);
+    }
+    input.idle = None;
+    loop {
+        input.calls = 0;
+        let message = reader.poll_batch(&mut input).unwrap();
+        assert!(input.calls <= 128);
+        if let Some(message) = message {
+            assert_eq!(message, expected);
+            break;
+        }
     }
 }

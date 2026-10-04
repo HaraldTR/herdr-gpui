@@ -3,9 +3,9 @@ use core::prelude::v1::test;
 
 mod cells;
 mod composition;
+mod diagnostics;
 mod glyph_cache;
-mod placed_graphics;
-mod timing;
+mod placed_images;
 
 fn cell(symbol: &str) -> CellData {
     CellData {

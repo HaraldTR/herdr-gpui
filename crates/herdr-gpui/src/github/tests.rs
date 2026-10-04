@@ -7,7 +7,7 @@ use super::{
     http::{LIMIT, authorization, graphql, pr_cooldown, response},
     log::{header, kind, public_sso, token_kind},
     store,
-    store::{KEYRING, credential_bytes, resolve_token},
+    store::{KEYRING, credential_bytes},
     token::Credential,
 };
 use crate::{Error, Result};
@@ -27,9 +27,6 @@ mod storage;
 
 fn device() -> Device {
     serde_json::from_str::<Device>(r#"{"device_code":"fixture-device", "user_code":"ABCD-1234", "verification_uri":"https://github.com/login/device", "expires_in":900, "interval":5}"#).unwrap().validate().unwrap()
-}
-fn token_reply(value: Value) -> Result<Reply> {
-    super::token_reply(serde_json::from_value(value).unwrap(), "fixture-client")
 }
 fn credential(token: &str) -> Credential {
     Credential::new(token.into(), None, "fixture-client").unwrap()

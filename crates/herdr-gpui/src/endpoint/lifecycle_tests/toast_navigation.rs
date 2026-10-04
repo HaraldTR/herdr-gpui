@@ -263,3 +263,101 @@ fn toast_rendered_clicks_reject_replaced_removed_and_disabled_origins(
         });
     }
 }
+
+#[gpui::test]
+fn toast_queue_failure_retains_notice(cx: &mut gpui::TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    let (mut endpoint, _server) = connected_endpoint("ssh:toast");
+    let mut wire = crate::notifications::tests::notification("queue failure");
+    wire.workspace_id = Some("w1".into());
+    endpoint
+        .toasts
+        .receive([crate::notifications::Notice::new(wire, Instant::now())
+            .with_snapshot(endpoint.live.snapshot.as_deref())
+            .preview()]);
+    view.update(cx, |view, cx| {
+        view.endpoints.push(endpoint);
+        view.selected_endpoint = 1;
+        view.options = ConnectOptions::default();
+        view.reset_selected();
+        // Keep the projected connected state to exercise enqueue failure itself.
+        view.endpoints[1].connection.inbox = Arc::new(Mutex::new(view.live.clone()));
+        view.endpoints[1]
+            .connection
+            .handle
+            .as_ref()
+            .unwrap()
+            .disconnect();
+        assert!(view.input_ready());
+        view.tick_toasts(false, Instant::now());
+        view.navigate_toast(0, cx);
+        assert_eq!(view.endpoints[1].toasts.entries.len(), 1);
+        assert!(view.local_error.is_some());
+    });
+}
+
+#[gpui::test]
+fn notification_command_rejects_ineligible_cards_without_selection_or_requests(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (fixture, cx) = cx.add_window_view(|window, cx| {
+        Fixture(cx.new(|cx| crate::sidebar::layout_tests::fixture_window(window, cx)))
+    });
+    let view = fixture.update(cx, |fixture, _| fixture.0.clone());
+    for case in 0..7 {
+        let (mut endpoint, mut server) = connected_endpoint("ssh:toast");
+        let mut wire = crate::notifications::tests::notification("ineligible");
+        wire.workspace_id = (case != 0).then(|| "w1".into());
+        let mut notice = crate::notifications::Notice::new(wire, Instant::now())
+            .with_snapshot(endpoint.live.snapshot.as_deref())
+            .preview();
+        if case != 4 {
+            notice.promote(Instant::now());
+        }
+        if case == 3 {
+            notice.expires = Instant::now();
+        }
+        endpoint.toasts.receive([notice]);
+        if case == 1 || case == 2 {
+            let mut state = endpoint.connection.inbox.lock().unwrap();
+            let snapshot = Arc::make_mut(state.snapshot.as_mut().unwrap());
+            if case == 1 {
+                snapshot.workspaces.clear();
+            } else {
+                snapshot.boot_id = "new-boot".into();
+            }
+        }
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.menu.reset();
+                view.endpoints.truncate(1);
+                view.endpoints.push(endpoint);
+                view.selected_endpoint = 0;
+                view.toasts_hidden = case == 5;
+                if case == 6 {
+                    view.open_keybinds(window, cx);
+                }
+                view.command(Command::OpenNotificationTarget, window, cx);
+                assert_eq!(view.selected_endpoint, 0, "case {case}");
+                assert!(view.pending_navigation.is_none());
+                assert!(view.pending_toast.is_none());
+                assert_eq!(view.endpoints[1].toasts.entries.len(), 1);
+                view.endpoints[1]
+                    .connection
+                    .handle
+                    .as_ref()
+                    .unwrap()
+                    .set_focus(&snapshot().boot_id, false)
+                    .unwrap();
+            })
+        });
+        // Ordered sentinel proves that no focus request preceded it.
+        assert!(matches!(
+            server.receive(),
+            ClientMessage::ClientShellFocus { focused: false }
+        ));
+    }
+}

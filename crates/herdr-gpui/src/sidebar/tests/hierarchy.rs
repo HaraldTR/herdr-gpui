@@ -179,10 +179,3 @@ fn child_labels_follow_upstream_custom_label_and_branch_rules() {
     workspace.branch = None;
     assert_eq!(workspace_label(&workspace, true), "herdr");
 }
-
-#[test]
-fn text_fallback_skips_missing_and_blank_metadata() {
-    assert_eq!(first_text([None, Some(" \t"), Some(" main ")], ""), "main");
-    assert_eq!(first_text([None, Some("")], ""), "");
-    assert_eq!(first_text([Some(" ")], "workspace"), "workspace");
-}

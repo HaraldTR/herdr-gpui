@@ -1,4 +1,5 @@
 use super::*;
+use herdr_client::protocol::AgentStatus;
 
 /// The daemon aggregates a workspace's and tab's status itself, so a
 /// snapshot carries the same value on all three rows.
@@ -65,55 +66,6 @@ fn daemon_status_reaches_the_sidebar_unchanged() {
         200,
     )));
     assert_status(&state, AgentStatus::Done);
-}
-
-#[test]
-fn surface_images_follow_the_connection_and_file_paths_stay_ignored() {
-    use herdr_client::{
-        SurfaceImages,
-        protocol::{
-            SurfaceGraphicsAsset, SurfaceGraphicsAssetKey, SurfaceGraphicsFormat,
-            SurfaceGraphicsSource, SurfaceGraphicsTarget,
-        },
-    };
-    let key = SurfaceGraphicsAssetKey {
-        source: SurfaceGraphicsSource::Terminal {
-            target: SurfaceGraphicsTarget::Pane {
-                pane_id: "p1".into(),
-            },
-            image_id: 1,
-        },
-        image_width: 1,
-        image_height: 1,
-        format: SurfaceGraphicsFormat::Rgba,
-        data_len: 4,
-        data_fingerprint: 1,
-    };
-    let images: SurfaceImages = [SurfaceGraphicsAsset {
-        key: key.clone(),
-        data: vec![0; 4],
-    }]
-    .into_iter()
-    .collect();
-    let mut state = LiveState::default();
-    state.apply(ClientEvent::SurfaceImages(Arc::new(images)));
-    assert!(state.surface_images.get(&key).is_some());
-    // A daemon naming a file for this client is never followed.
-    let before = state.surface_images.clone();
-    state.apply(ClientEvent::Message(ServerMessage::GraphicsFile {
-        path: "/etc/passwd".into(),
-        expected_len: 4,
-        image_id: 1,
-        transfer_id: 1,
-        leading: vec![],
-        control: String::new(),
-        surface_asset: Some(key.clone()),
-    }));
-    assert!(Arc::ptr_eq(&before, &state.surface_images));
-    state.apply(ClientEvent::Disconnected {
-        reason: "test".into(),
-    });
-    assert!(state.surface_images.is_empty());
 }
 
 #[test]

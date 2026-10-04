@@ -95,3 +95,63 @@ fn sidebar_background_colors_only_the_sidebar() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn upstream_aliases_fallbacks_and_legacy_override_precedence() -> anyhow::Result<()> {
+    for (alias, canonical) in [
+        ("Catppuccin Mocha", "catppuccin"),
+        ("light", "catppuccin-latte"),
+        ("tokyonight", "tokyo-night"),
+        ("tokyo_day", "tokyo-night-day"),
+        ("gruvbox-dark", "gruvbox"),
+        ("onedark", "one-dark"),
+        ("onelight", "one-light"),
+        ("solarized-dark", "solarized"),
+        ("lotus", "kanagawa-lotus"),
+        ("rosepine", "rose-pine"),
+        ("dawn", "rose-pine-dawn"),
+    ] {
+        assert_eq!(palette::canonical(alias), Some(canonical));
+        assert_eq!(
+            parsed(&format!("[theme]\nname = '{alias}'"))?.palettes,
+            parsed(&format!("[theme]\nname = '{canonical}'"))?.palettes,
+        );
+    }
+    // Upstream normalizes separators and case, but does not trim names.
+    assert_eq!(palette::canonical(" nord "), None);
+    let unknown = parsed("[theme]\nname = 'unknown'\nauto_switch = true")?;
+    assert_eq!(unknown.theme(false)?, parsed("")?.theme(false)?);
+    assert_eq!(
+        unknown.theme(true)?,
+        parsed("[theme]\nname = 'latte'")?.theme(false)?
+    );
+    let legacy = parsed(
+        "[ui]\naccent = '#123456'\n[theme]\nauto_switch = true\n[theme.custom.light]\naccent = '#abcdef'",
+    )?;
+    assert_eq!(legacy.theme(false)?.palette[5], 0x123456);
+    assert_eq!(legacy.theme(true)?.palette[5], 0xabcdef);
+    let custom = parsed(
+        "[ui]\naccent = '#123456'\n[theme.custom]\naccent = '#abcdef'\n[theme.custom.light]\naccent = '#ffffff'",
+    )?;
+    assert_eq!(custom.theme(false)?.palette[5], 0xabcdef);
+    assert_eq!(custom.theme(true)?, custom.theme(false)?);
+    Ok(())
+}
+
+#[test]
+fn prepared_indicator_palettes_and_parse_limit() -> anyhow::Result<()> {
+    let settings = parsed(&format!(
+        "[theme.custom]\nred = '{}#123456'",
+        " ".repeat(100_000)
+    ))?;
+    let prepared = settings.colors(false);
+    for _ in 0..1000 {
+        assert!(std::ptr::eq(prepared, settings.colors(false)));
+        assert_eq!(settings.status_color(AgentStatus::Blocked, false), 0x123456);
+    }
+    assert!(matches!(
+        parsed(&" ".repeat(1024 * 1024 + 1)),
+        Err(Error::TooLarge)
+    ));
+    Ok(())
+}

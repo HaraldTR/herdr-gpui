@@ -196,3 +196,57 @@ fn backend_cleanup_failure_survives_host_switch_without_disclosing_diagnostics(
     });
     peer.sentinel(&view, cx);
 }
+
+#[gpui::test]
+fn duplicate_copy_never_invokes_second_backend(cx: &mut TestAppContext) {
+    let (fixture, cx) = cx.add_window_view(fixture);
+    let view = fixture.read_with(cx, |fixture, _| fixture.view.clone().unwrap());
+    let mut peer = Peer::new();
+    let calls = Arc::new(AtomicU64::new(0));
+    let worker_calls = calls.clone();
+    view.update(cx, |view, cx| {
+        peer.prepare(view);
+        view.start_file_transfer_with(
+            InputTarget::Pane("w1:p1".into()),
+            vec!["large file".into()],
+            move |host, paths, cancelled, progress| {
+                assert_eq!(host, HOST);
+                assert_eq!(paths, [PathBuf::from("large file")]);
+                assert!(!cancelled.load(Ordering::Acquire));
+                progress(4_294_967_296, 8_589_934_592);
+                worker_calls.fetch_add(1, Ordering::Relaxed);
+                Err(herdr_client::Error::UploadPathLimit)
+            },
+            |_, _| panic!("failed uploads must not be cleaned up twice"),
+            cx,
+        );
+        let token = view.file_transfer.as_ref().unwrap().cancelled.clone();
+        view.start_file_transfer_with(
+            InputTarget::Pane("w1:p1".into()),
+            vec!["second".into()],
+            |_, _, _, _| panic!("duplicate upload started"),
+            |_, _| panic!("duplicate cleanup started"),
+            cx,
+        );
+        assert!(Arc::ptr_eq(
+            &token,
+            &view.file_transfer.as_ref().unwrap().cancelled
+        ));
+        assert_eq!(
+            view.endpoints[0].toasts.entries.back().unwrap().1.title,
+            "Copy not started"
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    view.read_with(cx, |view, _| {
+        assert!(view.file_transfer.is_none());
+        let notice = &view.endpoints[0].toasts.entries.back().unwrap().1;
+        assert_eq!(notice.title, "Copy failed");
+        assert_eq!(
+            notice.body.as_deref(),
+            Some(herdr_client::Error::UploadPathLimit.to_string().as_str())
+        );
+    });
+    peer.sentinel(&view, cx);
+}

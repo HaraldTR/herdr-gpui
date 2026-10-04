@@ -290,3 +290,88 @@ fn spans_and_styles_use_custom_theme() {
     assert_eq!(cell_colors(&row[0], &theme).0, theme.foreground);
     assert_eq!(cell_colors(&row[1], &theme).0, theme.palette[1]);
 }
+
+#[cfg(feature = "integration-test")]
+#[gpui::test]
+fn terminal_graphics_bypass_fonts_but_keep_decorations_and_skip_cells(cx: &mut TestAppContext) {
+    let (_, cx) = cx.add_window_view(|_, _| Empty);
+    cx.draw(Point::default(), size(px(800.), px(600.)), |_, _| {
+        canvas(
+            |_, _, _| (),
+            |bounds, _, window, cx| {
+                let mut frame = FrameData {
+                    width: 5,
+                    height: 1,
+                    cells: vec![
+                        CellData {
+                            modifier: UNDERLINE | STRIKETHROUGH,
+                            ..cell("▏")
+                        },
+                        CellData {
+                            modifier: REVERSED,
+                            ..cell("█")
+                        },
+                        CellData {
+                            modifier: DIM,
+                            ..cell("▀")
+                        },
+                        CellData {
+                            modifier: HIDDEN,
+                            ..cell("┼")
+                        },
+                        CellData {
+                            skip: true,
+                            ..cell("█")
+                        },
+                    ],
+                    cursor: None,
+                    hyperlinks: vec![],
+                    graphics: vec![],
+                };
+                let mut painter = TerminalPainter::default();
+                for family in ["Menlo", "Courier"] {
+                    painter.set_appearance(21.35, 30.5, Theme::default());
+                    let before = *cx.default_global::<crate::performance::Counts>();
+                    painter.paint_frame(
+                        &frame,
+                        bounds.origin,
+                        None,
+                        12.81,
+                        &font(family),
+                        &[],
+                        &[],
+                        None,
+                        window,
+                        cx,
+                    );
+                    let after = cx.default_global::<crate::performance::Counts>();
+                    assert_eq!(painter.glyphs.len(), 0);
+                    assert_eq!(after.shapes, before.shapes);
+                    assert_eq!(after.glyphs, before.glyphs);
+                    assert_eq!(after.decorations - before.decorations, 2);
+                    let backgrounds = background_spans(&frame.cells, &painter.theme).count();
+                    assert_eq!(after.quads - before.quads, backgrounds + 7);
+                }
+                frame.cells[0] = cell("a");
+                painter.paint_frame(
+                    &frame,
+                    bounds.origin,
+                    None,
+                    12.81,
+                    &font("Menlo"),
+                    &[],
+                    &[],
+                    None,
+                    window,
+                    cx,
+                );
+                assert_eq!(
+                    painter.glyphs.len(),
+                    1,
+                    "ordinary text still uses the glyph cache"
+                );
+            },
+        )
+        .size_full()
+    });
+}

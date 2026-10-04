@@ -440,29 +440,6 @@ fn every_layout_looks_different(cx: &mut gpui::TestAppContext) {
     }
 }
 
-#[test]
-fn teleported_names_fade_but_stay_legible() {
-    use crate::config::Theme;
-    use crate::contrast::{Contrast, ratio};
-    for name in Theme::BUILTIN_NAMES {
-        for contrast in [Contrast::Standard, Contrast::High] {
-            let theme = Theme::builtin(name).unwrap().with_contrast(contrast);
-            for color in [theme.foreground, theme.subtext()] {
-                let faded = super::super::row::left_behind(color, &theme);
-                let context = format!("{name} {contrast:?} {color:06x} -> {faded:06x}");
-                assert!(
-                    ratio(faded, theme.background) < ratio(color, theme.background),
-                    "{context}: not faded"
-                );
-                assert!(
-                    ratio(faded, theme.background) >= Contrast::Standard.mark_ratio() - 0.01,
-                    "{context}: unreadable"
-                );
-            }
-        }
-    }
-}
-
 #[gpui::test]
 fn upstream_counts_follow_the_branch_or_trail_one_line_rows(cx: &mut gpui::TestAppContext) {
     use crate::config::{Density, LayoutMode, Style};

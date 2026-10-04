@@ -1,9 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use super::{
-    Cache, Input, Lookup, Origin, Result,
-    cache::{CACHE_LIMIT, ERROR_BACKOFF, REFRESH},
-    clean,
+    Cache, Input, Lookup, Origin, Result, clean,
     fetch::{OUTPUT_LIMIT, TIMEOUT, fetch, local_repository, remote_host, worktree_checkout},
     fixture,
     lookup::Worker,
@@ -19,17 +17,10 @@ use std::{
 };
 
 mod cache;
+mod fetch;
+mod lookup;
 mod responses;
 mod upstream;
-mod worker;
-
-fn input(branch: &str) -> Input {
-    Input {
-        checkout: None,
-        repo_key: "/repo/.git".into(),
-        branch: branch.into(),
-    }
-}
 
 fn response() -> serde_json::Value {
     serde_json::json!([{

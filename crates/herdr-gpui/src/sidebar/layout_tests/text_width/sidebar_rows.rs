@@ -1,5 +1,6 @@
-//! Initial text allocation, row geometry, and divider resize checks.
-use super::super::*;
+//! Initial text allocation, row geometry, divider resize, collapse toggling,
+//! and scaled row checks.
+use super::*;
 use gpui::{MouseButton, MouseDownEvent};
 
 pub(super) fn check_text_allocation(cx: &mut gpui::VisualTestContext) {
@@ -208,4 +209,79 @@ pub(super) fn check_sidebar_resize(
         let _ = full_draw(window, cx);
     });
     assert_eq!(cx.debug_bounds("sidebar").unwrap().size.width, px(232.));
+}
+
+pub(super) fn check_collapse_toggle(
+    view: &Entity<HerdrWindow>,
+    cx: &mut gpui::VisualTestContext,
+) -> ClientShellSnapshot {
+    let before = cx.update(|_, cx| {
+        view.update(cx, |view, _| {
+            let snapshot = Arc::make_mut(view.live.snapshot.as_mut().unwrap());
+            snapshot.focused_workspace_id = Some("w4".into());
+            for workspace in &mut snapshot.workspaces {
+                workspace.focused = workspace.workspace_id == "w4";
+            }
+            view.marked = "selection must survive toggle".into();
+            snapshot.clone()
+        })
+    });
+    for collapsed in [true, false] {
+        let arrow = cx.debug_bounds("collapse-3").unwrap();
+        cx.simulate_click(arrow.center(), Default::default());
+        cx.update(|window, cx| {
+            cx.default_global::<TextProbes>().0.clear();
+            window.refresh();
+            full_draw(window, cx).clear(cx);
+            let view = view.read(cx);
+            assert_eq!(view.live.snapshot.as_deref(), Some(&before));
+            assert_eq!(view.marked, "selection must survive toggle");
+            assert!(cx.global::<TextProbes>().0.contains_key(if collapsed {
+                "\u{25b8}"
+            } else {
+                "\u{25be}"
+            }));
+            assert_eq!(view.collapsed_repos.contains(REPO_KEY), collapsed);
+            assert_eq!(
+                !cx.global::<TextProbes>().0.contains_key("sidebar-child"),
+                collapsed
+            );
+        });
+    }
+    before
+}
+
+pub(super) fn check_scaled_sidebar(view: &Entity<HerdrWindow>, cx: &mut gpui::VisualTestContext) {
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.config.sidebar.size = 24.;
+            view.marked = "composition".into();
+            view.open_keybinds(window, cx);
+            assert!(view.marked.is_empty());
+        });
+        full_draw(window, cx).clear(cx);
+        assert!(!view.read(cx).focus.is_focused(window));
+    });
+    let line_height = cx.update(|_, cx| crate::sidebar::line_height(&view.read(cx).config.sidebar));
+    assert_eq!(
+        cx.debug_bounds("row-herdr").unwrap().size.height,
+        px(2. * line_height + 8.)
+    );
+    assert_eq!(
+        cx.debug_bounds("name-herdr").unwrap().size.height,
+        px(line_height)
+    );
+    let title = cx.debug_bounds("name-herdr").unwrap();
+    let detail = cx.debug_bounds("detail-herdr").unwrap();
+    let icon = cx.debug_bounds("github-herdr").unwrap();
+    assert_eq!(title.bottom(), detail.top());
+    assert_eq!(detail.size.height, px(line_height));
+    assert_eq!(
+        title.size.width,
+        px(crate::sidebar::LABEL_WIDTH - crate::sidebar::ICON_RESERVE)
+    );
+    assert_eq!(title.right(), detail.right());
+    assert_eq!(icon.center().y, title.center().y);
+    cx.simulate_keystrokes("escape");
+    cx.update(|window, cx| assert!(view.read(cx).focus.is_focused(window)));
 }

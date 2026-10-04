@@ -16,6 +16,7 @@ use std::{
     sync::atomic::AtomicU64,
 };
 
+mod endpoint_switch;
 mod focus_fences;
 mod image_paste;
 mod image_paste_native;
@@ -23,7 +24,6 @@ mod input_gap;
 mod keyboard;
 mod mouse_gestures;
 mod mouse_targets;
-mod navigation;
 mod prompts;
 mod reconnect_backoff;
 mod sounds;
@@ -31,6 +31,7 @@ mod split_drag;
 mod toast_handoff;
 mod toast_navigation;
 mod window_notices;
+mod workspace_menu_navigation;
 
 struct Server {
     stream: UnixStream,

@@ -25,14 +25,14 @@ fn check_sidebar(fixture: Entity<SidebarFixture>, cx: &mut gpui::VisualTestConte
     sidebar_rows::check_sidebar_resize(&fixture, cx);
 
     let view = cx.update(|_, cx| fixture.read(cx).0.clone());
-    let before = menus::check_collapse_toggle(&view, cx);
-    menus::check_keybinds_panel(&view, cx);
+    let before = sidebar_rows::check_collapse_toggle(&view, cx);
+    panels::check_keybinds_panel(&view, cx);
     let parent = menus::check_workspace_menu_rows(&view, &before, cx);
     menus::check_pr_menu(&view, cx);
     menus::check_menu_anchor(&view, cx);
     menus::check_rename_dialog(&view, parent, cx);
 
-    panels::check_scaled_sidebar(&view, cx);
+    sidebar_rows::check_scaled_sidebar(&view, cx);
     panels::check_shortcut_search(&view, cx);
     panels::check_preferences_scroll(&view, cx);
     panels::check_github_panel(&view, cx);
@@ -40,8 +40,8 @@ fn check_sidebar(fixture: Entity<SidebarFixture>, cx: &mut gpui::VisualTestConte
     panels::check_command_palette(&view, cx);
     panels::check_close_confirmation(&view, cx);
 
-    let before_install = status::check_install_modal(&view, cx);
-    status::check_app_update(&view, &before_install, cx)?;
+    let before_install = panels::check_install_modal(&view, cx);
+    panels::check_app_update(&view, &before_install, cx)?;
     status::check_status_bar(&view, cx)?;
     cx.update(|_, cx| cx.default_global::<PaintedProbes>().check())
 }

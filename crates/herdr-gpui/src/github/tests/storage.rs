@@ -1,4 +1,5 @@
 use super::*;
+use crate::github::store::resolve_token;
 
 #[test]
 fn keyring_is_used_by_signed_macos_releases_and_linux() {
@@ -203,4 +204,60 @@ fn policy_reload_drains_accepted_write_without_applying_its_token() {
     assert!(!auth.connected());
     load_fixture_profile(&mut auth, Store::Environment, None);
     assert!(!auth.connected());
+}
+
+#[test]
+fn auth_priority_and_storage_errors_never_fall_back_silently() {
+    assert_eq!(
+        resolve_token(Some(" gh ".into()), Some("github".into()), || panic!(
+            "must not read Keychain"
+        ))
+        .unwrap()
+        .expose_secret(),
+        "gh"
+    );
+    assert_eq!(
+        resolve_token(Some(" ".into()), Some("github".into()), || panic!(
+            "must not read Keychain"
+        ))
+        .unwrap()
+        .expose_secret(),
+        "github"
+    );
+    assert_eq!(
+        resolve_token(None, None, || Ok(Some("saved".into())))
+            .unwrap()
+            .expose_secret(),
+        "saved"
+    );
+    assert!(
+        resolve_token(None, None, || Ok(None))
+            .unwrap_err()
+            .to_string()
+            .contains("authentication required")
+    );
+    assert_eq!(
+        resolve_token(None, None, || Err(std::io::Error::other("locked").into()))
+            .unwrap_err()
+            .to_string(),
+        "locked"
+    );
+    assert!(resolve_token(Some("bad\nsecret".into()), None, || panic!()).is_err());
+    assert!(resolve_token(None, None, || Ok(Some("  ".into()))).is_err());
+    assert_eq!(
+        resolve_token(Some(" \t".into()), Some("\n".into()), || Ok(Some(
+            " saved ".into()
+        )))
+        .unwrap()
+        .expose_secret(),
+        "saved"
+    );
+    assert!(
+        resolve_token(
+            Some("bad\nsecret".into()),
+            Some("valid".into()),
+            || panic!()
+        )
+        .is_err()
+    );
 }

@@ -160,3 +160,58 @@ fn cancellation_does_not_flush_commands_behind_pending_request() {
     assert_eq!(server.read(&mut [0]).unwrap(), 0);
     assert!(client.events.try_recv().is_err());
 }
+
+#[test]
+fn stale_boot_and_unsupported_commands_never_reach_socket() {
+    let (client, mut server, worker) = test_client();
+    handshake(&mut server);
+    event(&client);
+    event(&client);
+    client
+        .handle
+        .send_input(
+            "old-boot",
+            "w1:p1",
+            vec![ClientPaneInputEvent::Paste("bad".into())],
+        )
+        .unwrap();
+    assert!(matches!(
+        event(&client),
+        ClientEvent::CommandRejected {
+            request_id: None,
+            reason: Error::CommandBoot,
+        }
+    ));
+    for method in [
+        Method::TabCreate,
+        Method::WorktreeList,
+        Method::WorktreeOpen,
+    ] {
+        let unsupported = client.handle.request("boot-v1", method, json!({})).unwrap();
+        assert!(
+            matches!(event(&client), ClientEvent::CommandRejected { request_id: Some(id), reason: Error::UnsupportedMethod } if id == unsupported)
+        );
+    }
+    client.handle.set_focus("boot-v1", true).unwrap();
+    assert_eq!(
+        receive(&mut server),
+        ClientMessage::ClientShellFocus { focused: true }
+    );
+    let mut snapshot: Value = serde_json::from_str(SNAPSHOT).unwrap();
+    snapshot["boot_id"] = "replacement-boot".into();
+    send(
+        &mut server,
+        ServerMessage::EndpointControl {
+            kind: ENDPOINT_SNAPSHOT_KIND.into(),
+            data: snapshot.to_string(),
+        },
+    );
+    assert!(
+        worker
+            .join()
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("boot changed")
+    );
+}

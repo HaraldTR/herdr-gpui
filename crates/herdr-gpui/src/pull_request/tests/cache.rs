@@ -1,4 +1,13 @@
 use super::*;
+use crate::pull_request::cache::{CACHE_LIMIT, ERROR_BACKOFF, REFRESH};
+
+fn input(branch: &str) -> Input {
+    Input {
+        checkout: None,
+        repo_key: "/repo/.git".into(),
+        branch: branch.into(),
+    }
+}
 
 struct Peer {
     cache: Cache,

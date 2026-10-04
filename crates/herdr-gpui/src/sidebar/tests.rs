@@ -7,7 +7,6 @@ use super::{
     },
     layout_tests,
     render::header,
-    row::first_text,
     workspace_label,
     workspaces::workspace_entries,
 };

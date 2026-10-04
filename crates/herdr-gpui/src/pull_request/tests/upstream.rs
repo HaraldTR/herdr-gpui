@@ -107,24 +107,3 @@ fn unsupported_upstream_and_config_errors_do_not_fall_back() {
         Err(Error::PrCancelled)
     ));
 }
-
-#[test]
-fn github_origins_are_strictly_validated() {
-    assert_eq!(
-        crate::avatars::github_repo("git@github.com:Some-Owner/repo.git"),
-        Some(("some-owner".into(), "repo".into()))
-    );
-    // Enterprise managed users own repositories under an `_shortcode` login.
-    assert_eq!(
-        crate::avatars::github_repo("https://github.com/fabienpenso_microsoft/repo"),
-        Some(("fabienpenso_microsoft".into(), "repo".into()))
-    );
-    for remote in [
-        "https://github.com/a/b/c",
-        "https://github.com@evil.test/a/b",
-        "https://other.test/a/b",
-        "https://github.com/a/b?x",
-    ] {
-        assert!(crate::avatars::github_repo(remote).is_none());
-    }
-}

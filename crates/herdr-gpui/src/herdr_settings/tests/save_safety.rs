@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 
 #[test]
 #[cfg(unix)]

@@ -1,5 +1,9 @@
 use super::*;
 
+fn token_reply(value: Value) -> Result<Reply> {
+    super::super::token_reply(serde_json::from_value(value).unwrap(), "fixture-client")
+}
+
 #[test]
 fn setup_fixture_describes_public_config_and_environment_override() {
     let auth = Auth::fixture(false);
@@ -7,61 +11,6 @@ fn setup_fixture_describes_public_config_and_environment_override() {
     assert!(SETUP_MESSAGE.contains("[github] oauth_client_id"));
     assert!(SETUP_MESSAGE.contains("HERDR_GITHUB_OAUTH_CLIENT_ID"));
     assert!(SETUP_MESSAGE.contains("GitHub App or OAuth App public client ID"));
-}
-#[test]
-fn auth_priority_and_storage_errors_never_fall_back_silently() {
-    assert_eq!(
-        resolve_token(Some(" gh ".into()), Some("github".into()), || panic!(
-            "must not read Keychain"
-        ))
-        .unwrap()
-        .expose_secret(),
-        "gh"
-    );
-    assert_eq!(
-        resolve_token(Some(" ".into()), Some("github".into()), || panic!(
-            "must not read Keychain"
-        ))
-        .unwrap()
-        .expose_secret(),
-        "github"
-    );
-    assert_eq!(
-        resolve_token(None, None, || Ok(Some("saved".into())))
-            .unwrap()
-            .expose_secret(),
-        "saved"
-    );
-    assert!(
-        resolve_token(None, None, || Ok(None))
-            .unwrap_err()
-            .to_string()
-            .contains("authentication required")
-    );
-    assert_eq!(
-        resolve_token(None, None, || Err(std::io::Error::other("locked").into()))
-            .unwrap_err()
-            .to_string(),
-        "locked"
-    );
-    assert!(resolve_token(Some("bad\nsecret".into()), None, || panic!()).is_err());
-    assert!(resolve_token(None, None, || Ok(Some("  ".into()))).is_err());
-    assert_eq!(
-        resolve_token(Some(" \t".into()), Some("\n".into()), || Ok(Some(
-            " saved ".into()
-        )))
-        .unwrap()
-        .expose_secret(),
-        "saved"
-    );
-    assert!(
-        resolve_token(
-            Some("bad\nsecret".into()),
-            Some("valid".into()),
-            || panic!()
-        )
-        .is_err()
-    );
 }
 #[test]
 fn rejected_device_responses_name_the_failing_check() {
@@ -190,4 +139,15 @@ fn accepted_token_uses_store_off_thread_and_reports_failure() {
     auth.poll();
     assert_eq!(auth.message.as_deref(), Some("mock Keychain locked"));
     assert!(!auth.busy());
+}
+
+#[test]
+fn expired_token_reply_is_not_persisted() {
+    let mut auth = waiting();
+    auth.flow.as_mut().unwrap().deadline = Instant::now();
+    deliver(&mut auth, Ok(Reply::Token(credential("expired-secret"))));
+    auth.poll_with_store(|_| panic!("expired token must never be stored"));
+    assert!(!auth.busy());
+    assert!(auth.code().is_none());
+    assert!(auth.message.as_ref().unwrap().contains("expired"));
 }

@@ -27,19 +27,23 @@ mod device_footer;
 #[cfg(test)]
 mod host_groups;
 #[cfg(test)]
-mod layout_fit;
+mod layouts;
 #[cfg(test)]
-mod navigation;
+mod palette;
 #[cfg(test)]
 mod preferences_panel;
 #[cfg(test)]
 mod probes;
 #[cfg(test)]
-mod redraw;
-#[cfg(test)]
 mod row_drag;
 #[cfg(test)]
+mod selection_scroll;
+#[cfg(test)]
+mod sidebar_cache;
+#[cfg(test)]
 mod split_pane;
+#[cfg(test)]
+mod status_bar;
 #[cfg(test)]
 mod text_width;
 #[cfg(test)]

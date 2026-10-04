@@ -1,6 +1,6 @@
 use super::*;
 #[cfg(unix)]
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::PermissionsExt;
 use std::{fs, path::Path};
 
 // Every test in `edits` is Unix-only.

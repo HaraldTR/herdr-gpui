@@ -144,3 +144,38 @@ fn session_deadlines_and_snapshot_revision_fence() {
     assert!(error.to_string().contains("snapshot revision regressed"));
     assert_eq!(session.snapshot.unwrap().revision, 7);
 }
+
+#[test]
+fn response_boot_id_correlation_and_assembly_limits() {
+    for case in ["boot", "id", "limit"] {
+        let (client, mut server, worker) = test_client();
+        handshake(&mut server);
+        event(&client);
+        event(&client);
+        let id = client.handle.focus_pane("boot-v1", "w1:p1").unwrap();
+        receive(&mut server);
+        let data = match case {
+            "limit" => vec![b' '; MAX_RESPONSE_BYTES + 1],
+            "id" => br#"{"id":"wrong","result":{}}"#.to_vec(),
+            _ => vec![],
+        };
+        send(
+            &mut server,
+            ServerMessage::ClientShellEndpointResponseChunk {
+                boot_id: if case == "boot" { "stale" } else { "boot-v1" }.into(),
+                request_id: id,
+                final_chunk: true,
+                data,
+            },
+        );
+        let error = worker.join().unwrap().unwrap_err().to_string();
+        assert!(
+            error.contains(match case {
+                "boot" => "boot mismatch",
+                "id" => "ID mismatch",
+                _ => "limit exceeded",
+            }),
+            "{error}"
+        );
+    }
+}

@@ -2,58 +2,6 @@ use super::*;
 use crate::frame::ImageWriter;
 
 #[test]
-fn read_batches_bound_progress_and_stop_on_the_first_idle_read() {
-    struct Input {
-        bytes: io::Cursor<Vec<u8>>,
-        calls: usize,
-        idle: Option<io::ErrorKind>,
-    }
-    impl Read for Input {
-        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-            self.calls += 1;
-            if let Some(kind) = self.idle {
-                return Err(kind.into());
-            }
-            self.bytes.read(bytes)
-        }
-    }
-    let expected = ServerMessage::Graphics {
-        bytes: vec![17; 2 * 1024 * 1024],
-    };
-    let mut input = Input {
-        bytes: io::Cursor::new(encode_message(&expected, MAX_GRAPHICS_FRAME_SIZE).unwrap()),
-        calls: 0,
-        idle: None,
-    };
-    let mut reader = FrameReader::new();
-    assert!(reader.poll_batch(&mut input).unwrap().is_none());
-    assert!((1..=128).contains(&input.calls));
-    assert!(reader.bytes.len() <= 1024 * 1024);
-    let partial = reader.bytes.len();
-    for kind in [
-        io::ErrorKind::WouldBlock,
-        io::ErrorKind::TimedOut,
-        io::ErrorKind::Interrupted,
-    ] {
-        input.idle = Some(kind);
-        input.calls = 0;
-        assert!(reader.poll_batch(&mut input).unwrap().is_none());
-        assert_eq!(input.calls, 1);
-        assert_eq!(reader.bytes.len(), partial);
-    }
-    input.idle = None;
-    loop {
-        input.calls = 0;
-        let message = reader.poll_batch(&mut input).unwrap();
-        assert!(input.calls <= 128);
-        if let Some(message) = message {
-            assert_eq!(message, expected);
-            break;
-        }
-    }
-}
-
-#[test]
 fn image_writer_preserves_offsets_through_short_writes_and_timeouts() {
     struct ShortWriter {
         bytes: Vec<u8>,
