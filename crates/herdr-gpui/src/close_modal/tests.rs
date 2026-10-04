@@ -3,6 +3,8 @@ use super::*;
 use core::prelude::v1::test;
 use std::sync::Arc;
 
+mod pane_option;
+
 #[gpui::test]
 fn skipping_tab_confirmation_keeps_connection_checks_and_pane_prompt(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, cx| {

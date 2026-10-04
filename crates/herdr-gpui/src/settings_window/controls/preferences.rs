@@ -273,7 +273,12 @@ mod tests {
             (
                 Section::General,
                 "settings-confirm-close",
-                Preference::ConfirmClose(false),
+                Preference::ConfirmCloseTab(false),
+            ),
+            (
+                Section::General,
+                "settings-confirm-close-pane",
+                Preference::ConfirmClosePane(false),
             ),
             (
                 Section::General,

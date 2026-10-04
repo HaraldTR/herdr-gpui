@@ -300,6 +300,11 @@ impl HerdrWindow {
                 self.config.confirm_close_tab.to_string(),
             ))
             .child(row(
+                "preferences-confirm-close-pane",
+                "Confirm pane close",
+                self.config.confirm_close_pane.to_string(),
+            ))
+            .child(row(
                 "preferences-layout",
                 "Layout",
                 self.config.layout.mode.to_string(),

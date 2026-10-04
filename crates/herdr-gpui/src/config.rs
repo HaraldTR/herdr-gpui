@@ -60,6 +60,7 @@ pub(crate) mod corners {
 pub struct Config {
     pub theme: String,
     pub confirm_close_tab: bool,
+    pub confirm_close_pane: bool,
     pub show_agents: bool,
     /// CPU and memory of the selected host in the status bar.
     pub show_system_load: bool,
@@ -266,6 +267,7 @@ impl Default for Config {
             theme: "Default".into(),
             github: GitHubConfig::default(),
             confirm_close_tab: true,
+            confirm_close_pane: true,
             show_agents: true,
             show_system_load: true,
             show_listening_ports: true,
@@ -302,6 +304,7 @@ impl Default for Config {
 struct Settings {
     theme: Option<String>,
     confirm_close_tab: Option<bool>,
+    confirm_close_pane: Option<bool>,
     show_agents: Option<bool>,
     show_system_load: Option<bool>,
     show_listening_ports: Option<bool>,
@@ -610,6 +613,7 @@ impl Config {
             config.theme = theme;
         }
         config.confirm_close_tab = settings.confirm_close_tab.unwrap_or(true);
+        config.confirm_close_pane = settings.confirm_close_pane.unwrap_or(true);
         config.show_agents = settings.show_agents.unwrap_or(true);
         config.show_system_load = settings.show_system_load.unwrap_or(true);
         config.show_listening_ports = settings.show_listening_ports.unwrap_or(true);
