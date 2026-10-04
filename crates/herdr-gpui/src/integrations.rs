@@ -337,7 +337,7 @@ impl HerdrWindow {
         let mut body = div().id("integrations-body").min_h_0().overflow_y_scroll()
             .track_scroll(&state.scroll).p(px(16.))
             .child(div().font_weight(FontWeight::SEMIBOLD).child(crate::sidebar::label_text(&format!("Daemon host: {host}"))))
-            .child(div().mt(px(8.)).text_color(rgb(theme.muted)).child("Install updates agent configuration on this daemon's host, not necessarily this computer. No integrations are installed automatically."));
+            .child(div().mt(px(8.)).text_color(rgb(theme.subtext())).child("Install updates agent configuration on this daemon's host, not necessarily this computer. No integrations are installed automatically."));
         if let Some(error) = &state.error {
             body = body.child(
                 div()

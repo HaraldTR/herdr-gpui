@@ -553,7 +553,7 @@ impl HerdrWindow {
                         )
                 },
             )))
-            .child(div().text_color(rgb(theme.muted)).child(
+            .child(div().text_color(rgb(theme.subtext())).child(
                 "Each is asked to quit (SIGTERM), and may lose unsaved work. Processes they started keep running unless chosen too.",
             ))
             .child(
