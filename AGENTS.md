@@ -30,11 +30,10 @@ Closing or detaching the GUI must leave the daemon and its terminals running.
 - Keep dependency direction from UI to client to protocol. Protocol/client code must not depend on GPUI.
 - Keep session transitions separate from socket scheduling, and connection ownership separate from window rendering.
 - Reuse `ConnectionBridge`, domain targets, geometry helpers, and the test sandbox rather than duplicating their policies.
-- **File size limit: 1,000 lines.** No Rust, Python, shell, or Swift file may exceed it;
-  `just check-file-size` enforces it in `just ci` and CI's checks job. Files that were
-  already larger are allowlisted at their current size in `scripts/check-file-size.sh`:
-  they may shrink but never grow, and their entry goes once they are split below the
-  limit. Never add or raise an entry to make room; split the file instead.
+- **File size limit: 1,000 lines.** No Rust, Python, shell, or Swift file may exceed it,
+  tests included; `just check-file-size` enforces it in `just ci` and CI's checks job.
+  There is no allowlist: when a change would cross the limit, split the file by
+  responsibility in the same change rather than adding an exception.
 - Split modules by responsibility; the line limit is a ceiling, not a reason for arbitrary cuts. Prefer wiring and exports in entry points as code grows; do not perform unrelated file reshuffles.
 - Keep APIs narrow. Use private items by default and `pub(super)` or `pub(crate)` only where needed; do not expose every field merely to ease extraction.
 - Define shared types once in the lowest appropriate layer and re-export them. Do not create mirror enums or convert between them through strings.

@@ -123,7 +123,7 @@ bundle profile="release" features="":
 test-build: build-release
     cargo test --locked --release -p herdr-gpui --test cli
 
-# Fail on source files over 1,000 lines; existing ones may shrink, never grow.
+# Fail on source files over 1,000 lines.
 check-file-size:
     bash scripts/check-file-size.sh
 
