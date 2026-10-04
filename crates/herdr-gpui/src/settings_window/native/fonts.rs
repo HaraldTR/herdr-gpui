@@ -1,6 +1,7 @@
 //! Native font section checks: inline role rows, picker, and size editing.
+use super::super::themes;
 use super::*;
-use crate::font_picker::FontTarget;
+use crate::{config::FontFace, font_picker::FontTarget};
 
 fn inside(inner: Bounds<Pixels>, outer: Bounds<Pixels>) -> Result<()> {
     ensure!(

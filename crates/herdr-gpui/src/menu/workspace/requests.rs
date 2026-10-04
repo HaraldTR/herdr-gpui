@@ -13,7 +13,7 @@ impl HerdrWindow {
     /// The dialog closes as soon as a removal is queued, so its response is
     /// tracked on the window instead. Only a refusal is reported: success shows
     /// up as the workspace leaving the daemon's snapshot.
-    pub(in crate::menu) fn update_pending_removal(&mut self, cx: &mut Context<Self>) {
+    fn update_pending_removal(&mut self, cx: &mut Context<Self>) {
         let Some(removal) = &self.removal else {
             return;
         };

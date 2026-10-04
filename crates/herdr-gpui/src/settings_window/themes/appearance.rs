@@ -1,5 +1,14 @@
 //! Theme preview and appearance section rendering.
-use super::*;
+use super::{Choice, FOLLOW, LIST_HEIGHT, ROW_HEIGHT, Scope, SettingsWindow, grid};
+use crate::{
+    config::{Config, Theme, corners},
+    contrast::Contrast,
+    fonts::StyledFont,
+    herdr_settings,
+};
+use gpui::{
+    Context, Div, ScrollStrategy, Window, div, prelude::*, px, relative, rgb, uniform_list,
+};
 
 impl SettingsWindow {
     fn theme_preview(&self) -> Div {

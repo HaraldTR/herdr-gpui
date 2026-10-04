@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::FontFace;
 use core::prelude::v1::test;
 use std::sync::{
     Arc, Mutex,

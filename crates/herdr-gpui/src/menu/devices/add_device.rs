@@ -1,15 +1,156 @@
 //! The Add Device dialog: its form, the host check and save that run off the
 //! UI thread, and the local workspace that carries a setup needing prompts.
 
-use super::{LocalSpace, Offer, Setup, Step, setup};
-use crate::{HerdrWindow, NavigationTarget};
+use super::{Page, setup};
+use crate::{HerdrWindow, NavigationTarget, search_input::SearchInput};
 use gpui::{prelude::*, *};
 use herdr_client::{
     HostProbe, Method,
     protocol::{ClientKeyCode, ClientKeyKind, ClientPaneInputEvent},
 };
 
+pub(in crate::menu) struct Setup {
+    pub(super) fields: [Entity<SearchInput>; 3],
+    pub(super) step: Step,
+    /// This process's claim on the host being added, from the first check
+    /// until the device is saved or the dialog closes.
+    pub(super) claim: Option<setup::Claim>,
+    pub(super) task: Option<Task<()>>,
+}
+
+/// Where adding a device stands. Each step after `Form` belongs to the request
+/// that was submitted, not to whatever the fields hold now.
+pub(super) enum Step {
+    Form,
+    Checking(setup::Request),
+    /// Herdr is present, so the CLI saves the device without a terminal. A
+    /// stopped server is started by that same command.
+    Saving(setup::Request, HostProbe),
+    /// Saved; the next frame closes the dialog (see `poll_device_setup`).
+    Saved,
+    /// Setup needs prompts, so the user decides whether to run it locally.
+    Confirm(setup::Request, Offer),
+    /// Checking the catalog on disk again before opening the setup workspace.
+    Verifying(setup::Request),
+    /// Waiting for the local daemon to create the setup workspace.
+    Opening(setup::Request, LocalSpace),
+}
+
+/// Why setup has to continue in a terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Offer {
+    Install,
+    Update,
+    /// SSH needs a prompt, or saving without a terminal failed.
+    Terminal,
+}
+
+impl Offer {
+    /// `None` when Herdr is present, so the device is saved without a terminal.
+    pub(super) fn for_probe(probe: HostProbe) -> Option<Self> {
+        match probe {
+            HostProbe::Running | HostProbe::Stopped => None,
+            HostProbe::Missing => Some(Self::Install),
+            HostProbe::Outdated => Some(Self::Update),
+            HostProbe::SshFailed => Some(Self::Terminal),
+        }
+    }
+
+    pub(super) fn question(self, target: &str) -> String {
+        match self {
+            Self::Install => {
+                format!("Herdr was not detected on {target}. Should we install it?")
+            }
+            Self::Update => {
+                format!("The Herdr on {target} is too old for this app. Should we update it?")
+            }
+            Self::Terminal => format!(
+                "Setting up {target} needs your input, such as an SSH password or host key. Continue in a local terminal?"
+            ),
+        }
+    }
+
+    fn action(self) -> &'static str {
+        match self {
+            Self::Install => "Install",
+            Self::Update => "Update",
+            Self::Terminal => "Open terminal",
+        }
+    }
+}
+
+/// The local workspace request whose root pane will run the setup command.
+pub(super) struct LocalSpace {
+    pub(super) request: String,
+    pub(super) boot: String,
+    pub(super) command: String,
+}
+
 impl HerdrWindow {
+    /// Show an empty Add Device form with the target field focused.
+    pub(super) fn open_add_device(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let fields = std::array::from_fn(|index| {
+            let input = cx.new(SearchInput::new);
+            input.update(cx, |input, cx| {
+                input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
+                input.set_placeholder(
+                    ["user@hostname or SSH alias", "The SSH target", "default"][index],
+                    cx,
+                );
+            });
+            input
+        });
+        window.focus(&fields[0].read(cx).focus.clone(), cx);
+        self.menu.device_setup = Some(Setup {
+            fields,
+            step: Step::Form,
+            claim: None,
+            task: None,
+        });
+        self.menu.page = Some(Page::AddDevice);
+    }
+
+    /// Route a key to the Add Device form. Returns `false` when the key is
+    /// left to propagate: during composition, or when the form ignores it.
+    pub(super) fn add_device_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(form) = &self.menu.device_setup else {
+            return false;
+        };
+        if form
+            .fields
+            .iter()
+            .any(|field| field.read(cx).is_composing())
+        {
+            return false;
+        }
+        match event.keystroke.key.as_str() {
+            "tab" => {
+                let index = form
+                    .fields
+                    .iter()
+                    .position(|field| field.read(cx).focus.is_focused(window))
+                    .unwrap_or(0);
+                let next = (index
+                    + if event.keystroke.modifiers.shift {
+                        2
+                    } else {
+                        1
+                    })
+                    % 3;
+                window.focus(&form.fields[next].read(cx).focus.clone(), cx);
+            }
+            "enter" => self.submit_device_setup(cx),
+            "escape" => self.dismiss_menu(window, cx),
+            _ => return false,
+        }
+        true
+    }
+
     pub(in crate::menu) fn render_add_device(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &self.theme;
         let view = div()
@@ -180,7 +321,7 @@ impl HerdrWindow {
         }
     }
 
-    pub(super) fn submit_device_setup(&mut self, cx: &mut Context<Self>) {
+    fn submit_device_setup(&mut self, cx: &mut Context<Self>) {
         let Some(form) = &mut self.menu.device_setup else {
             return;
         };

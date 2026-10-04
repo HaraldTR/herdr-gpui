@@ -1,12 +1,131 @@
-//! Loading and saving preferences off the UI thread, then reconciling the result.
-use super::{Loaded, SettingsWindow, layouts, themes};
+//! Loading and saving preferences off the UI thread, then reconciling the result,
+//! including the config watcher and the saves that finish when the app quits.
+use super::{SettingsWindow, layouts, themes};
 use crate::{
-    config::{Config, FontFace},
+    config::{Config, FontFace, Theme},
     herdr_settings::{self, Edit},
 };
 use gpui::*;
 
+pub(super) struct Loaded {
+    pub(super) config: Config,
+    pub(super) theme: Theme,
+    pub(super) shared: Option<herdr_settings::Settings>,
+    pub(super) error: Option<String>,
+}
+
+pub(super) type SaveCompletion =
+    std::result::Result<Option<herdr_settings::Settings>, std::sync::Arc<crate::Error>>;
+
+#[cfg(test)]
+type SizeWriter = dyn Fn(Vec<(FontFace, f32)>) -> crate::Result<()> + Send + Sync;
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(super) struct SizeIo {
+    pub(super) write: std::sync::Arc<SizeWriter>,
+    pub(super) load: fn() -> crate::Result<Loaded>,
+}
+
 impl SettingsWindow {
+    pub(super) fn watch_config(&mut self, cx: &mut Context<Self>) {
+        let Ok(path) = Config::local_path() else {
+            return;
+        };
+        let daemon = crate::config::daemon_config_path(|key| std::env::var_os(key));
+        self._watch = Some(cx.spawn(async move |this, cx| {
+            let mut watch = crate::config::watch::Watch::default();
+            let mut pending = None;
+            loop {
+                let (path, daemon) = (path.clone(), daemon.clone());
+                let sample = cx
+                    .background_executor()
+                    .spawn(async move {
+                        use crate::config::watch::fingerprint;
+                        [fingerprint(&path), fingerprint(&daemon)]
+                    })
+                    .await;
+                if this
+                    .update(cx, |this, cx| {
+                        if let Some((sample, revision)) = pending
+                            && revision != this.load_revision
+                        {
+                            watch.accept(sample);
+                            pending = None;
+                        }
+                        if watch.observe(sample) && !this.busy() {
+                            pending = Some((sample, this.load_revision));
+                            this.reload(cx);
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(250))
+                    .await;
+            }
+        }));
+    }
+
+    pub(super) fn shutdown(&mut self, cx: &mut Context<Self>) -> Task<crate::Result<()>> {
+        #[cfg(test)]
+        if let Some(io) = self.size_io.clone() {
+            return self.shutdown_with(move |sizes| (io.write)(sizes), cx);
+        }
+        self.shutdown_with(|sizes| Config::save_font_sizes(&sizes), cx)
+    }
+
+    pub(super) fn shutdown_with(
+        &mut self,
+        write: impl FnOnce(Vec<(FontFace, f32)>) -> crate::Result<()> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) -> Task<crate::Result<()>> {
+        self.quitting = true;
+        self._watch = None;
+        let pending = self.take_pending_control_sizes();
+        let theme = self.take_shutdown_theme();
+        let layout = self
+            .layout_intent
+            .take()
+            .filter(|_| !self.layout_saving)
+            .map(|mode| self.layout_operation(mode));
+        let completion = self.save_completion.take();
+        let executor = cx.background_executor().clone();
+        cx.background_executor().spawn(async move {
+            let mut shared = None;
+            let mut preceding = Ok(());
+            if let Some(completion) = completion {
+                // Yield rather than occupying the executor thread needed by
+                // the preceding save, including single-threaded test workers.
+                loop {
+                    match completion.try_recv() {
+                        Ok(result) => {
+                            match result {
+                                Ok(snapshot) => shared = snapshot,
+                                Err(error) => preceding = Err(crate::Error::SettingsSave(error)),
+                            }
+                            break;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                            executor.timer(std::time::Duration::from_millis(10)).await;
+                        }
+                    }
+                }
+            }
+            let sizes = if pending.is_empty() {
+                Ok(())
+            } else {
+                write(pending)
+            };
+            let theme = theme.map_or(Ok(()), |theme| theme(shared));
+            let layout = layout.map_or(Ok(()), |write| write());
+            preceding.and(sizes).and(theme).and(layout)
+        })
+    }
+
     pub(super) fn save_control_sizes(
         &mut self,
         sizes: Vec<(FontFace, f32)>,

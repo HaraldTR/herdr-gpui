@@ -203,3 +203,135 @@ fn quit_waits_for_current_save_then_drains_latest_sizes_once(cx: &mut TestAppCon
     assert!(weak.upgrade().is_none());
     drop(quit);
 }
+
+#[cfg(unix)]
+#[gpui::test]
+fn quit_shared_theme_uses_only_successfully_reconciled_preceding_snapshot(cx: &mut TestAppContext) {
+    // Failed writes/loads must retain the original conflict boundary. A genuine
+    // conflict after a successful handoff must surface, never reload and retry.
+    for (saved_ok, reload_ok, shared_available, external_conflict) in [
+        (true, true, true, false),
+        (false, true, true, false),
+        (true, false, true, false),
+        (true, true, false, false),
+        (true, true, true, true),
+    ] {
+        let source = cx.add_window(crate::sidebar::layout_tests::fixture_window);
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let refreshed = saved_ok && reload_ok && shared_available;
+        let quit = cx.update(|cx| {
+            let weak = source.update(cx, |_, _, cx| cx.weak_entity()).unwrap();
+            open_fixture(weak, cx);
+            cx.global::<SettingsWindowHandle>()
+                .window
+                .unwrap()
+                .update(cx, |view, window, cx| {
+                    let original = herdr_settings::Settings::parse_text(
+                        "[ui.sound]\nenabled=true\n[theme.custom]\naccent='#123456'\n",
+                    )
+                    .unwrap();
+                    let updated = herdr_settings::Settings::parse_text(
+                        "[ui.sound]\nenabled=false\n[theme.custom]\naccent='#abcdef'\n",
+                    )
+                    .unwrap();
+                    let expected = if refreshed {
+                        updated.clone()
+                    } else {
+                        original.clone()
+                    };
+                    view.shared = Some(original);
+                    let written = operations.clone();
+                    view.theme_io = Some(themes::ThemeIo {
+                        write: Arc::new(move |name, shared| {
+                            let shared = shared.unwrap();
+                            assert_eq!(name, "nord");
+                            assert_eq!(shared.sound_enabled, expected.sound_enabled);
+                            assert_eq!(
+                                shared.theme(false).unwrap(),
+                                expected.theme(false).unwrap()
+                            );
+                            let mut operations = written.lock().unwrap();
+                            assert_eq!(*operations, ["preceding write"]);
+                            operations.push("theme write");
+                            if external_conflict {
+                                Err(herdr_settings::Error::Conflict.into())
+                            } else {
+                                Ok(())
+                            }
+                        }),
+                        load: Arc::new(|| {
+                            panic!("shutdown must not reload/retry the theme writer")
+                        }),
+                        resolve: None,
+                    });
+                    let preceding = operations.clone();
+                    view.save_with(
+                        move || {
+                            preceding.lock().unwrap().push("preceding write");
+                            if saved_ok {
+                                Ok(())
+                            } else {
+                                Err(crate::Error::MissingHome)
+                            }
+                        },
+                        move || {
+                            if !reload_ok {
+                                return Err(crate::Error::MissingHome);
+                            }
+                            let mut loaded = fixture();
+                            loaded.shared = shared_available.then_some(updated);
+                            Ok(loaded)
+                        },
+                        true,
+                        cx,
+                    );
+                    view.accept_theme_choice(
+                        themes::Choice {
+                            scope: themes::Scope::Herdr,
+                            name: "nord".into(),
+                        },
+                        cx,
+                    );
+                    let quit = view.shutdown_with(|_| panic!("no pending font sizes"), cx);
+                    window.remove_window();
+                    quit
+                })
+                .unwrap()
+        });
+        let (done, result) = std::sync::mpsc::sync_channel(1);
+        cx.executor()
+            .spawn(async move {
+                done.send(quit.await).unwrap();
+            })
+            .detach();
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(10));
+        cx.run_until_parked();
+        let result = result.try_recv().unwrap();
+        if external_conflict {
+            let crate::Error::ConfigFile { source, .. } = result.unwrap_err() else {
+                panic!("expected typed shared conflict")
+            };
+            assert!(matches!(
+                source.downcast_ref::<herdr_settings::Error>(),
+                Some(herdr_settings::Error::Conflict)
+            ));
+        } else if saved_ok {
+            result.unwrap();
+        } else {
+            assert!(matches!(result, Err(crate::Error::SettingsSave(source))
+                if matches!(*source, crate::Error::MissingHome)));
+        }
+        assert_eq!(
+            *operations.lock().unwrap(),
+            ["preceding write", "theme write"]
+        );
+        cx.update(|cx| {
+            source
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+            themes::clear_theme_draft(cx);
+        });
+    }
+}

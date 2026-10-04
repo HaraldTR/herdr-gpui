@@ -1,4 +1,8 @@
-use super::{LocalSpace, Offer, Page, Setup, Step, add_device::enter, setup};
+use super::{
+    Page,
+    add_device::{LocalSpace, Offer, Setup, Step, enter},
+    setup,
+};
 use crate::{
     HerdrWindow, NavigationTarget, search_input::SearchInput,
     sidebar::layout_tests::fixture_window, state::ConnectionStatus,

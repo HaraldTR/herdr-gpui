@@ -285,3 +285,76 @@ fn theme_close_failure_keeps_window_and_draft_without_retrying(cx: &mut TestAppC
     cx.update(|cx| assert!(settings.read(cx).is_err()));
     assert_eq!(*writes.lock().unwrap(), ["Nord", "Nord"]);
 }
+
+#[gpui::test]
+fn accepted_close_survives_source_close_and_reactivation_and_fences_late_theme_reads(
+    cx: &mut TestAppContext,
+) {
+    let source = cx.add_window(crate::sidebar::layout_tests::fixture_window);
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    let (settings, revision) = cx.update(|cx| {
+        let weak = source.update(cx, |_, _, cx| cx.weak_entity()).unwrap();
+        open_fixture(weak.clone(), cx);
+        let settings = cx.global::<SettingsWindowHandle>().window.unwrap();
+        source
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        let revision = theme_load_revision(cx);
+        settings
+            .update(cx, |view, window, cx| {
+                view.theme_io = Some(recording_themes(writes.clone(), false));
+                choose(view, "Nord", cx);
+                view.close(window, cx);
+                assert!(view.saving);
+            })
+            .unwrap();
+        open_fixture(weak, cx);
+        assert_eq!(cx.global::<SettingsWindowHandle>().window, Some(settings));
+        (settings, revision)
+    });
+    cx.run_until_parked();
+    assert_eq!(*writes.lock().unwrap(), ["Nord"]);
+    cx.update(|cx| {
+        assert!(settings.read(cx).is_err());
+        assert!(!theme_pending(cx));
+        let mut config = Config::default();
+        config.ui.size = 25.;
+        let mut theme = Theme::default();
+        apply_loaded_theme(&mut config, &mut theme, revision, cx);
+        assert_eq!(config.ui.size, 25.);
+        assert_eq!(config.theme, "Nord");
+        assert_eq!(theme, Theme::builtin("Nord").unwrap());
+    });
+}
+
+#[gpui::test]
+fn theme_selection_cancels_main_picker_and_preserves_focus(cx: &mut TestAppContext) {
+    let source = cx.add_window(crate::sidebar::layout_tests::fixture_window);
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    cx.update(|cx| {
+        let weak = source
+            .update(cx, |view, window, cx| {
+                view.open_theme_picker(window, cx);
+                cx.weak_entity()
+            })
+            .unwrap();
+        open_fixture(weak, cx);
+        cx.global::<SettingsWindowHandle>()
+            .window
+            .unwrap()
+            .update(cx, |view, _, cx| {
+                view.theme_io = Some(recording_themes(writes, false));
+                choose(view, "Nord", cx);
+            })
+            .unwrap();
+        source
+            .update(cx, |view, window, cx| {
+                assert!(view.menu.page.is_none());
+                assert_eq!(view.theme, Theme::builtin("Nord").unwrap());
+                view.dismiss_menu(window, cx);
+                assert_eq!(view.theme, Theme::builtin("Nord").unwrap());
+            })
+            .unwrap();
+    });
+    cx.run_until_parked();
+}

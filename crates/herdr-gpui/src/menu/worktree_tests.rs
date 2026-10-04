@@ -14,6 +14,7 @@ use gpui::{Entity, VisualTestContext};
 mod dialog_entry;
 mod github_listings;
 mod local_listings;
+mod name_field;
 
 fn origin() -> Origin {
     Origin {

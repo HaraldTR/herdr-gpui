@@ -4,11 +4,11 @@ use super::{WorkspaceAction, WorkspaceTarget, state::Deletion};
 use crate::{HerdrWindow, dialog_input::DialogInput, sidebar};
 use herdr_client::Method;
 
-mod actions;
 mod close;
 mod dialog_layout;
 mod naming;
 mod pull_requests;
+mod targets;
 mod worktree_create;
 mod worktree_delete;
 

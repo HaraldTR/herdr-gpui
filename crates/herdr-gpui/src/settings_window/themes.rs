@@ -1,15 +1,14 @@
 //! Search-only samples and explicit app-wide theme intents. Disk work stays off the UI thread.
 use super::SettingsWindow;
 use crate::{
-    config::{Config, Theme, corners},
+    config::{Config, Theme},
     contrast::Contrast,
-    fonts::StyledFont,
     herdr_settings::{self, Edit},
     search_input::{Changed, SearchInput},
 };
 use gpui::{prelude::*, *};
+mod appearance;
 mod grid;
-mod view;
 
 const FOLLOW: &str = "Follow Herdr";
 const LIST_HEIGHT: f32 = 168.;
