@@ -1286,6 +1286,15 @@ request.
   their numbers carry over when switching, and the choice is remembered.
 - A scrollbar along the diff's right edge shows how much of it is in view
   and where; drag its thumb to move through a long change.
+- Large changes stay reviewable. Line counts come first
+  (`git diff --numstat`), so a file with more than 5,000 changed lines, one
+  larger than 1 MiB on disk, or any file past 15,000 changed lines in total
+  is left out of the diff and listed as "Large change not shown" with its
+  counts; its file header still takes a note. Marking notes is a lookup per
+  note, not a pass over the diff.
+- The notes panel resizes by dragging its left edge, as the sidebar does,
+  and a double-click on the edge restores its default. The review and an
+  annotated page share the width, which is remembered with the sidebar's.
 
 - Click a line, added, removed or unchanged, or a file name, write what should
   change, and press Enter or **Add note**. Escape drops the note being

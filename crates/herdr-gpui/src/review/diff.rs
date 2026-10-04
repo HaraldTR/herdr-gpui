@@ -3,7 +3,10 @@
 //! numbered lines, plus untracked files shown as wholly added. File contents are untrusted: every row is stripped of control and
 //! direction-override characters and bounded before it is drawn or quoted.
 use crate::{notifications::safe_text, pull_request::Input};
+
+mod budget;
 use std::{
+    collections::HashMap,
     io::Read as _,
     path::{Component, Path},
     time::{Duration, Instant},
@@ -79,7 +82,7 @@ pub(crate) enum Scope {
 }
 
 /// Which version of a file a line number counts in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Side {
     Added,
     Removed,
@@ -266,6 +269,22 @@ impl Diff {
         }
     }
 
+    /// Adds a changed file left out of the diff for its size, so it is still
+    /// listed and can take a note as a whole.
+    pub(crate) fn add_skipped(&mut self, name: &str, added: Option<u64>, deleted: Option<u64>) {
+        if !self.start_file(clean(name)) {
+            return;
+        }
+        self.mark_file("too large to show");
+        let remark = match (added, deleted) {
+            (Some(added), Some(deleted)) => {
+                format!("Large change not shown: +{added} \u{2212}{deleted} lines")
+            }
+            _ => "Large change not shown".to_owned(),
+        };
+        self.push(Kind::Meta, None, None, &remark);
+    }
+
     /// What a note on row `index` is about; hunks and remarks take none.
     pub(crate) fn anchor(&self, index: usize) -> Option<Anchor> {
         let row = self.rows.get(index)?;
@@ -329,9 +348,52 @@ impl Diff {
     }
 
     /// The row a note with `anchor` belongs on, to mark it there.
-    pub(crate) fn row_of(&self, anchor: &Anchor) -> Option<usize> {
-        (0..self.rows.len()).find(|index| self.anchor(*index).as_ref() == Some(anchor))
+    /// Built once per load: marking a review's notes is then a lookup
+    /// per note rather than a pass over every row.
+    pub(crate) fn index(&self) -> RowIndex {
+        let mut index = RowIndex::default();
+        for (number, name) in self.files.iter().enumerate() {
+            index.files.entry(name.clone()).or_insert(number);
+        }
+        for (row, line) in self.rows.iter().enumerate() {
+            let key = match line.kind {
+                Kind::File => {
+                    index.headers.entry(line.file).or_insert(row);
+                    continue;
+                }
+                Kind::Added => line.new.map(|number| (Side::Added, number)),
+                Kind::Removed => line.old.map(|number| (Side::Removed, number)),
+                Kind::Context => line.new.map(|number| (Side::Unchanged, number)),
+                Kind::Hunk | Kind::Meta => None,
+            };
+            if let Some((side, number)) = key {
+                index.lines.entry((line.file, side, number)).or_insert(row);
+            }
+        }
+        index
     }
+
+    /// The row a note with `anchor` belongs on, to mark it there: the one
+    /// `index` names, if it still quotes the same line.
+    pub(crate) fn row_of(&self, index: &RowIndex, anchor: &Anchor) -> Option<usize> {
+        let row = match anchor {
+            Anchor::File { path } => *index.headers.get(index.files.get(path)?)?,
+            Anchor::Line {
+                path, side, number, ..
+            } => *index
+                .lines
+                .get(&(*index.files.get(path)?, *side, *number))?,
+        };
+        (self.anchor(row).as_ref() == Some(anchor)).then_some(row)
+    }
+}
+
+/// Where each file header and numbered line of a [`Diff`] is.
+#[derive(Debug, Default)]
+pub(crate) struct RowIndex {
+    files: HashMap<String, usize>,
+    headers: HashMap<usize, usize>,
+    lines: HashMap<(usize, Side, u32), usize>,
 }
 
 /// The changes in a checkout, where it is, and what they were taken against.
@@ -446,6 +508,14 @@ fn untracked_text(path: &Path) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+/// Git's output outgrew what is read: say so in the review's terms.
+fn too_large(error: crate::Error) -> crate::Error {
+    match error {
+        crate::Error::PrSize => crate::Error::ReviewTooLarge,
+        error => error,
+    }
+}
+
 /// Reads the focused checkout's changes in `scope`; `base_hint` names the
 /// pull request's base branch when one is known. Blocking: it runs Git and
 /// reads files, so it belongs on a background thread.
@@ -462,27 +532,64 @@ pub(crate) fn load(input: &Input, scope: Scope, base_hint: Option<&str>) -> crat
             (Some(label), commit, before)
         }
     };
-    // Explicit prefixes and no external tools, whatever the user configured.
-    let text = crate::git::git(
+    // Line counts first: they are small whatever the change, and say which
+    // files would make the diff itself too large to read.
+    let numstat = crate::git::git(
         &checkout,
         &[
-            "-c",
-            "core.quotePath=false",
             "diff",
-            "--no-color",
+            "--numstat",
+            "-z",
             "--no-ext-diff",
             "--no-textconv",
-            "--src-prefix=a/",
-            "--dst-prefix=b/",
             &revision,
             "--",
         ],
+        "count working tree changes",
+        deadline,
+        &never,
+    )
+    .map_err(too_large)?;
+    let counted = budget::parse_numstat(&numstat);
+    let root = Path::new(&checkout);
+    let skipped = budget::too_large(&counted, |path| {
+        inside(path)
+            .then(|| std::fs::symlink_metadata(root.join(path)).ok())
+            .flatten()
+            .filter(std::fs::Metadata::is_file)
+            .map(|metadata| metadata.len())
+    });
+    // Explicit prefixes and no external tools, whatever the user configured.
+    let mut args = vec![
+        "-c".to_owned(),
+        "core.quotePath=false".to_owned(),
+        "diff".to_owned(),
+        "--no-color".to_owned(),
+        "--no-ext-diff".to_owned(),
+        "--no-textconv".to_owned(),
+        "--src-prefix=a/".to_owned(),
+        "--dst-prefix=b/".to_owned(),
+        revision,
+        "--".to_owned(),
+    ];
+    if !skipped.is_empty() {
+        args.push(":(top)".to_owned());
+        args.extend(skipped.iter().map(|file| budget::excluded(&file.path)));
+    }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let text = crate::git::git(
+        &checkout,
+        &args,
         "read working tree changes",
         deadline,
         &never,
-    )?;
+    )
+    .map_err(too_large)?;
     let mut diff = Diff::parse(&text);
     diff.before = before;
+    for file in skipped {
+        diff.add_skipped(&file.path, file.added, file.deleted);
+    }
     let untracked = crate::git::git(
         &checkout,
         &["ls-files", "--others", "--exclude-standard", "-z"],

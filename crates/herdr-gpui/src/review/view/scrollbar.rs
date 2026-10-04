@@ -106,8 +106,6 @@ impl HerdrWindow {
                     }
                 }),
             )
-            // A wheel scroll moves the list itself; redraw so the thumb follows.
-            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
             .child(list)
             .children(thumb)
     }

@@ -157,7 +157,7 @@ impl HerdrWindow {
                 div()
                     .flex_none()
                     .h_full()
-                    .w(px(crate::browser::annotate_view::ANNOTATIONS_WIDTH * shown))
+                    .w(px(self.notes_panel_width() * shown))
                     .overflow_hidden()
                     .child(self.render_annotations(tab, cx))
                     .into_any_element()

@@ -155,6 +155,10 @@ pub(crate) struct HerdrWindow {
     pub(crate) git: git::Git,
     /// Notes waiting for their agents to be ready for them.
     pub(crate) deliveries: crate::agent_notes::Deliveries,
+    /// The notes panel beside a review or an annotated page; both share it.
+    pub(crate) notes_width: crate::panel_resize::PanelWidth,
+    /// The window's width at its last render, which caps side panels.
+    pub(crate) viewport_width: f32,
     pub(crate) usage: crate::usage::Usage,
     pub(crate) system_load: crate::system_load::SystemLoad,
     pub(crate) install_warning_shown: bool,
@@ -292,6 +296,9 @@ impl HerdrWindow {
         }
         if !self.sidebar_split_modified {
             self.sidebar_split = chrome.sidebar_split;
+        }
+        if self.notes_width.chosen().is_none() {
+            self.notes_width.restore(chrome.notes_width);
         }
         if !self.agent_sort_modified
             && let Some(sort) = chrome.agent_sort
@@ -596,6 +603,8 @@ impl HerdrWindow {
             teleport_follow: None,
             git: git::Git::default(),
             deliveries: Default::default(),
+            notes_width: crate::panel_resize::NOTES,
+            viewport_width: 0.,
             usage: Default::default(),
             system_load: Default::default(),
             install_warning_shown: false,

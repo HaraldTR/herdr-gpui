@@ -221,6 +221,8 @@ pub enum Error {
         "No base branch to compare with: neither the pull request's base nor origin/HEAD, main, or master exists locally."
     )]
     ReviewNoBase,
+    #[error("These changes are too large to review here, even leaving out the largest files.")]
+    ReviewTooLarge,
     #[error("Could not {operation}.")]
     GitProcess {
         operation: &'static str,

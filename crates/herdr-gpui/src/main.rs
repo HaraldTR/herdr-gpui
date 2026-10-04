@@ -56,6 +56,7 @@ mod notifications;
 mod osc52;
 mod palette;
 mod pane_menu;
+mod panel_resize;
 mod preferences;
 mod presentation;
 mod progress;

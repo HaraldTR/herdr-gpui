@@ -201,5 +201,6 @@ fn notes_go_to_the_focused_agent_or_the_workspace_s_first() {
 }
 
 mod layout;
+mod resize;
 mod scope;
 mod scrollbar;

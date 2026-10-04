@@ -101,7 +101,7 @@ fn notes_anchor_to_a_line_on_its_own_side_or_a_whole_file() {
         })
     );
     let line = diff.anchor(4).unwrap();
-    assert_eq!(diff.row_of(&line), Some(4));
+    assert_eq!(diff.row_of(&diff.index(), &line), Some(4));
     assert_eq!(diff.anchor(diff.rows.len()), None);
 }
 
@@ -160,4 +160,5 @@ fn untracked_links_and_binaries_are_not_read() {
 
 mod branch;
 
+mod large;
 mod split;

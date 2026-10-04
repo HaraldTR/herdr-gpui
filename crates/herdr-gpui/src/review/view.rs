@@ -2,7 +2,7 @@
 //! the line the user picked, and the queued notes with Send. Git runs on the
 //! background executor; nothing reaches an agent until the user presses Send.
 use super::{
-    diff::{Loaded, Scope, SplitRow},
+    diff::{Loaded, RowIndex, Scope, SplitRow},
     notes::{self, MAX_NOTES, Note},
 };
 use crate::{
@@ -15,9 +15,6 @@ use std::{collections::HashMap, sync::Arc};
 
 mod rows;
 mod scrollbar;
-
-/// The notes column beside the diff.
-const NOTES_WIDTH: f32 = 300.;
 
 /// How the diff is drawn.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -84,6 +81,8 @@ pub(crate) struct Review {
     layout: Layout,
     /// The loaded rows paired for the side-by-side view.
     split: Vec<SplitRow>,
+    /// Where the loaded rows are, to mark notes without a scan.
+    index: RowIndex,
     agent: Option<Agent>,
     /// The endpoint the agent's daemon was on when the review opened.
     endpoint: usize,
@@ -104,6 +103,7 @@ pub(crate) struct Review {
 impl Review {
     fn set_loaded(&mut self, loaded: Loaded) {
         self.split = loaded.diff.split_rows();
+        self.index = loaded.diff.index();
         self.state = State::Loaded(Arc::new(loaded));
     }
 
@@ -129,7 +129,7 @@ impl Review {
             return;
         };
         for (index, note) in self.notes.iter().enumerate() {
-            if let Some(row) = loaded.diff.row_of(&note.anchor) {
+            if let Some(row) = loaded.diff.row_of(&self.index, &note.anchor) {
                 self.marks.entry(row).or_insert(index + 1);
             }
         }
@@ -162,6 +162,7 @@ impl HerdrWindow {
                     scope: Scope::default(),
                     layout: Layout::default(),
                     split: Vec::new(),
+                    index: RowIndex::default(),
                     agent: None,
                     endpoint,
                     state: State::Loading,
@@ -244,6 +245,7 @@ impl HerdrWindow {
             scope: loaded.scope,
             layout: Layout::default(),
             split: Vec::new(),
+            index: RowIndex::default(),
             agent,
             endpoint: self.selected_endpoint,
             state: State::Loading,
@@ -691,11 +693,10 @@ impl HerdrWindow {
         });
         let has_notes = !review.notes.is_empty();
         let has_agent = review.agent.is_some();
-        div()
+        let panel = div()
             .id("review-notes")
             .debug_selector(|| "review-notes".into())
             .flex_none()
-            .w(px(NOTES_WIDTH))
             .h_full()
             .flex()
             .flex_col()
@@ -736,7 +737,13 @@ impl HerdrWindow {
                                 .on_click(cx.listener(|this, _, _, cx| this.copy_review(cx))),
                         ),
                 )
-            })
+            });
+        self.resizable_notes(
+            panel,
+            "review-notes-resize",
+            crate::panel_resize::PanelDrag::ReviewNotes,
+            cx,
+        )
     }
 }
 

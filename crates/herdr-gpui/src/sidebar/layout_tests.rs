@@ -431,6 +431,8 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         config_load_revision: 0,
         git: Default::default(),
         deliveries: Default::default(),
+        notes_width: crate::panel_resize::NOTES,
+        viewport_width: 0.,
         usage: Default::default(),
         system_load: Default::default(),
         sidebar_visible: true,

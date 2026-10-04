@@ -19,9 +19,6 @@ mod delivery;
 mod panel;
 mod screenshots;
 
-/// The notes panel's width beside the page.
-pub(super) const ANNOTATIONS_WIDTH: f32 = 300.;
-
 /// What the next note will be about, picked but not yet written, and its
 /// screenshot once WebKit delivers it.
 struct Draft {
