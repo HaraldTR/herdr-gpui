@@ -760,7 +760,7 @@ mod git_button_tests {
             let number = cx.debug_bounds("titlebar-git-pr").unwrap();
             let churn = cx.debug_bounds("titlebar-git-pr-lines").unwrap();
             let button = cx.debug_bounds("titlebar-git").unwrap();
-            assert!(number.left() >= px(80.));
+            assert!(number.left() >= cx.debug_bounds("toggle-sidebar").unwrap().right());
             assert!(number.right() <= churn.left());
             assert!(churn.right() <= button.left());
             for selector in [
