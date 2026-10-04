@@ -10,6 +10,7 @@
 mod error;
 mod job;
 mod plan;
+mod state;
 mod ui;
 
-pub(crate) use ui::{FanOut, Origin};
+pub(crate) use state::{FanOut, Origin};
