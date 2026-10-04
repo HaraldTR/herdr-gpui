@@ -9,6 +9,7 @@
 
 mod render;
 mod scan;
+mod tunnel;
 
 #[cfg(test)]
 mod tests;
@@ -20,7 +21,7 @@ use crate::{
 };
 use herdr_client::ConnectTarget;
 pub(crate) use render::chips;
-pub(crate) use scan::{Origin, Port, Ports, parse};
+pub(crate) use scan::{Link, Origin, Port, Ports, parse};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -28,6 +29,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+pub(crate) use tunnel::Tunnels;
 
 /// Ports open and close at human pace; `lsof` is not free on a busy machine.
 const INTERVAL: Duration = Duration::from_secs(5);
@@ -296,6 +298,18 @@ impl ListeningPorts {
                     ports,
                     origin: &reading.origin,
                 })
+        })
+    }
+
+    /// Whether any workspace on `host` still listens on `port`.
+    pub fn listening(&self, host: &Host, port: u16) -> bool {
+        self.monitors.get(host).is_some_and(|monitor| {
+            monitor
+                .reading
+                .ports
+                .values()
+                .flatten()
+                .any(|listed| listed.number == port)
         })
     }
 

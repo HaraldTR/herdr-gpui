@@ -372,6 +372,14 @@ pub enum Error {
     ListeningPortsTool,
     #[error("Listening ports cannot be read on this platform.")]
     ListeningPortsUnsupported,
+    #[error("No free local port for an SSH tunnel.")]
+    TunnelPort(#[source] io::Error),
+    #[error("Could not start ssh for a tunnel.")]
+    TunnelStart(#[source] io::Error),
+    #[error("SSH ended before the tunnel opened ({0}).")]
+    TunnelExited(std::process::ExitStatus),
+    #[error("The SSH tunnel did not open in time.")]
+    TunnelTimeout,
     #[error("{0}")]
     Update(#[from] UpdateError),
     #[error("{0}")]

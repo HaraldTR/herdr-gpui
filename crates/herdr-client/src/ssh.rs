@@ -357,6 +357,15 @@ pub fn remote_config_value(
 /// it must not leave a persistent background process behind.
 #[cfg(unix)]
 pub(super) fn command(target: &str, remote_command: &str) -> Command {
+    let mut command = noninteractive();
+    command.args(["-o", "ClearAllForwardings=yes", "--", target]);
+    command.arg(remote_command);
+    command
+}
+
+/// `ssh` with the bridge's connection policy and nothing to connect yet.
+#[cfg(unix)]
+fn noninteractive() -> Command {
     let mut command = Command::new("ssh");
     command.args([
         "-T",
@@ -378,14 +387,39 @@ pub(super) fn command(target: &str, remote_command: &str) -> Command {
         "-o",
         "ForwardX11=no",
         "-o",
-        "ClearAllForwardings=yes",
-        "-o",
         "ControlMaster=no",
+    ]);
+    command
+}
+
+/// A noninteractive `ssh` child that runs no remote command and forwards
+/// `127.0.0.1:<local>` on this machine to `localhost:<remote>` on `target`,
+/// so a server listening only on the remote host's loopback can be opened
+/// here. Forwarding is this child's whole purpose, so unlike the bridge it
+/// keeps forwardings, and `ExitOnForwardFailure` ends it when the local port
+/// cannot be bound rather than leaving a tunnel that forwards nothing. The
+/// caller owns the child: its streams, readiness, and reaping.
+#[cfg(unix)]
+pub fn forward_command(target: &str, local: u16, remote: u16) -> Result<Command> {
+    validate_target(target)?;
+    let mut command = noninteractive();
+    command.args([
+        "-N",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-L",
+        &format!("127.0.0.1:{local}:localhost:{remote}"),
         "--",
         target,
     ]);
-    command.arg(remote_command);
-    command
+    Ok(command)
+}
+
+/// Windows rejects SSH endpoints, so it has no host to forward from.
+#[cfg(windows)]
+pub fn forward_command(target: &str, _local: u16, _remote: u16) -> Result<std::process::Command> {
+    validate_target(target)?;
+    Err(Error::SshUnsupported)
 }
 
 /// A one-shot, noninteractive `ssh` child that runs `script` under the remote
@@ -770,6 +804,37 @@ esac
             assert!(validate_target(bad).is_err());
         }
     }
+    #[test]
+    fn forwarding_binds_only_loopback_and_keeps_the_bridge_policy() {
+        let command = forward_command("user@host", 41000, 3000).unwrap();
+        let args: Vec<_> = command.get_args().map(|a| a.to_str().unwrap()).collect();
+        for option in [
+            "-N",
+            "BatchMode=yes",
+            "StrictHostKeyChecking=yes",
+            "ControlMaster=no",
+            "ExitOnForwardFailure=yes",
+            "127.0.0.1:41000:localhost:3000",
+        ] {
+            assert!(args.contains(&option), "{option} missing from {args:?}");
+        }
+        // Clearing forwardings would clear this one too.
+        assert!(!args.contains(&"ClearAllForwardings=yes"));
+        assert_eq!(args[args.len() - 2], "--");
+        assert_eq!(args[args.len() - 1], "user@host");
+        assert!(forward_command("-oProxyCommand=bad", 1, 2).is_err());
+        // The bridge itself still forwards nothing.
+        let bridge = command_args("user@host");
+        assert!(bridge.contains(&"ClearAllForwardings=yes".to_owned()));
+    }
+
+    fn command_args(target: &str) -> Vec<String> {
+        command(target, "true")
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
     #[test]
     fn script_runs_under_remote_sh_and_rejects_option_targets() {
         let command = script_command("user@host", "echo 'hi'").unwrap();

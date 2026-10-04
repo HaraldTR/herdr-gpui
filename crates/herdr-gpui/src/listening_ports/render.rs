@@ -1,8 +1,15 @@
 //! Drawing a workspace's listening ports: a globe and `:3000 :5173` after
 //! it, each number opening its page in a browser tab of that workspace.
 
-use super::Port;
-use crate::{config::Theme, window::HerdrWindow};
+use super::{
+    Link, Port,
+    tunnel::{self, Key},
+};
+use crate::{
+    browser::WebUrl,
+    config::Theme,
+    window::{Flash, HerdrWindow},
+};
 use gpui::{prelude::*, *};
 
 const GAP: f32 = 6.;
@@ -64,8 +71,8 @@ pub(crate) fn chips(
                 .text_color(rgb(muted)),
         )
         .children(listed.ports.iter().map(|port| {
-            let url = port.url(listed.origin);
-            let hint = SharedString::from(hint(port, url.as_ref().map(|url| url.as_str())));
+            let link = port.link(listed.origin);
+            let hint = SharedString::from(hint(port, link.as_ref()));
             let id = SharedString::from(format!("port-{endpoint}-{workspace}-{}", port.number));
             let chip = div()
                 .id(id.clone())
@@ -81,13 +88,16 @@ pub(crate) fn chips(
                     })
                     .into()
                 });
-            match url {
-                Some(url) => {
-                    let (endpoint, workspace) = (endpoint.to_owned(), workspace.to_owned());
-                    chip.cursor_pointer()
-                        .hover(|style| style.text_color(rgb(foreground)).underline())
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
+            let Some(link) = link else {
+                return chip;
+            };
+            let (endpoint, workspace) = (endpoint.to_owned(), workspace.to_owned());
+            chip.cursor_pointer()
+                .hover(|style| style.text_color(rgb(foreground)).underline())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    match &link {
+                        Link::Page(url) => {
                             this.open_workspace_page(
                                 &endpoint,
                                 &workspace,
@@ -95,23 +105,91 @@ pub(crate) fn chips(
                                 window,
                                 cx,
                             );
-                        }))
-                }
-                None => chip,
-            }
+                        }
+                        Link::Tunnel(key) => {
+                            this.open_tunneled_page(&endpoint, &workspace, key.clone(), window, cx);
+                        }
+                    }
+                }))
         }))
 }
 
 /// `node listening on *:3000` over what clicking does.
-fn hint(port: &Port, url: Option<&str>) -> String {
+fn hint(port: &Port, link: Option<&Link>) -> String {
     let process = if port.process.is_empty() {
         "A process"
     } else {
         port.process.as_str()
     };
-    let action = match url {
-        Some(url) => format!("Open {url}"),
-        None => "Only reachable from the host itself; forward it over SSH to open it".into(),
+    let action = match link {
+        Some(Link::Page(url)) => format!("Open {}", url.as_str()),
+        Some(Link::Tunnel(key)) => format!("Open through an SSH tunnel to {}", key.target),
+        None => "Not reachable from this machine".into(),
     };
     format!("{process} listening on {}\n{action}", port.address())
+}
+
+impl HerdrWindow {
+    /// Opens a remote loopback-only port through an SSH tunnel: an existing
+    /// one at once, otherwise a new one started on the background executor,
+    /// since SSH may take seconds to connect. The page opens once the tunnel
+    /// accepts; a window closed meanwhile drops, and so kills, the tunnel.
+    pub(crate) fn open_tunneled_page(
+        &mut self,
+        endpoint: &str,
+        workspace: &str,
+        key: Key,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(local) = self.tunnels.local(&key) {
+            self.open_local_port(endpoint, workspace, local, window, cx);
+            return;
+        }
+        let Some(preferred) = self.tunnels.begin(&key) else {
+            self.show_flash(
+                Flash::warning("A tunnel to that port is already opening"),
+                cx,
+            );
+            return;
+        };
+        let opening = key.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { tunnel::open(&opening, preferred) });
+        let (endpoint, workspace) = (endpoint.to_owned(), workspace.to_owned());
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(tunnel) => {
+                    if let Some(local) = this.tunnels.finish(key, tunnel) {
+                        this.open_local_port(&endpoint, &workspace, local, window, cx);
+                    }
+                }
+                Err(error) => {
+                    this.tunnels.fail(&key);
+                    // The display boundary for a failed tunnel.
+                    this.show_flash(
+                        Flash::warning(format!("Could not open :{}: {error}", key.port)),
+                        cx,
+                    );
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn open_local_port(
+        &mut self,
+        endpoint: &str,
+        workspace: &str,
+        local: u16,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match WebUrl::try_from(format!("http://localhost:{local}/").as_str()) {
+            Ok(url) => self.open_workspace_page(endpoint, workspace, url, window, cx),
+            Err(error) => self.show_flash(Flash::warning(error.to_string()), cx),
+        }
+    }
 }

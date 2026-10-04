@@ -153,6 +153,8 @@ pub(crate) struct HerdrWindow {
     pub(crate) usage: crate::usage::Usage,
     pub(crate) system_load: crate::system_load::SystemLoad,
     pub(crate) listening_ports: crate::listening_ports::ListeningPorts,
+    /// SSH tunnels to remote ports that listen on their host's loopback only.
+    pub(crate) tunnels: crate::listening_ports::Tunnels,
     pub(crate) install_warning_shown: bool,
     pub(crate) collapsed_repos: std::collections::HashSet<String>,
     /// Expanded; collapsed leaves the rail or nothing, as Herdr's
@@ -450,10 +452,16 @@ impl HerdrWindow {
     /// Listening ports are scanned on the same hosts as CPU and memory.
     fn update_listening_ports(&mut self) -> bool {
         if !self.config.show_listening_ports {
+            self.tunnels = Default::default();
             return self.listening_ports.poll(Vec::new());
         }
         let hosts = self.watched_hosts();
-        self.listening_ports.poll(hosts)
+        let changed = self.listening_ports.poll(hosts);
+        // A tunnel lives as long as its remote port is listed.
+        let ports = &self.listening_ports;
+        self.tunnels
+            .retain(|key| ports.listening(&crate::usage::Host::Ssh(key.target.clone()), key.port));
+        changed
     }
 
     /// The machines background monitors watch: this one always, a remote
@@ -611,6 +619,7 @@ impl HerdrWindow {
             usage: Default::default(),
             system_load: Default::default(),
             listening_ports: Default::default(),
+            tunnels: Default::default(),
             install_warning_shown: false,
             collapsed_repos: Default::default(),
             sidebar_visible: true,

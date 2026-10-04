@@ -1506,6 +1506,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         usage: Default::default(),
         system_load: Default::default(),
         listening_ports: Default::default(),
+        tunnels: Default::default(),
         sidebar_visible: true,
         sidebar_start_pending: true,
         device_filter: None,

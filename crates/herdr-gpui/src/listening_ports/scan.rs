@@ -6,6 +6,7 @@
 //! Listeners whose process lacks the variable (system services, containers,
 //! anything started outside Herdr) belong to no workspace and are dropped.
 
+use super::tunnel::Key;
 use crate::{Error, Result, browser::WebUrl, usage::Host};
 use std::{
     collections::HashMap,
@@ -127,6 +128,18 @@ impl Port {
         WebUrl::try_from(format!("http://{name}:{}/", self.number)).ok()
     }
 
+    /// What clicking the port does: open its page, or first tunnel to a
+    /// remote one that listens only on its host's loopback.
+    pub(crate) fn link(&self, origin: &Origin) -> Option<Link> {
+        match (self.bind, origin) {
+            (Bind::Loopback, Origin::Remote { target, .. }) => Some(Link::Tunnel(Key {
+                target: target.clone(),
+                port: self.number,
+            })),
+            _ => self.url(origin).map(Link::Page),
+        }
+    }
+
     /// `*:3000`, `127.0.0.1:3000`, as a tooltip names the socket.
     pub(crate) fn address(&self) -> String {
         match self.bind {
@@ -136,6 +149,13 @@ impl Port {
             Bind::Address(IpAddr::V4(address)) => format!("{address}:{}", self.number),
         }
     }
+}
+
+/// Where clicking a port leads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Link {
+    Page(WebUrl),
+    Tunnel(Key),
 }
 
 /// Where a browser on this machine finds the scanned host.

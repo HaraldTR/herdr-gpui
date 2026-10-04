@@ -2,7 +2,8 @@
 
 use super::{
     Daemon, ListeningPorts, Reading, Scan,
-    scan::{Bind, MAX_PORTS, Origin, Port, Ports, parse},
+    scan::{Bind, Link, MAX_PORTS, Origin, Port, Ports, parse},
+    tunnel::{self, Key},
 };
 use crate::{Error, usage::Host};
 use herdr_client::ConnectTarget;
@@ -357,4 +358,146 @@ fn a_local_daemon_owns_the_api_socket_beside_its_client_socket() {
     let custom = Daemon::from(&ConnectTarget::Socket("/run/x/dev-client.sock".into()));
     assert!(custom.owns("/run/x/dev.sock"));
     assert!(!custom.owns("/run/x/herdr.sock"));
+}
+
+#[test]
+fn only_remote_loopback_ports_need_a_tunnel() {
+    let loopback = port(5173, Bind::Loopback, "vite");
+    let any = port(3000, Bind::Any, "node");
+    let remote = Origin::new(&Host::Ssh("me@devbox".into()), Some("devbox.lan"));
+    assert_eq!(
+        loopback.link(&remote),
+        Some(Link::Tunnel(Key {
+            target: "me@devbox".into(),
+            port: 5173,
+        }))
+    );
+    assert!(
+        matches!(any.link(&remote), Some(Link::Page(url)) if url.as_str() == "http://devbox.lan:3000/")
+    );
+    assert!(
+        matches!(loopback.link(&Origin::Local), Some(Link::Page(url)) if url.as_str() == "http://localhost:5173/")
+    );
+}
+
+#[test]
+fn a_tunnel_keeps_its_local_port_while_it_is_free() {
+    let free = |port: u16| Ok(if port == 0 { 50000 } else { port });
+    assert_eq!(tunnel::pick(Some(41000), free).unwrap(), 41000);
+    assert_eq!(tunnel::pick(None, free).unwrap(), 50000);
+    let taken = |port: u16| {
+        if port == 41000 {
+            Err(std::io::ErrorKind::AddrInUse.into())
+        } else {
+            Ok(50001)
+        }
+    };
+    assert_eq!(tunnel::pick(Some(41000), taken).unwrap(), 50001);
+    // The real binder never offers a port someone holds.
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let busy = held.local_addr().unwrap().port();
+    let other = tunnel::free_port(Some(busy)).unwrap();
+    assert!(other != busy && other != 0);
+}
+
+#[test]
+fn a_bad_target_never_starts_ssh() {
+    let key = Key {
+        target: "-oProxyCommand=bad".into(),
+        port: 3000,
+    };
+    assert!(matches!(tunnel::open(&key, None), Err(Error::Client(_))));
+}
+
+/// A child that runs until killed, standing in for `ssh -N`.
+#[cfg(unix)]
+fn idle_child() -> std::process::Child {
+    std::process::Command::new("/bin/sh")
+        .args(["-c", "exec sleep 600"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
+/// Whether `pid` has exited and been reaped, waiting a bounded while for the
+/// reaper thread.
+#[cfg(unix)]
+fn gone(pid: u32) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        let alive = std::process::Command::new("/bin/kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !alive {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    false
+}
+
+#[cfg(unix)]
+#[test]
+fn tunnels_close_with_their_port_and_never_open_twice() {
+    let key = Key {
+        target: "devbox".into(),
+        port: 5173,
+    };
+    let mut tunnels = tunnel::Tunnels::default();
+    assert_eq!(tunnels.begin(&key), Some(None));
+    assert_eq!(tunnels.begin(&key), None, "one attempt at a time");
+    let child = idle_child();
+    let pid = child.id();
+    assert_eq!(
+        tunnels.finish(key.clone(), tunnel::Tunnel::around(child, 41000)),
+        Some(41000)
+    );
+    assert_eq!(tunnels.local(&key), Some(41000));
+    // Reopening after a close prefers the same local port.
+    assert_eq!(tunnels.begin(&key), Some(Some(41000)));
+    tunnels.fail(&key);
+    // The port stops listening: its tunnel's child is killed and reaped.
+    tunnels.retain(|_| false);
+    assert_eq!(tunnels.len(), 0);
+    assert!(gone(pid), "the tunnel's child outlived it");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_tunnel_finished_after_its_port_closed_is_dropped() {
+    let key = Key {
+        target: "devbox".into(),
+        port: 8080,
+    };
+    let mut tunnels = tunnel::Tunnels::default();
+    assert!(tunnels.begin(&key).is_some());
+    tunnels.retain(|_| false);
+    let child = idle_child();
+    let pid = child.id();
+    assert_eq!(
+        tunnels.finish(key.clone(), tunnel::Tunnel::around(child, 41001)),
+        None
+    );
+    assert_eq!(tunnels.local(&key), None);
+    assert!(gone(pid));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dead_tunnel_is_forgotten() {
+    let key = Key {
+        target: "devbox".into(),
+        port: 9000,
+    };
+    let mut tunnels = tunnel::Tunnels::default();
+    let mut child = idle_child();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    tunnels.insert(key.clone(), tunnel::Tunnel::around(child, 41002));
+    assert_eq!(tunnels.local(&key), None);
+    assert_eq!(tunnels.len(), 0);
 }

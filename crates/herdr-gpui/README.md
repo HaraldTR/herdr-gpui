@@ -477,8 +477,14 @@ Every five seconds each host runs `ss -ltnp` (Linux) or `lsof -iTCP
 -sTCP:LISTEN` (macOS) in its own shell, this machine's locally and a connected
 remote host's over SSH, listing only your own processes. A remote server opens
 at the SSH host's name when it listens on every address, the `HostName` your
-SSH configuration gives an alias (`ssh -G`) when it has one; one listening only on
-the remote loopback is listed but needs an SSH tunnel to open. Windows clients
+SSH configuration gives an alias (`ssh -G`) when it has one. One listening only
+on the remote loopback opens through an SSH tunnel started on the first click:
+`ssh -N -L` from a free port on this machine's loopback, with the same
+noninteractive options as the remote connection. The tunnel stays up while
+the port is listed, is reused by later clicks, and closes when the port
+stops listening, the host disconnects, scanning is turned off, or the window
+closes; a page reopened after a dropped tunnel keeps its address while that
+local port is free. Windows clients
 do not scan this machine. Set top-level `show_listening_ports = false`, or
 turn off **Show listening ports** in Settings, to hide them and stop scanning.
 
