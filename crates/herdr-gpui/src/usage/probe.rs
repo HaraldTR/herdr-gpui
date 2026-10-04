@@ -261,9 +261,38 @@ pub(crate) struct Probe<'a> {
     provider: Provider,
     settings: Option<&'a ProviderSettings>,
     cookies: &'a mut CookieJar,
-    /// Whether the config asked for this provider, which is what allows
-    /// reading browser cookies for it.
-    requested: bool,
+    consent: Consent,
+    prompt: Prompt,
+}
+
+/// What a probe may do that the user would notice. Reading another app's
+/// Keychain item, or a browser's cookie key, makes macOS ask, so only a
+/// provider the config lists and the user allowed in its panel gets past
+/// [`Consent::Ask`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Consent {
+    /// Detected, not asked for: read only what needs no permission.
+    Quiet,
+    /// Listed but not allowed yet: anything that would ask is withheld and
+    /// reported, so the panel can offer to allow it. `browsers` is whether
+    /// browser cookies would be read once allowed.
+    Ask { browsers: bool },
+    /// Listed and allowed: may read another app's Keychain item.
+    Keychain,
+    /// Listed and allowed with browser cookies on: also reads the browsers'
+    /// cookies.
+    Browsers,
+}
+
+/// Why a read that would ask macOS did not happen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Prompt {
+    #[default]
+    None,
+    /// Not allowed yet.
+    Withheld,
+    /// Allowed, but the read failed on this machine, usually a denial.
+    Refused,
 }
 
 impl<'a> Probe<'a> {
@@ -272,14 +301,15 @@ impl<'a> Probe<'a> {
         provider: Provider,
         settings: Option<&'a ProviderSettings>,
         cookies: &'a mut CookieJar,
-        requested: bool,
+        consent: Consent,
     ) -> Self {
         Self {
             exec,
             provider,
             settings,
             cookies,
-            requested,
+            consent,
+            prompt: Prompt::None,
         }
     }
 
@@ -385,10 +415,56 @@ impl<'a> Probe<'a> {
         self.security("find-generic-password", service, account)
     }
 
-    /// A macOS keychain internet password, keyed by server, as some editors
-    /// store their sign-in.
-    pub fn keychain_internet(&mut self, server: &str, account: Option<&str>) -> Option<Secret> {
-        self.security("find-internet-password", server, account)
+    /// A macOS keychain internet password that another app owns, such as an
+    /// editor's sign-in. Reading it makes macOS ask the user, so it is only
+    /// read once the user allowed it, and a refusal on this machine is
+    /// remembered rather than asked again each refresh.
+    pub fn foreign_keychain_internet(
+        &mut self,
+        server: &str,
+        account: Option<&str>,
+    ) -> Option<Secret> {
+        self.foreign("find-internet-password", server, account)
+    }
+
+    /// Like [`Probe::foreign_keychain_internet`], for a generic password.
+    pub fn foreign_keychain(&mut self, service: &str, account: Option<&str>) -> Option<Secret> {
+        self.foreign("find-generic-password", service, account)
+    }
+
+    fn foreign(&mut self, kind: &str, service: &str, account: Option<&str>) -> Option<Secret> {
+        match self.consent {
+            Consent::Quiet => return None,
+            Consent::Ask { .. } => {
+                self.prompt = Prompt::Withheld;
+                return None;
+            }
+            Consent::Keychain | Consent::Browsers => {}
+        }
+        let local = matches!(self.exec, Exec::Local);
+        let item = [kind, service, account.unwrap_or_default()].join("\n");
+        if local && self.cookies.refused(self.provider, &item) {
+            self.prompt = Prompt::Refused;
+            return None;
+        }
+        let secret = self.security(kind, service, account);
+        // Over SSH macOS cannot show the dialog, so only a local miss is a
+        // refusal worth remembering.
+        if local && secret.is_none() {
+            self.cookies.refuse(self.provider, item);
+            self.prompt = Prompt::Refused;
+        }
+        secret
+    }
+
+    /// Why a provider that found no sign-in found none: a read that would
+    /// ask macOS was withheld or refused, or there simply is none.
+    pub(super) fn missing(&self) -> Error {
+        match self.prompt {
+            Prompt::Withheld => Error::UsageKeychainAccess,
+            Prompt::Refused => Error::UsageKeychainDenied,
+            Prompt::None => Error::UsageNotSignedIn,
+        }
     }
 
     fn security(&mut self, kind: &str, service: &str, account: Option<&str>) -> Option<Secret> {
@@ -502,12 +578,12 @@ impl<'a> Probe<'a> {
         if let Some(cookie) = self.setting("cookie") {
             return Some(cookie);
         }
-        if !self.requested {
+        if !self.browsers() {
             return None;
         }
-        self.cookies
-            .header(domains, names)
-            .map(|header| Secret::from(SecretString::from(header)))
+        let header = self.cookies.header(domains, names);
+        self.browsers_answered(header.is_some());
+        header.map(|header| Secret::from(SecretString::from(header)))
     }
 
     /// Like [`Probe::cookies`], but satisfied by whichever of `names` the
@@ -516,14 +592,35 @@ impl<'a> Probe<'a> {
         if let Some(cookie) = self.setting("cookie") {
             return Some(cookie);
         }
-        if !self.requested {
+        if !self.browsers() {
             return None;
         }
-        names.iter().find_map(|name| {
-            self.cookies
-                .header(domains, &[name])
-                .map(|header| Secret::from(SecretString::from(header)))
-        })
+        let header = names
+            .iter()
+            .find_map(|name| self.cookies.header(domains, &[name]));
+        self.browsers_answered(header.is_some());
+        header.map(|header| Secret::from(SecretString::from(header)))
+    }
+
+    /// Whether browser cookies may be read now, noting a read withheld until
+    /// the user allows it.
+    fn browsers(&mut self) -> bool {
+        match self.consent {
+            Consent::Browsers => true,
+            Consent::Ask { browsers: true } => {
+                self.prompt = Prompt::Withheld;
+                false
+            }
+            Consent::Quiet | Consent::Ask { browsers: false } | Consent::Keychain => false,
+        }
+    }
+
+    /// A browser read that found nothing because a browser's cookie key
+    /// could not be read was most likely denied.
+    fn browsers_answered(&mut self, found: bool) {
+        if !found && self.cookies.key_refused() {
+            self.prompt = Prompt::Refused;
+        }
     }
 
     /// One cookie's bare value, for services that want it as a bearer token
@@ -533,7 +630,11 @@ impl<'a> Probe<'a> {
         let header = match self.setting("cookie") {
             Some(Secret(Held::Here(header))) => Zeroizing::new(header.expose_secret().to_owned()),
             Some(Secret(Held::There(_))) => return None,
-            None if self.requested => Zeroizing::new(self.cookies.header(domains, &[name])?),
+            None if self.browsers() => {
+                let header = self.cookies.header(domains, &[name]);
+                self.browsers_answered(header.is_some());
+                Zeroizing::new(header?)
+            }
             None => return None,
         };
         cookie_in(&header, name).map(|value| Secret::from(SecretString::from(value)))

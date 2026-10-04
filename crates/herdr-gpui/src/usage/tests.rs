@@ -9,13 +9,16 @@ use super::{
         Account, Balance, Kind, Provider, Report, SESSION, Section, Severity, Unit, WEEK, Window,
         countdown, group,
     },
-    probe::{Exec, Probe, Response, json_field},
+    probe::{Consent, Exec, Probe, Response, json_field},
     providers::{claude, codex},
     registry,
     settings::ProviderSettings,
 };
 use crate::Error;
-use std::time::{Duration, Instant, SystemTime};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant, SystemTime},
+};
 
 fn at(seconds: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
@@ -394,7 +397,7 @@ fn remote_secrets_stay_on_the_host() {
     let mut exec = Exec::Remote(host.shell());
     let mut jar = CookieJar::default();
     let codex = provider("codex");
-    let mut probe = Probe::new(&mut exec, codex, None, &mut jar, false);
+    let mut probe = Probe::new(&mut exec, codex, None, &mut jar, Consent::Quiet);
     assert!(probe.is_remote());
     let auth = probe
         .file(&HostPath::env_or("CODEX_HOME", ".codex", "auth.json"))
@@ -481,10 +484,99 @@ fn settings_come_from_this_machines_config() {
         provider("claude"),
         Some(&settings),
         &mut jar,
-        false,
+        Consent::Quiet,
     );
     assert_eq!(probe.text_setting("api_key").as_deref(), Some("config-key"));
     assert!(probe.setting("missing").is_none());
+}
+
+/// Another app's Keychain item makes macOS ask, so it is read only once the
+/// user allowed it; a refusal is not asked again until they allow it anew.
+#[test]
+fn foreign_keychain_items_wait_for_the_user() {
+    const SERVER: &str = "https://herdr-gpui.invalid/no-such-item";
+    let item = format!("find-internet-password\n{SERVER}\n42");
+    let zed = provider("zed");
+    let mut exec = Exec::Local;
+    let mut jar = CookieJar::default();
+
+    let mut probe = Probe::new(&mut exec, zed, None, &mut jar, Consent::Quiet);
+    assert!(
+        probe
+            .foreign_keychain_internet(SERVER, Some("42"))
+            .is_none()
+    );
+    assert!(matches!(probe.missing(), Error::UsageNotSignedIn));
+
+    let ask = Consent::Ask { browsers: true };
+    let mut probe = Probe::new(&mut exec, zed, None, &mut jar, ask);
+    assert!(
+        probe
+            .foreign_keychain_internet(SERVER, Some("42"))
+            .is_none()
+    );
+    assert!(probe.cookies(&["zed.dev"], &["zed.session"]).is_none());
+    assert!(matches!(probe.missing(), Error::UsageKeychainAccess));
+    assert!(!jar.refused(zed, &item), "nothing asked before Allow");
+
+    let mut probe = Probe::new(&mut exec, zed, None, &mut jar, Consent::Keychain);
+    assert!(
+        probe
+            .foreign_keychain_internet(SERVER, Some("42"))
+            .is_none()
+    );
+    assert!(matches!(probe.missing(), Error::UsageKeychainDenied));
+    assert!(jar.refused(zed, &item), "a refusal is remembered");
+
+    jar.forgive(zed);
+    assert!(!jar.refused(zed, &item), "Allow lets macOS ask again");
+}
+
+#[test]
+fn a_denied_prompt_is_reported_for_its_grant_to_be_dropped() {
+    let now = Instant::now();
+    let zed = provider("zed");
+    let mut usage = Usage::default();
+    begin(&mut usage, &Host::Local, now);
+    usage.apply(
+        Message::Reading(Host::Local, zed, Err(Error::UsageKeychainAccess)),
+        now,
+    );
+    let entry = usage.current().unwrap();
+    assert_eq!(entry.readings[0].access, Some(super::Access::Needed));
+    assert_eq!(
+        entry.headline(super::HEADLINE, None).len(),
+        1,
+        "a sign-in waiting on Keychain access gets a status bar segment to open"
+    );
+    assert!(usage.take_denied().is_empty());
+
+    usage.apply(
+        Message::Reading(Host::Local, zed, Err(Error::UsageKeychainDenied)),
+        now,
+    );
+    assert_eq!(
+        usage.current().unwrap().readings[0].access,
+        Some(super::Access::Denied)
+    );
+    assert_eq!(usage.take_denied(), [zed]);
+    assert!(usage.take_denied().is_empty());
+}
+
+#[test]
+fn allowing_reads_at_once_and_forgets_refusals_once() {
+    let now = Instant::now();
+    let zed = provider("zed");
+    let mut usage = Usage::default();
+    begin(&mut usage, &Host::Local, now);
+    usage.apply(Message::Done(Host::Local, Ok(())), now);
+    // Unlike Refresh, Allow is not spaced: macOS should ask right away.
+    usage.allow(zed, now + Duration::from_secs(1));
+    assert_eq!(
+        usage.current().unwrap().due,
+        Some(now + Duration::from_secs(1))
+    );
+    assert!(usage.retry.contains(&zed));
 }
 
 #[test]
@@ -590,7 +682,14 @@ fn a_failed_refresh_keeps_the_last_numbers_and_says_why() {
     let (claude, codex) = (provider("claude"), provider("codex"));
     let local = Host::Local;
     let mut usage = Usage::default();
-    assert!(usage.poll(Some(local.clone()), &UsageConfig::default(), 0, false, now));
+    assert!(usage.poll(
+        Some(local.clone()),
+        &UsageConfig::default(),
+        &HashSet::new(),
+        0,
+        false,
+        now,
+    ));
     assert!(
         usage.current().is_none(),
         "an inactive window reads nothing"
@@ -623,11 +722,13 @@ fn a_failed_refresh_keeps_the_last_numbers_and_says_why() {
                 provider: codex,
                 report: None,
                 error: Some(Error::UsageRejected.to_string()),
+                access: None,
             },
             Reading {
                 provider: claude,
                 report: Some(report(claude, 20.)),
                 error: Some(Error::UsageRateLimited.to_string()),
+                access: None,
             },
         ],
         "registry order, whatever order answers came in"
@@ -677,11 +778,18 @@ fn each_host_keeps_its_own_answer_within_a_bound() {
         usage.apply(Message::Done(host, Ok(())), now);
     }
     let config = UsageConfig::default();
-    usage.poll(Some(Host::Local), &config, 0, false, now);
+    usage.poll(Some(Host::Local), &config, &HashSet::new(), 0, false, now);
     assert_eq!(usage.current().unwrap().readings.len(), 1);
-    usage.poll(None, &config, 0, false, now);
+    usage.poll(None, &config, &HashSet::new(), 0, false, now);
     assert!(usage.current().is_none());
-    usage.poll(Some(remote.clone()), &config, 0, false, now);
+    usage.poll(
+        Some(remote.clone()),
+        &config,
+        &HashSet::new(),
+        0,
+        false,
+        now,
+    );
     for index in 0..super::HOST_LIMIT * 2 {
         usage.begin(Host::Ssh(format!("host-{index}")), now);
     }
@@ -692,7 +800,14 @@ fn each_host_keeps_its_own_answer_within_a_bound() {
         "the shown host survives trimming"
     );
     // A new config makes every host due.
-    usage.poll(Some(remote.clone()), &config, 1, false, now);
+    usage.poll(
+        Some(remote.clone()),
+        &config,
+        &HashSet::new(),
+        1,
+        false,
+        now,
+    );
     assert!(usage.entries.values().all(|entry| entry.due == Some(now)));
 }
 
@@ -746,6 +861,7 @@ fn live_local_usage() {
     super::read(
         &Host::Local,
         &UsageConfig::default(),
+        &HashSet::new(),
         &mut jar,
         |provider, report| {
             match report {
@@ -774,6 +890,7 @@ fn the_status_bar_shows_the_two_closest_to_a_limit() {
         provider: provider(id),
         report: used.map(|used| report(provider(id), used)),
         error: None,
+        access: None,
     };
     let mut entry = super::Entry {
         readings: vec![
@@ -794,6 +911,7 @@ fn the_status_bar_shows_the_two_closest_to_a_limit() {
             vec![],
         )),
         error: None,
+        access: None,
     });
     let ids = |limit, chosen: Option<&str>| {
         entry
@@ -818,11 +936,13 @@ fn panel_tabs_leave_out_sign_ins_with_nothing_to_show() {
         provider: provider(id),
         report: Some(report(provider(id), 5.)),
         error: None,
+        access: None,
     };
     let without = |id: &str| Reading {
         provider: provider(id),
         report: None,
         error: Some(Error::UsageNoPlan.to_string()),
+        access: None,
     };
     let entry = super::Entry {
         readings: vec![with("codex"), without("gemini"), without("cursor")],

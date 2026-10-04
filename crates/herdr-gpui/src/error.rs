@@ -320,6 +320,10 @@ pub enum Error {
     UsageNotSignedIn,
     #[error("This account has no plan with usage limits to show.")]
     UsageNoPlan,
+    #[error("Reading this sign-in needs Keychain access, which macOS asks for.")]
+    UsageKeychainAccess,
+    #[error("Keychain access was denied, so this sign-in cannot be read.")]
+    UsageKeychainDenied,
     #[error("Usage request mixes this machine's settings with the remote host's sign-in.")]
     UsageMixedSecrets,
     #[error("Usage command failed: {0}.")]

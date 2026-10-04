@@ -397,7 +397,7 @@ impl HerdrWindow {
         if self.update_git() {
             cx.notify();
         }
-        if self.update_usage() {
+        if self.update_usage(cx) {
             cx.notify();
         }
         if self.update_system_load() {
@@ -414,7 +414,7 @@ impl HerdrWindow {
 
     /// Plan usage follows the selected host: a remote host reports its own
     /// agents' sign-ins, never this machine's.
-    fn update_usage(&mut self) -> bool {
+    fn update_usage(&mut self, cx: &mut Context<Self>) -> bool {
         let host = self
             .config
             .usage
@@ -422,13 +422,21 @@ impl HerdrWindow {
             .then(|| self.endpoints.get(self.selected_endpoint))
             .flatten()
             .map(|endpoint| crate::usage::Host::from(&endpoint.connection.target));
-        self.usage.poll(
+        let granted = crate::usage::KeychainGrants::granted(cx);
+        let changed = self.usage.poll(
             host,
             &self.config.usage,
+            &granted,
             self.config_load_revision,
             self.active,
             std::time::Instant::now(),
-        )
+        );
+        // A denied prompt takes the grant back, so a later launch does not
+        // ask again in the background.
+        for provider in self.usage.take_denied() {
+            crate::usage::KeychainGrants::revoke(provider, cx);
+        }
+        changed
     }
 
     /// CPU and memory are sampled for every enabled host: this machine
