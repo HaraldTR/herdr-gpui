@@ -46,7 +46,7 @@ fn qa_play_sound_dispatches_without_daemon_or_pane(cx: &mut gpui::TestAppContext
     });
     assert!(matches!(
         played.recv_timeout(Duration::from_secs(3)),
-        Err(mpsc::RecvTimeoutError::Disconnected)
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
     ));
 }
 

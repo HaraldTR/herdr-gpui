@@ -1,6 +1,8 @@
 #![allow(clippy::unwrap_used)]
 use super::*;
+use crate::Error;
 use herdr_client::ClientEvent;
+use std::sync::mpsc;
 
 #[test]
 fn saved_profile_ids_are_the_catalog_ids_behind_ssh_endpoints() {
