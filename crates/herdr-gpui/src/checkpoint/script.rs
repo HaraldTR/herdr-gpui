@@ -38,6 +38,9 @@ fn prelude(checkout: &Checkout) -> String {
         r#"set -eu
 PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.nix-profile/bin"
 export PATH
+# Never prefix `g` with an assignment: before a function call, bash's POSIX
+# mode (macOS /bin/sh) keeps it set afterwards, so a temporary index would
+# leak into every later command. Such calls run `git` directly instead.
 g() {{ git -c core.fsmonitor=false "$@"; }}
 key={key}
 branch={branch}
@@ -67,8 +70,8 @@ index=$(g rev-parse --git-path index)
 # not hashed again. Git replaces the index by rename, so the copy is whole.
 if [ -f "$index" ]; then cp "$index" "$tmp"; else rm -f "$tmp"; fi
 capture() {
-    GIT_INDEX_FILE="$tmp" g add -A
-    tree=$(GIT_INDEX_FILE="$tmp" g write-tree)
+    GIT_INDEX_FILE="$tmp" git -c core.fsmonitor=false add -A
+    tree=$(GIT_INDEX_FILE="$tmp" git -c core.fsmonitor=false write-tree)
     latest=$(g for-each-ref --count=1 --sort=-refname --format='%(objectname)' "$namespace")
     if [ -n "$latest" ] \
         && [ "$(g rev-parse "$latest^{tree}")" = "$tree" ] \
@@ -78,7 +81,7 @@ capture() {
         commit=$(printf '%s\n\nHerdr-Branch: %s\n' "$1" "$branch" \
             | GIT_AUTHOR_NAME='Herdr GPUI' GIT_AUTHOR_EMAIL='herdr-gpui@localhost' \
               GIT_COMMITTER_NAME='Herdr GPUI' GIT_COMMITTER_EMAIL='herdr-gpui@localhost' \
-              g commit-tree --no-gpg-sign -p "$head" "$tree")
+              git -c core.fsmonitor=false commit-tree --no-gpg-sign -p "$head" "$tree")
         g update-ref -m 'herdr-gpui: checkpoint' "$namespace$2" "$commit" ''
         printf 'created %s\n' "$2"
     fi
@@ -138,7 +141,7 @@ done
 {CAPTURE}capture {label} {stamp} {keep}
 # The temporary index matches the working tree exactly, so a two-tree merge
 # moves every file to the checkpoint's and deletes those it did not have.
-GIT_INDEX_FILE="$tmp" g read-tree -m -u "$tree" "$target^{{tree}}"
+GIT_INDEX_FILE="$tmp" git -c core.fsmonitor=false read-tree -m -u "$tree" "$target^{{tree}}"
 g reset -q "$target^"
 "#,
         prelude = prelude(checkout),

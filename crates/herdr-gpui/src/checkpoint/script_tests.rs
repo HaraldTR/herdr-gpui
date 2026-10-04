@@ -306,6 +306,16 @@ mod live {
             "refs/heads/feature",
             "still on the branch"
         );
+        // The real index is reset to HEAD, not the temporary one: the
+        // restored work is unstaged, the agent's commit nowhere in it.
+        assert_eq!(
+            git(&repo.checkout, &["diff", "--cached", "--name-only"]),
+            ""
+        );
+        assert_eq!(
+            git(&repo.checkout, &["status", "--porcelain=v1"]),
+            " M edit.txt\n?? new/\n"
+        );
 
         // The state it replaced was saved first, so the restore undoes.
         let list = repo.list();
