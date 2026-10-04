@@ -204,3 +204,4 @@ mod layout;
 mod resize;
 mod scope;
 mod scrollbar;
+mod split_resize;

@@ -5,9 +5,17 @@ use super::Layout;
 use crate::{
     HerdrWindow,
     config::Theme,
-    review::diff::{Diff, Kind, Row, SplitRow},
+    review::{
+        diff::{Diff, Kind, Row, SplitRow},
+        highlight::Token,
+    },
 };
 use gpui::{prelude::*, *};
+
+/// The old side's share of a side-by-side row until it is dragged, and how
+/// narrow either side may get.
+pub(super) const EVEN_SPLIT: f32 = 0.5;
+const MIN_SIDE: f32 = 0.2;
 
 /// How a row of `kind` is marked and coloured.
 fn look(theme: &Theme, kind: Kind) -> (&'static str, Option<Rgba>, u32) {
@@ -32,6 +40,44 @@ fn content(diff: &Diff, row: &Row) -> String {
     } else {
         format!("{name} ({})", row.text)
     }
+}
+
+/// A token's colour in this theme: the terminal palette's, made readable
+/// on the panel and its add and remove tints.
+fn token_colour(theme: &Theme, token: Token) -> Rgba {
+    rgb(match token {
+        Token::Comment => theme.muted,
+        Token::String => theme.ink(theme.palette[2]),
+        Token::Number | Token::Constant => theme.ink(theme.palette[3]),
+        Token::Keyword => theme.ink(theme.palette[5]),
+        Token::Type => theme.ink(theme.palette[6]),
+        Token::Function => theme.ink(theme.palette[4]),
+    })
+}
+
+/// A row's code, coloured where its syntax is known.
+fn code(theme: &Theme, diff: &Diff, row: &Row) -> AnyElement {
+    let text = content(diff, row);
+    if row.spans.is_empty() {
+        return text.into_any_element();
+    }
+    let highlights: Vec<_> = row
+        .spans
+        .iter()
+        .filter(|span| span.end <= text.len())
+        .map(|span| {
+            (
+                span.start..span.end,
+                HighlightStyle {
+                    color: Some(token_colour(theme, span.token).into()),
+                    ..HighlightStyle::default()
+                },
+            )
+        })
+        .collect();
+    StyledText::new(text)
+        .with_highlights(highlights)
+        .into_any_element()
 }
 
 fn number(theme: &Theme, value: Option<u32>) -> Div {
@@ -146,7 +192,7 @@ impl HerdrWindow {
             .when(row.kind == Kind::File, |line| {
                 line.font_weight(FontWeight::SEMIBOLD).gap_1()
             })
-            .child(div().min_w_0().child(content(diff, row)))
+            .child(div().min_w_0().child(code(theme, diff, row)))
     }
 
     /// The list's rows in `range`, in the review's layout.
@@ -237,7 +283,11 @@ impl HerdrWindow {
                                 .id(("review-split", position))
                                 .w_full()
                                 .flex()
-                                .child(side(self, left, Numbers::Old, cx))
+                                .child(
+                                    side(self, left, Numbers::Old, cx)
+                                        .flex_none()
+                                        .w(relative(review.split_ratio)),
+                                )
                                 .child(
                                     side(self, right, Numbers::New, cx)
                                         .border_l_1()
@@ -250,6 +300,31 @@ impl HerdrWindow {
                 Some(element)
             })
             .collect()
+    }
+
+    /// Moves the line between the sides to the pointer at `x`, within the
+    /// list laid out at `bounds`; whether it moved.
+    pub(super) fn drag_review_split(&mut self, bounds: Bounds<Pixels>, x: Pixels) -> bool {
+        let Some(review) = self.menu.review.as_mut() else {
+            return false;
+        };
+        let width = f32::from(bounds.size.width);
+        if width <= 0. {
+            return false;
+        }
+        let ratio = (f32::from(x - bounds.left()) / width).clamp(MIN_SIDE, 1. - MIN_SIDE);
+        if (ratio - review.split_ratio).abs() < f32::EPSILON {
+            return false;
+        }
+        review.split_ratio = ratio;
+        true
+    }
+
+    /// Back to even sides.
+    pub(super) fn reset_review_split(&mut self) {
+        if let Some(review) = self.menu.review.as_mut() {
+            review.split_ratio = EVEN_SPLIT;
+        }
     }
 
     /// Shows the diff unified or side by side; notes and scroll stay.

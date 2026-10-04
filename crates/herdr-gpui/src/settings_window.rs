@@ -528,7 +528,6 @@ impl SettingsWindow {
                 "settings-navigation-resize",
                 Side::Left,
                 PanelDrag::SettingsNavigation,
-                rgba((theme.primary() << 8) | 0x44),
                 cx.listener(|this, _, _, cx| {
                     this.navigation_width.reset();
                     cx.notify();

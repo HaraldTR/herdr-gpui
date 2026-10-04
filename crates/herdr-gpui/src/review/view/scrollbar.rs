@@ -1,7 +1,13 @@
 //! The diff's scrollbar: a thumb along the list's right edge that shows where
 //! the view sits and how much of the diff it holds, and drags it. Its size
-//! and travel are the tab strip's thumb math, turned on its side.
-use crate::{HerdrWindow, browser::Thumb};
+//! and travel are the tab strip's thumb math, turned on its side. Side by
+//! side, the line between the halves drags here too, over every row.
+use super::Layout;
+use crate::{
+    HerdrWindow,
+    browser::Thumb,
+    panel_resize::{PanelDrag, divider},
+};
 use gpui::{prelude::*, *};
 
 /// How wide the thumb draws, and its margin from the list's edge.
@@ -92,6 +98,22 @@ impl HerdrWindow {
                 )
                 .on_drag(DiffThumb, |_, _, _, cx| cx.new(|_| EmptyView))
         });
+        // The halves split the list's width, as it last laid out.
+        let split = self.menu.review.as_ref().and_then(|review| {
+            let width = review.scroll.0.borrow().base_handle.bounds().size.width;
+            (review.layout == Layout::Split && width > px(0.)).then(|| width * review.split_ratio)
+        });
+        let split = split.map(|x| {
+            divider(
+                "review-split-divider",
+                x,
+                PanelDrag::DiffSides,
+                cx.listener(|this, _, _, cx| {
+                    this.reset_review_split();
+                    cx.notify();
+                }),
+            )
+        });
         div()
             .id("review-scroll-area")
             .relative()
@@ -106,7 +128,17 @@ impl HerdrWindow {
                     }
                 }),
             )
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<PanelDrag>, _, cx| {
+                    if *event.drag(cx) == PanelDrag::DiffSides
+                        && this.drag_review_split(event.bounds, event.event.position.x)
+                    {
+                        cx.notify();
+                    }
+                }),
+            )
             .child(list)
+            .children(split)
             .children(thumb)
     }
 }

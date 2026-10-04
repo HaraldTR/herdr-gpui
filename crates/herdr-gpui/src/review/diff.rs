@@ -43,6 +43,8 @@ pub(crate) struct Row {
     /// The line's number after the change, for context and added lines.
     pub new: Option<u32>,
     pub text: String,
+    /// Syntax colouring of `text`, once worked out; empty otherwise.
+    pub spans: Vec<super::highlight::Span>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -148,6 +150,7 @@ impl Diff {
             old,
             new,
             text: clean(text),
+            spans: Vec::new(),
         });
         true
     }

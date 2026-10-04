@@ -1284,6 +1284,14 @@ request.
   left and the new on the right, each run of removed lines paired with the
   added lines that follow it. Either side's line can take a note, notes and
   their numbers carry over when switching, and the choice is remembered.
+  Side by side, drag the line between the halves to give either more room
+  (each keeps at least a fifth); a double-click on it evens them again.
+- Code is coloured by its language, chosen by file extension from the
+  grammars bundled with [syntect](https://github.com/trishume/syntect).
+  Removed lines are read in the old file's order and added lines in the new
+  file's, each hunk afresh. Colouring runs in the background after the plain
+  diff shows, and the colours come from the theme's palette, so they follow
+  theme changes.
 - A scrollbar along the diff's right edge shows how much of it is in view
   and where; drag its thumb to move through a long change.
 - Large changes stay reviewable. Line counts come first
@@ -1292,8 +1300,9 @@ request.
   is left out of the diff and listed as "Large change not shown" with its
   counts; its file header still takes a note. Marking notes is a lookup per
   note, not a pass over the diff.
-- The notes panel resizes by dragging its left edge, as the sidebar does,
-  and a double-click on the edge restores its default. The review and an
+- The notes panel resizes by dragging its left edge, with the sidebar's
+  cursor and hover tint, and a double-click on the edge restores its
+  default. Settings' section list resizes the same way by its right edge. The review and an
   annotated page share the width, which is remembered with the sidebar's.
 
 - Click a line, added, removed or unchanged, or a file name, write what should

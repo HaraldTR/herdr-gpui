@@ -6,6 +6,8 @@ use gpui::{prelude::*, *};
 
 /// How wide the grabbable edge is, laid over the panel's border.
 const HANDLE: f32 = 6.;
+/// The tint a resizable edge shows under the pointer, the sidebar's first.
+pub(crate) const RESIZE_HOVER: u32 = 0x78a9ff44;
 /// The share of the surrounding space a panel may take.
 const MAX_SHARE: f32 = 0.6;
 /// A stored width beyond this is not a real panel.
@@ -30,6 +32,8 @@ pub(crate) enum PanelDrag {
     PageNotes,
     /// The settings window's section list.
     SettingsNavigation,
+    /// The line between a side-by-side diff's halves.
+    DiffSides,
 }
 
 /// The notes panel beside a review or an annotated page.
@@ -119,10 +123,35 @@ pub(crate) fn handle(
     id: &'static str,
     side: Side,
     drag: PanelDrag,
-    hover: Rgba,
     reset: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
-    let handle = div()
+    let handle = grip(id, drag, reset);
+    // Inside the panel's edge: a panel that slides open clips its overflow.
+    match side {
+        Side::Right => handle.left_0(),
+        Side::Left => handle.right_0(),
+    }
+}
+
+/// A line to drag at `x` within its `relative()` container, such as the one
+/// between a side-by-side diff's halves.
+pub(crate) fn divider(
+    id: &'static str,
+    x: Pixels,
+    drag: PanelDrag,
+    reset: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    grip(id, drag, reset).left(x - px(HANDLE / 2.))
+}
+
+/// The grabbable strip both share: the sidebar's cursor and hover tint, a
+/// drag of `drag`, and `reset` on a double-click.
+fn grip(
+    id: &'static str,
+    drag: PanelDrag,
+    reset: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    div()
         .id(id)
         .debug_selector(move || id.into())
         .absolute()
@@ -130,19 +159,14 @@ pub(crate) fn handle(
         .h_full()
         .w(px(HANDLE))
         .cursor(CursorStyle::ResizeLeftRight)
-        .hover(move |style| style.bg(hover))
+        .hover(|style| style.bg(rgba(RESIZE_HOVER)))
         .on_mouse_down(MouseButton::Left, move |event, window, cx| {
             cx.stop_propagation();
             if event.click_count == 2 {
                 reset(event, window, cx);
             }
         })
-        .on_drag(drag, |_, _, _, cx| cx.new(|_| EmptyView));
-    // Inside the panel's edge: a panel that slides open clips its overflow.
-    match side {
-        Side::Right => handle.left_0(),
-        Side::Left => handle.right_0(),
-    }
+        .on_drag(drag, |_, _, _, cx| cx.new(|_| EmptyView))
 }
 
 impl crate::HerdrWindow {
@@ -161,7 +185,6 @@ impl crate::HerdrWindow {
         drag: PanelDrag,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let hover = rgba((self.theme.primary() << 8) | 0x44);
         let save = |this: &mut Self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>| {
             if this.notes_width.take_unsaved() {
                 this.save_chrome();
@@ -187,7 +210,6 @@ impl crate::HerdrWindow {
                 id,
                 Side::Right,
                 drag,
-                hover,
                 cx.listener(|this, _, _, cx| {
                     this.notes_width.reset();
                     if this.notes_width.take_unsaved() {

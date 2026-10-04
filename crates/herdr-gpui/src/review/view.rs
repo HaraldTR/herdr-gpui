@@ -81,6 +81,8 @@ pub(crate) struct Review {
     layout: Layout,
     /// The loaded rows paired for the side-by-side view.
     split: Vec<SplitRow>,
+    /// The share of a side-by-side row the old side takes.
+    split_ratio: f32,
     /// Where the loaded rows are, to mark notes without a scan.
     index: RowIndex,
     agent: Option<Agent>,
@@ -162,6 +164,7 @@ impl HerdrWindow {
                     scope: Scope::default(),
                     layout: Layout::default(),
                     split: Vec::new(),
+                    split_ratio: rows::EVEN_SPLIT,
                     index: RowIndex::default(),
                     agent: None,
                     endpoint,
@@ -208,8 +211,25 @@ impl HerdrWindow {
             .spawn(async move { super::diff::load(&checkout, scope, base_hint.as_deref()) });
         cx.spawn(async move |this, cx| {
             let result = loading.await;
+            let plain = result.as_ref().ok().map(|loaded| loaded.diff.clone());
             this.update(cx, |this, cx| {
                 this.review_loaded(request, result);
+                cx.notify();
+            })
+            .ok();
+            // The plain diff shows at once; its colours follow.
+            let Some(mut diff) = plain else {
+                return;
+            };
+            let coloured = cx
+                .background_executor()
+                .spawn(async move {
+                    super::highlight::colour(&mut diff);
+                    diff
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.review_coloured(request, coloured);
                 cx.notify();
             })
             .ok();
@@ -245,6 +265,7 @@ impl HerdrWindow {
             scope: loaded.scope,
             layout: Layout::default(),
             split: Vec::new(),
+            split_ratio: rows::EVEN_SPLIT,
             index: RowIndex::default(),
             agent,
             endpoint: self.selected_endpoint,
@@ -279,6 +300,31 @@ impl HerdrWindow {
             }
         }
         review.refresh_marks();
+    }
+
+    /// Swaps in the coloured rows of load `request`, if it is still the
+    /// one shown. The rows are the same, so notes and markers stand.
+    fn review_coloured(&mut self, request: u64, diff: super::diff::Diff) {
+        let Some(review) = self
+            .menu
+            .review
+            .as_mut()
+            .filter(|review| review.request == request)
+        else {
+            return;
+        };
+        let Some(loaded) = review.loaded() else {
+            return;
+        };
+        if loaded.diff.rows.len() != diff.rows.len() {
+            return;
+        }
+        review.state = State::Loaded(Arc::new(Loaded {
+            checkout: loaded.checkout.clone(),
+            scope: loaded.scope,
+            base: loaded.base.clone(),
+            diff,
+        }));
     }
 
     /// Starts a note on `row`, typed in the composer.
