@@ -421,8 +421,8 @@ impl HerdrWindow {
                     });
                 let ports = (self.config.show_listening_ports && !removing_row)
                     .then(|| self.listening_ports.get(&daemon, &workspace.workspace_id))
-                    .filter(|ports| !ports.is_empty())
-                    .map(|ports| {
+                    .flatten()
+                    .map(|listed| {
                         // Under the label column, clear of the status dot.
                         let indent = if indented {
                             layout.child_indent() + indicators.width(font) - STATUS_WIDTH
@@ -442,8 +442,7 @@ impl HerdrWindow {
                             .pr(px(content_x))
                             .text_size(px((font.size * 0.85).round()))
                             .child(crate::listening_ports::chips(
-                                ports,
-                                daemon.host(),
+                                listed,
                                 (&endpoint_id, &workspace.workspace_id),
                                 theme,
                                 (font.size * 0.85).round(),

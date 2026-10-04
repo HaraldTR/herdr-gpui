@@ -2,7 +2,7 @@
 //! it, each number opening its page in a browser tab of that workspace.
 
 use super::Port;
-use crate::{config::Theme, usage::Host, window::HerdrWindow};
+use crate::{config::Theme, window::HerdrWindow};
 use gpui::{prelude::*, *};
 
 const GAP: f32 = 6.;
@@ -22,10 +22,7 @@ impl HerdrWindow {
             .focused_workspace_id
             .as_deref()?;
         let daemon = super::Daemon::from(&endpoint.connection.target);
-        let ports = self.listening_ports.get(&daemon, workspace);
-        if ports.is_empty() {
-            return None;
-        }
+        let listed = self.listening_ports.get(&daemon, workspace)?;
         Some(
             div()
                 .id("listening-ports")
@@ -34,8 +31,7 @@ impl HerdrWindow {
                 .h_full()
                 .px(px(6.))
                 .child(chips(
-                    ports,
-                    daemon.host(),
+                    listed,
                     (&endpoint.id, workspace),
                     &self.theme,
                     14.,
@@ -48,8 +44,7 @@ impl HerdrWindow {
 /// A globe and one clickable number per port. `place` is the endpoint and
 /// workspace whose browser tab a click opens.
 pub(crate) fn chips(
-    ports: &[Port],
-    host: &Host,
+    listed: super::Listed<'_>,
     (endpoint, workspace): (&str, &str),
     theme: &Theme,
     glyph: f32,
@@ -68,8 +63,8 @@ pub(crate) fn chips(
                 .flex_none()
                 .text_color(rgb(muted)),
         )
-        .children(ports.iter().map(|port| {
-            let url = port.url(host);
+        .children(listed.ports.iter().map(|port| {
+            let url = port.url(listed.origin);
             let hint = SharedString::from(hint(port, url.as_ref().map(|url| url.as_str())));
             let id = SharedString::from(format!("port-{endpoint}-{workspace}-{}", port.number));
             let chip = div()

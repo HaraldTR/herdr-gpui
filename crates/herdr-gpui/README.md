@@ -476,7 +476,8 @@ machine never claim each other's servers.
 Every five seconds each host runs `ss -ltnp` (Linux) or `lsof -iTCP
 -sTCP:LISTEN` (macOS) in its own shell, this machine's locally and a connected
 remote host's over SSH, listing only your own processes. A remote server opens
-at the SSH host's name when it listens on every address; one listening only on
+at the SSH host's name when it listens on every address, the `HostName` your
+SSH configuration gives an alias (`ssh -G`) when it has one; one listening only on
 the remote loopback is listed but needs an SSH tunnel to open. Windows clients
 do not scan this machine. Set top-level `show_listening_ports = false`, or
 turn off **Show listening ports** in Settings, to hide them and stop scanning.

@@ -116,13 +116,13 @@ impl Port {
     /// Where a browser on this machine reaches the port. A remote port bound
     /// to its own loopback is unreachable from here without a tunnel, and
     /// `localhost` would open whatever this machine runs on the same number.
-    pub(crate) fn url(&self, host: &Host) -> Option<WebUrl> {
-        let name = match (self.bind, host) {
+    pub(crate) fn url(&self, origin: &Origin) -> Option<WebUrl> {
+        let name = match (self.bind, origin) {
             (Bind::Address(IpAddr::V6(address)), _) => format!("[{address}]"),
             (Bind::Address(IpAddr::V4(address)), _) => address.to_string(),
-            (Bind::Any | Bind::Loopback, Host::Local) => "localhost".into(),
-            (Bind::Loopback, Host::Ssh(_)) => return None,
-            (Bind::Any, Host::Ssh(target)) => ssh_host(target)?,
+            (Bind::Any | Bind::Loopback, Origin::Local) => "localhost".into(),
+            (Bind::Loopback, Origin::Remote { .. }) => return None,
+            (Bind::Any, Origin::Remote { name, .. }) => name.clone()?,
         };
         WebUrl::try_from(format!("http://{name}:{}/", self.number)).ok()
     }
@@ -138,15 +138,43 @@ impl Port {
     }
 }
 
-/// The machine name in an SSH target such as `me@devbox`. An alias only SSH
-/// configuration resolves will not resolve in a browser either; that is the
-/// best this client can name without a tunnel.
-fn ssh_host(target: &str) -> Option<String> {
-    let host = target.rsplit('@').next()?;
+/// Where a browser on this machine finds the scanned host.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Origin {
+    #[default]
+    Local,
+    Remote {
+        /// The SSH target, which a tunnel to the host dials.
+        target: String,
+        /// The host's name as a URL spells it, if one could be found.
+        name: Option<String>,
+    },
+}
+
+impl Origin {
+    /// `resolved` is the host name SSH configuration gives the target
+    /// (`ssh -G`), so an alias such as `devbox` opens at its real `HostName`.
+    /// Without one, the target's own host part is the best guess.
+    pub(crate) fn new(host: &Host, resolved: Option<&str>) -> Self {
+        match host {
+            Host::Local => Self::Local,
+            Host::Ssh(target) => Self::Remote {
+                target: target.clone(),
+                name: resolved
+                    .and_then(url_host)
+                    .or_else(|| url_host(target.rsplit('@').next()?)),
+            },
+        }
+    }
+}
+
+/// `host` as a URL's host: an IPv6 address in brackets, a name or IPv4
+/// address as is, anything else refused.
+fn url_host(host: &str) -> Option<String> {
     if let Ok(address) = host.parse::<Ipv6Addr>() {
         return Some(format!("[{address}]"));
     }
-    (!host.is_empty() && !host.contains(['/', ':', '[', ']'])).then(|| host.to_owned())
+    (!host.is_empty() && !host.contains(['/', ':', '[', ']', '@'])).then(|| host.to_owned())
 }
 
 /// The pane a listener was started in: its workspace, and the JSON API

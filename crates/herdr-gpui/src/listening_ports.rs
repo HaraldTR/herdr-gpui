@@ -20,7 +20,7 @@ use crate::{
 };
 use herdr_client::ConnectTarget;
 pub(crate) use render::chips;
-pub(crate) use scan::{Port, Ports, parse};
+pub(crate) use scan::{Origin, Port, Ports, parse};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -68,6 +68,7 @@ impl From<&ConnectTarget> for Daemon {
 }
 
 impl Daemon {
+    #[cfg(test)]
     pub(crate) fn host(&self) -> &Host {
         &self.host
     }
@@ -131,6 +132,28 @@ fn local_shell() -> Result<Shell> {
     Err(Error::ListeningPortsUnsupported)
 }
 
+/// Where a browser finds `host`. Resolving an SSH alias reads configuration
+/// only, but runs `ssh -G`, so it happens on the worker, once per worker.
+fn origin(host: &Host) -> Origin {
+    let resolved = match host {
+        Host::Local => None,
+        Host::Ssh(target) => herdr_client::resolve_destination(target)
+            .inspect_err(|error| {
+                tracing::debug!(category = "listening-ports", %error, "could not resolve an SSH host name");
+            })
+            .ok()
+            .map(|destination| destination.host),
+    };
+    Origin::new(host, resolved.as_deref())
+}
+
+/// One scan of a host, with where its ports open.
+#[derive(Debug, PartialEq)]
+struct Scan {
+    ports: Ports,
+    origin: Origin,
+}
+
 fn scan(shell: &mut Shell) -> Result<Ports> {
     let output = shell.run(scan::COMMAND, STEP_TIMEOUT).map_err(failed)?;
     parse(&output.stdout)
@@ -142,7 +165,7 @@ fn failed(error: Error) -> Error {
 
 struct Worker {
     stop: Arc<Stop>,
-    results: mpsc::Receiver<Result<Ports>>,
+    results: mpsc::Receiver<Result<Scan>>,
 }
 
 impl Drop for Worker {
@@ -168,7 +191,8 @@ fn spawn(host: Host) -> Option<Worker> {
     }
 }
 
-fn run(host: &Host, stop: &Stop, results: &mpsc::SyncSender<Result<Ports>>) {
+fn run(host: &Host, stop: &Stop, results: &mpsc::SyncSender<Result<Scan>>) {
+    let origin = origin(host);
     let mut shell: Option<Shell> = None;
     loop {
         let opened = match shell.take() {
@@ -181,7 +205,10 @@ fn run(host: &Host, stop: &Stop, results: &mpsc::SyncSender<Result<Ports>>) {
             if !matches!(ports, Err(Error::ListeningPorts(_))) {
                 shell = Some(opened);
             }
-            ports
+            ports.map(|ports| Scan {
+                ports,
+                origin: origin.clone(),
+            })
         });
         let due = Instant::now() + if result.is_ok() { INTERVAL } else { RETRY };
         match results.try_send(result) {
@@ -199,6 +226,7 @@ fn run(host: &Host, stop: &Stop, results: &mpsc::SyncSender<Result<Ports>>) {
 #[derive(Default)]
 struct Reading {
     ports: Ports,
+    origin: Origin,
     /// Why the latest scan failed, as last logged; the last good ports stay
     /// shown.
     error: Option<String>,
@@ -206,14 +234,15 @@ struct Reading {
 
 impl Reading {
     /// Whether anything shown changed.
-    fn apply(&mut self, result: Result<Ports>) -> bool {
+    fn apply(&mut self, result: Result<Scan>) -> bool {
         match result {
-            Ok(ports) => {
+            Ok(Scan { ports, origin }) => {
                 self.error = None;
-                if ports == self.ports {
+                if ports == self.ports && origin == self.origin {
                     return false;
                 }
                 self.ports = ports;
+                self.origin = origin;
                 true
             }
             Err(error) => {
@@ -243,6 +272,13 @@ struct Monitor {
     reading: Reading,
 }
 
+/// One workspace's ports and where a browser finds them.
+#[derive(Clone, Copy)]
+pub(crate) struct Listed<'a> {
+    pub ports: &'a [Port],
+    pub origin: &'a Origin,
+}
+
 /// Every scanned host's listening ports, keyed by host.
 #[derive(Default)]
 pub(crate) struct ListeningPorts {
@@ -250,23 +286,27 @@ pub(crate) struct ListeningPorts {
 }
 
 impl ListeningPorts {
-    /// The ports `workspace` of `daemon` listens on, lowest first.
-    pub fn get(&self, daemon: &Daemon, workspace: &str) -> &[Port] {
-        self.monitors
-            .get(&daemon.host)
-            .and_then(|monitor| {
-                monitor.reading.ports.iter().find_map(|(owner, ports)| {
-                    (owner.workspace == workspace && daemon.owns(&owner.socket))
-                        .then_some(ports.as_slice())
+    /// The ports `workspace` of `daemon` listens on, lowest first, and where
+    /// they open; None while it listens on none.
+    pub fn get(&self, daemon: &Daemon, workspace: &str) -> Option<Listed<'_>> {
+        let reading = &self.monitors.get(&daemon.host)?.reading;
+        reading.ports.iter().find_map(|(owner, ports)| {
+            (owner.workspace == workspace && daemon.owns(&owner.socket) && !ports.is_empty())
+                .then_some(Listed {
+                    ports,
+                    origin: &reading.origin,
                 })
-            })
-            .unwrap_or_default()
+        })
     }
 
     /// Shows `ports` for `host` as if a scan had found them, with no worker.
     #[cfg(test)]
     pub(crate) fn seed(&mut self, host: Host, ports: Ports) {
-        let reading = Reading { ports, error: None };
+        let reading = Reading {
+            origin: Origin::new(&host, None),
+            ports,
+            error: None,
+        };
         self.monitors.insert(
             host,
             Monitor {

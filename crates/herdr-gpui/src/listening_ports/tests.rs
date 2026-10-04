@@ -1,8 +1,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::{
-    Daemon, ListeningPorts, Reading,
-    scan::{Bind, MAX_PORTS, Port, Ports, parse},
+    Daemon, ListeningPorts, Reading, Scan,
+    scan::{Bind, MAX_PORTS, Origin, Port, Ports, parse},
 };
 use crate::{Error, usage::Host};
 use herdr_client::ConnectTarget;
@@ -142,9 +142,9 @@ fn each_workspace_keeps_its_lowest_ports_only() {
 
 #[test]
 fn urls_reach_the_host_the_port_is_on() {
-    let local = Host::Local;
-    let remote = Host::Ssh("me@devbox".into());
-    let url = |port: &Port, host: &Host| port.url(host).map(|url| url.as_str().to_owned());
+    let local = Origin::Local;
+    let remote = Origin::new(&Host::Ssh("me@devbox".into()), None);
+    let url = |port: &Port, origin: &Origin| port.url(origin).map(|url| url.as_str().to_owned());
     let any = port(3000, Bind::Any, "node");
     let loopback = port(5173, Bind::Loopback, "vite");
     let lan = port(
@@ -168,11 +168,29 @@ fn urls_reach_the_host_the_port_is_on() {
     assert_eq!(url(&any, &remote).as_deref(), Some("http://devbox:3000/"));
     assert_eq!(url(&loopback, &remote), None);
     assert_eq!(url(&lan, &remote).as_deref(), Some("http://10.0.0.2:8080/"));
+    let ssh =
+        |target: &str, resolved: Option<&str>| Origin::new(&Host::Ssh(target.into()), resolved);
     assert_eq!(
-        url(&any, &Host::Ssh("fd00::9".into())).as_deref(),
+        url(&any, &ssh("fd00::9", None)).as_deref(),
         Some("http://[fd00::9]:3000/")
     );
-    assert_eq!(url(&any, &Host::Ssh("me@".into())), None);
+    assert_eq!(url(&any, &ssh("me@", None)), None);
+    // An alias opens at the host name SSH configuration resolves it to.
+    assert_eq!(
+        url(&any, &ssh("me@devbox", Some("devbox.lan"))).as_deref(),
+        Some("http://devbox.lan:3000/")
+    );
+    assert_eq!(
+        url(&any, &ssh("devbox", Some("fd00::7"))).as_deref(),
+        Some("http://[fd00::7]:3000/")
+    );
+    // A resolution no URL can carry falls back to the target's own name.
+    assert_eq!(
+        url(&any, &ssh("me@devbox", Some("a/b"))).as_deref(),
+        Some("http://devbox:3000/")
+    );
+    // Loopback-only remote ports never open on this machine's localhost.
+    assert_eq!(url(&loopback, &ssh("devbox", Some("devbox.lan"))), None);
     assert_eq!(any.address(), "*:3000");
     assert_eq!(loopback.address(), "localhost:5173");
 }
@@ -181,8 +199,18 @@ fn urls_reach_the_host_the_port_is_on() {
 fn only_a_different_scan_changes_what_is_shown() {
     let mut reading = Reading::default();
     let found = parse("L 1 *:3000 node\nE 1 w1\n").unwrap();
-    assert!(reading.apply(Ok(found.clone())));
-    assert!(!reading.apply(Ok(found.clone())));
+    let scan = |ports: &Ports, origin: &Origin| {
+        Ok(Scan {
+            ports: ports.clone(),
+            origin: origin.clone(),
+        })
+    };
+    assert!(reading.apply(scan(&found, &Origin::Local)));
+    assert!(!reading.apply(scan(&found, &Origin::Local)));
+    // Where the ports open is shown too.
+    let remote = Origin::new(&Host::Ssh("devbox".into()), Some("devbox.lan"));
+    assert!(reading.apply(scan(&found, &remote)));
+    assert!(!reading.apply(scan(&found, &remote)));
     // A failed scan keeps the last ports and is not a change.
     assert!(!reading.apply(Err(Error::ListeningPorts(Box::new(
         Error::UsageUnreachable
@@ -194,7 +222,7 @@ fn only_a_different_scan_changes_what_is_shown() {
         "{error}"
     );
     assert!(error.contains("SSH"), "the cause is kept: {error}");
-    assert!(reading.apply(Ok(Ports::new())));
+    assert!(reading.apply(scan(&Ports::new(), &remote)));
     assert_eq!(reading.error, None);
 }
 
@@ -204,21 +232,31 @@ fn seeded_hosts_are_looked_up_by_workspace_and_forgotten_when_dropped() {
     let daemon = remote("default");
     let host = daemon.host().clone();
     ports.seed(host.clone(), parse("L 1 *:3000 node\nE 1 w1\n").unwrap());
-    assert_eq!(ports.get(&daemon, "w1").len(), 1);
-    assert!(ports.get(&daemon, "w2").is_empty());
+    assert_eq!(
+        ports
+            .get(&daemon, "w1")
+            .map_or(0, |listed| listed.ports.len()),
+        1
+    );
+    assert!(ports.get(&daemon, "w2").is_none());
     assert!(
         ports
             .get(&Daemon::from(&ConnectTarget::Local), "w1")
-            .is_empty()
+            .is_none()
     );
     // A host still wanted keeps its reading; no worker is started for it.
     assert!(!ports.poll([host.clone(), host.clone()]));
-    assert_eq!(ports.get(&daemon, "w1").len(), 1);
+    assert_eq!(
+        ports
+            .get(&daemon, "w1")
+            .map_or(0, |listed| listed.ports.len()),
+        1
+    );
     assert!(
         ports.poll(std::iter::empty()),
         "dropping shown ports is a change"
     );
-    assert!(ports.get(&daemon, "w1").is_empty());
+    assert!(ports.get(&daemon, "w1").is_none());
     assert!(!ports.poll(std::iter::empty()));
 }
 
@@ -295,9 +333,8 @@ fn two_sessions_on_one_host_keep_their_own_ports() {
     let numbers = |daemon: &Daemon, workspace: &str| -> Vec<u16> {
         ports
             .get(daemon, workspace)
-            .iter()
-            .map(|port| port.number)
-            .collect()
+            .map(|listed| listed.ports.iter().map(|port| port.number).collect())
+            .unwrap_or_default()
     };
     // One workspace id in two sessions: each session sees only its own.
     assert_eq!(numbers(&remote("default"), "w1"), [3000]);
