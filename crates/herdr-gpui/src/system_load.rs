@@ -111,21 +111,22 @@ fn remote(error: Error) -> Error {
     Error::SystemLoadRemote(Box::new(error))
 }
 
-/// Tells a worker to stop, waking it from its wait between samples.
+/// Tells a worker to stop, waking it from its wait between samples. The
+/// listening-port scanners stop the same way.
 #[derive(Default)]
-struct Stop {
+pub(crate) struct Stop {
     stopped: Mutex<bool>,
     changed: Condvar,
 }
 
 impl Stop {
-    fn stop(&self) {
+    pub(crate) fn stop(&self) {
         *self.stopped.lock().unwrap_or_else(PoisonError::into_inner) = true;
         self.changed.notify_all();
     }
 
     /// Waits until `due`; false once stopped.
-    fn wait(&self, due: Instant) -> bool {
+    pub(crate) fn wait(&self, due: Instant) -> bool {
         let mut stopped = self.stopped.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
             if *stopped {

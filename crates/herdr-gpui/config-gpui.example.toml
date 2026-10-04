@@ -36,6 +36,11 @@ show_agents = true
 # on its sidebar row. Connected remote hosts are read over SSH every couple of
 # seconds; false stops all sampling. Also under Settings > General.
 show_system_load = true
+# Show the TCP ports each workspace's servers listen on, under its sidebar row
+# and in the status bar; click one to open it in a browser tab. Hosts are
+# scanned every five seconds with ss or lsof, a remote one over SSH; false
+# stops all scanning. Also under Settings > General.
+show_listening_ports = true
 # macOS only: whether Option-letter reaches a pane as an Alt shortcut (Alt-P
 # for Option-P) or types the character the keyboard layout puts there. "auto"
 # sends Alt on the U.S. and ABC layouts and types elsewhere, so layouts that

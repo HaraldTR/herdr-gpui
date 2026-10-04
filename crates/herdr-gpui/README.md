@@ -465,6 +465,20 @@ every two seconds over its own SSH shell, kept open while the host is connected
 systems, and remote hosts from a Windows client, show it as unavailable. Set top-level `show_system_load = false`,
 or turn off **Show CPU and memory** in Settings, to hide it and stop sampling.
 
+Workspaces that run a server show the TCP ports it listens on, as `:3000`
+chips on a line under the workspace's sidebar row and, for the focused
+workspace, in the status bar. Clicking one opens the page in a browser tab of
+that workspace (`http://localhost:<port>` on this machine). A port belongs to
+a workspace when its process inherited the `HERDR_WORKSPACE_ID` Herdr sets in
+every pane, so system services and servers started outside Herdr never show.
+Every five seconds each host runs `ss -ltnp` (Linux) or `lsof -iTCP
+-sTCP:LISTEN` (macOS) in its own shell, this machine's locally and a connected
+remote host's over SSH, listing only your own processes. A remote server opens
+at the SSH host's name when it listens on every address; one listening only on
+the remote loopback is listed but needs an SSH tunnel to open. Windows clients
+do not scan this machine. Set top-level `show_listening_ports = false`, or
+turn off **Show listening ports** in Settings, to hide them and stop scanning.
+
 `[notifications]` in `config-gpui.local.toml` overrides shared toast preferences
 for GUI-local in-app delivery, independently per key. `enabled = true` shows
 in-app toasts even when shared delivery is `system`; `enabled = false` leaves

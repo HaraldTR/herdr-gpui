@@ -366,6 +366,12 @@ pub enum Error {
     SystemLoadUnsupported(String),
     #[error("CPU and memory output was not understood.")]
     SystemLoadOutput,
+    #[error("Could not read listening ports on this host.")]
+    ListeningPorts(#[source] Box<Error>),
+    #[error("Neither ss nor lsof is installed on this host, so listening ports cannot be read.")]
+    ListeningPortsTool,
+    #[error("Listening ports cannot be read on this platform.")]
+    ListeningPortsUnsupported,
     #[error("{0}")]
     Update(#[from] UpdateError),
     #[error("{0}")]

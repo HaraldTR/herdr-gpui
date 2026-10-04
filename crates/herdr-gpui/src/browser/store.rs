@@ -228,9 +228,9 @@ impl Store {
         Some(id)
     }
 
-    /// The tab one agent already opened on this page, which showing the page
-    /// again reuses rather than stacking another tab.
-    #[cfg(any(unix, test))]
+    /// The tab one agent, or the user when `origin` is None, already opened
+    /// on this page, which showing the page again reuses rather than stacking
+    /// another tab.
     pub(crate) fn opened_before(
         &self,
         scope: &Scope,

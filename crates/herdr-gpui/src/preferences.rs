@@ -262,6 +262,25 @@ impl HerdrWindow {
             )
             .child(
                 toggle(
+                    "preferences-show-listening-ports",
+                    "Show listening ports",
+                    self.config.show_listening_ports,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    let show = !this.config.show_listening_ports;
+                    this.save_preference(
+                        move || {
+                            Config::save_preference(
+                                crate::config::preferences::Preference::ShowListeningPorts(show),
+                            )
+                        },
+                        cx,
+                    );
+                })),
+            )
+            .child(
+                toggle(
                     "preferences-high-contrast",
                     "High contrast",
                     self.config.contrast == Contrast::High,
