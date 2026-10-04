@@ -234,7 +234,7 @@ mod tests {
         assert!(Icons.load("unknown.svg").unwrap().is_none());
         assert_eq!(
             Icons.list("icons/").unwrap().len(),
-            31 + AgentIcon::ALL.len() + crate::usage::icon_paths().count()
+            32 + AgentIcon::ALL.len() + crate::usage::icon_paths().count()
         );
     }
 
