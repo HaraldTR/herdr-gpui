@@ -1,4 +1,5 @@
 use super::*;
+use crate::error::ThemeParseError;
 use anyhow::Context as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
