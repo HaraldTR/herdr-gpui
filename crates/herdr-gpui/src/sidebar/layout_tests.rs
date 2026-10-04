@@ -29,6 +29,8 @@ mod host_groups;
 #[cfg(test)]
 mod layouts;
 #[cfg(test)]
+mod listening_ports;
+#[cfg(test)]
 mod palette;
 #[cfg(test)]
 mod preferences_panel;
@@ -433,6 +435,8 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         usage: Default::default(),
         system_load: Default::default(),
         port_forwards: Default::default(),
+        listening_ports: Default::default(),
+        tunnels: Default::default(),
         sidebar_visible: true,
         sidebar_start_pending: true,
         device_filter: None,

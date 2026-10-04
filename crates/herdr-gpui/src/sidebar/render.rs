@@ -264,6 +264,7 @@ impl HerdrWindow {
                 host: (multi && endpoint_id != crate::endpoint::LOCAL)
                     .then_some(endpoint.label.as_str()),
             };
+            let daemon = crate::listening_ports::Daemon::from(&endpoint.connection.target);
             let live = if selected { &self.live } else { &endpoint.live };
             let Some(snapshot) = &live.snapshot else {
                 continue;
@@ -409,6 +410,45 @@ impl HerdrWindow {
                 } else {
                     0.
                 };
+                let removing_row = selected
+                    && self.live.status.is_connected()
+                    && self.removal.as_ref().is_some_and(|removal| {
+                        removal.pending_for(
+                            (self.selection_epoch, endpoint.generation),
+                            &snapshot.boot_id,
+                            &workspace.workspace_id,
+                        )
+                    });
+                let ports = (self.config.show_listening_ports && !removing_row)
+                    .then(|| self.listening_ports.get(&daemon, &workspace.workspace_id))
+                    .flatten()
+                    .map(|listed| {
+                        // Under the label column, clear of the status dot.
+                        let indent = if indented {
+                            layout.child_indent() + indicators.width(font) - STATUS_WIDTH
+                        } else {
+                            0.
+                        };
+                        div()
+                            .debug_selector(|| format!("ports-{endpoint_id}-{id}"))
+                            .h(px(line_height(font)))
+                            .flex_none()
+                            .w_full()
+                            .min_w_0()
+                            .pl(px(content_x
+                                + indent
+                                + indicators.width(font)
+                                + layout.gap()))
+                            .pr(px(content_x))
+                            .text_size(px((font.size * 0.85).round()))
+                            .child(crate::listening_ports::chips(
+                                listed,
+                                (&endpoint_id, &workspace.workspace_id),
+                                theme,
+                                (font.size * 0.85).round(),
+                                cx,
+                            ))
+                    });
                 let element = Cell::new(
                     rows,
                     RowData::Workspace(WorkspaceRow {
@@ -434,15 +474,7 @@ impl HerdrWindow {
                             (&self.teleport_marks, &endpoint.id),
                             theme,
                         ),
-                        removing: selected
-                            && self.live.status.is_connected()
-                            && self.removal.as_ref().is_some_and(|removal| {
-                                removal.pending_for(
-                                    (self.selection_epoch, endpoint.generation),
-                                    &snapshot.boot_id,
-                                    &workspace.workspace_id,
-                                )
-                            }),
+                        removing: removing_row,
                         status: shown_status,
                         lines,
                     }),
@@ -553,12 +585,30 @@ impl HerdrWindow {
                         }),
                     )
                 })
-                .when(gap > 0., |row| row.mt(px(gap)))
-                .when(shift != px(0.), |row| row.top(shift));
+                .when(carried, |row| row.cursor_grabbing());
+                // Ports ride under their row as one list item, so the drop
+                // preview still measures one height per workspace.
+                let element = match ports {
+                    None => element
+                        .when(gap > 0., |row| row.mt(px(gap)))
+                        .when(shift != px(0.), |row| row.top(shift))
+                        .into_any_element(),
+                    Some(ports) => div()
+                        .flex()
+                        .flex_col()
+                        .flex_none()
+                        .w_full()
+                        .relative()
+                        .when(gap > 0., |unit| unit.mt(px(gap)))
+                        .when(shift != px(0.), |unit| unit.top(shift))
+                        .child(element)
+                        .child(ports)
+                        .into_any_element(),
+                };
                 spaces = if carried {
                     // Painted last so it floats over the rows it passes, while
                     // its layout slot keeps the others' positions stable.
-                    spaces.child(deferred(element.cursor_grabbing()).with_priority(1))
+                    spaces.child(deferred(element).with_priority(1))
                 } else {
                     spaces.child(element)
                 };

@@ -1,5 +1,7 @@
 use super::*;
 
+mod forward;
+
 #[test]
 fn discovery_and_bridge_stdio_work_with_quoted_install_paths() {
     let root =
