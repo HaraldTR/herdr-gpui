@@ -979,8 +979,10 @@ run there, not on this machine.
 
 **Trust.** The file is repository content, so nothing in it runs until you
 trust it. The first time a script would run, a dialog shows every script in
-the file. **Trust and run** remembers that exact file for that repository on
-that host. Any change to the file, such as a pulled commit, asks again. The
+the file, every line of it. The dialog can open by itself, so it has no
+keyboard shortcut and ignores clicks for its first moment: a keystroke or
+click meant for the terminal cannot answer it. **Trust and run** remembers
+that exact file for that repository on that host. Any change to the file, such as a pulled commit, asks again. The
 same repository on another host is asked about separately. **Don't run**
 runs nothing. For an archive script, **Remove without running** removes the
 checkout as the delete dialog would have, and Escape keeps it. Trust is kept

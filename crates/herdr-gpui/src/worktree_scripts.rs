@@ -88,8 +88,11 @@ enum Step {
     Locating(String),
     /// The file is being read on a background executor.
     Reading,
-    /// Waiting for the user to trust the file; `shown` once the page opened.
-    Asking { config: Config, shown: bool },
+    /// Waiting for the user to trust the file; `shown` when the page opened.
+    Asking {
+        config: Config,
+        shown: Option<std::time::Instant>,
+    },
     /// The `tab.create` the script will be typed into.
     Opening(String),
 }
@@ -261,7 +264,7 @@ impl HerdrWindow {
         }
         job.step = Step::Asking {
             config,
-            shown: false,
+            shown: None,
         };
         cx.notify();
         Ok(())
@@ -331,9 +334,11 @@ impl HerdrWindow {
         let request = match self.worktree_script.as_mut().map(|job| &mut job.step) {
             Some(Step::Locating(request) | Step::Opening(request)) => request.clone(),
             Some(Step::Asking { shown, .. }) => {
-                let open = !*shown && page.is_none();
-                let dismissed = *shown && page != Some(Page::WorktreeScript);
-                *shown |= open;
+                let open = shown.is_none() && page.is_none();
+                let dismissed = shown.is_some() && page != Some(Page::WorktreeScript);
+                if open {
+                    *shown = Some(std::time::Instant::now());
+                }
                 if open && self.open_menu(window, cx) {
                     self.menu.page = Some(Page::WorktreeScript);
                 }
@@ -415,8 +420,33 @@ impl HerdrWindow {
         self.navigate_endpoint(&endpoint, NavigationTarget::Tab(&tab), cx);
     }
 
+    /// Whether the trust question has been up long enough for a click on it
+    /// to be meant for it, not one aimed at what was there before it opened.
+    fn worktree_script_armed(&self, now: std::time::Instant) -> bool {
+        matches!(
+            self.worktree_script.as_ref().map(|job| &job.step),
+            Some(Step::Asking { shown: Some(shown), .. })
+                if now.duration_since(*shown) >= ARMING_DELAY
+        )
+    }
+
+    /// Ages an open trust question past its arming delay.
+    #[cfg(test)]
+    pub(crate) fn arm_worktree_script(&mut self) {
+        if let Some(Job {
+            step: Step::Asking { shown, .. },
+            ..
+        }) = &mut self.worktree_script
+        {
+            *shown = std::time::Instant::now().checked_sub(ARMING_DELAY);
+        }
+    }
+
     /// The trust question's primary answer: remember this file and run it.
     pub(crate) fn trust_worktree_script(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.worktree_script_armed(std::time::Instant::now()) {
+            return;
+        }
         let Some(Job {
             launch,
             step: Step::Asking { config, .. },
@@ -441,6 +471,10 @@ impl HerdrWindow {
     /// The trust question's other answer: run nothing. An archive goes on to
     /// remove the checkout without its script, as the button says.
     pub(crate) fn skip_worktree_script(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Removing without the script is consequential too.
+        if !self.worktree_script_armed(std::time::Instant::now()) {
+            return;
+        }
         let current = self.worktree_script_current();
         let Some(job) = self.worktree_script.take() else {
             return;
@@ -516,6 +550,8 @@ impl HerdrWindow {
             .filter_map(|other| Some((other, config.scripts.get(other)?)))
             .collect();
         let host = &self.endpoints[self.selected_endpoint].label;
+        // No key confirms: this page can open by itself while the user is
+        // typing, and a stray Enter must not grant trust. Only a click does.
         div()
             .debug_selector(|| "worktree-script-trust".into())
             .child(div().p(px(8.)).font_weight(FontWeight::SEMIBOLD).child(title))
@@ -568,12 +604,13 @@ impl HerdrWindow {
     }
 }
 
-/// Most lines the trust question shows of one script.
-const MAX_SHOWN_LINES: usize = 200;
+/// How long the trust question ignores clicks after it opens by itself.
+const ARMING_DELAY: std::time::Duration = std::time::Duration::from_millis(600);
 
-/// A script as the trust question shows it: line by line, with controls and
-/// invisible formatting characters made visible, so what is reviewed is what
-/// runs (bidirectional overrides cannot reorder it on screen).
+/// A script as the trust question shows it: every line, since trusting
+/// covers all of it (the file is bounded by `config::MAX_BYTES`), with
+/// controls and invisible formatting characters made visible, so what is
+/// reviewed is what runs (bidirectional overrides cannot reorder it on screen).
 fn script_lines(script: &str) -> Vec<String> {
     let visible = |c: char| match c {
         '\t' => c,
@@ -584,17 +621,11 @@ fn script_lines(script: &str) -> Vec<String> {
         c if c.is_control() => '\u{fffd}',
         c => c,
     };
-    let mut lines: Vec<String> = script
+    script
         .trim_end_matches('\n')
         .split('\n')
-        .take(MAX_SHOWN_LINES)
         .map(|line| line.chars().map(visible).collect())
-        .collect();
-    let total = script.trim_end_matches('\n').split('\n').count();
-    if total > MAX_SHOWN_LINES {
-        lines.push(format!("\u{2026} {} more lines", total - MAX_SHOWN_LINES));
-    }
-    lines
+        .collect()
 }
 
 #[cfg(test)]

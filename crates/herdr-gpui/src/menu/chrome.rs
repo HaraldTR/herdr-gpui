@@ -1019,9 +1019,6 @@ impl HerdrWindow {
                     "enter" if this.menu.page == Some(Page::AgentSkill) => {
                         this.install_browser_skill(window, cx);
                     }
-                    "enter" if this.menu.page == Some(Page::WorktreeScript) => {
-                        this.trust_worktree_script(window, cx);
-                    }
                     "enter" if this.menu.page == Some(Page::Install) => {
                         cx.open_url(crate::about::WEBSITE);
                     }

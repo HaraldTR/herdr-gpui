@@ -1378,6 +1378,7 @@ fn an_untrusted_archive_script_is_asked_about_before_removal(cx: &mut gpui::Test
             assert!(view.menu.page.is_none() && view.removal.is_none());
             view.poll_worktree_script(window, cx);
             assert_eq!(view.menu.page, Some(super::Page::WorktreeScript));
+            view.arm_worktree_script();
             view.skip_worktree_script(window, cx);
             assert!(view.removal.as_ref().unwrap().pending.is_some());
         })
