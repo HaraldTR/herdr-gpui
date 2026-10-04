@@ -2,7 +2,7 @@
 mod fonts;
 mod preferences;
 
-use super::{Section, SettingsWindow};
+use super::{Section, SettingsWindow, remote_history::HostState};
 use crate::{
     agent_skill::{AgentSkill, Choice},
     config::{Config, FONT_SIZE_RANGE, FontFace, LayoutMode, corners},
@@ -701,6 +701,7 @@ impl SettingsWindow {
             ));
         div().flex().flex_col().gap(px(24.)).child(general)
             .child(self.render_tab_bar_controls(cx))
+            .child(self.render_session_controls(cx))
             .child(self.render_skill_controls(cx))
             .child(self.clipboard_controls(cx))
             .child(self.control_card("Configuration")
@@ -767,6 +768,80 @@ impl SettingsWindow {
             } else {
                 "Shared with Herdr and read-only on this platform. With copy on select off, Ctrl-C copies the highlighted selection."
             }))
+    }
+
+    /// Herdr's opt-in pane history. The daemon owns the terminals, so it
+    /// alone can save their scrollback and seed it back into the restored
+    /// panes; these switches only edit each daemon's own setting.
+    fn render_session_controls(&self, cx: &mut Context<Self>) -> Div {
+        let ready = self.controls_shared_ready();
+        let enabled = self
+            .shared
+            .as_ref()
+            .is_some_and(|shared| shared.pane_history);
+        let mut card = self
+            .control_card("Session restore")
+            .child(
+                self.control_switch(
+                    "settings-pane-history",
+                    "Restore scrollback after Herdr restarts (experimental)",
+                    enabled,
+                    ready,
+                )
+                .when(ready, |button| {
+                    button.on_click(cx.listener(move |this, _, _, cx| {
+                        this.save_shared(Edit::PaneHistory(!enabled), cx);
+                    }))
+                }),
+            )
+            .child(self.control_note(
+                "Reopening this app always keeps scrollback while Herdr runs. With this on, Herdr also saves pane output to session-history.json and replays it when the daemon restarts, so that file holds terminal history.",
+            ))
+            .when(!cfg!(unix), |card| {
+                card.child(self.control_note("Shared with Herdr and read-only on this platform."))
+            });
+        let hosts = self.remote_history.hosts();
+        if hosts.is_empty() {
+            return card;
+        }
+        card = card.child(self.control_note(
+            "Each connected SSH host's Herdr keeps its own setting, saved in that host's config.",
+        ));
+        let open = !self.quitting && self.closing.is_none();
+        for (index, host) in hosts.iter().enumerate() {
+            let (checked, settled) = match &host.state {
+                HostState::Ready(history) => (history.enabled, true),
+                HostState::Saving(history) => (history.enabled, false),
+                HostState::Loading | HostState::Failed(_) => (false, false),
+            };
+            let ready = open && settled;
+            let target = host.target.clone();
+            card = card.child(
+                self.control_switch(
+                    format!("settings-pane-history-host-{index}"),
+                    host.label.clone(),
+                    checked,
+                    ready,
+                )
+                .when(ready, |button| {
+                    button.on_click(cx.listener(move |this, _, _, cx| {
+                        this.save_remote_history(&target, !checked, cx);
+                    }))
+                }),
+            );
+            let note = match &host.state {
+                HostState::Loading => Some("Reading host config...".to_owned()),
+                HostState::Saving(_) => Some("Saving host config...".to_owned()),
+                HostState::Failed(error) => {
+                    Some(format!("{error}. Reload configuration to try again."))
+                }
+                HostState::Ready(_) => None,
+            };
+            if let Some(note) = note {
+                card = card.child(self.control_note(note));
+            }
+        }
+        card
     }
 
     pub(super) fn render_sidebar_layout_controls(&self, cx: &mut Context<Self>) -> Div {
@@ -1000,6 +1075,7 @@ mod tests {
             "settings-tab-bar-bottom",
             "settings-hide-single-tab-bar",
             "settings-copy-on-select",
+            "settings-pane-history",
         ] {
             let control = cx.debug_bounds(id).unwrap();
             // A save in flight owns the shared snapshot: clicks wait for it.
@@ -1010,8 +1086,56 @@ mod tests {
                 assert!(!shared.copy_on_select);
                 assert_eq!(shared.tab_bar_position, TabBarPosition::Bottom);
                 assert!(!shared.hide_tab_bar_when_single_tab);
+                assert!(!shared.pane_history);
             });
         }
+    }
+
+    #[gpui::test]
+    fn connected_ssh_hosts_get_their_own_pane_history_rows(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(skill_fixture);
+        cx.simulate_resize(size(px(680.), px(2200.)));
+        let long = "a-very-long-ssh-host-label.with.many.domain.parts.example.internal";
+        view.update(cx, |view, cx| {
+            let jobs = view.remote_history.sync(
+                [
+                    (long.to_owned(), "ready".to_owned()),
+                    ("loading".to_owned(), "loading".to_owned()),
+                ],
+                false,
+            );
+            let ready = &jobs[0];
+            let history = crate::herdr_settings::RemotePaneHistory::parse_text(Some(
+                "[experimental]\npane_history = true\n".into(),
+            ))
+            .unwrap();
+            assert!(
+                view.remote_history
+                    .finish(&ready.target, ready.generation, Ok(history))
+            );
+            cx.notify();
+        });
+        cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
+        let body = cx.debug_bounds("settings-pane-history").unwrap();
+        for id in [
+            "settings-pane-history-host-0",
+            "settings-pane-history-host-1",
+        ] {
+            let row = cx.debug_bounds(id).unwrap();
+            assert!(
+                row.left() >= body.left() && row.right() <= body.right(),
+                "{id}"
+            );
+            assert!(row.top() >= body.bottom(), "{id}");
+        }
+        // A host still being read cannot be toggled.
+        let loading = cx.debug_bounds("settings-pane-history-host-1").unwrap();
+        cx.simulate_click(loading.center(), Default::default());
+        view.read_with(cx, |view, _| {
+            let hosts = view.remote_history.hosts();
+            assert!(matches!(hosts[1].state, HostState::Loading));
+            assert!(matches!(&hosts[0].state, HostState::Ready(history) if history.enabled));
+        });
     }
 
     #[gpui::test]
