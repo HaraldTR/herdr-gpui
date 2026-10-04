@@ -343,28 +343,6 @@ impl HerdrWindow {
         }
     }
 
-    fn submit_address(
-        &mut self,
-        group: GroupId,
-        id: TabId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let text = self.group_address(group, cx).read(cx).text().to_owned();
-        let Ok(url) = WebUrl::from_typed(&text) else {
-            self.show_flash(Flash::warning("Not an http or https address"), cx);
-            return;
-        };
-        let location = Location::Web { url };
-        Store::update(cx, |store| store.visited(id, Some(location.clone()), None));
-        #[cfg(any(target_os = "macos", windows))]
-        if self.browser.pages.contains(id) {
-            self.browser.pages.load(id, &location, cx);
-            self.browser.pages.focus(id, cx);
-        }
-        self.show_browser_tab_in(Some(group), id, window, cx);
-    }
-
     /// Whether a notes panel or a note is still moving, so the window draws
     /// another frame. Only builds that show pages have either.
     pub(crate) fn annotations_moving(&self) -> bool {

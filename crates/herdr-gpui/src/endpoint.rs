@@ -19,8 +19,6 @@ mod catalog;
 mod polling;
 
 pub(super) use catalog::Catalog;
-#[cfg(test)]
-use catalog::CatalogUpdate;
 
 pub(super) const LOCAL: &str = "local";
 /// Saved SSH endpoints are keyed `ssh:<profile-id>`, so no catalog ID can

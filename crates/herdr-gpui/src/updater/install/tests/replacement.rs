@@ -1,4 +1,5 @@
 use super::*;
+use crate::updater::install::location::linux_location;
 
 #[test]
 fn replacement_retains_backup_and_rolls_back_on_spawn_failure() -> anyhow::Result<()> {

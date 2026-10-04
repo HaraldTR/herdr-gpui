@@ -1,7 +1,9 @@
-//! The saved-host catalog: background loads of the saved devices and the
-//! serialized writes of this client's host selection.
-use super::SAVED_PREFIX;
-use crate::{Error, Result};
+//! The saved-host catalog: background loads of the saved devices, the
+//! serialized writes of this client's host selection, and reconciling the
+//! window's endpoints and selection with what the catalog says.
+use super::{Endpoint, LOCAL, SAVED_PREFIX};
+use crate::{Error, HerdrWindow, Result};
+use gpui::Context;
 use herdr_client::{ConnectTarget, SavedHost};
 use std::{
     sync::mpsc,
@@ -9,19 +11,19 @@ use std::{
 };
 
 pub(crate) struct Catalog {
-    pub(super) development: Option<bool>,
-    pub(super) pending: Option<mpsc::Receiver<Result<CatalogUpdate>>>,
-    pub(super) next_poll: Instant,
+    development: Option<bool>,
+    pending: Option<mpsc::Receiver<Result<CatalogUpdate>>>,
+    next_poll: Instant,
     pub(super) desired: Option<String>,
     pub(super) initialized: bool,
     pub(super) restore_pending: bool,
     pub(super) queued_write: Option<Option<String>>,
-    pub(super) writing: Option<mpsc::Receiver<Result<()>>>,
+    writing: Option<mpsc::Receiver<Result<()>>>,
 }
 
 pub(super) struct CatalogUpdate {
     pub(super) hosts: Vec<SavedHost>,
-    pub(super) selection: Option<Option<String>>,
+    selection: Option<Option<String>>,
 }
 
 impl Catalog {
@@ -134,3 +136,107 @@ impl Catalog {
         error
     }
 }
+
+impl HerdrWindow {
+    pub(super) fn restore_selection(&mut self, cx: &mut Context<Self>) {
+        if !self.catalog.restore_pending {
+            return;
+        }
+        let Some(id) = self
+            .catalog
+            .desired
+            .as_ref()
+            .map(|id| format!("{SAVED_PREFIX}{id}"))
+        else {
+            return;
+        };
+        if self.endpoints.iter().any(|endpoint| {
+            endpoint.id == id
+                && endpoint.enabled
+                && endpoint.connection.handle.is_some()
+                && endpoint.live.status.is_connected()
+                && endpoint.live.snapshot.is_some()
+        }) {
+            // One handoff attempt: activation failure may fall back to Local,
+            // but must neither overwrite the preference nor loop on every tick.
+            self.catalog.restore_pending = false;
+            self.switch_endpoint(&id, cx);
+        }
+    }
+
+    pub(crate) fn reconcile_catalog(&mut self, hosts: Vec<SavedHost>, cx: &mut Context<Self>) {
+        let selected = &self.endpoints[self.selected_endpoint];
+        let selected_id = selected.id.clone();
+        let selected_retired = self.selected_endpoint != 0
+            && !hosts.iter().any(|host| {
+                format!("{SAVED_PREFIX}{}", host.id) == selected_id
+                    && host.enabled
+                    && !entry_changed(selected, host)
+            });
+        if selected_retired {
+            self.switch_endpoint(LOCAL, cx);
+        }
+        let selected_id = self.endpoints[self.selected_endpoint].id.clone();
+        let mut previous = std::mem::take(&mut self.endpoints);
+        let mut next = vec![previous.remove(0)];
+        for host in hosts {
+            let id = format!("{SAVED_PREFIX}{}", host.id);
+            let mut endpoint = if let Some(index) = previous.iter().position(|e| e.id == id) {
+                previous.remove(index)
+            } else {
+                Endpoint::new(
+                    id,
+                    host.label.clone(),
+                    ConnectTarget::Ssh {
+                        target: host.target.clone(),
+                        session: host.session.clone(),
+                    },
+                    host.enabled,
+                )
+            };
+            let changed = endpoint.enabled != host.enabled || entry_changed(&endpoint, &host);
+            if changed {
+                endpoint.stop();
+                endpoint.attempts = 0;
+                endpoint.connection.target = ConnectTarget::Ssh {
+                    target: host.target.clone(),
+                    session: host.session.clone(),
+                };
+                endpoint.enabled = host.enabled;
+                endpoint.detached = false;
+                endpoint.retry_at = Instant::now();
+            }
+            endpoint.label = host.label.clone();
+            endpoint.saved_host = Some(host);
+            next.push(endpoint);
+        }
+        self.endpoints = next;
+        self.selected_endpoint = self
+            .endpoints
+            .iter()
+            .position(|e| e.id == selected_id)
+            .unwrap_or(0);
+        cx.notify();
+    }
+}
+
+/// Whether a saved entry differs from the one this endpoint was last reconciled
+/// against, which is what an edit to a device's saved profile looks like. An
+/// endpoint that has never been reconciled compares its live target instead, so
+/// one built outside the catalog still retires when its entry changes.
+fn entry_changed(endpoint: &Endpoint, host: &SavedHost) -> bool {
+    match &endpoint.saved_host {
+        Some(saved) => saved.target != host.target || saved.session != host.session,
+        None => !same_target(&endpoint.connection.target, host),
+    }
+}
+
+/// Whether an endpoint's live target is exactly the saved entry's, session
+/// included. A device's identity as the catalog describes it; the sessions list
+/// deliberately points an endpoint at other sessions of the same device.
+fn same_target(target: &ConnectTarget, host: &SavedHost) -> bool {
+    matches!(target, ConnectTarget::Ssh { target, session } if target == &host.target && session == &host.session)
+}
+
+#[cfg(test)]
+mod tests;

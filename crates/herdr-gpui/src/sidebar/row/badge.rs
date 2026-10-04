@@ -42,6 +42,98 @@ impl RowBadge {
         let mark = line_height(font).min(18.) + glyph_width(font);
         pr + mark * f32::from(u8::from(self.dirty) + u8::from(self.teleported))
     }
+
+    /// The badge column at a row's trailing edge, `width` wide: the marks and
+    /// pull request number on the first line, its counts under them.
+    pub(in crate::sidebar) fn element(
+        self,
+        key: &str,
+        width: f32,
+        font: &FontConfig,
+        theme: &Theme,
+        layout: &dyn SidebarDensity,
+    ) -> Div {
+        let Self {
+            pr,
+            dirty,
+            teleported,
+        } = self;
+        div()
+            .debug_selector(|| format!("pr-{key}"))
+            .w(px(width))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .items_end()
+            .overflow_hidden()
+            .child(
+                div()
+                    .h(px(line_height(font)))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(glyph_width(font)))
+                    .overflow_hidden()
+                    // Uncommitted work, marked the way the titlebar
+                    // button marks it: the counts beside it are the
+                    // pull request's, not the working tree's.
+                    .when(teleported, |line| {
+                        line.child(
+                            crate::icons::teleported(
+                                theme,
+                                (line_height(font) * 0.75).round().min(15.),
+                            )
+                            .debug_selector(|| format!("teleported-{key}")),
+                        )
+                    })
+                    .when(dirty, |line| {
+                        line.child(
+                            // Well under the line height, so marks on
+                            // neighbouring rows keep a visible gap.
+                            crate::icons::uncommitted(
+                                theme,
+                                (line_height(font) * 0.75).round().min(15.),
+                            )
+                            .debug_selector(|| format!("dirty-{key}")),
+                        )
+                    })
+                    .when_some(pr.as_ref(), |line, badge| {
+                        line.child(
+                            div()
+                                .flex_none()
+                                .truncate()
+                                .text_color(rgb(badge.color))
+                                .child(label_text(&badge.number)),
+                        )
+                    }),
+            )
+            .when_some(pr.filter(|_| layout.pr_counts()), |column, badge| {
+                column.child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(rgb(theme.ink(theme.palette[2])))
+                                .child(label_text(&badge.additions)),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(rgb(theme.muted))
+                                .child(label_text("/")),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(rgb(theme.ink(theme.palette[1])))
+                                .child(label_text(&badge.deletions)),
+                        ),
+                )
+            })
+    }
 }
 
 /// Cached pull request state for a worktree row: the number carries the

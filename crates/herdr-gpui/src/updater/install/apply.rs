@@ -2,7 +2,9 @@
 //! stage, waits on the parent's commit barrier, swaps the installation, and
 //! records the outcome for manual recovery.
 use super::{
-    Mode, WAIT, authenticate, candidate, detect, io, lock_file, no_links, owned, read_request,
+    HELPER, Mode, WAIT, authenticate, candidate, io,
+    location::{detect, lock_file, no_links, owned},
+    read_request,
 };
 use crate::updater::error::{Result, UpdateError as Error};
 use std::{
@@ -14,7 +16,7 @@ use std::{
         fs::{MetadataExt, OpenOptionsExt},
     },
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, ExitCode, Stdio},
     sync::{atomic::AtomicBool, mpsc},
     thread,
     time::{Duration, Instant},
@@ -112,7 +114,20 @@ pub(super) fn remove_failed_linux_backup(
     fs::remove_file(backup).map_err(io)
 }
 
-pub(super) fn helper(stage: &Path) -> Result<()> {
+/// Pass arguments excluding argv[0], before initializing GPUI. Recognized but
+/// malformed helper invocations fail closed rather than starting the GUI.
+pub(in crate::updater) fn run_helper(args: &[OsString]) -> Option<ExitCode> {
+    if args.first().is_none_or(|arg| arg != HELPER) {
+        return None;
+    }
+    Some(if args.len() == 2 && helper(Path::new(&args[1])).is_ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+fn helper(stage: &Path) -> Result<()> {
     let cancel = AtomicBool::new(false);
     let installation = detect(&cancel)?;
     no_links(stage)?;

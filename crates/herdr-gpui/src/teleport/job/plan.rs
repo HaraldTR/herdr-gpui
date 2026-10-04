@@ -115,11 +115,7 @@ fn process_infos(
 }
 
 /// Choose what each pane becomes on a destination with `installed` programs.
-pub(crate) fn plan_action(
-    work: &Work,
-    installed: &[String],
-    note: impl FnOnce() -> String,
-) -> Action {
+fn plan_action(work: &Work, installed: &[String], note: impl FnOnce() -> String) -> Action {
     let has = |program: &str| installed.iter().any(|p| p == program);
     let fallback = || {
         AgentKind::FALLBACKS
@@ -284,3 +280,6 @@ fn plan_tab(
         panes,
     }
 }
+
+#[cfg(test)]
+mod tests;

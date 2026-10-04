@@ -1,5 +1,29 @@
 use super::*;
 
+fn archive(root: &Path, entries: &[(&str, u8, &str)]) -> anyhow::Result<PathBuf> {
+    let path = root.join("fixture.tar.gz");
+    let encoder = GzEncoder::new(File::create(&path)?, Compression::fast());
+    let mut archive = tar::Builder::new(encoder);
+    for (path, kind, content) in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o755);
+        header.set_entry_type(tar::EntryType::new(*kind));
+        let bytes = if *kind == b'0' {
+            content.as_bytes()
+        } else {
+            &[]
+        };
+        header.set_size(bytes.len() as u64);
+        if *kind == b'2' || *kind == b'1' {
+            header.set_link_name(content)?;
+        }
+        header.set_cksum();
+        archive.append_data(&mut header, path, bytes)?;
+    }
+    archive.into_inner()?.finish()?;
+    Ok(path)
+}
+
 #[test]
 fn linux_exact_payload_and_cancel() -> anyhow::Result<()> {
     let root = tempfile::tempdir()?;
@@ -139,5 +163,94 @@ fn digest_is_checked_before_extraction_and_staging_is_private() -> anyhow::Resul
     };
     assert!(candidate(stage.path(), &installation, &offer, &AtomicBool::new(false)).is_err());
     assert_eq!(fs::read_dir(stage.path())?.count(), 1);
+    Ok(())
+}
+
+#[test]
+fn bundle_distribution_permissions_are_shared_but_staging_stays_private() -> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("permissions.tar.gz");
+    let encoder = GzEncoder::new(File::create(&source)?, Compression::fast());
+    let mut archive = tar::Builder::new(encoder);
+    for (path, kind, mode, bytes) in [
+        (
+            "Herdr.app",
+            tar::EntryType::Directory,
+            0o7777,
+            b"".as_slice(),
+        ),
+        (
+            "Herdr.app/empty",
+            tar::EntryType::Directory,
+            0o700,
+            b"".as_slice(),
+        ),
+        (
+            "Herdr.app/Contents/MacOS/Herdr",
+            tar::EntryType::Regular,
+            0o6777,
+            b"executable bytes".as_slice(),
+        ),
+        (
+            "Herdr.app/Contents/Resources/config",
+            tar::EntryType::Regular,
+            0o6666,
+            b"resource bytes".as_slice(),
+        ),
+        (
+            "Herdr.app/Contents/Resources/current",
+            tar::EntryType::Symlink,
+            0o777,
+            b"".as_slice(),
+        ),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(kind);
+        header.set_mode(mode);
+        header.set_size(bytes.len() as u64);
+        if kind.is_symlink() {
+            header.set_link_name("config")?;
+        }
+        header.set_cksum();
+        archive.append_data(&mut header, path, bytes)?;
+    }
+    archive.into_inner()?.finish()?;
+    let stage = private_directory(root.path())?;
+    let tree = private_directory(stage.path())?;
+    let candidate = extract(
+        &source,
+        tree.path(),
+        Mode::Mac,
+        "unused",
+        &AtomicBool::new(false),
+    )?;
+    let installed = root.path().join("Installed.app");
+    fs::rename(candidate, &installed)?;
+    for path in [
+        "",
+        "empty",
+        "Contents",
+        "Contents/MacOS",
+        "Contents/Resources",
+    ] {
+        assert_eq!(
+            fs::metadata(installed.join(path))?.mode() & 0o7777,
+            0o755,
+            "{path}"
+        );
+    }
+    let executable = installed.join("Contents/MacOS/Herdr");
+    let resource = installed.join("Contents/Resources/config");
+    assert_eq!(fs::metadata(&executable)?.mode() & 0o7777, 0o755);
+    assert_eq!(fs::metadata(&resource)?.mode() & 0o7777, 0o644);
+    assert_eq!(fs::read(executable)?, b"executable bytes");
+    assert_eq!(fs::read(resource)?, b"resource bytes");
+    assert_eq!(
+        fs::read(installed.join("Contents/Resources/current"))?,
+        b"resource bytes"
+    );
+    for private in [stage.path(), tree.path()] {
+        assert_eq!(fs::metadata(private)?.mode() & 0o7777, 0o700);
+    }
     Ok(())
 }

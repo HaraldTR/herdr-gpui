@@ -5,9 +5,10 @@ use super::{store, tab_label};
 use crate::{
     HerdrWindow,
     browser::{
-        Location, Tab, TabId,
-        groups::{Pick, Slot},
+        Location, Store, Tab, TabId, WebUrl,
+        groups::{GroupId, Pick, Slot},
     },
+    window::Flash,
 };
 use gpui::{prelude::*, *};
 
@@ -393,5 +394,27 @@ impl HerdrWindow {
                     .children(panel),
             )
             .into_any_element()
+    }
+
+    fn submit_address(
+        &mut self,
+        group: GroupId,
+        id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = self.group_address(group, cx).read(cx).text().to_owned();
+        let Ok(url) = WebUrl::from_typed(&text) else {
+            self.show_flash(Flash::warning("Not an http or https address"), cx);
+            return;
+        };
+        let location = Location::Web { url };
+        Store::update(cx, |store| store.visited(id, Some(location.clone()), None));
+        #[cfg(any(target_os = "macos", windows))]
+        if self.browser.pages.contains(id) {
+            self.browser.pages.load(id, &location, cx);
+            self.browser.pages.focus(id, cx);
+        }
+        self.show_browser_tab_in(Some(group), id, window, cx);
     }
 }
