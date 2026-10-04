@@ -232,7 +232,8 @@ size = 12
 # hide_providers = []
 # Let providers listed in show_providers read their web session from Chrome
 # (and Brave, Edge, Arc, Chromium) or Safari when no cookie is set below.
-# Chrome asks once for Keychain access; Safari needs Full Disk Access.
+# Chrome makes macOS ask for Keychain access, so nothing is read until you
+# press Allow in that provider's usage panel; Safari needs Full Disk Access.
 # browser_cookies = true
 
 # --- usage providers: generated from each provider's settings ---

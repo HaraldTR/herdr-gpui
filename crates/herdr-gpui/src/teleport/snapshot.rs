@@ -167,6 +167,17 @@ pub(crate) struct Process {
 }
 
 impl ProcessInfo {
+    /// Every process in the foreground job; none while the shell itself is in
+    /// the foreground (an idle prompt).
+    pub(crate) fn foreground_pids(&self) -> Vec<u32> {
+        if self.foreground_process_group_id.is_none()
+            || self.foreground_process_group_id == self.shell_pid
+        {
+            return Vec::new();
+        }
+        self.foreground_processes.iter().map(|p| p.pid).collect()
+    }
+
     /// The foreground job's leader, or `None` while the shell itself is in
     /// the foreground (an idle prompt).
     pub(crate) fn foreground_job(&self) -> Option<&Process> {
@@ -288,11 +299,14 @@ mod tests {
         )
         .unwrap();
         assert!(info.foreground_job().is_none());
+        assert!(info.foreground_pids().is_empty());
         let info: ProcessInfo = serde_json::from_str(
             r#"{"foreground_process_group_id":9,"shell_pid":7,
                 "foreground_processes":[{"pid":12,"argv":["node","x"]},{"pid":9,"argv":["npm","run","dev"]}]}"#,
         )
         .unwrap();
         assert_eq!(info.foreground_job().unwrap().argv, ["npm", "run", "dev"]);
+        assert_eq!(info.foreground_pids(), [12, 9]);
+        assert!(ProcessInfo::default().foreground_pids().is_empty());
     }
 }

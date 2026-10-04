@@ -4,13 +4,14 @@ use super::{
     Reading, UsageConfig,
     cookies::CookieJar,
     model::{Account, Kind, Provider, Report, WEEK, Window},
-    probe::{Exec, Probe},
+    probe::{Consent, Exec, Probe},
     registry,
 };
 use crate::Error;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 mod browser_cookies;
+mod keychain_access;
 mod labels;
 mod provider_data;
 mod provider_settings;
@@ -33,4 +34,9 @@ fn report(provider: Provider, used: f64) -> Report {
         Account::default(),
         vec![Window::new(Kind::Session, used, None, None)],
     )
+}
+
+fn begin(usage: &mut super::Usage, host: &super::Host, now: Instant) {
+    usage.host = Some(host.clone());
+    usage.begin(host.clone(), now);
 }

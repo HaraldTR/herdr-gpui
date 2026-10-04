@@ -5,6 +5,7 @@
 //! switching back shows them at once and a failed refresh keeps the numbers it
 //! had, marked stale, rather than blanking them.
 
+mod access;
 mod cookies;
 mod icons;
 mod model;
@@ -21,6 +22,7 @@ mod values;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use access::KeychainGrants;
 pub(crate) use model::{Host, Provider};
 pub(crate) use panel::PANEL_WIDTH;
 pub(crate) use probe::Shell;
@@ -29,7 +31,7 @@ pub use settings::UsageConfig;
 
 use cookies::CookieJar;
 use model::Report;
-use probe::{Exec, Probe};
+use probe::{Consent, Exec, Probe};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, mpsc},
@@ -65,6 +67,18 @@ pub(crate) struct Reading {
     pub provider: Provider,
     pub report: Option<Report>,
     pub error: Option<String>,
+    /// Set when the sign-in sits behind a Keychain prompt the user has not
+    /// allowed, or denied, so the panel can offer to allow it.
+    pub access: Option<Access>,
+}
+
+/// Where a provider stands on a read that makes macOS ask.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Access {
+    /// Waiting for the user to press Allow.
+    Needed,
+    /// Allowed, then denied in the macOS prompt.
+    Denied,
 }
 
 #[derive(Default)]
@@ -93,7 +107,7 @@ impl Entry {
         let mut shown: Vec<&Reading> = self
             .readings
             .iter()
-            .filter(|reading| has_numbers(reading))
+            .filter(|reading| has_numbers(reading) || reading.access.is_some())
             .collect();
         // Stable: equally used providers keep the registry's order.
         shown.sort_by(|a, b| urgency(b).total_cmp(&urgency(a)));
@@ -142,8 +156,16 @@ enum Message {
     Done(Host, crate::Result<()>),
 }
 
+/// One read of one host.
+struct Job {
+    host: Host,
+    config: Arc<UsageConfig>,
+    granted: HashSet<Provider>,
+    retry: HashSet<Provider>,
+}
+
 struct Worker {
-    requests: mpsc::SyncSender<(Host, Arc<UsageConfig>)>,
+    requests: mpsc::SyncSender<Job>,
     results: mpsc::Receiver<Message>,
 }
 
@@ -158,6 +180,12 @@ pub(crate) struct Usage {
     /// The provider last picked in the panel, which leads the status bar on
     /// any host that has numbers for it.
     chosen: Option<Provider>,
+    /// Providers just allowed, whose remembered refusals the next read
+    /// forgets so macOS asks again.
+    retry: HashSet<Provider>,
+    /// Providers denied in a macOS prompt, for the window to take back the
+    /// saved grant.
+    denied: Vec<Provider>,
 }
 
 impl Usage {
@@ -181,6 +209,20 @@ impl Usage {
         self.host.is_some() && self.busy == self.host
     }
 
+    /// The user pressed Allow for `provider`: read the tracked host on the
+    /// next poll, even if it was just read, so macOS asks right away.
+    pub fn allow(&mut self, provider: Provider, now: Instant) {
+        self.retry.insert(provider);
+        if let Some(host) = self.host.clone() {
+            self.entries.entry(host).or_default().due = Some(now);
+        }
+    }
+
+    /// Providers denied since the last call, whose grants should be dropped.
+    pub fn take_denied(&mut self) -> Vec<Provider> {
+        std::mem::take(&mut self.denied)
+    }
+
     /// Reads the tracked host on the next poll, unless it was just read.
     pub fn refresh(&mut self, now: Instant) {
         let Some(host) = self.host.clone() else {
@@ -198,12 +240,14 @@ impl Usage {
     /// Follows `host` (None hides usage), takes finished answers, and starts
     /// the next read when it is due. Reads only start while `active`, so a
     /// background window costs no requests; a new config `revision` makes
-    /// every host due. Returns whether anything shown changed, including the
-    /// minute the reset countdowns count from.
+    /// every host due. `granted` lists the providers allowed to make macOS
+    /// ask. Returns whether anything shown changed, including the minute the
+    /// reset countdowns count from.
     pub fn poll(
         &mut self,
         host: Option<Host>,
         config: &UsageConfig,
+        granted: &HashSet<Provider>,
         revision: u64,
         active: bool,
         now: Instant,
@@ -244,12 +288,17 @@ impl Usage {
                 .is_some_and(|entry| !entry.readings.is_empty());
         }
         if active && self.busy.is_none() {
-            changed |= self.dispatch(config, now);
+            changed |= self.dispatch(config, granted, now);
         }
         changed
     }
 
-    fn dispatch(&mut self, config: &UsageConfig, now: Instant) -> bool {
+    fn dispatch(
+        &mut self,
+        config: &UsageConfig,
+        granted: &HashSet<Provider>,
+        now: Instant,
+    ) -> bool {
         let Some(host) = self.host.clone() else {
             return false;
         };
@@ -268,11 +317,15 @@ impl Usage {
             self.entries.entry(host).or_default().due = Some(now + ERROR_BACKOFF);
             return false;
         };
-        match worker
-            .requests
-            .try_send((host.clone(), Arc::new(config.clone())))
-        {
+        let job = Job {
+            host: host.clone(),
+            config: Arc::new(config.clone()),
+            granted: granted.clone(),
+            retry: self.retry.clone(),
+        };
+        match worker.requests.try_send(job) {
             Ok(()) => {
+                self.retry.clear();
                 self.begin(host, now);
                 true
             }
@@ -316,13 +369,23 @@ impl Usage {
                         provider,
                         report: Some(report),
                         error: None,
+                        access: None,
                     },
                     Err(error) => {
                         entry.rate_limited |= matches!(error, crate::Error::UsageRateLimited);
+                        let access = match error {
+                            crate::Error::UsageKeychainAccess => Some(Access::Needed),
+                            crate::Error::UsageKeychainDenied => Some(Access::Denied),
+                            _ => None,
+                        };
+                        if access == Some(Access::Denied) {
+                            self.denied.push(provider);
+                        }
                         Reading {
                             provider,
                             report: previous.and_then(|index| entry.readings[index].report.clone()),
                             error: Some(error.to_string()),
+                            access,
                         }
                     }
                 };
@@ -372,7 +435,7 @@ impl Usage {
 }
 
 fn spawn() -> Option<Worker> {
-    let (requests, incoming) = mpsc::sync_channel::<(Host, Arc<UsageConfig>)>(1);
+    let (requests, incoming) = mpsc::sync_channel::<Job>(1);
     let (outgoing, results) = mpsc::sync_channel(256);
     let spawned = thread::Builder::new()
         .name("herdr-usage".into())
@@ -380,12 +443,22 @@ fn spawn() -> Option<Worker> {
             // Browser cookie keys are kept for the worker's life, so a
             // browser asks for Keychain access once.
             let mut cookies = CookieJar::default();
-            for (host, config) in incoming {
-                let done = read(&host, &config, &mut cookies, |provider, report| {
-                    outgoing
-                        .send(Message::Reading(host.clone(), provider, report))
-                        .is_ok()
-                });
+            for job in incoming {
+                for provider in &job.retry {
+                    cookies.forgive(*provider);
+                }
+                let host = job.host;
+                let done = read(
+                    &host,
+                    &job.config,
+                    &job.granted,
+                    &mut cookies,
+                    |provider, report| {
+                        outgoing
+                            .send(Message::Reading(host.clone(), provider, report))
+                            .is_ok()
+                    },
+                );
                 if outgoing.send(Message::Done(host, done)).is_err() {
                     break;
                 }
@@ -402,10 +475,11 @@ fn spawn() -> Option<Worker> {
 
 /// Reads every provider on `host`, reporting each through `report` as it
 /// answers. A provider the config lists but the host has no sign-in for
-/// answers with what to set up.
+/// answers with what to set up, or that it waits on Keychain access.
 fn read(
     host: &Host,
     config: &UsageConfig,
+    granted: &HashSet<Provider>,
     cookies: &mut CookieJar,
     mut report: impl FnMut(Provider, crate::Result<Report>) -> bool,
 ) -> crate::Result<()> {
@@ -418,16 +492,26 @@ fn read(
             continue;
         }
         let requested = config.shown(provider);
+        let consent = match (
+            requested,
+            granted.contains(&provider),
+            config.browser_cookies,
+        ) {
+            (false, _, _) => Consent::Quiet,
+            (true, false, browsers) => Consent::Ask { browsers },
+            (true, true, false) => Consent::Keychain,
+            (true, true, true) => Consent::Browsers,
+        };
         let mut probe = Probe::new(
             &mut exec,
             provider,
             config.settings(provider),
             cookies,
-            requested && config.browser_cookies,
+            consent,
         );
         let answer = match provider.service().fetch(&mut probe) {
             Some(answer) => answer,
-            None if requested => Err(crate::Error::UsageNotSignedIn),
+            None if requested => Err(probe.missing()),
             None => continue,
         };
         if !report(provider, answer) {
