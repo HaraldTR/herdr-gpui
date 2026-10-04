@@ -188,7 +188,7 @@ fn process_text_is_bounded_and_has_no_control_characters() {
 fn kill_signals_only_the_exact_process_chosen() {
     use std::os::unix::process::ExitStatusExt;
     let mut system = System::new();
-    system.refresh_processes_specifics(ProcessesToUpdate::All, ProcessRefreshKind::new());
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
     let me = identity(system.process(Pid::from_u32(std::process::id())).unwrap());
     let spawn = || {
         std::process::Command::new("sleep")
@@ -198,7 +198,7 @@ fn kill_signals_only_the_exact_process_chosen() {
     };
     let mut kept = spawn();
     let mut ended = spawn();
-    system.refresh_processes_specifics(ProcessesToUpdate::All, ProcessRefreshKind::new());
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
     let of =
         |child: &std::process::Child| identity(system.process(Pid::from_u32(child.id())).unwrap());
     let (kept_id, ended_id) = (of(&kept), of(&ended));
