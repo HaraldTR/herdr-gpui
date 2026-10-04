@@ -348,7 +348,7 @@ impl HerdrWindow {
                     .font_weight(FontWeight::SEMIBOLD).child("Add session"))
                     .child(div().text_color(rgb(theme.muted)).child(format!("On {destination}")))
                     .child(input.clone())
-                    .child(div().text_color(rgb(theme.muted)).child("Creates and connects to a headless session. An existing name connects to that session."));
+                    .child(div().text_color(rgb(theme.subtext())).child("Creates and connects to a headless session. An existing name connects to that session."));
             }
             Some(Edit::Delete { row, .. }) => {
                 let name = match row {
@@ -363,7 +363,7 @@ impl HerdrWindow {
                             .child("Delete session?"),
                     )
                     .child(div().min_w_0().truncate().child(name.to_owned()))
-                    .child(div().text_color(rgb(theme.muted)).child(
+                    .child(div().text_color(rgb(theme.subtext())).child(
                         "Herdr will stop this session, terminate its running processes, and remove its saved state. If you are using it, this window switches to default. This cannot be undone.",
                     ));
             }

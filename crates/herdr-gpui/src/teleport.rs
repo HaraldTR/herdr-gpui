@@ -25,6 +25,7 @@ pub(crate) use marks::Destination as MarkDestination;
 pub(crate) use {
     job::{HostRepositories, Place, Repository, Retired, Source},
     marks::{Mark, Marks},
+    snapshot::{Envelope, ProcessInfo, ProcessInfoResult},
     ui::{Follow, Teleport},
 };
 

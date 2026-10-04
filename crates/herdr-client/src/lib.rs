@@ -9,6 +9,7 @@ mod connect;
 mod discovery;
 mod error;
 mod event;
+mod forward;
 mod frame;
 mod handle;
 mod host_theme;
@@ -45,6 +46,7 @@ pub use discovery::{ConnectTarget, session_socket};
 pub use error::Error as SendError;
 pub use error::{Error, Result, StorageOperation};
 pub use event::ClientEvent;
+pub use forward::{ForwardEvent, PortForward, preferred_local_port};
 pub use handle::{Client, ClientHandle};
 pub use host_theme::HostTheme;
 pub use method::Method;
@@ -57,7 +59,8 @@ pub use sessions::{
 #[cfg(unix)]
 pub use ssh::script_command;
 pub use ssh::{
-    Destination, HostProbe, probe_host, remote_config_value, remote_origin_url, resolve_destination,
+    Destination, FORWARD_READY, HostProbe, forward_command, probe_host, remote_config_value,
+    remote_origin_url, resolve_destination,
 };
 pub use surface_images::{
     MAX_IMAGE_BYTES, MAX_IMAGE_SIDE, MAX_IMAGES, MAX_PLACEMENTS, SurfaceImage, SurfaceImages,

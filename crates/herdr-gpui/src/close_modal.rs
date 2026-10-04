@@ -256,7 +256,7 @@ impl HerdrWindow {
         div().p(px(12.)).flex().flex_col().gap(px(12.))
             .child(div().text_size(px(self.config.ui.size * 1.35)).font_weight(FontWeight::SEMIBOLD).child(format!("Close {kind}?")))
             .child(div().child(close.label.clone()))
-            .child(div().text_color(rgb(theme.muted)).child(if close.pane.is_some() {
+            .child(div().text_color(rgb(theme.subtext())).child(if close.pane.is_some() {
                 "This terminates the pane and its running processes. This cannot be undone."
             } else { "This terminates every pane and running process in this tab. This cannot be undone." }))
             .when_some(close.error.clone(), |panel, error| panel.child(div().bg(rgb(theme.active)).p(px(8.)).child(error)))

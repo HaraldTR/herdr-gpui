@@ -3,6 +3,8 @@ use gpui::{prelude::*, *};
 use herdr_client::{Method, protocol::ClientShellSnapshot};
 use serde_json::{Value, json};
 
+mod processes;
+
 #[cfg(test)]
 mod tests;
 
@@ -86,6 +88,7 @@ enum Action {
     Zoom,
     EditScrollback,
     RightClick,
+    Processes,
     Close,
 }
 
@@ -119,7 +122,7 @@ impl Action {
                     "right_click": if target.right_click_passthrough { "herdr" } else { "pane" },
                 }),
             ),
-            Self::Rename | Self::EditScrollback | Self::Close => return None,
+            Self::Rename | Self::EditScrollback | Self::Processes | Self::Close => return None,
         })
     }
 
@@ -134,12 +137,13 @@ impl Action {
             Self::EditScrollback => "Open Scrollback in Editor",
             Self::RightClick if target.right_click_passthrough => "Open This Menu on Right-Click",
             Self::RightClick => "Send Right-Clicks to Pane",
+            Self::Processes => "Processes",
             Self::Close => "Close",
         }
     }
 }
 
-const ACTIONS: [Action; 8] = [
+const ACTIONS: [Action; 9] = [
     Action::Rename,
     Action::SplitRight,
     Action::SplitDown,
@@ -147,15 +151,21 @@ const ACTIONS: [Action; 8] = [
     Action::Zoom,
     Action::EditScrollback,
     Action::RightClick,
+    Action::Processes,
     Action::Close,
 ];
 
 impl PaneMenu {
-    /// The rows this menu offers: a swap needs another pane to trade with.
+    /// The rows this menu offers: a swap needs another pane to trade with,
+    /// and a process list needs the pane's processes on this machine.
     fn actions(&self) -> Vec<Action> {
         ACTIONS
             .into_iter()
-            .filter(|action| !matches!(action, Action::Swap) || self.target.focused.is_some())
+            .filter(|action| match action {
+                Action::Swap => self.target.focused.is_some(),
+                Action::Processes => self.daemon.is_some(),
+                _ => true,
+            })
             .collect()
     }
 }
@@ -166,6 +176,9 @@ pub(super) struct PaneMenu {
     input: Option<Entity<SearchInput>>,
     pending: Option<String>,
     error: Option<String>,
+    /// The daemon to ask for the pane's processes, when they run here.
+    daemon: Option<crate::processes::Daemon>,
+    processes: Option<processes::PaneProcesses>,
 }
 
 impl HerdrWindow {
@@ -213,6 +226,9 @@ impl HerdrWindow {
         if !self.open_menu(window, cx) {
             return;
         }
+        let daemon = crate::processes::Daemon::for_target(
+            &self.endpoints[self.selected_endpoint].connection.target,
+        );
         self.menu.anchor = anchor;
         self.menu.page = Some(Page::Pane);
         self.menu.pane = Some(PaneMenu {
@@ -221,6 +237,8 @@ impl HerdrWindow {
             input: None,
             pending: None,
             error: None,
+            daemon,
+            processes: None,
         });
     }
 
@@ -315,6 +333,7 @@ impl HerdrWindow {
                     cx.notify();
                 }
             }
+            Action::Processes => self.open_pane_processes(cx),
             Action::EditScrollback => {
                 let result = (|| {
                     if !self.live.supports_edit_scrollback {
@@ -478,6 +497,19 @@ impl HerdrWindow {
             return;
         };
         let key = event.keystroke.key.as_str();
+        if matches!(
+            self.menu.page,
+            Some(Page::PaneProcesses | Page::KillProcesses)
+        ) {
+            if key == "escape" && self.menu.page == Some(Page::PaneProcesses) {
+                self.dismiss_menu(window, cx);
+            } else if !self.pane_processes_key(key, cx) {
+                return;
+            }
+            cx.stop_propagation();
+            window.prevent_default();
+            return;
+        }
         if self.menu.page == Some(Page::RenamePane)
             && pane.pending.is_none()
             && (pane
@@ -521,6 +553,11 @@ impl HerdrWindow {
         let Some(pane) = &self.menu.pane else {
             return div();
         };
+        match self.menu.page {
+            Some(Page::PaneProcesses) => return self.render_pane_processes(pane, cx),
+            Some(Page::KillProcesses) => return self.render_kill_processes(pane, cx),
+            _ => {}
+        }
         let mut body = div().flex().flex_col();
         if self.menu.page == Some(Page::Pane) {
             for (index, action) in pane.actions().into_iter().enumerate() {
@@ -554,7 +591,11 @@ impl HerdrWindow {
                 body.p(px(8.))
                     .gap(px(12.))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("Rename pane"))
-                    .child(div().child("Leave blank to clear the custom label."))
+                    .child(
+                        div()
+                            .text_color(rgb(self.theme.subtext()))
+                            .child("Leave blank to clear the custom label."),
+                    )
                     .when_some(pane.input.clone(), |body, input| {
                         if pane.pending.is_some() {
                             body.child(div().child(input.read(cx).text().to_owned()))

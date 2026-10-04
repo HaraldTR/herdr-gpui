@@ -157,6 +157,11 @@ pub(crate) struct HerdrWindow {
     pub(crate) pr_actions: crate::pr_actions::Actions,
     pub(crate) usage: crate::usage::Usage,
     pub(crate) system_load: crate::system_load::SystemLoad,
+    /// Remote ports forwarded to this machine; they end with the window.
+    pub(crate) port_forwards: crate::port_forward::PortForwards,
+    pub(crate) listening_ports: crate::listening_ports::ListeningPorts,
+    /// SSH tunnels to remote ports that listen on their host's loopback only.
+    pub(crate) tunnels: crate::listening_ports::Tunnels,
     pub(crate) install_warning_shown: bool,
     pub(crate) collapsed_repos: std::collections::HashSet<String>,
     /// Expanded; collapsed leaves the rail or nothing, as Herdr's
@@ -388,6 +393,7 @@ impl HerdrWindow {
         }
         self.poll_tab_rename(window, cx);
         self.poll_pane_rename(window, cx);
+        self.poll_pane_processes(cx);
         if old_pane
             != self
                 .live
@@ -404,10 +410,14 @@ impl HerdrWindow {
         if self.update_git() {
             cx.notify();
         }
-        if self.update_usage() {
+        if self.update_usage(cx) {
             cx.notify();
         }
         if self.update_system_load() {
+            cx.notify();
+        }
+        self.update_port_forwards(cx);
+        if self.update_listening_ports() {
             cx.notify();
         }
         if self.live.missing_installation && !self.install_warning_shown {
@@ -422,7 +432,7 @@ impl HerdrWindow {
 
     /// Plan usage follows the selected host: a remote host reports its own
     /// agents' sign-ins, never this machine's.
-    fn update_usage(&mut self) -> bool {
+    fn update_usage(&mut self, cx: &mut Context<Self>) -> bool {
         let host = self
             .config
             .usage
@@ -430,25 +440,54 @@ impl HerdrWindow {
             .then(|| self.endpoints.get(self.selected_endpoint))
             .flatten()
             .map(|endpoint| crate::usage::Host::from(&endpoint.connection.target));
-        self.usage.poll(
+        let granted = crate::usage::KeychainGrants::granted(cx);
+        let changed = self.usage.poll(
             host,
             &self.config.usage,
+            &granted,
             self.config_load_revision,
             self.active,
             std::time::Instant::now(),
-        )
+        );
+        // A denied prompt takes the grant back, so a later launch does not
+        // ask again in the background.
+        for provider in self.usage.take_denied() {
+            crate::usage::KeychainGrants::revoke(provider, cx);
+        }
+        changed
     }
 
-    /// CPU and memory are sampled for every enabled host: this machine
-    /// always, a remote host while it is connected, so a dropped host is not
-    /// dialled every few seconds.
+    /// CPU and memory are sampled for every enabled host.
     fn update_system_load(&mut self) -> bool {
-        let hosts = self
-            .config
-            .show_system_load
-            .then_some(self.endpoints.iter().enumerate())
-            .into_iter()
-            .flatten()
+        if !self.config.show_system_load {
+            return self.system_load.poll(Vec::new());
+        }
+        let hosts = self.watched_hosts();
+        self.system_load.poll(hosts)
+    }
+
+    /// Listening ports are scanned on the same hosts as CPU and memory.
+    fn update_listening_ports(&mut self) -> bool {
+        if !self.config.show_listening_ports {
+            self.tunnels = Default::default();
+            return self.listening_ports.poll(Vec::new());
+        }
+        let hosts = self.watched_hosts();
+        let changed = self.listening_ports.poll(hosts);
+        // A tunnel lives as long as its remote port is listed.
+        let ports = &self.listening_ports;
+        self.tunnels
+            .retain(|key| ports.listening(&crate::usage::Host::Ssh(key.target.clone()), key.port));
+        changed
+    }
+
+    /// The machines background monitors watch: this one always, a remote
+    /// host while it is connected, so a dropped host is not dialled every
+    /// few seconds.
+    fn watched_hosts(&self) -> Vec<crate::usage::Host> {
+        self.endpoints
+            .iter()
+            .enumerate()
             .filter(|(index, endpoint)| {
                 let live = if *index == self.selected_endpoint {
                     &self.live
@@ -459,8 +498,35 @@ impl HerdrWindow {
                     && (live.status.is_connected()
                         || !matches!(endpoint.connection.target, ConnectTarget::Ssh { .. }))
             })
-            .map(|(_, endpoint)| crate::usage::Host::from(&endpoint.connection.target));
-        self.system_load.poll(hosts)
+            .map(|(_, endpoint)| crate::usage::Host::from(&endpoint.connection.target))
+            .collect()
+    }
+
+    /// Forwards outlive a dropped connection, since SSH may still reach the
+    /// host, but end once their host is removed or disabled. A report the
+    /// user did not just ask for is flashed.
+    pub(crate) fn update_port_forwards(&mut self, cx: &mut Context<Self>) {
+        let endpoints = &self.endpoints;
+        let mut changed = self.port_forwards.retain_hosts(|target| {
+            endpoints.iter().any(|endpoint| {
+                endpoint.enabled
+                    && endpoint
+                        .saved_ssh()
+                        .is_some_and(|(saved, _)| saved == target)
+            })
+        });
+        let notices = self.port_forwards.poll();
+        if let Some(notice) = notices.last() {
+            let flash = match notice {
+                crate::port_forward::Notice::Listening { .. } => Flash::success(notice.text()),
+                crate::port_forward::Notice::Ended { .. } => Flash::warning(notice.text()),
+            };
+            self.show_flash(flash, cx);
+            changed = true;
+        }
+        if changed {
+            cx.notify();
+        }
     }
 
     /// The machine the selected endpoint runs on.
@@ -598,6 +664,9 @@ impl HerdrWindow {
             pr_actions: Default::default(),
             usage: Default::default(),
             system_load: Default::default(),
+            port_forwards: Default::default(),
+            listening_ports: Default::default(),
+            tunnels: Default::default(),
             install_warning_shown: false,
             collapsed_repos: Default::default(),
             sidebar_visible: true,
@@ -655,6 +724,13 @@ impl HerdrWindow {
                 cx.notify();
             }),
         };
+        // Quitting need not drop this window, so its SSH children are killed
+        // here rather than left forwarding after the app is gone.
+        cx.on_app_quit(|this, _| {
+            this.port_forwards.stop_all();
+            async {}
+        })
+        .detach();
         #[cfg(feature = "integration-test")]
         if sidebar_test {
             this._poll = Task::ready(());

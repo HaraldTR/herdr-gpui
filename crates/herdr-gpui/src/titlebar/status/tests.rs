@@ -132,7 +132,9 @@ fn header_keeps_controls_reachable(cx: &mut TestAppContext) {
         assert!(git.right() <= avatar.left());
         assert_eq!(avatar.right(), px(width - 6.));
         let status = cx.debug_bounds("titlebar-status").unwrap();
-        assert!(status.left() >= px(80.));
+        // Clear of the leading controls, whatever room the platform
+        // leaves before them.
+        assert!(status.left() >= cx.debug_bounds("toggle-sidebar").unwrap().right());
         assert!(status.right() <= git.left());
     }
 }

@@ -616,7 +616,7 @@ impl HerdrWindow {
             .py(px(12.))
             .child(
                 div()
-                    .text_color(rgb(theme.muted))
+                    .text_color(rgb(theme.subtext()))
                     .child("Stages every change in the checkout, then commits."),
             )
             .child(

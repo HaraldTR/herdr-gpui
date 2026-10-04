@@ -224,7 +224,7 @@ impl HerdrWindow {
                     )
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(message))
                     .children(update_progress(state, accent.into(), rgb(theme.active).into()))
-                    .child(div().text_color(rgb(theme.muted)).child(
+                    .child(div().text_color(rgb(theme.subtext())).child(
                         "Downloads are verified before installation. Your daemon and terminal sessions stay running.",
                     ))
                     .when(self.update_preview.is_some(), |body| {
@@ -235,7 +235,7 @@ impl HerdrWindow {
                                 .rounded(px(crate::config::corners::CONTROL))
                                 .bg(rgb(theme.background))
                                 .child(div().font_weight(FontWeight::SEMIBOLD).child("QA preview"))
-                                .child(div().pt(px(4.)).text_color(rgb(theme.muted)).child(
+                                .child(div().pt(px(4.)).text_color(rgb(theme.subtext())).child(
                                     "Synthetic update state only. No network or installation is performed. Close or Escape dismisses this preview.",
                                 )),
                         )
