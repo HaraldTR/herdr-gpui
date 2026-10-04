@@ -63,13 +63,16 @@ fn tab_icon_bounds_and_inactive_cross_confirmation(cx: &mut TestAppContext) {
         view.live.snapshot = Some(Arc::new(snapshot));
         view
     });
-    for width in [800., 360.] {
+    // The window's least width still leaves both tabs room beside the title bar's
+    // drag room and account slot.
+    for width in [800., 640.] {
         cx.simulate_resize(size(px(width), px(600.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let button = cx.debug_bounds("new-tab").unwrap();
         let icon = cx.debug_bounds("new-tab-icon").unwrap();
         assert!(button.size.width >= px(34.));
-        assert_eq!(button.size.height, px(24.));
+        // As tall as the strip, which stands in for the title bar.
+        assert_eq!(button.size.height, px(crate::titlebar::HEIGHT));
         assert_eq!(icon.size, size(px(14.), px(14.)));
         // Centred within the content box, which the divider insets by a pixel.
         assert!((button.center().x - icon.center().x).abs() <= px(1.));
