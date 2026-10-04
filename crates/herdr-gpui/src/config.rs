@@ -98,6 +98,9 @@ pub struct Config {
     pub usage: crate::usage::UsageConfig,
     pub option_as_alt: OptionAsAlt,
     pub open_links_in: LinkTarget,
+    /// Whether a terminal selection stays highlighted, and readable by
+    /// selection tools, after it is copied.
+    pub keep_selection_after_copy: bool,
     pub sidebar: FontConfig,
     pub tabs: FontConfig,
     pub terminal: FontConfig,
@@ -117,6 +120,7 @@ pub struct Config {
     pub(crate) keybinding_overrides: BTreeMap<String, Binding>,
     /// Per saved device, by catalog profile ID.
     pub(crate) devices: BTreeMap<String, DeviceSettings>,
+    pub palette: crate::palette::PaletteConfig,
     /// Keys the file names that this build does not know, sorted. They are
     /// ignored, as Herdr ignores its own, so a config written by a newer
     /// build or with a typo still loads; `diagnostic` reports them.
@@ -737,6 +741,7 @@ impl Default for Config {
             usage: crate::usage::UsageConfig::default(),
             option_as_alt: OptionAsAlt::default(),
             open_links_in: LinkTarget::default(),
+            keep_selection_after_copy: true,
             features: Features::default(),
             notifications: NotificationConfig::default(),
             notification_overrides: NotificationSettings::default(),
@@ -748,6 +753,7 @@ impl Default for Config {
             keybinding_overrides: BTreeMap::new(),
             devices: BTreeMap::new(),
             unknown_keys: Vec::new(),
+            palette: crate::palette::PaletteConfig::default(),
             sidebar: font(monospace, 12.0),
             // Tabs are terminal chrome, so they read in the monospace face the
             // sidebar and terminal use, as they do in the reference UI.
@@ -769,6 +775,7 @@ struct Settings {
     usage: crate::usage::UsageConfig,
     option_as_alt: OptionAsAlt,
     open_links_in: LinkTarget,
+    keep_selection_after_copy: Option<bool>,
     sidebar: FontSettings,
     tabs: FontSettings,
     terminal: FontSettings,
@@ -781,6 +788,7 @@ struct Settings {
     layout: Layout,
     keybindings: BTreeMap<String, Binding>,
     devices: BTreeMap<String, DeviceSettings>,
+    palette: crate::palette::PaletteConfig,
 }
 
 /// Each key overrides the daemon's answer on its own, so naming one of them
@@ -1214,6 +1222,8 @@ impl Config {
             return Err(Error::TooManyDevices(MAX_DEVICES));
         }
         config.devices = settings.devices;
+        settings.palette.validate()?;
+        config.palette = settings.palette;
         if let Some(theme) = settings.theme {
             if theme.trim().is_empty() {
                 return Err(Error::EmptyTheme);
@@ -1227,6 +1237,7 @@ impl Config {
         config.usage = settings.usage;
         config.option_as_alt = settings.option_as_alt;
         config.open_links_in = settings.open_links_in;
+        config.keep_selection_after_copy = settings.keep_selection_after_copy.unwrap_or(true);
         for (name, font, settings) in [
             ("sidebar", &mut config.sidebar, settings.sidebar),
             ("tabs", &mut config.tabs, settings.tabs),
@@ -1927,6 +1938,37 @@ impl Theme {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn palette_defaults_overrides_and_validation() -> anyhow::Result<()> {
+        let defaults = Config::parse("")?;
+        assert!(defaults.palette.double_shift);
+        assert!(defaults.palette.project_roots.is_empty());
+        let config = Config::parse(
+            "[palette]\ndouble_shift = false\nproject_roots = ['~/Code', '$HOME/Projects']",
+        )?;
+        assert!(!config.palette.double_shift);
+        assert_eq!(config.palette.project_roots, ["~/Code", "$HOME/Projects"]);
+        for text in [
+            "[palette]\nproject_roots = ['']",
+            "[palette]\nproject_roots = ['   ']",
+            "[palette]\nproject_roots = ['x', 1]",
+            "[palette]\ndouble_shift = 'yes'",
+        ] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
+        assert_eq!(
+            Config::parse("[palette]\nunknown = true")?.unknown_keys,
+            ["palette.unknown"]
+        );
+        assert!(matches!(
+            Config::parse(&format!(
+                "[palette]\nproject_roots = [{}]",
+                vec!["'x'"; 17].join(",")
+            )),
+            Err(Error::PaletteProjectRoots)
+        ));
+        Ok(())
+    }
     use super::*;
     use anyhow::Context as _;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -3081,6 +3123,15 @@ mod tests {
             LinkTarget::BrowserTab
         );
         assert!(Config::parse("open_links_in = \"tab\"").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn selections_stay_after_copy_unless_configured() -> anyhow::Result<()> {
+        assert!(Config::parse("")?.keep_selection_after_copy);
+        assert!(Config::parse(DEFAULT_CONFIG)?.keep_selection_after_copy);
+        assert!(!Config::parse("keep_selection_after_copy = false")?.keep_selection_after_copy);
+        assert!(Config::parse("keep_selection_after_copy = 'no'").is_err());
         Ok(())
     }
 

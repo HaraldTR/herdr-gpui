@@ -1602,6 +1602,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         prefix_armed: false,
         resize_mode: false,
         server_keys: None,
+        shift_taps: Default::default(),
         _prefix_interceptor: HerdrWindow::intercept_prefix(window, cx),
     }
 }
@@ -1614,7 +1615,9 @@ fn palette_rejects_changed_endpoint_epoch_or_generation(cx: &mut gpui::TestAppCo
     });
     for reconnect in [false, true] {
         cx.update(|window, cx| {
-            view.update(cx, |view, cx| view.open_palette(false, window, cx));
+            view.update(cx, |view, cx| {
+                view.open_palette(crate::palette::Filter::All, window, cx)
+            });
             full_draw(window, cx).clear(cx);
         });
         cx.simulate_input("toggle sidebar");

@@ -296,7 +296,10 @@ impl HerdrWindow {
             ("APPLICATION", vec![(vec!["cmd-v"], "Paste into terminal")]),
         ];
         for info in COMMANDS {
-            let keys: Vec<&str> = self.keymap().shortcuts(info.command).collect();
+            let mut keys: Vec<&str> = self.keymap().shortcuts(info.command).collect();
+            if info.command == Command::Palette && self.config.palette.double_shift {
+                keys.push("shift shift");
+            }
             if keys.is_empty() {
                 continue;
             }
