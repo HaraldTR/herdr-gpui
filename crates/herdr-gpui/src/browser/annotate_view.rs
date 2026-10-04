@@ -3,12 +3,9 @@
 //! notes are written in the app, never in the page, and nothing reaches an
 //! agent until the user presses Send.
 use super::{
-    Tab, TabId,
+    TabId,
     annotate::{self, Anchor, MAX_NOTES, Note, Rect, Report},
 };
-/// The notes panel's width beside the page.
-pub(super) const ANNOTATIONS_WIDTH: f32 = 300.;
-
 use crate::{
     HerdrWindow,
     motion::{self, ENTER, Toggle},
@@ -16,15 +13,14 @@ use crate::{
     window::Flash,
 };
 use gpui::{prelude::*, *};
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::Arc,
-    time::{Duration, Instant, SystemTime},
-};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
-/// Screenshots older than this are removed when the next ones are saved.
-const SCREENSHOT_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+mod delivery;
+mod panel;
+mod screenshots;
+
+/// The notes panel's width beside the page.
+pub(super) const ANNOTATIONS_WIDTH: f32 = 300.;
 
 /// What the next note will be about, picked but not yet written, and its
 /// screenshot once WebKit delivers it.
@@ -145,66 +141,6 @@ impl Annotations {
                 .flatten()
                 .any(|since| motion::progress(*since, now, ENTER).is_some())
     }
-}
-
-/// Writes the notes' screenshots where the agent can read them, returning
-/// each note's file. They live in the app's private state folder, and ones
-/// older than a week are removed first. Blocking; run off the UI thread.
-fn save_screenshots(images: &[Option<Arc<Image>>]) -> crate::Result<Vec<Option<PathBuf>>> {
-    let dir = crate::preferences::state_dir()
-        .ok_or(crate::Error::MissingStateRoot)?
-        .join("annotations");
-    save_screenshots_in(&dir, images, SystemTime::now())
-}
-
-fn save_screenshots_in(
-    dir: &std::path::Path,
-    images: &[Option<Arc<Image>>],
-    now: SystemTime,
-) -> crate::Result<Vec<Option<PathBuf>>> {
-    std::fs::create_dir_all(dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let old = entry
-                .metadata()
-                .and_then(|metadata| metadata.modified())
-                .ok()
-                .and_then(|modified| now.duration_since(modified).ok())
-                .is_some_and(|age| age > SCREENSHOT_AGE);
-            if old {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
-    }
-    let stamp = now
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|since| since.as_millis())
-        .unwrap_or_default();
-    images
-        .iter()
-        .enumerate()
-        .map(|(index, image)| {
-            let Some(image) = image else {
-                return Ok(None);
-            };
-            let path = dir.join(format!("note-{stamp}-{}.png", index + 1));
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            use std::io::Write as _;
-            options.open(&path)?.write_all(&image.bytes)?;
-            Ok(Some(path))
-        })
-        .collect()
 }
 
 impl HerdrWindow {
@@ -452,310 +388,17 @@ impl HerdrWindow {
         cx.notify();
     }
 
-    /// The queued notes as a prompt, after their screenshots are saved to
-    /// files the agent can read. Saving runs off the UI thread; `then` gets
-    /// the prompt back on it.
-    fn with_notes_prompt(
-        &mut self,
-        tab: &Tab,
-        cx: &mut Context<Self>,
-        then: impl FnOnce(&mut Self, String, &mut Context<Self>) + 'static,
-    ) {
-        let notes = self.tab_notes(tab.id).notes.clone();
-        if notes.is_empty() {
-            return;
-        }
-        let reload = crate::control::reload_command();
-        if notes.iter().all(|note| note.image.is_none()) {
-            let text = annotate::prompt(tab, &notes, &[], &reload);
-            then(self, text, cx);
-            return;
-        }
-        let images: Vec<Option<Arc<Image>>> = notes.iter().map(|note| note.image.clone()).collect();
-        let saving = cx
-            .background_executor()
-            .spawn(async move { save_screenshots(&images) });
-        let tab = tab.clone();
-        cx.spawn(async move |this, cx| {
-            let paths = saving.await;
-            this.update(cx, |this, cx| {
-                let paths = paths.unwrap_or_else(|error| {
-                    tracing::warn!(%error, "Could not save note screenshots");
-                    this.show_flash(Flash::warning("Screenshots could not be saved"), cx);
-                    Vec::new()
-                });
-                let text = annotate::prompt(&tab, &notes, &paths, &reload);
-                then(this, text, cx);
-            })
-            .ok();
-        })
-        .detach();
-    }
-
     fn clear_notes(&mut self, id: TabId, cx: &mut Context<Self>) {
         self.tab_notes(id).notes.clear();
         self.refresh_markers(id, cx);
         cx.notify();
-    }
-
-    fn copy_notes(&mut self, tab: &Tab, cx: &mut Context<Self>) {
-        self.with_notes_prompt(tab, cx, |this, text, cx| {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-            this.show_flash(Flash::success("Notes copied"), cx);
-        });
-    }
-
-    /// Sends the queued notes to the agent that opened the page: to it
-    /// directly when it waits in `browser feedback`, otherwise into its pane
-    /// once it is idle, and kept for `browser feedback` when its pane is gone.
-    pub(super) fn send_notes(&mut self, tab: &Tab, cx: &mut Context<Self>) {
-        // The queue is cleared at once, so a second Send cannot repeat it
-        // while screenshots are still being saved.
-        let pane_id = tab.origin.clone();
-        let here = super::view::scope(&self.endpoints[self.selected_endpoint]) == tab.scope;
-        self.with_notes_prompt(tab, cx, move |this, text, cx| {
-            this.deliver_notes(pane_id, here, text, cx);
-        });
-        self.clear_notes(tab.id, cx);
-    }
-
-    /// The notes panel beside the page.
-    pub(crate) fn render_annotations(&mut self, tab: &Tab, cx: &mut Context<Self>) -> AnyElement {
-        let id = tab.id;
-        let theme = self.theme.clone();
-        let armed = self.browser.annotations.armed(id);
-        let notes = self.tab_notes(id);
-        let regions = notes.regions;
-        let pending = notes.pending.as_ref().map(|draft| {
-            (
-                draft.anchor.summary(),
-                draft.image.clone(),
-                draft.capture.is_some(),
-            )
-        });
-        let list: Vec<(usize, Note)> = notes.notes.iter().cloned().enumerate().collect();
-        let now = Instant::now();
-        self.browser.annotations.observe_notes(id, list.len(), now);
-        let origin = tab.origin.is_some();
-        let tab_for_send = tab.clone();
-        let tab_for_copy = tab.clone();
-        let button = |id: &'static str, label: &'static str, primary: bool| {
-            let background = if primary {
-                theme.primary()
-            } else {
-                theme.active
-            };
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .px_2()
-                .py_1()
-                .rounded(px(crate::config::corners::CONTROL))
-                .cursor_pointer()
-                .bg(rgb(background))
-                .text_color(rgb(theme.text_on(background)))
-                .child(label)
-        };
-        let thumbnail = |image: Arc<Image>| {
-            img(image)
-                .max_w_full()
-                .max_h(px(96.))
-                .rounded(px(crate::config::corners::CONTROL))
-                .border_1()
-                .border_color(rgb(theme.active))
-        };
-        let composer = pending.map(|(summary, image, capturing)| {
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .p_2()
-                .border_b_1()
-                .border_color(rgb(theme.active))
-                .child(div().text_color(rgb(theme.muted)).truncate().child(summary))
-                .children(image.map(thumbnail))
-                .when(capturing, |draft| {
-                    draft.child(
-                        div()
-                            .text_color(rgb(theme.muted))
-                            .child("Taking a screenshot\u{2026}"),
-                    )
-                })
-                .child(
-                    div()
-                        .id("annotation-input")
-                        .debug_selector(|| "annotation-input".into())
-                        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                            match event.keystroke.key.as_str() {
-                                "enter" => this.add_note(id, window, cx),
-                                "escape" => {
-                                    this.tab_notes(id).pending = None;
-                                    window.focus(&this.focus, cx);
-                                    cx.notify();
-                                }
-                                _ => return,
-                            }
-                            cx.stop_propagation();
-                        }))
-                        .child(self.browser.annotations.input.clone()),
-                )
-                .child(div().flex().gap_1().child(
-                    button("annotation-add", "Add note", true).on_click(
-                        cx.listener(move |this, _, window, cx| this.add_note(id, window, cx)),
-                    ),
-                ))
-        });
-        let growth: Vec<Option<f32>> = (0..list.len())
-            .map(|index| self.browser.annotations.note_growth(id, index, now))
-            .collect();
-        let rows = list.into_iter().map(|(index, note)| {
-            div()
-                .id(("annotation-note", index))
-                // A new note opens into the list and fades in.
-                .when_some(growth[index], |row, k| {
-                    row.max_h(px(320. * k)).overflow_hidden().opacity(k)
-                })
-                .flex()
-                .gap_2()
-                .p_2()
-                .border_b_1()
-                .border_color(rgb(theme.active))
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(18.))
-                        .rounded_full()
-                        .bg(rgb(theme.palette[3]))
-                        .text_color(rgb(theme.text_on(theme.palette[3])))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child((index + 1).to_string()),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_color(rgb(theme.muted))
-                                .truncate()
-                                .child(note.anchor.summary()),
-                        )
-                        .child(div().child(note.comment))
-                        .children(note.image.clone().map(thumbnail)),
-                )
-                .child(
-                    div()
-                        .id(("annotation-remove", index))
-                        .flex_none()
-                        .size(px(18.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .rounded(px(crate::config::corners::CONTROL))
-                        .hover(|s| s.bg(rgb(theme.active)))
-                        .child(
-                            svg()
-                                .path("icons/close.svg")
-                                .size(px(12.))
-                                .text_color(rgb(theme.muted)),
-                        )
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.remove_note(id, index, cx)),
-                        ),
-                )
-        });
-        let has_notes = !self.tab_notes(id).notes.is_empty();
-        div()
-            .id("annotations")
-            .debug_selector(|| "annotations".into())
-            .flex_none()
-            .w(px(ANNOTATIONS_WIDTH))
-            .h_full()
-            .flex()
-            .flex_col()
-            .bg(rgb(theme.surface))
-            .border_l_1()
-            .border_color(rgb(theme.active))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .p_2()
-                    .border_b_1()
-                    .border_color(rgb(theme.active))
-                    .child("Notes")
-                    .child(
-                        div()
-                            .flex()
-                            .gap_1()
-                            .child(
-                                // Drag draws a region while this is on;
-                                // Shift-drag draws one either way.
-                                button("annotation-region", "Region", regions).on_click(
-                                    cx.listener(move |this, _, _, cx| this.toggle_regions(id, cx)),
-                                ),
-                            )
-                            .child(button("annotation-page", "Note on page", false).on_click(
-                                cx.listener(move |this, _, window, cx| {
-                                    this.begin_note(id, Anchor::Page, None, window, cx);
-                                }),
-                            )),
-                    ),
-            )
-            .children(composer)
-            .child(
-                div()
-                    .id("annotation-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .children(rows)
-                    .when(!has_notes && armed, |list| {
-                        list.child(
-                            div()
-                                .p_2()
-                                .text_color(rgb(theme.muted))
-                                .child("Click an element, select text, or Shift-drag a region in the page, then describe the change."),
-                        )
-                    }),
-            )
-            .when(has_notes, |panel| {
-                panel.child(
-                    div()
-                        .flex()
-                        .gap_1()
-                        .p_2()
-                        .border_t_1()
-                        .border_color(rgb(theme.active))
-                        .when(origin, |row| {
-                            row.child(button("annotation-send", "Send to agent", true).on_click(
-                                cx.listener(move |this, _, _, cx| this.send_notes(&tab_for_send, cx)),
-                            ))
-                        })
-                        .child(button("annotation-copy", "Copy", !origin).on_click(cx.listener(
-                            move |this, _, _, cx| this.copy_notes(&tab_for_copy, cx),
-                        ))),
-                )
-            })
-            .into_any_element()
     }
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::{Annotations, ENTER, Instant, SCREENSHOT_AGE, TabId, save_screenshots_in};
-    use gpui::{Image, ImageFormat};
-    use std::{
-        sync::Arc,
-        time::{Duration, SystemTime},
-    };
+    use super::{Annotations, ENTER, Instant, TabId};
 
     #[gpui::test]
     fn new_notes_grow_in_and_the_panel_slides(cx: &mut gpui::TestAppContext) {
@@ -788,43 +431,5 @@ mod tests {
             annotations.forget(id);
             assert!(!annotations.moving(start + ENTER));
         });
-    }
-
-    #[test]
-    fn screenshots_are_private_files_and_old_ones_go() {
-        let dir = tempfile::tempdir().unwrap();
-        let stale = dir.path().join("note-1-1.png");
-        std::fs::write(&stale, b"old").unwrap();
-        let week_ago = SystemTime::now() - SCREENSHOT_AGE - Duration::from_secs(60);
-        std::fs::File::options()
-            .write(true)
-            .open(&stale)
-            .unwrap()
-            .set_modified(week_ago)
-            .unwrap();
-        let image = Arc::new(Image::from_bytes(ImageFormat::Png, b"png bytes".to_vec()));
-        let paths =
-            save_screenshots_in(dir.path(), &[None, Some(image)], SystemTime::now()).unwrap();
-        assert!(paths[0].is_none());
-        let saved = paths[1].as_ref().unwrap();
-        assert_eq!(std::fs::read(saved).unwrap(), b"png bytes");
-        assert!(
-            saved
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .ends_with("-2.png")
-        );
-        assert!(!stale.exists());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = |path: &std::path::Path| {
-                std::fs::metadata(path).unwrap().permissions().mode() & 0o777
-            };
-            assert_eq!(mode(saved), 0o600);
-            assert_eq!(mode(dir.path()), 0o700);
-        }
     }
 }
