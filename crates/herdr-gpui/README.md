@@ -1266,6 +1266,29 @@ them to the agent that opened it, so it can change the page.
 - Tabs you open yourself have no agent to send to; **Copy** is offered
   instead.
 
+### Reviewing An Agent's Changes
+
+**Review changes...** in the title bar's Git popup shows the focused local
+checkout's uncommitted changes (`git diff HEAD`, plus untracked text files as
+wholly added) and lets you send review notes to the agent that made them,
+like inline comments on a pull request.
+
+- Click a line, added, removed or unchanged, or a file name, write what should
+  change, and press Enter or **Add note**. Escape drops the note being
+  written; a second Escape closes the review. Noted lines carry the note's
+  number. Unsent notes stay for the next look at the same checkout.
+- Notes go to the agent in the focused pane, or else to the first agent Herdr
+  reports in the focused workspace; the header names it. **Send to agent**
+  turns them into one prompt: the checkout, then for each note the
+  `path:line` (removed lines numbered as before the change), the quoted line,
+  and your note. It reaches the agent the same one way as page notes above,
+  including `browser feedback`. Without an agent, **Copy** is offered.
+- Git runs in the background, never on the UI thread, with explicit `a/`/`b/`
+  prefixes and no external diff tools or text conversion. Diff text is
+  cleaned of control characters and bounded (20,000 rows, 400 characters a
+  row, 64 untracked files up to 256 KiB each; links and binaries are not
+  read). Only the local daemon's checkouts can be reviewed.
+
 ### Local Pages
 
 `herdr-gpui browser open ./mockup.html` shows a local file. The app serves it,

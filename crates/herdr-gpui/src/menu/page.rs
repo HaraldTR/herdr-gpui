@@ -37,6 +37,8 @@ pub(crate) enum Page {
     /// Titlebar Git actions for the focused checkout, and its commit dialog.
     Git,
     GitCommit,
+    /// Reviewing the focused checkout's changes and noting them for its agent.
+    Review,
     Dialog(WorkspaceAction),
     /// Moving a linked worktree to another host.
     Teleport,

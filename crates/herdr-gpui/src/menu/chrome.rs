@@ -405,7 +405,7 @@ impl HerdrWindow {
             )
             .when(
                 !footer_anchored
-                    && !matches!(page, Page::Usage(_))
+                    && !matches!(page, Page::Usage(_) | Page::Review)
                     && !pointer_anchored
                     && !matches!(page, Page::Dialog(_)),
                 |panel| {
@@ -433,6 +433,7 @@ impl HerdrWindow {
                         | Page::AddDevice
                         | Page::Usage(_)
                         | Page::RenameDevice
+                        | Page::Review
                 ),
                 |panel| {
                     // Dialogs draw their own full-bleed header and footer rules,
@@ -457,6 +458,16 @@ impl HerdrWindow {
                         .shadow_lg()
                 },
             )
+            .when(page == Page::Review, |panel| {
+                // The diff wants the room a terminal had, less a frame.
+                panel
+                    .w((viewport.width - px(48.)).max(px(0.)).min(px(1400.)))
+                    .h((viewport.height - px(48.)).max(px(0.)))
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .shadow_lg()
+            })
             .when(page == Page::GitHub, |panel| {
                 panel
                     .w((viewport.width - px(32.)).max(px(0.)).min(px(400.)))
@@ -636,6 +647,8 @@ impl HerdrWindow {
             panel = panel.child(self.render_git_menu(cx));
         } else if page == Page::GitCommit {
             panel = panel.child(self.render_git_commit(cx));
+        } else if page == Page::Review {
+            panel = panel.child(self.render_review(cx));
         } else if matches!(page, Page::Host | Page::RenameDevice | Page::RemoveDevice) {
             panel = panel.child(self.render_host_menu(cx));
         } else if matches!(page, Page::Tab | Page::RenameTab) {
@@ -838,6 +851,11 @@ impl HerdrWindow {
                 }
                 if this.menu.page == Some(Page::Git) {
                     this.git_key(event, window, cx);
+                    return;
+                }
+                if this.menu.page == Some(Page::Review) {
+                    // The note composer edits itself, IME included.
+                    this.review_key(event, window, cx);
                     return;
                 }
                 if this.menu.page == Some(Page::Teleport) {

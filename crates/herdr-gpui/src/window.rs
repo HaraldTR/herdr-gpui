@@ -150,6 +150,8 @@ pub(crate) struct HerdrWindow {
     /// The workspace a finished teleport keeps steering to until focused.
     pub(crate) teleport_follow: Option<crate::teleport::Follow>,
     pub(crate) git: git::Git,
+    /// Notes waiting for their agents to be ready for them.
+    pub(crate) deliveries: crate::agent_notes::Deliveries,
     pub(crate) usage: crate::usage::Usage,
     pub(crate) system_load: crate::system_load::SystemLoad,
     pub(crate) install_warning_shown: bool,
@@ -589,6 +591,7 @@ impl HerdrWindow {
             teleport_marks: crate::teleport::Marks::start(),
             teleport_follow: None,
             git: git::Git::default(),
+            deliveries: Default::default(),
             usage: Default::default(),
             system_load: Default::default(),
             install_warning_shown: false,

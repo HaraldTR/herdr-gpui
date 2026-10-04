@@ -663,7 +663,7 @@ fn parse_created(response: &serde_json::Value, owner: &str, repo: &str) -> crate
 
 /// Every Git child runs through the shared process policy: no shell, no
 /// terminal prompts, bounded output, and a deadline the caller owns.
-fn git(
+pub(crate) fn git(
     checkout: &str,
     args: &[&str],
     operation: &'static str,

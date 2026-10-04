@@ -11,6 +11,7 @@ use gpui::{prelude::*, *};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Row {
+    Review,
     Commit,
     Push,
     PullRequest,
@@ -19,6 +20,7 @@ pub(super) enum Row {
 impl Row {
     fn icon(self) -> &'static str {
         match self {
+            Self::Review => "icons/zoom.svg",
             Self::Commit => "icons/pencil.svg",
             Self::Push => "icons/chevron-up.svg",
             Self::PullRequest => "icons/git-branch.svg",
@@ -174,6 +176,7 @@ impl HerdrWindow {
             return Vec::new();
         }
         vec![
+            (Row::Review, "Review changes...".into()),
             (Row::Commit, "Commit...".into()),
             (Row::Push, "Push".into()),
             match self.git_open_pull_request() {
@@ -196,6 +199,10 @@ impl HerdrWindow {
             return;
         }
         match row {
+            Row::Review => {
+                self.open_review(window, cx);
+                return;
+            }
             Row::Commit => {
                 self.menu.page = Some(Page::GitCommit);
                 self.menu.input = Some(DialogInput::default());
@@ -977,7 +984,17 @@ mod tests {
                     .into_iter()
                     .map(|(_, label)| label)
                     .collect();
-                assert_eq!(rows, ["Commit...", "Push", "Create pull request"]);
+                assert_eq!(
+                    rows,
+                    ["Review changes...", "Commit...", "Push", "Create pull request"]
+                );
+                // Review opens its own dialog on the tracked checkout.
+                view.activate_git_row(Row::Review, window, cx);
+                assert_eq!(view.menu.page, Some(Page::Review));
+                assert!(view.menu.review.is_some());
+                view.open_git_menu(point(px(900.), px(20.)), window, cx);
+                view.open_git_menu(point(px(900.), px(20.)), window, cx);
+                assert_eq!(view.menu.page, Some(Page::Git));
                 view.activate_git_row(Row::Commit, window, cx);
                 assert_eq!(view.menu.page, Some(Page::GitCommit));
                 assert!(view.menu.input.is_some(), "the dialog opens with a field");

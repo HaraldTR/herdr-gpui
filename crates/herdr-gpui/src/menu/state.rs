@@ -72,6 +72,8 @@ pub(crate) struct MenuState {
     pub(crate) preferences_scroll: ScrollHandle,
     pub(crate) font_size_editor: Option<crate::preferences::FontSizeEditor>,
     pub(crate) themes: Option<crate::theme_picker::ThemePicker>,
+    /// Kept when the dialog closes, so unsent notes wait for the next look.
+    pub(crate) review: Option<crate::review::Review>,
     pub(crate) fonts: Option<crate::font_picker::FontPicker>,
     pub(crate) palette: Option<crate::palette::Palette>,
     pub(crate) close: Option<crate::close_modal::CloseConfirmation>,
@@ -241,6 +243,7 @@ impl MenuState {
             preferences_scroll: ScrollHandle::new(),
             font_size_editor: None,
             themes: None,
+            review: None,
             fonts: None,
             palette: None,
             close: None,
