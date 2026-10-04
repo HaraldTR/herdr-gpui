@@ -451,7 +451,7 @@ impl HerdrWindow {
         body = body.child(
             div()
                 .py(px(14.))
-                .text_color(rgb(theme.muted))
+                .text_color(rgb(theme.subtext()))
                 .child("Includes the prefix chords from Herdr's [keys] in config.toml. Daemon actions with no GUI command, and terminal applications, keep their own shortcuts."),
         );
         div()

@@ -424,10 +424,10 @@ impl HerdrWindow {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("Remove device"),
             )
-            .child(format!(
+            .child(div().text_color(rgb(theme.subtext())).child(format!(
                 "Remove {} ({} · {}) from this computer? Herdr keeps running on that host.",
                 host.label, host.target, host.session
-            ))
+            )))
             .when(github, |body| {
                 body.child(
                     div()

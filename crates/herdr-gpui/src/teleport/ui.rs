@@ -463,6 +463,7 @@ impl HerdrWindow {
         let theme = &self.theme;
         let font = &self.config.ui;
         let muted = rgb(theme.muted);
+        let subtext = rgb(theme.subtext());
         let danger = crate::menu::danger(theme);
         let bar = |progress| {
             progress::bar(
@@ -612,7 +613,7 @@ impl HerdrWindow {
                 }
                 body = body.child(line(
                     "Ignored files such as .env stay behind. The workspace here then closes; its checkout stays and can be reopened with Open worktree.".into(),
-                ).text_color(muted));
+                ).text_color(subtext));
                 ("Teleport", true)
             }
             Stage::Moving(candidate, step) => {
@@ -626,7 +627,7 @@ impl HerdrWindow {
                     )
                     .child(
                         line("Closing this dialog does not stop the move.".into())
-                            .text_color(muted),
+                            .text_color(subtext),
                     );
                 ("Moving...", false)
             }
@@ -642,7 +643,7 @@ impl HerdrWindow {
                             "The source workspace closes only once the destination is ready."
                                 .into(),
                         )
-                        .text_color(muted),
+                        .text_color(subtext),
                     );
                 ("Close", true)
             }

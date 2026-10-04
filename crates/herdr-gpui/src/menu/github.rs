@@ -327,7 +327,7 @@ impl HerdrWindow {
                 div()
                     .debug_selector(|| "github-host-note".into())
                     .mb(px(12.))
-                    .text_color(rgb(theme.muted))
+                    .text_color(rgb(theme.subtext()))
                     .child(note),
             );
         }
