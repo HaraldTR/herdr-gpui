@@ -608,7 +608,7 @@ impl Render for HerdrWindow {
             || self.local_error.is_some()
             || self.live.error.is_some())
         .then(|| self.live.status_text(self.local_error.as_deref()));
-        div()
+        let root = div()
             .on_modifiers_changed(cx.listener(Self::double_shift_modifiers))
             .capture_any_mouse_down(cx.listener(|this, _, _, _| this.shift_taps.cancel()))
             .child({
@@ -683,7 +683,7 @@ impl Render for HerdrWindow {
             .text_color(rgb(self.theme.foreground))
             .text_font(&self.config.ui)
             .text_size(px(self.config.ui.size))
-            .child(self.render_titlebar(cx))
+            .child(self.render_titlebar(window, cx))
             .children(worktree_banner::render(
                 env!("HERDR_BUILD_WORKTREE") == "1",
                 env!("HERDR_BUILD_BRANCH"),
@@ -785,6 +785,7 @@ impl Render for HerdrWindow {
                                 div().debug_selector(|| "connection-message".into()).child(status)
                             )),
                     )
+                    .children(self.render_listening_ports(cx))
                     .children(self.render_system_load())
                     .when(crate::caffeine::SUPPORTED, |bar| {
                         let awake = crate::caffeine::active(cx);
@@ -954,6 +955,7 @@ impl Render for HerdrWindow {
             .children(self.render_file_transfer(window, cx))
             .when(self.menu.page.is_some(), |root| {
                 root.child(self.render_menu(window, cx))
-            })
+            });
+        crate::titlebar::frame(window, self.theme.active, root)
     }
 }

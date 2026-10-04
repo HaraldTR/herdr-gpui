@@ -66,6 +66,8 @@ pub struct Config {
     /// Snapshot a checkout's files each time one of its agents starts or
     /// finishes a turn, so they can be rolled back.
     pub agent_checkpoints: bool,
+    /// Ports each workspace listens on, in the sidebar and the status bar.
+    pub show_listening_ports: bool,
     /// How far the app's own marks and labels stand off its chrome.
     pub contrast: Contrast,
     pub usage: crate::usage::UsageConfig,
@@ -270,6 +272,7 @@ impl Default for Config {
             show_agents: true,
             show_system_load: true,
             agent_checkpoints: true,
+            show_listening_ports: true,
             contrast: Contrast::default(),
             usage: crate::usage::UsageConfig::default(),
             option_as_alt: OptionAsAlt::default(),
@@ -306,6 +309,7 @@ struct Settings {
     show_agents: Option<bool>,
     show_system_load: Option<bool>,
     agent_checkpoints: Option<bool>,
+    show_listening_ports: Option<bool>,
     contrast: Contrast,
     usage: crate::usage::UsageConfig,
     option_as_alt: OptionAsAlt,
@@ -614,6 +618,7 @@ impl Config {
         config.show_agents = settings.show_agents.unwrap_or(true);
         config.show_system_load = settings.show_system_load.unwrap_or(true);
         config.agent_checkpoints = settings.agent_checkpoints.unwrap_or(true);
+        config.show_listening_ports = settings.show_listening_ports.unwrap_or(true);
         config.contrast = settings.contrast;
         config.usage = settings.usage;
         config.option_as_alt = settings.option_as_alt;

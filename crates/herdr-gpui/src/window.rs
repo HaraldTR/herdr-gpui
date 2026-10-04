@@ -157,6 +157,9 @@ pub(crate) struct HerdrWindow {
     pub(crate) system_load: crate::system_load::SystemLoad,
     /// Snapshots of checkouts taken at agent turns, and the dialog listing them.
     pub(crate) checkpoints: crate::checkpoint::Checkpoints,
+    pub(crate) listening_ports: crate::listening_ports::ListeningPorts,
+    /// SSH tunnels to remote ports that listen on their host's loopback only.
+    pub(crate) tunnels: crate::listening_ports::Tunnels,
     pub(crate) install_warning_shown: bool,
     pub(crate) collapsed_repos: std::collections::HashSet<String>,
     /// Expanded; collapsed leaves the rail or nothing, as Herdr's
@@ -412,6 +415,9 @@ impl HerdrWindow {
             cx.notify();
         }
         self.update_checkpoints(cx);
+        if self.update_listening_ports() {
+            cx.notify();
+        }
         if self.live.missing_installation && !self.install_warning_shown {
             self.install_warning_shown = true;
             self.show_install_modal(window, cx);
@@ -449,16 +455,37 @@ impl HerdrWindow {
         changed
     }
 
-    /// CPU and memory are sampled for every enabled host: this machine
-    /// always, a remote host while it is connected, so a dropped host is not
-    /// dialled every few seconds.
+    /// CPU and memory are sampled for every enabled host.
     fn update_system_load(&mut self) -> bool {
-        let hosts = self
-            .config
-            .show_system_load
-            .then_some(self.endpoints.iter().enumerate())
-            .into_iter()
-            .flatten()
+        if !self.config.show_system_load {
+            return self.system_load.poll(Vec::new());
+        }
+        let hosts = self.watched_hosts();
+        self.system_load.poll(hosts)
+    }
+
+    /// Listening ports are scanned on the same hosts as CPU and memory.
+    fn update_listening_ports(&mut self) -> bool {
+        if !self.config.show_listening_ports {
+            self.tunnels = Default::default();
+            return self.listening_ports.poll(Vec::new());
+        }
+        let hosts = self.watched_hosts();
+        let changed = self.listening_ports.poll(hosts);
+        // A tunnel lives as long as its remote port is listed.
+        let ports = &self.listening_ports;
+        self.tunnels
+            .retain(|key| ports.listening(&crate::usage::Host::Ssh(key.target.clone()), key.port));
+        changed
+    }
+
+    /// The machines background monitors watch: this one always, a remote
+    /// host while it is connected, so a dropped host is not dialled every
+    /// few seconds.
+    fn watched_hosts(&self) -> Vec<crate::usage::Host> {
+        self.endpoints
+            .iter()
+            .enumerate()
             .filter(|(index, endpoint)| {
                 let live = if *index == self.selected_endpoint {
                     &self.live
@@ -469,8 +496,8 @@ impl HerdrWindow {
                     && (live.status.is_connected()
                         || !matches!(endpoint.connection.target, ConnectTarget::Ssh { .. }))
             })
-            .map(|(_, endpoint)| crate::usage::Host::from(&endpoint.connection.target));
-        self.system_load.poll(hosts)
+            .map(|(_, endpoint)| crate::usage::Host::from(&endpoint.connection.target))
+            .collect()
     }
 
     /// Agent turns are watched on every enabled, connected host this client
@@ -652,6 +679,8 @@ impl HerdrWindow {
             usage: Default::default(),
             system_load: Default::default(),
             checkpoints: Default::default(),
+            listening_ports: Default::default(),
+            tunnels: Default::default(),
             install_warning_shown: false,
             collapsed_repos: Default::default(),
             sidebar_visible: true,

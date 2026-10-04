@@ -465,6 +465,32 @@ every two seconds over its own SSH shell, kept open while the host is connected
 systems, and remote hosts from a Windows client, show it as unavailable. Set top-level `show_system_load = false`,
 or turn off **Show CPU and memory** in Settings, to hide it and stop sampling.
 
+Workspaces that run a server show the TCP ports it listens on, as `:3000`
+chips on a line under the workspace's sidebar row and, for the focused
+workspace, in the status bar. Clicking one opens the page in a browser tab of
+that workspace (`http://localhost:<port>` on this machine). A port belongs to
+a workspace when its process inherited the `HERDR_WORKSPACE_ID` Herdr sets in
+every pane, so system services and servers started outside Herdr never show,
+and its `HERDR_SOCKET_PATH` names the same daemon, so two sessions on one
+machine never claim each other's servers.
+Every five seconds each host runs `ss -ltnp` (Linux) or `lsof -iTCP
+-sTCP:LISTEN` (macOS) in its own shell, this machine's locally and a connected
+remote host's over SSH, listing only your own processes. A remote server opens
+at the SSH host's name when it listens on every address, the `HostName` your
+SSH configuration gives an alias (`ssh -G`) when it has one. One listening only
+on the remote loopback opens through an SSH tunnel started on the first click:
+`ssh -N -L` from a free port on this machine's loopback, with the same
+noninteractive options as the remote connection. The page opens only once SSH
+itself reports the forward bound, never because something answers on the
+port. Tunnels do not share a `ControlMaster` connection, so they need
+noninteractive authentication (keys or an agent). The tunnel stays up while
+the port is listed, is reused by later clicks, and closes when the port
+stops listening, the host disconnects, scanning is turned off, or the window
+closes; a page reopened after a dropped tunnel keeps its address while that
+local port is free. Windows clients
+do not scan this machine. Set top-level `show_listening_ports = false`, or
+turn off **Show listening ports** in Settings, to hide them and stop scanning.
+
 `[notifications]` in `config-gpui.local.toml` overrides shared toast preferences
 for GUI-local in-app delivery, independently per key. `enabled = true` shows
 in-app toasts even when shared delivery is `system`; `enabled = false` leaves
@@ -793,7 +819,21 @@ the theme foreground. This profile control opens native GitHub sign-in and shows
 the authenticated user's avatar when connected. It consumes clicks so
 double-clicking it does not invoke the title-bar action.
 The header and clearance remain in fullscreen so the body layout stays stable.
-Windows/Linux keep the existing native frame and do not render this header.
+On Windows and Linux the main window shows the same header below the native
+frame, with an 8px lead in place of the traffic-light clearance; Settings,
+Logs, and the mockup board rely on the native frame alone.
+
+Some Linux compositors, GNOME's Wayland session among them, draw no frame for
+other applications, and GPUI falls back to client-side decorations there.
+Every window then draws its own: pressing the header starts a compositor move
+(a double-click maximizes or restores instead), a right-click opens the compositor's window menu when it offers one, and the
+header ends in minimize, maximize/restore, and close buttons, each shown only
+when the compositor supports it, with close always present. Secondary windows
+show the header in this mode too. Close runs the window's own close path, so
+Settings still finishes pending preferences first. A 10px transparent band
+around the window carries a shadow and the resize handles; edges the
+compositor tiles lose both, so a maximized window fills the screen. X11 and
+compositors with server-side decorations keep their native frame.
 
 Linked-worktree builds add a full-width, 22px amber banner below
 the macOS header (above the body on Linux), with the compile-time branch or short
@@ -822,7 +862,11 @@ icon produces a nonempty mask. These do not verify AppKit behavior. Native QA re
 required for dragging across the header, traffic-light alignment and actions,
 double-click preferences (zoom/minimize/do nothing), fullscreen transitions and
 auto-hidden controls, theme changes, and modal/focus/IME behavior. Windows/Linux
-native-frame appearance also remains unverified by these macOS tests.
+native-frame appearance also remains unverified by these macOS tests. Headless
+tests check the client-decorated frame (inset, handles kept out of the content,
+tiled edges, and button order and support) with forced decorations. Native QA
+on GNOME Wayland remains required for dragging, resizing, the window menu,
+maximize/restore, and the shadow.
 
 ## Terminal Selection And Copy
 

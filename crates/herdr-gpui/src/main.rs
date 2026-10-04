@@ -43,6 +43,7 @@ mod integrations;
 mod keymap;
 mod lenient;
 mod links;
+mod listening_ports;
 mod local_path;
 mod log_window;
 mod login_env;
