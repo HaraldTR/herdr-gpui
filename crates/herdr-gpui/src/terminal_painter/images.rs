@@ -330,6 +330,15 @@ impl ImageCache {
         released
     }
 
+    /// Starts a paint and drops the textures it evicts from the atlas. A
+    /// paint with placements does this as it prepares them; one without must
+    /// call it, or the textures of images that went away stay resident.
+    pub(crate) fn release_idle(&mut self, window: &mut Window) {
+        for texture in self.begin(Instant::now()) {
+            let _ = window.drop_image(texture);
+        }
+    }
+
     /// Resolves the textures and geometry for one frame's placements,
     /// starting background decodes for images not yet decoded. Placements
     /// whose texture is not ready are skipped this paint; a finished decode
@@ -343,10 +352,8 @@ impl ImageCache {
         window: &mut Window,
         cx: &mut App,
     ) -> Vec<(i32, ImageGeometry, Arc<RenderImage>)> {
+        self.release_idle(window);
         let now = Instant::now();
-        for texture in self.begin(now) {
-            let _ = window.drop_image(texture);
-        }
         let mut placed = Vec::new();
         for (placement, image) in images.resolved() {
             let Some(geometry) = geometry(placement, origin, cell, grid) else {

@@ -5,7 +5,7 @@
 use super::HerdrWindow;
 use crate::{
     config::Theme,
-    terminal_painter::{self, Highlight, Span, TerminalPainter},
+    terminal_painter::{self, Highlight, Layer, Part, Span, TerminalPainter},
 };
 use gpui::{prelude::*, *};
 use herdr_client::protocol::{FrameData, PaneSurfaceFrame, PaneSurfacePane, SurfaceRect};
@@ -152,17 +152,23 @@ fn partition(frame: &FrameData, panes: &[PaneSurfacePane]) -> Vec<(Owner, Vec<Sp
     regions
 }
 
-/// One region of the grid. Its scene is replayed while the region paints
-/// the same cells; a change replaces the view instead of notifying it.
+/// One layer of one region of the grid. Its scene is replayed while the
+/// region paints the same cells; a change replaces the view instead of
+/// notifying it.
 pub(crate) struct RegionView {
     painter: Rc<RefCell<TerminalPainter>>,
-    region: Region,
+    region: Rc<Region>,
+    layer: Layer,
 }
+
+/// A region's views, one per layer in `Layer::ALL` order.
+pub(crate) type RegionLayers = [Entity<RegionView>; 3];
 
 impl Render for RegionView {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let painter = self.painter.clone();
         let region = self.region.clone();
+        let layer = self.layer;
         canvas(
             |_, _, _| (),
             move |bounds, _, window, cx| {
@@ -174,7 +180,10 @@ impl Render for RegionView {
                     &region.look.font,
                     &region.highlights,
                     &region.surface.panes,
-                    Some(&region.area),
+                    Some(Part {
+                        area: &region.area,
+                        layer,
+                    }),
                     None,
                     window,
                     cx,
@@ -188,7 +197,10 @@ impl Render for RegionView {
 impl HerdrWindow {
     /// The cached views painting `surface`'s cells, bottom first, or none when
     /// the grid must paint as a whole. Each covers the full grid bounds and
-    /// paints only its own cells.
+    /// paints one layer of only its own cells. Every region's backgrounds
+    /// come before any region's text, and all text before any decoration, as
+    /// in a whole-grid paint: a glyph overhanging its region into a border or
+    /// a neighbouring pane stays visible.
     ///
     /// Images stay whole-frame: a texture no paint looks up is released while
     /// a replayed scene would still sample it.
@@ -205,36 +217,43 @@ impl HerdrWindow {
         };
         let mut previous = std::mem::take(&mut self.regions);
         for (owner, area) in partition(&surface.frame, &surface.panes) {
-            let region = Region {
+            let region = Rc::new(Region {
                 owner,
                 surface: surface.clone(),
                 highlights: terminal_painter::clip(highlights, &area),
                 area,
                 look: look.clone(),
-            };
+            });
             let kept = previous
                 .iter()
-                .position(|view| view.read(cx).region.owner == region.owner)
+                .position(|views| views[0].read(cx).region.owner == region.owner)
                 .map(|index| previous.swap_remove(index))
-                .filter(|view| view.read(cx).region.paints_like(&region));
+                .filter(|views| views[0].read(cx).region.paints_like(&region));
             // Notifying a view while the window draws only marks it for the
             // next frame, so a changed region takes a fresh view, which has
             // no scene to replay. An unchanged one adopts the new surface
             // without being invalidated, releasing the old frame.
-            let view = match kept {
-                Some(view) => {
-                    view.update(cx, |view, _| view.region = region);
-                    view
+            let views = match kept {
+                Some(views) => {
+                    for view in &views {
+                        view.update(cx, |view, _| view.region = region.clone());
+                    }
+                    views
                 }
-                None => {
+                None => Layer::ALL.map(|layer| {
                     let painter = self.painter.clone();
-                    cx.new(|_| RegionView { painter, region })
-                }
+                    let region = region.clone();
+                    cx.new(|_| RegionView {
+                        painter,
+                        region,
+                        layer,
+                    })
+                }),
             };
-            self.regions.push(view);
+            self.regions.push(views);
         }
-        self.regions
-            .iter()
+        (0..Layer::ALL.len())
+            .flat_map(|layer| self.regions.iter().map(move |views| &views[layer]))
             .map(|view| {
                 view.clone()
                     .cached(
@@ -255,6 +274,7 @@ impl HerdrWindow {
 mod tests {
     use super::{HerdrWindow, Owner, partition};
     use crate::sidebar::layout_tests::fixture_window;
+    use crate::terminal_painter::Layer;
     use gpui::{Entity, EntityId, TestAppContext, VisualTestContext};
     use herdr_client::protocol::{
         CellData, CursorState, FrameData, PaneSurfaceFrame, PaneSurfacePane, SurfaceRect,
@@ -360,12 +380,12 @@ mod tests {
         );
     }
 
-    /// Draws `surface` and returns the region views in owner order.
+    /// Draws `surface` and returns each region's layer views in owner order.
     fn draw(
         view: &Entity<HerdrWindow>,
         surface: &PaneSurfaceFrame,
         cx: &mut VisualTestContext,
-    ) -> Vec<(Owner, EntityId)> {
+    ) -> Vec<(Owner, [EntityId; 3])> {
         view.update(cx, |view, _| {
             let snapshot = view.live.snapshot.as_ref().unwrap();
             let mut surface = surface.clone();
@@ -377,7 +397,14 @@ mod tests {
         view.read_with(cx, |view, cx| {
             view.regions
                 .iter()
-                .map(|region| (region.read(cx).region.owner.clone(), region.entity_id()))
+                .map(|views| {
+                    let owner = views[0].read(cx).region.owner.clone();
+                    for (view, layer) in views.iter().zip(Layer::ALL) {
+                        let view = view.read(cx);
+                        assert_eq!((&view.region.owner, view.layer), (&owner, layer));
+                    }
+                    (owner, views.each_ref().map(Entity::entity_id))
+                })
                 .collect()
         })
     }

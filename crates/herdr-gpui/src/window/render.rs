@@ -438,6 +438,10 @@ impl Render for HerdrWindow {
                                         window,
                                         cx,
                                     );
+                                } else {
+                                    // Regions place no images, so nothing
+                                    // else releases the ones that went away.
+                                    painter.borrow_mut().release_idle_images(window);
                                 }
                                 painter.borrow().paint_link(
                                     &surface.frame,

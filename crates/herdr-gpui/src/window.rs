@@ -136,7 +136,7 @@ pub(crate) struct HerdrWindow {
     pub(crate) presentation: Presentation,
     pub(crate) painter: std::rc::Rc<std::cell::RefCell<terminal_painter::TerminalPainter>>,
     /// The terminal grid's cached regions; see `regions`.
-    pub(crate) regions: Vec<Entity<regions::RegionView>>,
+    pub(crate) regions: Vec<regions::RegionLayers>,
     pub(crate) marked: String,
     /// The sidebar row the pointer is resting on, waiting to open its menu.
     pub(crate) hover: Option<sidebar::HoverRest>,
