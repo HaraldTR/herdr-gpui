@@ -480,7 +480,10 @@ at the SSH host's name when it listens on every address, the `HostName` your
 SSH configuration gives an alias (`ssh -G`) when it has one. One listening only
 on the remote loopback opens through an SSH tunnel started on the first click:
 `ssh -N -L` from a free port on this machine's loopback, with the same
-noninteractive options as the remote connection. The tunnel stays up while
+noninteractive options as the remote connection. The page opens only once SSH
+itself reports the forward bound, never because something answers on the
+port. Tunnels do not share a `ControlMaster` connection, so they need
+noninteractive authentication (keys or an agent). The tunnel stays up while
 the port is listed, is reused by later clicks, and closes when the port
 stops listening, the host disconnects, scanning is turned off, or the window
 closes; a page reopened after a dropped tunnel keeps its address while that

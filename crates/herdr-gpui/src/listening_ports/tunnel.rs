@@ -6,16 +6,20 @@
 use crate::{Error, Result};
 use std::{
     collections::{HashMap, HashSet},
-    net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
+    io::{BufRead, BufReader, Read},
+    net::{Ipv4Addr, TcpListener},
     process::{Child, Stdio},
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
 
 /// SSH connects, authenticates, and binds within its own `ConnectTimeout`.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
-const PROBE_TIMEOUT: Duration = Duration::from_millis(200);
-const PROBE_INTERVAL: Duration = Duration::from_millis(100);
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Under `-N`, SSH's stdout carries only the readiness line, perhaps after
+/// whatever the user's shell prints when it runs `LocalCommand`.
+const READY_OUTPUT: u64 = 64 * 1024;
 /// Tunnels are opened by hand, one click each; this only bounds a runaway.
 const TUNNEL_LIMIT: usize = 32;
 
@@ -60,44 +64,86 @@ impl Drop for Tunnel {
     }
 }
 
-/// Starts a tunnel to `key` and waits until its local port accepts, which
-/// blocks for up to [`OPEN_TIMEOUT`]: call it off the UI thread. `preferred`
-/// is the local port a previous tunnel used, kept when it is still free so a
-/// page reopened after a dropped connection keeps its address.
+/// Starts a tunnel to `key` and waits until SSH says its forward is bound,
+/// which blocks for up to [`OPEN_TIMEOUT`]: call it off the UI thread.
+/// `preferred` is the local port this remote port was last forwarded to,
+/// kept when it is still free so a page reopened after a dropped connection
+/// keeps its address.
 pub(crate) fn open(key: &Key, preferred: Option<u16>) -> Result<Tunnel> {
+    match start(key, preferred) {
+        // Someone took the remembered port meanwhile; any free one will do.
+        Err(Error::TunnelExited(_)) if preferred.is_some() => start(key, None),
+        result => result,
+    }
+}
+
+fn start(key: &Key, preferred: Option<u16>) -> Result<Tunnel> {
     let local = free_port(preferred).map_err(Error::TunnelPort)?;
     let mut command = herdr_client::forward_command(&key.target, local, key.port)?;
-    // Banners and diagnostics may carry secrets; nothing is read back.
+    // Only the readiness line is read; diagnostics may carry secrets.
     command
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    let mut child = command.spawn().map_err(Error::TunnelStart)?;
+    let stdout = child.stdout.take();
+    // From here on, dropping the tunnel kills the child.
     let mut tunnel = Tunnel {
-        child: Some(command.spawn().map_err(Error::TunnelStart)?),
+        child: Some(child),
         local,
     };
-    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, local));
-    let deadline = Instant::now() + OPEN_TIMEOUT;
+    let (Some(stdout), Some(child)) = (stdout, tunnel.child.as_mut()) else {
+        return Err(Error::TunnelStart(std::io::Error::other("no stdout pipe")));
+    };
+    ready(child, stdout, Instant::now() + OPEN_TIMEOUT)?;
+    Ok(tunnel)
+}
+
+/// Waits for `child` to print [`herdr_client::FORWARD_READY`]. The port
+/// itself is never probed: a process that bound it before SSH could would
+/// answer a probe, and a page opened then would show that process instead.
+/// SSH prints the line only once it holds the port.
+pub(super) fn ready(
+    child: &mut Child,
+    stdout: impl Read + Send + 'static,
+    deadline: Instant,
+) -> Result<()> {
+    let (sender, found) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("herdr-tunnel-ready".into())
+        .spawn(move || {
+            let ready = BufReader::new(stdout.take(READY_OUTPUT))
+                .lines()
+                .map_while(std::io::Result::ok)
+                .any(|line| line.trim_end() == herdr_client::FORWARD_READY);
+            let _ = sender.send(ready);
+        })
+        .map_err(Error::TunnelStart)?;
+    let mut closed = false;
     loop {
-        if TcpStream::connect_timeout(&address, PROBE_TIMEOUT).is_ok() {
-            return Ok(tunnel);
+        if closed {
+            thread::sleep(POLL_INTERVAL);
+        } else {
+            match found.recv_timeout(POLL_INTERVAL) {
+                Ok(true) => return Ok(()),
+                // Output ended without the line: the child is exiting.
+                Ok(false) | Err(mpsc::RecvTimeoutError::Disconnected) => closed = true,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
         }
-        if let Some(child) = tunnel.child.as_mut()
-            && let Some(status) = child.try_wait().map_err(Error::TunnelStart)?
-        {
+        if let Some(status) = child.try_wait().map_err(Error::TunnelStart)? {
             return Err(Error::TunnelExited(status));
         }
         if Instant::now() >= deadline {
-            // Dropping the tunnel kills the child.
             return Err(Error::TunnelTimeout);
         }
-        thread::sleep(PROBE_INTERVAL);
     }
 }
 
 /// A loopback port nobody listens on, `preferred` when it is free. The
 /// listener is closed before `ssh` binds the port; another process taking it
-/// in between makes `ssh` exit, which [`open`] reports.
+/// in between makes `ssh` exit before it reports ready, so [`open`] fails
+/// rather than opening the other process's page.
 pub(super) fn free_port(preferred: Option<u16>) -> std::io::Result<u16> {
     pick(preferred, |port| {
         TcpListener::bind((Ipv4Addr::LOCALHOST, port))?
@@ -154,6 +200,9 @@ impl Tunnels {
             return None;
         }
         let local = tunnel.local;
+        // A local port belongs to one remote port at a time, so a page left
+        // open on another remote port's old address is never handed this one.
+        self.used.retain(|_, used| *used != local);
         self.used.insert(key.clone(), local);
         self.open.insert(key, tunnel);
         Some(local)

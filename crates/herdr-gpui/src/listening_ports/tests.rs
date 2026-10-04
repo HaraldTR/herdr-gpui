@@ -501,3 +501,94 @@ fn a_dead_tunnel_is_forgotten() {
     assert_eq!(tunnels.local(&key), None);
     assert_eq!(tunnels.len(), 0);
 }
+
+/// A child printing `script`'s output on a pipe, standing in for `ssh -N`.
+#[cfg(unix)]
+fn scripted(script: &str) -> (std::process::Child, std::process::ChildStdout) {
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", script])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    (child, stdout)
+}
+
+#[cfg(unix)]
+#[test]
+fn another_process_on_the_port_is_never_taken_for_the_tunnel() {
+    // Something else already listens on the port the tunnel was given; a
+    // probe would connect to it. SSH has not said it holds the port, so the
+    // tunnel is not ready, however long the port answers.
+    let squatter = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let _port = squatter.local_addr().unwrap().port();
+    let (mut child, stdout) = scripted("exec sleep 600");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    let result = tunnel::ready(&mut child, stdout, deadline);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(matches!(result, Err(Error::TunnelTimeout)), "{result:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_tunnel_is_ready_once_ssh_prints_its_line() {
+    let (mut child, stdout) =
+        scripted("echo 'shell noise'; echo herdr-forward-ready; exec sleep 600");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let result = tunnel::ready(&mut child, stdout, deadline);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_ending_before_its_forward_is_bound_reports_why() {
+    // ExitOnForwardFailure: a taken port ends SSH before LocalCommand runs.
+    let (mut child, stdout) = scripted("echo 'bind failed' >&2; exit 255");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    match tunnel::ready(&mut child, stdout, deadline) {
+        Err(Error::TunnelExited(status)) => assert_eq!(status.code(), Some(255)),
+        other => panic!("expected the exit status, got {other:?}"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_local_port_is_never_handed_back_to_a_previous_remote_port() {
+    let first = Key {
+        target: "devbox".into(),
+        port: 3000,
+    };
+    let second = Key {
+        target: "devbox".into(),
+        port: 4000,
+    };
+    let mut tunnels = tunnel::Tunnels::default();
+    assert!(tunnels.begin(&first).is_some());
+    let (exiting, _) = scripted("exit 0");
+    assert_eq!(
+        tunnels.finish(first.clone(), tunnel::Tunnel::around(exiting, 41000)),
+        Some(41000)
+    );
+    // The first tunnel dies; its local port is reused by the second.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while tunnels.local(&first).is_some() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the child never exited"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(tunnels.begin(&second).is_some());
+    assert_eq!(
+        tunnels.finish(second.clone(), tunnel::Tunnel::around(idle_child(), 41000)),
+        Some(41000)
+    );
+    // Reopening the first must not prefer the port now showing the second.
+    assert_eq!(tunnels.begin(&first), Some(None));
+    tunnels.retain(|_| false);
+}

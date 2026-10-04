@@ -392,19 +392,36 @@ fn noninteractive() -> Command {
     command
 }
 
+/// The line a [`forward_command`] child prints on stdout once its forward is
+/// bound.
+pub const FORWARD_READY: &str = "herdr-forward-ready";
+
 /// A noninteractive `ssh` child that runs no remote command and forwards
 /// `127.0.0.1:<local>` on this machine to `localhost:<remote>` on `target`,
 /// so a server listening only on the remote host's loopback can be opened
 /// here. Forwarding is this child's whole purpose, so unlike the bridge it
-/// keeps forwardings, and `ExitOnForwardFailure` ends it when the local port
-/// cannot be bound rather than leaving a tunnel that forwards nothing. The
-/// caller owns the child: its streams, readiness, and reaping.
+/// keeps forwardings.
+///
+/// Readiness comes from SSH itself, never from connecting to the port, which
+/// another local process could have bound first: `ExitOnForwardFailure` ends
+/// the child when the bind fails, and OpenSSH runs `LocalCommand` only after
+/// its forwards are set up, so [`FORWARD_READY`] on stdout means this child
+/// holds the port. `ControlPath=none` keeps the forward in this child rather
+/// than in a shared master, so killing the child closes it; a host that needs
+/// an interactively authenticated master cannot be tunnelled. The caller owns
+/// the child: its streams, readiness, and reaping.
 #[cfg(unix)]
 pub fn forward_command(target: &str, local: u16, remote: u16) -> Result<Command> {
     validate_target(target)?;
     let mut command = noninteractive();
     command.args([
         "-N",
+        "-o",
+        "ControlPath=none",
+        "-o",
+        "PermitLocalCommand=yes",
+        "-o",
+        &format!("LocalCommand=echo {FORWARD_READY}"),
         "-o",
         "ExitOnForwardFailure=yes",
         "-L",
@@ -815,6 +832,9 @@ esac
             "ControlMaster=no",
             "ExitOnForwardFailure=yes",
             "127.0.0.1:41000:localhost:3000",
+            "ControlPath=none",
+            "PermitLocalCommand=yes",
+            "LocalCommand=echo herdr-forward-ready",
         ] {
             assert!(args.contains(&option), "{option} missing from {args:?}");
         }
