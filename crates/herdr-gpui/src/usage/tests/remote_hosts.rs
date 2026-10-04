@@ -1,13 +1,12 @@
 use super::*;
+use crate::usage::probe::{HostPath, Request, Shell};
 
 /// A local `sh` standing in for the remote host: its home holds agent
 /// sign-ins, and a fake `curl` on its PATH records what it was given.
-#[cfg(unix)]
 struct FakeHost {
     root: tempfile::TempDir,
 }
 
-#[cfg(unix)]
 impl FakeHost {
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
@@ -53,7 +52,6 @@ impl FakeHost {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn remote_secrets_stay_on_the_host() {
     let host = FakeHost::new();
@@ -116,7 +114,6 @@ fn remote_secrets_stay_on_the_host() {
     assert!(!log.contains("id-fixture"));
 }
 
-#[cfg(unix)]
 #[test]
 fn remote_steps_report_failure_and_keep_the_session() {
     let host = FakeHost::new();
@@ -135,20 +132,4 @@ fn remote_steps_report_failure_and_keep_the_session() {
     ));
     // A step that overran leaves the session unusable rather than out of step.
     assert!(shell.run("true", Duration::from_secs(5)).is_err());
-}
-
-#[test]
-fn settings_come_from_this_machines_config() {
-    let settings = ProviderSettings::default().with("api_key", "config-key");
-    let mut exec = Exec::Local;
-    let mut jar = CookieJar::default();
-    let probe = Probe::new(
-        &mut exec,
-        provider("claude"),
-        Some(&settings),
-        &mut jar,
-        false,
-    );
-    assert_eq!(probe.text_setting("api_key").as_deref(), Some("config-key"));
-    assert!(probe.setting("missing").is_none());
 }

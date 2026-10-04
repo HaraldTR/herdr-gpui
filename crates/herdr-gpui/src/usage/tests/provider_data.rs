@@ -1,4 +1,9 @@
 use super::*;
+use crate::usage::{
+    model::{SESSION, Section},
+    probe::{Response, json_field},
+    providers::{claude, codex},
+};
 
 /// Trimmed from a live response: model windows only appear in `limits`.
 const CLAUDE: &str = r#"{"five_hour":{"utilization":3.0,"resets_at":"2026-09-25T08:20:00.978246+00:00"},
@@ -142,23 +147,6 @@ fn statuses_become_typed_errors_without_echoing_the_body() {
 }
 
 #[test]
-fn balances_read_in_their_own_unit() {
-    let usd = Balance::new("Credits", 12.3, Unit::Currency("USD".into()));
-    assert_eq!(usd.text(), "$12.30");
-    assert_eq!(usd.clone().out_of(50.).text(), "$12.30 of $50.00");
-    assert_eq!(
-        Balance::new("Left", 4.5, Unit::Currency("EUR".into())).text(),
-        "4.50 EUR"
-    );
-    assert_eq!(
-        Balance::new("Points", 1_250_000., Unit::Count("points".into())).text(),
-        "1,250,000 points"
-    );
-    assert_eq!(group(-1234), "-1,234");
-    assert_eq!(Severity::from(60.), Severity::Warning);
-}
-
-#[test]
 fn every_provider_is_registered_once_with_its_icon() {
     let ids: Vec<_> = registry::all().map(|p| p.id()).collect();
     let mut unique = ids.clone();
@@ -202,43 +190,6 @@ fn every_provider_is_registered_once_with_its_icon() {
 }
 
 #[test]
-fn config_ignores_unknown_providers_and_settings() {
-    let parse = |text: &str| {
-        let mut config: UsageConfig = toml::from_str(text).unwrap();
-        let unknown = config.retain_known();
-        (config, unknown)
-    };
-    let (config, unknown) = parse("show_providers = [\"claude\"]\nhide_providers = [\"codex\"]");
-    assert!(config.shown(provider("claude")));
-    assert!(config.hidden(provider("codex")));
-    assert!(config.show);
-    assert!(unknown.is_empty());
-    // Names a newer build may know are dropped and reported, not fatal.
-    let (config, unknown) = parse(
-        "show_providers = [\"nope\", \"claude\"]\nhide_providers = [\"later\"]\n\
-         [providers.claude]\napi_key = \"x\"\n[providers.future]\ntoken = \"y\"",
-    );
-    assert!(config.shown(provider("claude")));
-    assert_eq!(config.show_providers, ["claude"]);
-    assert!(config.hide_providers.is_empty());
-    assert!(!config.providers.contains_key("future"));
-    assert!(
-        config
-            .settings(provider("claude"))
-            .is_none_or(|settings| settings.get("api_key").is_none())
-    );
-    assert_eq!(
-        unknown,
-        [
-            "usage.show_providers.nope",
-            "usage.hide_providers.later",
-            "usage.providers.claude.api_key",
-            "usage.providers.future",
-        ]
-    );
-}
-
-#[test]
 fn json_fields_follow_paths_through_objects_and_arrays() {
     let text = r#"{"a":{"b":[{"c":"x"},{"c":7}]},"t":true,"n":null}"#;
     assert_eq!(
@@ -253,29 +204,4 @@ fn json_fields_follow_paths_through_objects_and_arrays() {
     assert_eq!(json_field(text, &["n"]), None);
     assert_eq!(json_field(text, &["a"]), None);
     assert_eq!(json_field("not json", &["a"]), None);
-}
-
-/// Regenerate with `HERDR_BLESS_EXAMPLE=1 cargo test example_config_documents`.
-#[test]
-fn example_config_documents_every_provider_setting() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/config-gpui.example.toml");
-    // A Windows checkout may carry CRLF line endings.
-    let text = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
-    let expected = super::super::settings::example_docs();
-    if std::env::var_os("HERDR_BLESS_EXAMPLE").is_some() {
-        let updated = match super::super::settings::docs_in(&text) {
-            Some(current) => text.replace(current, &expected),
-            None => format!(
-                "{}\n{expected}",
-                text.trim_end_matches('\n').to_owned() + "\n"
-            ),
-        };
-        std::fs::write(path, updated).unwrap();
-        return;
-    }
-    assert_eq!(
-        super::super::settings::docs_in(&text),
-        Some(expected.as_str()),
-        "config-gpui.example.toml is stale; rerun with HERDR_BLESS_EXAMPLE=1"
-    );
 }

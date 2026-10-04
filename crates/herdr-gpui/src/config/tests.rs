@@ -1,14 +1,14 @@
 use super::*;
-use crate::error::ThemeParseError;
 use anyhow::Context as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod discovery;
 mod fonts;
-mod general;
+mod github;
 mod keybindings;
-mod migration;
+mod loading;
 mod notification_settings;
+mod preferences;
 mod sidebar_settings;
 mod themes;
 

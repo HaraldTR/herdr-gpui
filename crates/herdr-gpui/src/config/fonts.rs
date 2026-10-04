@@ -1,6 +1,8 @@
-//! Font faces, their sizes, and the icon-font cascade.
+//! Font faces, their configured overrides and sizes, and the icon-font cascade.
 use super::Config;
+use crate::{Error, Result};
 use gpui::{Font, FontFallbacks};
+use serde::Deserialize;
 use std::ops::RangeInclusive;
 
 /// Every face is held to this range, whether it comes from the config file or
@@ -51,6 +53,42 @@ impl FontFace {
 /// uncovered codepoint, so a long list costs shaping time and covers nothing a
 /// short one does not. Names that are not installed are ignored by the platform.
 pub(super) const MAX_FONT_FALLBACKS: usize = 8;
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+pub(super) struct FontSettings {
+    family: Option<String>,
+    size: Option<f32>,
+    fallback: Option<Vec<String>>,
+}
+
+impl FontSettings {
+    /// Merges this face's configured keys over `font`, then validates the result.
+    pub(super) fn apply(self, name: &'static str, font: &mut FontConfig) -> Result<()> {
+        if let Some(family) = self.family {
+            font.family = family;
+        }
+        if let Some(size) = self.size {
+            font.size = size;
+        }
+        if let Some(fallback) = self.fallback {
+            if fallback.len() > MAX_FONT_FALLBACKS {
+                return Err(Error::TooManyFontFallbacks(name));
+            }
+            if fallback.iter().any(|family| family.trim().is_empty()) {
+                return Err(Error::EmptyFontFallback(name));
+            }
+            font.fallbacks = Some(fallback);
+        }
+        if font.family.trim().is_empty() {
+            return Err(Error::EmptyFontFamily(name));
+        }
+        if !font.size.is_finite() || !FONT_SIZE_RANGE.contains(&font.size) {
+            return Err(Error::InvalidFontSize(name));
+        }
+        Ok(())
+    }
+}
 
 /// Nerd Font patches keep this marker in every patched family name, so matching
 /// it finds the installed icon faces without naming individual fonts.

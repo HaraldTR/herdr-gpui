@@ -1,7 +1,9 @@
 //! Field lookup in the OneConsole gateway's nested, loosely typed JSON, shared
 //! with the Alibaba Coding Plan and Qwen Cloud.
 
-use super::*;
+use crate::usage::{service::Timestamp, values::number};
+use serde_json::{Map, Value};
+use std::time::{Duration, SystemTime};
 
 /// Expands strings that hold JSON, as the gateway nests stringified frames.
 pub(in crate::usage::providers) fn expand(value: Value) -> Value {
@@ -28,7 +30,7 @@ pub(in crate::usage::providers) fn expand(value: Value) -> Value {
 
 /// The first object, each checked before its descendants, for which `pick`
 /// finds something.
-pub(in crate::usage::providers) fn first_match<'a, T>(
+pub(super) fn first_match<'a, T>(
     value: &'a Value,
     arrays: bool,
     pick: &impl Fn(&'a Map<String, Value>) -> Option<T>,

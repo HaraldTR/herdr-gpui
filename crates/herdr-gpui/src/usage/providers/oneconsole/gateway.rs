@@ -1,10 +1,18 @@
 //! OneConsole gateway requests, sign-in token, and error mapping, shared with
 //! the Alibaba Coding Plan and Qwen Cloud.
 
-use super::*;
-
-const SAFARI_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
-     AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.3 Safari/605.1.15";
+use super::{
+    CHROME_AGENT, SAFARI_AGENT,
+    fields::{find_value, first_match, string},
+};
+use crate::{
+    Error, Result,
+    usage::{
+        probe::{Part, Probe, Request, Secret},
+        values::{self, number},
+    },
+};
+use serde_json::{Map, Value};
 
 /// Maps the gateway's error envelopes: login and token failures are a
 /// rejected session, other failures keep their status when it is an HTTP one.

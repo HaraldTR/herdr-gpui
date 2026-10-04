@@ -18,15 +18,15 @@ pub(crate) mod watch;
 
 use files::write_config;
 pub(crate) use fonts::FontFace;
-use fonts::MAX_FONT_FALLBACKS;
+use fonts::FontSettings;
 #[cfg(any(test, feature = "integration-test"))]
 pub use fonts::symbol_fallbacks;
 pub use fonts::{FONT_SIZE_RANGE, FONT_SIZE_STEP, FontConfig};
 use layout::MAX_SIDEBAR_GAP;
 pub use layout::{Density, Layout, LayoutMode, Style};
 pub(crate) use notifications::NotificationDelivery;
-use notifications::NotificationSettings;
 pub use notifications::{BellConfig, ClipboardToast, ClipboardToastPosition, NotificationConfig};
+use notifications::{ClipboardToastSettings, NotificationSettings};
 use serde::Deserialize;
 pub(crate) use sidebar::{
     AgentLayout, AgentToken, Rows, SidebarLayout, SpaceLayout, SpaceToken, TokenStyle,
@@ -315,32 +315,6 @@ struct Settings {
     keybindings: BTreeMap<String, Binding>,
     devices: BTreeMap<String, DeviceSettings>,
     palette: crate::palette::PaletteConfig,
-}
-
-/// Each key overrides the daemon's answer on its own, so naming one of them
-/// here does not silently reset the other to a GUI default.
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct ClipboardToastSettings {
-    enabled: Option<bool>,
-    position: Option<ClipboardToastPosition>,
-}
-
-impl ClipboardToastSettings {
-    fn resolve(self, base: ClipboardToast) -> ClipboardToast {
-        ClipboardToast {
-            enabled: self.enabled.unwrap_or(base.enabled),
-            position: self.position.unwrap_or(base.position),
-        }
-    }
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct FontSettings {
-    family: Option<String>,
-    size: Option<f32>,
-    fallback: Option<Vec<String>>,
 }
 
 /// Windows sets `USERPROFILE` rather than `HOME`, and upstream Herdr reads both.
@@ -638,27 +612,7 @@ impl Config {
             ("terminal", &mut config.terminal, settings.terminal),
             ("ui", &mut config.ui, settings.ui),
         ] {
-            if let Some(family) = settings.family {
-                font.family = family;
-            }
-            if let Some(size) = settings.size {
-                font.size = size;
-            }
-            if let Some(fallback) = settings.fallback {
-                if fallback.len() > MAX_FONT_FALLBACKS {
-                    return Err(Error::TooManyFontFallbacks(name));
-                }
-                if fallback.iter().any(|family| family.trim().is_empty()) {
-                    return Err(Error::EmptyFontFallback(name));
-                }
-                font.fallbacks = Some(fallback);
-            }
-            if font.family.trim().is_empty() {
-                return Err(Error::EmptyFontFamily(name));
-            }
-            if !font.size.is_finite() || !FONT_SIZE_RANGE.contains(&font.size) {
-                return Err(Error::InvalidFontSize(name));
-            }
+            settings.apply(name, font)?;
         }
         Ok(config)
     }

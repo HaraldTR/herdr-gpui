@@ -81,6 +81,24 @@ impl Default for NotificationConfig {
     }
 }
 
+/// Each key overrides the daemon's answer on its own, so naming one of them
+/// here does not silently reset the other to a GUI default.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+pub(super) struct ClipboardToastSettings {
+    enabled: Option<bool>,
+    position: Option<ClipboardToastPosition>,
+}
+
+impl ClipboardToastSettings {
+    pub(super) fn resolve(self, base: ClipboardToast) -> ClipboardToast {
+        ClipboardToast {
+            enabled: self.enabled.unwrap_or(base.enabled),
+            position: self.position.unwrap_or(base.position),
+        }
+    }
+}
+
 /// Only explicitly configured GUI keys override the shared Herdr preferences.
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(default)]

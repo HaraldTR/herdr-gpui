@@ -1,38 +1,6 @@
 use super::*;
 
 #[test]
-fn palette_defaults_overrides_and_validation() -> anyhow::Result<()> {
-    let defaults = Config::parse("")?;
-    assert!(defaults.palette.double_shift);
-    assert!(defaults.palette.project_roots.is_empty());
-    let config = Config::parse(
-        "[palette]\ndouble_shift = false\nproject_roots = ['~/Code', '$HOME/Projects']",
-    )?;
-    assert!(!config.palette.double_shift);
-    assert_eq!(config.palette.project_roots, ["~/Code", "$HOME/Projects"]);
-    for text in [
-        "[palette]\nproject_roots = ['']",
-        "[palette]\nproject_roots = ['   ']",
-        "[palette]\nproject_roots = ['x', 1]",
-        "[palette]\ndouble_shift = 'yes'",
-    ] {
-        assert!(Config::parse(text).is_err(), "{text}");
-    }
-    assert_eq!(
-        Config::parse("[palette]\nunknown = true")?.unknown_keys,
-        ["palette.unknown"]
-    );
-    assert!(matches!(
-        Config::parse(&format!(
-            "[palette]\nproject_roots = [{}]",
-            vec!["'x'"; 17].join(",")
-        )),
-        Err(Error::PaletteProjectRoots)
-    ));
-    Ok(())
-}
-
-#[test]
 fn primary_selection_text_contrasts_in_every_builtin_theme() {
     let luminance = |color: u32| {
         let channel = |shift: u32| ((color >> shift) & 255) as f32 / 255.;
@@ -270,34 +238,4 @@ fn theme_save_updates_only_local_overrides() -> anyhow::Result<()> {
     assert_eq!(config.theme, "Nord");
     assert_eq!(config.terminal.size, 19.);
     Ok(())
-}
-
-#[test]
-fn refreshes_managed_config_and_loads_absolute_theme() -> anyhow::Result<()> {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_nanos();
-    let directory = env::temp_dir().join(format!("herdr-config-{}-{unique}", std::process::id()));
-    let path = directory.join("config-gpui.toml");
-    let result = (|| {
-        let absent = directory.join("config.toml");
-        Config::load_path(&path, &absent)?;
-        assert_eq!(fs::read_to_string(&path)?, DEFAULT_CONFIG);
-        let local = path.with_extension("local.toml");
-        fs::write(&local, "theme = 'Nord'")?;
-        fs::write(&path, format!("{MANAGED_HEADER}\ntheme = 'Dracula'"))?;
-        assert_eq!(Config::load_path(&path, &absent)?.theme, "Nord");
-        assert_eq!(fs::read_to_string(&path)?, DEFAULT_CONFIG);
-        assert_eq!(fs::read_to_string(&local)?, "theme = 'Nord'");
-        let theme_path = directory.join("custom-theme");
-        fs::write(&theme_path, "background=112233")?;
-        let config = Config {
-            theme: theme_path.to_string_lossy().into_owned(),
-            ..Config::default()
-        };
-        assert_eq!(config.theme()?.background, 0x112233);
-        Ok(())
-    })();
-    fs::remove_dir_all(directory)?;
-    result
 }

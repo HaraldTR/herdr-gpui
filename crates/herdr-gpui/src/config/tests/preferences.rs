@@ -68,71 +68,6 @@ fn show_agents_saves_in_place_and_keeps_other_settings() -> anyhow::Result<()> {
 }
 
 #[test]
-fn defaults_and_partial_settings() -> anyhow::Result<()> {
-    // Sidebar, tabs, terminal, ui: only the status bar and modals are sans.
-    #[cfg(target_os = "linux")]
-    let families = [
-        "DejaVu Sans Mono",
-        "DejaVu Sans Mono",
-        "DejaVu Sans Mono",
-        "DejaVu Sans",
-    ];
-    #[cfg(not(target_os = "linux"))]
-    let families = ["Menlo", "Menlo", "Menlo", ".SystemUIFont"];
-
-    for config in [
-        Config::default(),
-        Config::parse("")?,
-        Config::parse(DEFAULT_CONFIG)?,
-    ] {
-        assert_eq!(config.theme()?, Theme::default());
-        assert!(config.github.oauth_client_id.is_none());
-        // Every feature ships off, including in the example config.
-        assert_eq!(config.features, Features::default());
-        assert!(!config.features.sidebar_hover_menu);
-        assert_eq!(config.terminal.line_height(), 20.0);
-        for ((font, family), size) in [config.sidebar, config.tabs, config.terminal, config.ui]
-            .into_iter()
-            .zip(families)
-            .zip([12.0, 12.0, 14.0, 12.0])
-        {
-            assert_eq!(font.family, family);
-            assert_eq!(font.size, size);
-        }
-    }
-
-    for settings in ["", "size = 18", "family = 'Custom Font'"] {
-        let text = ["sidebar", "tabs", "terminal", "ui"]
-            .map(|section| format!("[{section}]\n{settings}\n"))
-            .join("\n");
-        let config = Config::parse(&text)?;
-        for ((font, family), size) in [config.sidebar, config.tabs, config.terminal, config.ui]
-            .into_iter()
-            .zip(families)
-            .zip([12.0, 12.0, 14.0, 12.0])
-        {
-            assert_eq!(
-                font.family,
-                if settings.starts_with("family") {
-                    "Custom Font"
-                } else {
-                    family
-                }
-            );
-            assert_eq!(
-                font.size,
-                if settings.starts_with("size") {
-                    18.0
-                } else {
-                    size
-                }
-            );
-        }
-    }
-    Ok(())
-}
-
-#[test]
 fn appearance_and_close_options_preserve_defaults() -> anyhow::Result<()> {
     for config in [
         Config::default(),
@@ -243,59 +178,33 @@ fn features_are_opt_in_per_flag() -> anyhow::Result<()> {
 }
 
 #[test]
-fn github_public_client_id_and_explicit_environment_precedence() -> anyhow::Result<()> {
-    assert!(!Config::default().github.allow_plaintext_credentials);
-    assert!(
-        Config::parse("[github]\nallow_plaintext_credentials = true")?
-            .github
-            .allow_plaintext_credentials
-    );
-    assert!(Config::parse("[github]\nallow_plaintext_credentials = 'true'").is_err());
-    let config = Config::parse("[github]\noauth_client_id = 'Iv1.fixture'")?;
-    assert_eq!(
-        config.github.client_id_with_override(None)?.as_deref(),
-        Some("Iv1.fixture")
-    );
-    assert_eq!(
-        config
-            .github
-            .client_id_with_override(Some("override-fixture".as_ref()))?
-            .as_deref(),
-        Some("override-fixture")
-    );
-    assert_eq!(
-        config.github.oauth_client_id.as_deref(),
-        Some("Iv1.fixture")
-    );
-    assert_eq!(
-        Config::default()
-            .github
-            .client_id_with_override(None)?
-            .as_deref(),
-        Some("Iv23liurUcwxPjrdIFYT")
-    );
-    for id in [
-        "",
-        " ",
-        "bad\nvalue",
-        "bad/value",
-        "\u{e9}",
-        &"a".repeat(257),
+fn palette_defaults_overrides_and_validation() -> anyhow::Result<()> {
+    let defaults = Config::parse("")?;
+    assert!(defaults.palette.double_shift);
+    assert!(defaults.palette.project_roots.is_empty());
+    let config = Config::parse(
+        "[palette]\ndouble_shift = false\nproject_roots = ['~/Code', '$HOME/Projects']",
+    )?;
+    assert!(!config.palette.double_shift);
+    assert_eq!(config.palette.project_roots, ["~/Code", "$HOME/Projects"]);
+    for text in [
+        "[palette]\nproject_roots = ['']",
+        "[palette]\nproject_roots = ['   ']",
+        "[palette]\nproject_roots = ['x', 1]",
+        "[palette]\ndouble_shift = 'yes'",
     ] {
-        assert!(matches!(
-            config.github.client_id_with_override(Some(id.as_ref())),
-            Err(Error::InvalidClientId("HERDR_GITHUB_OAUTH_CLIENT_ID"))
-        ));
+        assert!(Config::parse(text).is_err(), "{text}");
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        assert!(
-            config
-                .github
-                .client_id_with_override(Some(std::ffi::OsStr::from_bytes(b"\xff")))
-                .is_err()
-        );
-    }
+    assert_eq!(
+        Config::parse("[palette]\nunknown = true")?.unknown_keys,
+        ["palette.unknown"]
+    );
+    assert!(matches!(
+        Config::parse(&format!(
+            "[palette]\nproject_roots = [{}]",
+            vec!["'x'"; 17].join(",")
+        )),
+        Err(Error::PaletteProjectRoots)
+    ));
     Ok(())
 }

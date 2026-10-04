@@ -13,10 +13,11 @@
 //! `ALIBABA_TOKEN_PLAN_HOST` / `_QUOTA_URL` test overrides, the `cna`
 //! anonymous id and CSRF headers derived from individual cookies (the probe
 //! keeps the cookie header opaque), and Firefox cookies.
-//!
-//! The OneConsole helpers here are shared with [`super::alibaba`] and
-//! [`super::qwencloud`].
 
+use super::oneconsole::{
+    DOMAINS, check, cornerstone, date, encode, expand, find_object, find_value, first, form_body,
+    gateway_request, sec_token, string,
+};
 use crate::{
     Error, Result,
     usage::{
@@ -24,27 +25,14 @@ use crate::{
             Account, Balance, Kind, MONTH, Provider, Report, SESSION, Section, Unit, WEEK, Window,
             group, title_case,
         },
-        probe::{Part, Probe, Request, Secret},
-        service::{Meta, Service, Setting, Timestamp},
-        values,
+        probe::{Probe, Secret},
+        service::{Meta, Service, Setting},
+        values::{self, number},
     },
 };
 use serde_json::{Map, Value};
 use std::time::{Duration, SystemTime};
 
-// Shared with [`super::alibaba`], which reads the same gateway numbers.
-pub(super) use crate::usage::values::number;
-
-mod console;
-mod fields;
-
-pub(super) use console::{check, cornerstone, encode, form_body, gateway_request, sec_token};
-pub(super) use fields::{date, expand, find_object, find_value, first, first_match, string};
-
-pub(super) const CHROME_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
-     AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
-/// Console sessions live on the aliyun and alibabacloud passport domains.
-pub(super) const DOMAINS: &[&str] = &["aliyun.com", "alibabacloud.com"];
 const PERSONAL_PRODUCT: &str = "sfm_bailian";
 const USAGE_API: &str = "zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/usage";
 const SUBSCRIPTION_API: &str = "zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/subscription";

@@ -1,28 +1,23 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-#[cfg(unix)]
-use super::probe::{HostPath, Request, Shell};
 use super::{
-    Host, Message, Reading, Usage, UsageConfig,
-    cookies::{self, CookieJar},
-    model::{
-        Account, Balance, Kind, Provider, Report, SESSION, Section, Severity, Unit, WEEK, Window,
-        countdown, group,
-    },
-    probe::{Exec, Probe, Response, json_field},
-    providers::{claude, codex},
+    Reading, UsageConfig,
+    cookies::CookieJar,
+    model::{Account, Kind, Provider, Report, WEEK, Window},
+    probe::{Exec, Probe},
     registry,
-    settings::ProviderSettings,
 };
 use crate::Error;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 mod browser_cookies;
 mod labels;
 mod provider_data;
+mod provider_settings;
 mod refresh;
+#[cfg(unix)]
 mod remote_hosts;
-mod status_bar;
+mod shown_providers;
 
 fn at(seconds: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)

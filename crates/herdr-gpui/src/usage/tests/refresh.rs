@@ -1,4 +1,6 @@
 use super::*;
+use crate::usage::{Host, Message, Usage};
+use std::time::Instant;
 
 fn begin(usage: &mut Usage, host: &Host, now: Instant) {
     usage.host = Some(host.clone());

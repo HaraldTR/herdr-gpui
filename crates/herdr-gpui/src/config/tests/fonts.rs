@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::fonts::MAX_FONT_FALLBACKS;
 
 #[test]
 fn font_family_saves_and_reset_preserve_other_overrides() -> anyhow::Result<()> {
@@ -239,4 +240,69 @@ fn fallback_lists_are_validated_per_face() {
         ))
         .is_ok()
     );
+}
+
+#[test]
+fn defaults_and_partial_settings() -> anyhow::Result<()> {
+    // Sidebar, tabs, terminal, ui: only the status bar and modals are sans.
+    #[cfg(target_os = "linux")]
+    let families = [
+        "DejaVu Sans Mono",
+        "DejaVu Sans Mono",
+        "DejaVu Sans Mono",
+        "DejaVu Sans",
+    ];
+    #[cfg(not(target_os = "linux"))]
+    let families = ["Menlo", "Menlo", "Menlo", ".SystemUIFont"];
+
+    for config in [
+        Config::default(),
+        Config::parse("")?,
+        Config::parse(DEFAULT_CONFIG)?,
+    ] {
+        assert_eq!(config.theme()?, Theme::default());
+        assert!(config.github.oauth_client_id.is_none());
+        // Every feature ships off, including in the example config.
+        assert_eq!(config.features, Features::default());
+        assert!(!config.features.sidebar_hover_menu);
+        assert_eq!(config.terminal.line_height(), 20.0);
+        for ((font, family), size) in [config.sidebar, config.tabs, config.terminal, config.ui]
+            .into_iter()
+            .zip(families)
+            .zip([12.0, 12.0, 14.0, 12.0])
+        {
+            assert_eq!(font.family, family);
+            assert_eq!(font.size, size);
+        }
+    }
+
+    for settings in ["", "size = 18", "family = 'Custom Font'"] {
+        let text = ["sidebar", "tabs", "terminal", "ui"]
+            .map(|section| format!("[{section}]\n{settings}\n"))
+            .join("\n");
+        let config = Config::parse(&text)?;
+        for ((font, family), size) in [config.sidebar, config.tabs, config.terminal, config.ui]
+            .into_iter()
+            .zip(families)
+            .zip([12.0, 12.0, 14.0, 12.0])
+        {
+            assert_eq!(
+                font.family,
+                if settings.starts_with("family") {
+                    "Custom Font"
+                } else {
+                    family
+                }
+            );
+            assert_eq!(
+                font.size,
+                if settings.starts_with("size") {
+                    18.0
+                } else {
+                    size
+                }
+            );
+        }
+    }
+    Ok(())
 }

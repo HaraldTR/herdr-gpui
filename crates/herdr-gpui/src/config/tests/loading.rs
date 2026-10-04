@@ -1,4 +1,5 @@
 use super::*;
+use crate::error::ThemeParseError;
 
 #[test]
 fn startup_reads_settings_without_writes_or_waiting_for_maintenance() -> anyhow::Result<()> {
@@ -303,4 +304,95 @@ fn simultaneous_migration_keeps_user_settings() -> anyhow::Result<()> {
         "theme = 'Nord'"
     );
     Ok(())
+}
+
+#[test]
+fn errors_retain_paths_categories_and_parser_sources() -> anyhow::Result<()> {
+    use std::error::Error as _;
+
+    let temp = TempDirectory::new()?;
+    let path = temp.0.join("invalid.toml");
+    fs::write(&path, "theme = [")?;
+    let error = Config::load_path(&path, &temp.0.join("absent.toml"))
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("accepted invalid TOML"))?;
+    assert!(
+        error
+            .to_string()
+            .starts_with(&format!("{}: ", path.display()))
+    );
+    let Error::Path {
+        path: actual,
+        source,
+    } = error
+    else {
+        anyhow::bail!("missing path context");
+    };
+    assert_eq!(actual, path);
+    assert!(matches!(source.as_ref(), Error::ConfigFile { .. }));
+    assert!(source.source().is_some());
+    assert!(matches!(
+        Config::parse("[ui]\nsize = nan"),
+        Err(Error::InvalidFontSize("ui"))
+    ));
+
+    let error = Theme::parse_ghostty("# ignored\npalette=bad=ffffff")
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("accepted invalid palette index"))?;
+    assert_eq!(
+        error.to_string(),
+        "line 2: palette: palette index must be between 0 and 255"
+    );
+    assert!(matches!(
+        &error,
+        Error::ThemeLine {
+            line: 2,
+            source: ThemeParseError::InvalidPaletteIndex(_),
+            ..
+        }
+    ));
+    assert!(
+        error
+            .source()
+            .and_then(|source| source.source())
+            .is_some_and(|source| source.is::<std::num::ParseIntError>())
+    );
+    assert!(matches!(
+        Theme::parse_ghostty("palette=256=ffffff"),
+        Err(Error::ThemeLine {
+            source: ThemeParseError::PaletteIndexOutOfRange,
+            ..
+        })
+    ));
+    Ok(())
+}
+
+#[test]
+fn refreshes_managed_config_and_loads_absolute_theme() -> anyhow::Result<()> {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let directory = env::temp_dir().join(format!("herdr-config-{}-{unique}", std::process::id()));
+    let path = directory.join("config-gpui.toml");
+    let result = (|| {
+        let absent = directory.join("config.toml");
+        Config::load_path(&path, &absent)?;
+        assert_eq!(fs::read_to_string(&path)?, DEFAULT_CONFIG);
+        let local = path.with_extension("local.toml");
+        fs::write(&local, "theme = 'Nord'")?;
+        fs::write(&path, format!("{MANAGED_HEADER}\ntheme = 'Dracula'"))?;
+        assert_eq!(Config::load_path(&path, &absent)?.theme, "Nord");
+        assert_eq!(fs::read_to_string(&path)?, DEFAULT_CONFIG);
+        assert_eq!(fs::read_to_string(&local)?, "theme = 'Nord'");
+        let theme_path = directory.join("custom-theme");
+        fs::write(&theme_path, "background=112233")?;
+        let config = Config {
+            theme: theme_path.to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        assert_eq!(config.theme()?.background, 0x112233);
+        Ok(())
+    })();
+    fs::remove_dir_all(directory)?;
+    result
 }

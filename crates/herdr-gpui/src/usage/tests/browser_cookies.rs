@@ -1,4 +1,5 @@
 use super::*;
+use crate::usage::cookies;
 
 #[test]
 fn chrome_values_decrypt_with_the_derived_key() {

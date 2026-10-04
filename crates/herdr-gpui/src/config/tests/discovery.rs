@@ -26,67 +26,6 @@ fn shared_windows_config_path_matches_upstream_roaming_layout() {
 }
 
 #[test]
-fn errors_retain_paths_categories_and_parser_sources() -> anyhow::Result<()> {
-    use std::error::Error as _;
-
-    let temp = TempDirectory::new()?;
-    let path = temp.0.join("invalid.toml");
-    fs::write(&path, "theme = [")?;
-    let error = Config::load_path(&path, &temp.0.join("absent.toml"))
-        .err()
-        .ok_or_else(|| anyhow::anyhow!("accepted invalid TOML"))?;
-    assert!(
-        error
-            .to_string()
-            .starts_with(&format!("{}: ", path.display()))
-    );
-    let Error::Path {
-        path: actual,
-        source,
-    } = error
-    else {
-        anyhow::bail!("missing path context");
-    };
-    assert_eq!(actual, path);
-    assert!(matches!(source.as_ref(), Error::ConfigFile { .. }));
-    assert!(source.source().is_some());
-    assert!(matches!(
-        Config::parse("[ui]\nsize = nan"),
-        Err(Error::InvalidFontSize("ui"))
-    ));
-
-    let error = Theme::parse_ghostty("# ignored\npalette=bad=ffffff")
-        .err()
-        .ok_or_else(|| anyhow::anyhow!("accepted invalid palette index"))?;
-    assert_eq!(
-        error.to_string(),
-        "line 2: palette: palette index must be between 0 and 255"
-    );
-    assert!(matches!(
-        &error,
-        Error::ThemeLine {
-            line: 2,
-            source: ThemeParseError::InvalidPaletteIndex(_),
-            ..
-        }
-    ));
-    assert!(
-        error
-            .source()
-            .and_then(|source| source.source())
-            .is_some_and(|source| source.is::<std::num::ParseIntError>())
-    );
-    assert!(matches!(
-        Theme::parse_ghostty("palette=256=ffffff"),
-        Err(Error::ThemeLine {
-            source: ThemeParseError::PaletteIndexOutOfRange,
-            ..
-        })
-    ));
-    Ok(())
-}
-
-#[test]
 fn discovers_sorted_names_and_loads_in_precedence_order() -> anyhow::Result<()> {
     let temp = TempDirectory::new()?;
     let first = temp.0.join("first");
