@@ -92,12 +92,57 @@ herdr_cli() {{ herdr{session} "$@"; }}
         limits: ScriptLimits,
         cancelled: &AtomicBool,
     ) -> Result<u64> {
+        self.stream(body, input, output, limits, cancelled)
+            .map_err(script(step))
+    }
+
+    /// [`Host::run`] without Teleport's step context.
+    fn stream(
+        &self,
+        body: &str,
+        input: impl Read + Send,
+        output: impl Write + Send,
+        limits: ScriptLimits,
+        cancelled: &AtomicBool,
+    ) -> herdr_client::Result<u64> {
         let host = self
             .ssh
             .as_deref()
             .map_or(ScriptHost::Local, ScriptHost::Ssh);
         let script_text = format!("{}{body}", self.prelude());
-        run_script(host, &script_text, input, output, limits, cancelled).map_err(script(step))
+        run_script(host, &script_text, input, output, limits, cancelled)
+    }
+
+    /// Run `body` with no input and collect its bounded stdout. Untied to
+    /// Teleport's steps, for other features that script a host and keep
+    /// their own typed errors.
+    pub(crate) fn capture(
+        &self,
+        body: &str,
+        cancelled: &AtomicBool,
+    ) -> herdr_client::Result<Vec<u8>> {
+        let mut output = Vec::new();
+        self.stream(
+            body,
+            &[][..],
+            &mut output,
+            ScriptLimits {
+                output: QUERY_OUTPUT,
+                idle: QUERY_IDLE,
+            },
+            cancelled,
+        )?;
+        Ok(output)
+    }
+
+    /// The script line running `herdr_cli` with `args`, each quoted.
+    pub(crate) fn herdr_line(args: &[&str]) -> String {
+        let command = args
+            .iter()
+            .map(|arg| shell_quote(arg))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("herdr_cli {command}\n")
     }
 
     /// Run `body` and collect its bounded stdout.
@@ -130,12 +175,7 @@ herdr_cli() {{ herdr{session} "$@"; }}
         args: &[&str],
         cancelled: &AtomicBool,
     ) -> Result<T> {
-        let command = args
-            .iter()
-            .map(|arg| shell_quote(arg))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let output = self.query(step, &format!("herdr_cli {command}\n"), &[], cancelled)?;
+        let output = self.query(step, &Self::herdr_line(args), &[], cancelled)?;
         serde_json::from_slice::<super::snapshot::Envelope<T>>(&output)
             .map(|envelope| envelope.result)
             .map_err(decode(step))
@@ -143,18 +183,10 @@ herdr_cli() {{ herdr{session} "$@"; }}
 
     /// Run `herdr_cli` with `args`, ignoring its output.
     pub(crate) fn herdr_ok(&self, step: Step, args: &[&str], cancelled: &AtomicBool) -> Result<()> {
-        let command = args
-            .iter()
-            .map(|arg| shell_quote(arg))
-            .collect::<Vec<_>>()
-            .join(" ");
-        self.query(
-            step,
-            &format!("herdr_cli {command} >/dev/null\n"),
-            &[],
-            cancelled,
-        )
-        .map(drop)
+        let line = Self::herdr_line(args);
+        let line = line.trim_end();
+        self.query(step, &format!("{line} >/dev/null\n"), &[], cancelled)
+            .map(drop)
     }
 
     /// Which of `programs` the user's login shell can find on this host.
@@ -164,6 +196,16 @@ herdr_cli() {{ herdr{session} "$@"; }}
         programs: &[&str],
         cancelled: &AtomicBool,
     ) -> Result<Vec<String>> {
+        self.installed_programs(programs, cancelled)
+            .map_err(script(step))
+    }
+
+    /// [`Host::installed`] without Teleport's step context.
+    pub(crate) fn installed_programs(
+        &self,
+        programs: &[&str],
+        cancelled: &AtomicBool,
+    ) -> herdr_client::Result<Vec<String>> {
         if programs.is_empty() {
             return Ok(Vec::new());
         }
@@ -182,7 +224,7 @@ for program in {names}; do
 done
 "#
         );
-        let output = self.query(step, &body, &[], cancelled)?;
+        let output = self.capture(&body, cancelled)?;
         Ok(String::from_utf8_lossy(&output)
             .lines()
             .filter(|line| programs.contains(line))

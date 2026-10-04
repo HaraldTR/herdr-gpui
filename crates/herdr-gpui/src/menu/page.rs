@@ -40,6 +40,8 @@ pub(crate) enum Page {
     Dialog(WorkspaceAction),
     /// Moving a linked worktree to another host.
     Teleport,
+    /// One prompt sent to several agents, and their comparison.
+    FanOut,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +73,8 @@ pub(crate) enum WorkspaceMenuAction {
     GoToTeleported,
     /// Forget that this checkout's work was teleported away.
     ClearTeleported,
+    /// Send one prompt to several agents, or reopen their comparison.
+    FanOut,
 }
 
 impl WorkspaceMenuAction {
@@ -91,6 +95,7 @@ impl WorkspaceMenuAction {
             Self::Teleport | Self::GoToTeleported => "icons/teleport.svg",
             Self::TeleportBack => "icons/teleport-back.svg",
             Self::ClearTeleported => "icons/x.svg",
+            Self::FanOut => "icons/split.svg",
             Self::PullRequest => return None,
         })
     }

@@ -46,6 +46,28 @@ enum Arity {
 }
 
 impl AgentKind {
+    /// Every kind, in declaration order.
+    pub(crate) const ALL: [Self; 18] = [
+        Self::Claude,
+        Self::Codex,
+        Self::Opencode,
+        Self::Pi,
+        Self::Omp,
+        Self::Copilot,
+        Self::Devin,
+        Self::Droid,
+        Self::Kimi,
+        Self::Mastracode,
+        Self::Hermes,
+        Self::Qodercli,
+        Self::Qwen,
+        Self::Kilo,
+        Self::Cursor,
+        Self::Antigravity,
+        Self::Grok,
+        Self::Letta,
+    ];
+
     /// The kind for the agent name Herdr reports.
     pub(crate) fn parse(name: &str) -> Option<Self> {
         Some(match name {
@@ -759,6 +781,14 @@ mod tests {
         }
         assert_eq!(AgentKind::parse("cursor-agent"), None);
         assert_eq!(AgentKind::parse("antigravity_cli"), None);
+    }
+
+    #[test]
+    fn every_kind_is_listed_once_and_parses_back() {
+        for (index, kind) in AgentKind::ALL.iter().enumerate() {
+            assert_eq!(AgentKind::parse(kind.name()), Some(*kind));
+            assert!(!AgentKind::ALL[..index].contains(kind), "{kind:?}");
+        }
     }
 
     #[test]

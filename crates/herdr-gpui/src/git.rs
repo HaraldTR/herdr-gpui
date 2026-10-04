@@ -498,7 +498,7 @@ fn checkout_status(
 
 /// `--numstat` is machine readable in any locale; binary files report `-` and
 /// contribute no line counts.
-fn parse_numstat(text: &str) -> Status {
+pub(super) fn parse_numstat(text: &str) -> Status {
     let mut status = Status::default();
     for line in text.lines() {
         let mut fields = line.split('\t');
