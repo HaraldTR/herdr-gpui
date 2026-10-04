@@ -27,7 +27,7 @@ pub(crate) use {
     job::{HostRepositories, Place, Repository, Retired, Source},
     launch::AgentKind,
     marks::{Mark, Marks},
-    snapshot::{Envelope, WorktreeCreated},
+    snapshot::{Envelope, ProcessInfo, ProcessInfoResult, WorktreeCreated},
     ui::{Follow, Teleport},
 };
 

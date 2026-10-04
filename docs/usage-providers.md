@@ -106,13 +106,13 @@ secret (emails, plan names, ids shown to the user).
 | `read(&HostPath)` | `Option<String>` | A non-secret file brought back, e.g. an XML quota report. |
 | `exists(&HostPath)` | `bool` | Whether a path exists on the host. |
 | `file_text(&HostPath, &[key])` | `Option<String>` | A non-secret JSON field of a file (an email) without bringing the file back. |
-| `keychain(service, account)` | `Option<Secret>` | A macOS keychain password on the host (`security -w`). |
+| `keychain(service, account)` | `Option<Secret>` | A macOS keychain password on the host (`security -w`), for items `security` itself may read without asking, such as Claude Code's. |
 | `field(&secret, &[key])` | `Option<Secret>` | A string/number at a JSON path inside a secret (array steps are indices as strings). |
 | `text(&secret, &[key])` | `Option<String>` | A non-secret JSON field revealed, e.g. a plan name. |
-| `cookies(&[domain], &[name])` | `Option<Secret>` | The `cookie` setting, else (only for providers the user listed) those cookies from Chrome/Safari. Pass the cookie names the service needs; `&[]` takes all cookies of the domains. |
+| `cookies(&[domain], &[name])` | `Option<Secret>` | The `cookie` setting, else (only for providers the user listed and allowed in the panel) those cookies from Chrome/Safari. Pass the cookie names the service needs; `&[]` takes all cookies of the domains. |
 | `cookies_any(&[domain], &[name])` | `Option<Secret>` | Like `cookies`, satisfied by whichever of the names exists (renamed session cookies). |
 | `cookie_value(&[domain], name)` | `Option<Secret>` | One cookie's bare value, for a service that wants it as a bearer or in a header. |
-| `keychain_internet(server, account)` | `Option<Secret>` | A macOS keychain internet password (`find-internet-password`). |
+| `foreign_keychain(service, account)`, `foreign_keychain_internet(server, account)` | `Option<Secret>` | A keychain item another app owns, such as Zed's sign-in. Reading it makes macOS ask, so it is read only for a listed provider after the user presses Allow in its panel; until then the provider shows a lock in the status bar. A denial is remembered and takes the grant back. |
 | `env_text(name)` | `Option<String>` | A host environment variable that is not secret, e.g. a local server URL. |
 | `body(Request)` | `Result<String>` | The body of a successful answer; failures become typed usage errors. Most providers need only this. |
 | `http(Request)` | `Result<Response>` | The whole answer, for a provider that reads the status itself; runs where its secrets are. |
