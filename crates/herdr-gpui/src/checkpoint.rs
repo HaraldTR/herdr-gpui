@@ -558,7 +558,11 @@ impl Checkpoints {
                 if let Some(view) = self.view.as_mut().filter(|_| viewed) {
                     view.restoring = false;
                     match &result {
-                        Ok(()) => view.confirming = None,
+                        // The list is about to change under the selection.
+                        Ok(()) => {
+                            view.confirming = None;
+                            view.selected = None;
+                        }
                         Err(error) => view.error = Some(describe(error)),
                     }
                     self.list(job.checkout.clone());

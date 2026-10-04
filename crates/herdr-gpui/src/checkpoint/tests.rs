@@ -192,7 +192,9 @@ fn the_dialog_lists_first_and_restores_only_after_confirming() {
     checkpoints.restore();
     assert!(!checkpoints.view.as_ref().unwrap().restoring);
 
-    checkpoints.view.as_mut().unwrap().confirming = Some("2".into());
+    let view = checkpoints.view.as_mut().unwrap();
+    view.selected = Some(0);
+    view.confirming = Some("2".into());
     checkpoints.restore();
     assert!(checkpoints.view.as_ref().unwrap().restoring);
     assert_eq!(
@@ -208,6 +210,7 @@ fn the_dialog_lists_first_and_restores_only_after_confirming() {
     assert_eq!(restored.len(), 1);
     let view = checkpoints.view.as_ref().unwrap();
     assert!(!view.restoring && view.confirming.is_none());
+    assert_eq!(view.selected, None, "a new list has nothing selected");
     assert_eq!(
         queued(&checkpoints)
             .iter()
