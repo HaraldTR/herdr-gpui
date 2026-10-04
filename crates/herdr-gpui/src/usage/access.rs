@@ -46,8 +46,7 @@ impl KeychainGrants {
                     None
                 }
             })
-            .and_then(|bytes| serde_json::from_slice::<Saved>(&bytes).ok())
-            .map(|saved| parse(&saved))
+            .and_then(|bytes| parse_saved(&bytes).ok())
             .unwrap_or_default();
         Self { granted, path }
     }
@@ -100,25 +99,11 @@ impl KeychainGrants {
 }
 
 /// Known providers only: an id this build does not have grants nothing.
-fn parse(saved: &Saved) -> HashSet<Provider> {
-    saved
+pub(super) fn parse_saved(bytes: impl AsRef<[u8]>) -> serde_json::Result<HashSet<Provider>> {
+    let saved: Saved = serde_json::from_slice(bytes.as_ref())?;
+    Ok(saved
         .providers
         .iter()
         .filter_map(|id| registry::find(id))
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
-    use super::*;
-
-    #[test]
-    fn saved_grants_keep_only_known_providers() {
-        let saved: Saved =
-            serde_json::from_str(r#"{"providers":["zed","no-such-provider"]}"#).unwrap();
-        let granted = parse(&saved);
-        assert_eq!(granted.len(), 1);
-        assert!(granted.contains(&registry::find("zed").unwrap()));
-    }
+        .collect())
 }
