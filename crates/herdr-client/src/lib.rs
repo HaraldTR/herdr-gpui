@@ -57,7 +57,8 @@ pub use sessions::{
 #[cfg(unix)]
 pub use ssh::script_command;
 pub use ssh::{
-    Destination, HostProbe, probe_host, remote_config_value, remote_origin_url, resolve_destination,
+    Destination, FORWARD_READY, HostProbe, forward_command, probe_host, remote_config_value,
+    remote_origin_url, resolve_destination,
 };
 pub use surface_images::{
     MAX_IMAGE_BYTES, MAX_IMAGE_SIDE, MAX_IMAGES, MAX_PLACEMENTS, SurfaceImage, SurfaceImages,

@@ -370,6 +370,20 @@ pub enum Error {
     SystemLoadUnsupported(String),
     #[error("CPU and memory output was not understood.")]
     SystemLoadOutput,
+    #[error("Could not read listening ports on this host.")]
+    ListeningPorts(#[source] Box<Error>),
+    #[error("Neither ss nor lsof is installed on this host, so listening ports cannot be read.")]
+    ListeningPortsTool,
+    #[error("Listening ports cannot be read on this platform.")]
+    ListeningPortsUnsupported,
+    #[error("No free local port for an SSH tunnel.")]
+    TunnelPort(#[source] io::Error),
+    #[error("Could not start ssh for a tunnel.")]
+    TunnelStart(#[source] io::Error),
+    #[error("SSH ended before the tunnel opened ({0}).")]
+    TunnelExited(std::process::ExitStatus),
+    #[error("The SSH tunnel did not open in time.")]
+    TunnelTimeout,
     #[error("Could not ask Herdr which process the pane runs.")]
     ProcessesQuery(#[source] herdr_client::Error),
     #[error("Herdr's answer about the pane's process was not understood.")]
