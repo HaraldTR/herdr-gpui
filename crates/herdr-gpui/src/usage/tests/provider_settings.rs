@@ -73,7 +73,7 @@ fn settings_come_from_this_machines_config() {
         provider("claude"),
         Some(&settings),
         &mut jar,
-        false,
+        Consent::Quiet,
     );
     assert_eq!(probe.text_setting("api_key").as_deref(), Some("config-key"));
     assert!(probe.setting("missing").is_none());
