@@ -56,6 +56,7 @@ mod notifications;
 mod osc52;
 mod palette;
 mod pane_menu;
+mod port_forward;
 mod preferences;
 mod presentation;
 mod processes;

@@ -15,6 +15,8 @@ pub(crate) enum Page {
     /// A saved SSH device's context menu, from its sidebar host header.
     Host,
     RenameDevice,
+    /// Names a saved SSH device's port to forward to this computer.
+    ForwardPort,
     RemoveDevice,
     Keybinds,
     Themes,
