@@ -152,6 +152,8 @@ pub(crate) struct HerdrWindow {
     pub(crate) git: git::Git,
     pub(crate) usage: crate::usage::Usage,
     pub(crate) system_load: crate::system_load::SystemLoad,
+    /// Snapshots of checkouts taken at agent turns, and the dialog listing them.
+    pub(crate) checkpoints: crate::checkpoint::Checkpoints,
     pub(crate) install_warning_shown: bool,
     pub(crate) collapsed_repos: std::collections::HashSet<String>,
     /// Expanded; collapsed leaves the rail or nothing, as Herdr's
@@ -405,6 +407,7 @@ impl HerdrWindow {
         if self.update_system_load() {
             cx.notify();
         }
+        self.update_checkpoints(cx);
         if self.live.missing_installation && !self.install_warning_shown {
             self.install_warning_shown = true;
             self.show_install_modal(window, cx);
@@ -456,6 +459,50 @@ impl HerdrWindow {
             })
             .map(|(_, endpoint)| crate::usage::Host::from(&endpoint.connection.target));
         self.system_load.poll(hosts)
+    }
+
+    /// Agent turns are watched on every enabled, connected host this client
+    /// may run Git on, and finished restores are reported wherever the user is.
+    fn update_checkpoints(&mut self, cx: &mut Context<Self>) {
+        self.close_stale_checkpoints();
+        let enabled = self.config.agent_checkpoints;
+        let mut watched = Vec::new();
+        for (index, endpoint) in self.endpoints.iter().enumerate() {
+            let live = if index == self.selected_endpoint {
+                &self.live
+            } else {
+                &endpoint.live
+            };
+            let (true, true, Some(host), Some(snapshot)) = (
+                enabled,
+                endpoint.enabled && live.status.is_connected(),
+                crate::checkpoint::host_for(&endpoint.connection.target, live),
+                live.snapshot.as_ref(),
+            ) else {
+                continue;
+            };
+            self.checkpoints.observe(&endpoint.id, &host, snapshot);
+            watched.push(endpoint.id.as_str());
+        }
+        self.checkpoints
+            .retain_endpoints(|endpoint| watched.contains(&endpoint));
+        let (changed, restored) = self.checkpoints.poll();
+        for restored in restored {
+            let flash = match restored.result {
+                Ok(()) => Flash::success(format!(
+                    "Restored a checkpoint of {}",
+                    restored.checkout.branch
+                )),
+                Err(error) => Flash::warning(format!(
+                    "Checkpoint not restored: {}",
+                    crate::checkpoint::describe(&error)
+                )),
+            };
+            self.show_flash(flash, cx);
+        }
+        if changed {
+            cx.notify();
+        }
     }
 
     /// The machine the selected endpoint runs on.
@@ -591,6 +638,7 @@ impl HerdrWindow {
             git: git::Git::default(),
             usage: Default::default(),
             system_load: Default::default(),
+            checkpoints: Default::default(),
             install_warning_shown: false,
             collapsed_repos: Default::default(),
             sidebar_visible: true,

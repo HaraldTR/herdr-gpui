@@ -36,6 +36,13 @@ show_agents = true
 # on its sidebar row. Connected remote hosts are read over SSH every couple of
 # seconds; false stops all sampling. Also under Settings > General.
 show_system_load = true
+# Checkpoint a worktree each time one of its agents starts or finishes a turn,
+# locally or over SSH, so its files can be rolled back from the workspace
+# menu's Checkpoints. Snapshots include untracked (not ignored) files, live in
+# hidden refs/herdr-gpui/checkpoints/ refs, and the newest 50 per branch are
+# kept. Taking one never changes the index or files. Also under
+# Settings > General.
+agent_checkpoints = true
 # macOS only: whether Option-letter reaches a pane as an Alt shortcut (Alt-P
 # for Option-P) or types the character the keyboard layout puts there. "auto"
 # sends Alt on the U.S. and ABC layouts and types elsewhere, so layouts that

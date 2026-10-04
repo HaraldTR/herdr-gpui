@@ -489,6 +489,9 @@ impl HerdrWindow {
             }
             items.push((WorkspaceMenuAction::Teleport, "Teleport..."));
         }
+        if self.checkpoint_checkout().is_some() {
+            items.push((WorkspaceMenuAction::Checkpoints, "Checkpoints..."));
+        }
         // Only a workspace that heads a group of checkouts can fold anything.
         if let Some(key) = target.group_key() {
             items.push(if self.collapsed_repos_for_selection().contains(key) {
@@ -670,6 +673,7 @@ impl HerdrWindow {
             WorkspaceMenuAction::GoToTeleported => self.go_to_teleported(window, cx),
             WorkspaceMenuAction::TeleportBack => self.teleport_back(window, cx),
             WorkspaceMenuAction::ClearTeleported => self.clear_teleport_mark(window, cx),
+            WorkspaceMenuAction::Checkpoints => self.open_checkpoints(window, cx),
         }
     }
 

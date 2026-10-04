@@ -691,6 +691,15 @@ impl SettingsWindow {
                 cx,
             ))
             .child(self.preference_switch(
+                "settings-agent-checkpoints",
+                "Checkpoint agent turns",
+                self.config.agent_checkpoints,
+                crate::config::preferences::Preference::AgentCheckpoints(
+                    !self.config.agent_checkpoints,
+                ),
+                cx,
+            ))
+            .child(self.preference_switch(
                 "settings-confirm-close",
                 "Confirm tab close",
                 self.config.confirm_close_tab,

@@ -632,6 +632,8 @@ impl HerdrWindow {
             panel = panel.child(self.render_workspace_dialog(action, cx));
         } else if page == Page::Teleport {
             panel = panel.child(self.render_teleport(cx));
+        } else if page == Page::Checkpoints {
+            panel = panel.child(self.render_checkpoints(cx));
         } else if page == Page::Git {
             panel = panel.child(self.render_git_menu(cx));
         } else if page == Page::GitCommit {
@@ -842,6 +844,10 @@ impl HerdrWindow {
                 }
                 if this.menu.page == Some(Page::Teleport) {
                     this.teleport_key(event, window, cx);
+                    return;
+                }
+                if this.menu.page == Some(Page::Checkpoints) {
+                    this.checkpoints_key(event, window, cx);
                     return;
                 }
                 if matches!(

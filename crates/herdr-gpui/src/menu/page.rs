@@ -40,6 +40,8 @@ pub(crate) enum Page {
     Dialog(WorkspaceAction),
     /// Moving a linked worktree to another host.
     Teleport,
+    /// A checkout's agent checkpoints, and restoring one.
+    Checkpoints,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +73,7 @@ pub(crate) enum WorkspaceMenuAction {
     GoToTeleported,
     /// Forget that this checkout's work was teleported away.
     ClearTeleported,
+    Checkpoints,
 }
 
 impl WorkspaceMenuAction {
@@ -91,6 +94,7 @@ impl WorkspaceMenuAction {
             Self::Teleport | Self::GoToTeleported => "icons/teleport.svg",
             Self::TeleportBack => "icons/teleport-back.svg",
             Self::ClearTeleported => "icons/x.svg",
+            Self::Checkpoints => "icons/refresh.svg",
             Self::PullRequest => return None,
         })
     }
