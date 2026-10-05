@@ -443,6 +443,8 @@ impl HerdrWindow {
             for revealed in &self.sidebar_revealed {
                 revealed.set(None);
             }
+            // The row a reveal left for the next frame is in the old list.
+            self.sidebar_pin_reveal.set(None);
         }
         cx.notify();
     }

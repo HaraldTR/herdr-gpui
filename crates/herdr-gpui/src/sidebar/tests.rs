@@ -22,3 +22,4 @@ use herdr_client::protocol::{
 mod hierarchy;
 mod row_text;
 mod statuses;
+mod sticky_hosts;
