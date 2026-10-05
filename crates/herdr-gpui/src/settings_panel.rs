@@ -1,6 +1,7 @@
 //! Prepared preferences state and background-only configuration operations.
 use crate::{
     HerdrWindow,
+    config::ThemeName,
     fonts::StyledFont,
     herdr_settings::{Edit, IndicatorStyle, Settings, THEME_NAMES, ToastDelivery},
 };
@@ -150,6 +151,59 @@ impl HerdrWindow {
                 Err(error) => self.settings.error = Some(error.to_string()),
             }
         }
+    }
+
+    /// Shows the side of a `light:…,dark:…` theme for the system appearance.
+    /// Theme files are read on the background executor; a result is dropped
+    /// when the theme or appearance changed while it loaded.
+    pub(crate) fn apply_system_theme(&mut self, cx: &mut Context<Self>) {
+        if !ThemeName::follows_system(&self.config.theme)
+            || self.menu.page == Some(crate::menu::Page::Themes)
+            || self.theme_save_in_flight()
+            // Settings applies its own draft to every window.
+            || crate::settings_window::theme_pending(cx)
+        {
+            return;
+        }
+        let light = crate::app::light_appearance(cx);
+        let config = self.config.clone();
+        let load = cx
+            .background_executor()
+            .spawn(async move { config.theme(light).map(|theme| (config, theme)) });
+        cx.spawn(async move |this, cx| {
+            let result = load.await;
+            let _ = this.update(cx, |this, cx| {
+                let (config, theme) = match result {
+                    Ok(loaded) => loaded,
+                    Err(error) => {
+                        tracing::warn!(%error, "Could not load the theme for the system appearance");
+                        this.local_error = Some(format!("Apply system appearance: {error}"));
+                        cx.notify();
+                        return;
+                    }
+                };
+                if config.theme != this.config.theme
+                    || config.contrast != this.config.contrast
+                    || light != crate::app::light_appearance(cx)
+                    || this.menu.page == Some(crate::menu::Page::Themes)
+                    || this.theme_save_in_flight()
+                    || crate::settings_window::theme_pending(cx)
+                {
+                    return;
+                }
+                this.theme = theme;
+                if let Some(mut appearance) =
+                    cx.try_global::<crate::app::InitialAppearance>().cloned()
+                    && appearance.config.theme == this.config.theme
+                {
+                    appearance.theme = this.theme.clone();
+                    cx.set_global(appearance);
+                }
+                crate::log_window::set_appearance(&this.config, &this.theme, cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn save_shared_settings(&mut self, edit: Edit, cx: &mut Context<Self>) {

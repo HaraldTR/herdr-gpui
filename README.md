@@ -13,7 +13,8 @@
   <a href="docs/updating.md">App updates</a> ·
   <a href="crates/herdr-gpui/README.md">GUI scope &amp; configuration</a> ·
   <a href="crates/herdr-gpui/PERFORMANCE.md">Performance report</a> ·
-  <a href="AGENTS.md">Contributing</a>
+  <a href="AGENTS.md">Contributing</a> ·
+  <a href="#star-history">Star history</a>
 </p>
 
 A native Rust/GPUI client for a [Herdr](https://herdr.dev/) daemon you installed
@@ -204,3 +205,13 @@ reference mode, workload, deterministic checks, and remaining limitations.
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE), plus the
 [upstream protocol attribution](crates/herdr-protocol/NOTICE.md) for the
 vendored parts of `herdr-protocol`.
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=penso%2Fherdr-gpui&type=date&legend=top-left">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=penso/herdr-gpui&type=date&theme=dark&legend=top-left">
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=penso/herdr-gpui&type=date&legend=top-left">
+    <img alt="Star history chart for penso/herdr-gpui" src="https://api.star-history.com/svg?repos=penso/herdr-gpui&type=date&legend=top-left">
+  </picture>
+</a>

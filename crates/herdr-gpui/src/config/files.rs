@@ -101,7 +101,7 @@ impl Config {
             theme: name.into(),
             ..self.clone()
         };
-        selected.theme()?;
+        selected.validate_theme()?;
         let result = (|| -> Result<()> {
             let text = match fs::read_to_string(path) {
                 Ok(text) => text,

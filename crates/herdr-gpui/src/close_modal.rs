@@ -1,5 +1,6 @@
 use crate::{
     Error, HerdrWindow, Result,
+    config::preferences::Preference,
     controls::{self, Command},
     menu::Page,
 };
@@ -18,6 +19,8 @@ pub(super) struct CloseConfirmation {
     pane: Option<String>,
     label: String,
     confirm_selected: bool,
+    /// Pane closes only: confirming also saves `confirm_close_pane = false`.
+    do_not_ask_again: bool,
     error: Option<String>,
 }
 
@@ -43,6 +46,7 @@ impl CloseConfirmation {
             pane: None,
             label: tab.label.clone(),
             confirm_selected: false,
+            do_not_ask_again: false,
             error: None,
         })
     }
@@ -75,14 +79,15 @@ impl CloseConfirmation {
                 .map(|pane| pane.label.clone().unwrap_or_else(|| pane.pane_id.clone()))
                 .unwrap_or_else(|| tab.label.clone()),
             confirm_selected: false,
+            do_not_ask_again: false,
             error: None,
         })
     }
 
     /// Whether closing this target could interrupt an agent mid-task: one
     /// working, or blocked on a prompt. Idle, done, and unknown agents, and
-    /// tabs without any, have nothing in flight to lose. Pane closes always
-    /// ask, so this only matters for tabs.
+    /// tabs without any, have nothing in flight to lose. Pane closes ask
+    /// unless `confirm_close_pane` is off, so this only matters for tabs.
     fn interrupts_agent(&self, snapshot: &ClientShellSnapshot) -> bool {
         let busy = |status| matches!(status, AgentStatus::Working | AgentStatus::Blocked);
         // The tab's aggregate status may rank a finished agent above a
@@ -149,10 +154,10 @@ impl HerdrWindow {
         self.show_close(close, window, cx);
     }
 
-    /// Opens the confirmation, or closes a tab straight away when it has no
-    /// agent mid-task or confirmation is turned off. The immediate close still
-    /// goes through `confirm_close`, so its connection and target checks hold
-    /// and a refusal stays visible in the dialog.
+    /// Opens the confirmation, or closes straight away when confirmation is
+    /// turned off for the target kind or a tab has no agent mid-task. The
+    /// immediate close still goes through `confirm_close`, so its connection
+    /// and target checks hold and a refusal stays visible in the dialog.
     fn show_close(
         &mut self,
         close: Option<CloseConfirmation>,
@@ -162,13 +167,16 @@ impl HerdrWindow {
         let Some(close) = close else {
             return;
         };
-        let immediate = close.pane.is_none()
-            && (!self.config.confirm_close_tab
+        let immediate = if close.pane.is_some() {
+            !self.config.confirm_close_pane
+        } else {
+            !self.config.confirm_close_tab
                 || !self
                     .live
                     .snapshot
                     .as_ref()
-                    .is_some_and(|snapshot| close.interrupts_agent(snapshot)));
+                    .is_some_and(|snapshot| close.interrupts_agent(snapshot))
+        };
         if !self.open_menu(window, cx) {
             return;
         }
@@ -180,9 +188,19 @@ impl HerdrWindow {
     }
 
     fn confirm_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(close) = &self.menu.close else {
-            return;
-        };
+        if let Some(edit) = self.send_close(window, cx) {
+            self.save_preference(move || crate::config::Config::save_preference(edit), cx);
+        }
+    }
+
+    /// Sends the close, returning the preference "Do not ask again" asks to
+    /// persist once the close actually went out; a refusal persists nothing.
+    pub(super) fn send_close(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Preference> {
+        let close = self.menu.close.as_ref()?;
         let result = (|| {
             if !self.menu_target_current() || !self.input_ready() {
                 return Err(Error::StaleConnection);
@@ -201,16 +219,19 @@ impl HerdrWindow {
         })();
         match result {
             Ok((method, params)) => {
+                let stop_asking = close.do_not_ask_again;
                 self.request_focus_change(method.as_str(), None, |handle, boot| {
                     handle.request(boot, method, params)
                 });
                 self.dismiss_menu(window, cx);
+                stop_asking.then_some(Preference::ConfirmClosePane(false))
             }
             Err(error) => {
                 if let Some(close) = &mut self.menu.close {
                     close.error = Some(error.to_string());
                 }
                 cx.notify();
+                None
             }
         }
     }
@@ -231,6 +252,7 @@ impl HerdrWindow {
                 }
                 cx.notify();
             }
+            "space" => self.toggle_do_not_ask_again(cx),
             "enter" => {
                 if self
                     .menu
@@ -247,6 +269,15 @@ impl HerdrWindow {
         }
     }
 
+    fn toggle_do_not_ask_again(&mut self, cx: &mut Context<Self>) {
+        if let Some(close) = &mut self.menu.close
+            && close.pane.is_some()
+        {
+            close.do_not_ask_again = !close.do_not_ask_again;
+            cx.notify();
+        }
+    }
+
     pub(super) fn render_close_confirmation(&self, cx: &mut Context<Self>) -> Div {
         let Some(close) = &self.menu.close else {
             return div();
@@ -260,6 +291,11 @@ impl HerdrWindow {
                 "This terminates the pane and its running processes. This cannot be undone."
             } else { "This terminates every pane and running process in this tab. This cannot be undone." }))
             .when_some(close.error.clone(), |panel, error| panel.child(div().bg(rgb(theme.active)).p(px(8.)).child(error)))
+            .when(close.pane.is_some(), |panel| panel.child(div().id("close-do-not-ask").debug_selector(|| "close-do-not-ask".into())
+                .flex().gap(px(8.)).cursor_pointer().text_color(rgb(theme.muted))
+                .child(if close.do_not_ask_again { "☑" } else { "☐" })
+                .child("Do not ask again")
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_do_not_ask_again(cx)))))
             .child(div().flex().justify_end().gap(px(8.))
                 .child(div().id("close-cancel").debug_selector(|| "close-cancel".into()).px(px(12.)).py(px(6.)).rounded(px(crate::config::corners::CONTROL)).border_1()
                     .border_color(rgb(if close.confirm_selected { theme.active } else { theme.foreground }))

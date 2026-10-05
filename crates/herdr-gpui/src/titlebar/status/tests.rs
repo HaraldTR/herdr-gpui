@@ -55,7 +55,7 @@ fn remote_text_is_bounded_without_controls() {
 
 #[gpui::test]
 fn usage_display_switches_apply_independently_on_reload(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+    let (view, cx) = cx.add_window_view(crate::titlebar::tests::header_window);
     view.update(cx, |view, cx| {
         view.live.status = ConnectionStatus::Connected;
         let snapshot = std::sync::Arc::make_mut(view.live.snapshot.as_mut().unwrap());
@@ -101,7 +101,7 @@ fn usage_display_switches_apply_independently_on_reload(cx: &mut TestAppContext)
 
 #[gpui::test]
 fn header_keeps_controls_reachable(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+    let (view, cx) = cx.add_window_view(crate::titlebar::tests::header_window);
     cx.update(|_, cx| {
         view.update(cx, |view, cx| {
             view.live.status = ConnectionStatus::Connected;

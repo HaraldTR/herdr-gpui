@@ -62,7 +62,7 @@ fn appearance_updates_open_paused_console_and_geometry(cx: &mut TestAppContext) 
         theme: "Nord".into(),
         ..Config::default()
     };
-    cx.update(|cx| set_appearance(&config, &config.theme().unwrap(), cx));
+    cx.update(|cx| set_appearance(&config, &config.theme(false).unwrap(), cx));
     let (view, cx) = cx.add_window_view(|window, cx| {
         let mut view = LogWindow::new(window, cx);
         view.following = false;
@@ -77,7 +77,7 @@ fn appearance_updates_open_paused_console_and_geometry(cx: &mut TestAppContext) 
         config.terminal.family = "DejaVu Sans Mono".into();
         config.terminal.size = 20.;
         config.ui.size = 16.;
-        let theme = config.theme().unwrap();
+        let theme = config.theme(false).unwrap();
         cx.update(|_, cx| set_appearance(&config, &theme, cx));
         cx.run_until_parked();
         view.read_with(cx, |view, _| {

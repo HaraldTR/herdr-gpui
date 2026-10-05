@@ -46,7 +46,7 @@ fn recording_themes(writes: Arc<Mutex<Vec<String>>>, fail: bool) -> themes::Them
         load: Arc::new(move || {
             let mut loaded = fixture();
             loaded.config.theme = disk.lock().unwrap().clone();
-            loaded.theme = loaded.config.theme()?;
+            loaded.theme = loaded.config.theme(false)?;
             Ok(loaded)
         }),
     }

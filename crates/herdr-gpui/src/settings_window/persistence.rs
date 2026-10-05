@@ -1,6 +1,6 @@
 //! Loading and saving preferences off the UI thread, then reconciling the result,
 //! including the config watcher and the saves that finish when the app quits.
-use super::{SettingsWindow, layouts, themes};
+use super::{Section, SettingsWindow, layouts, themes};
 use crate::{
     config::{Config, FontFace, Theme},
     herdr_settings::{self, Edit},
@@ -154,7 +154,7 @@ impl SettingsWindow {
                     let theme = if config.theme == "Follow Herdr" {
                         shared.theme(light)?.with_contrast(config.contrast)
                     } else {
-                        config.theme()?
+                        config.theme(light)?
                     };
                     (Some(shared), None, theme)
                 }
@@ -162,7 +162,7 @@ impl SettingsWindow {
                 Err(error) => (
                     None,
                     Some(format!("Load shared settings: {error}")),
-                    config.theme()?,
+                    config.theme(light)?,
                 ),
             };
             Ok(Loaded {
@@ -212,6 +212,9 @@ impl SettingsWindow {
     }
 
     pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
+        if self.section == Section::General {
+            self.sync_remote_history(true, cx);
+        }
         self.reload_with(Self::loader(cx), cx);
     }
 

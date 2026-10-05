@@ -1,7 +1,7 @@
 //! Theme preview and appearance section rendering.
 use super::{Choice, FOLLOW, LIST_HEIGHT, ROW_HEIGHT, Scope, SettingsWindow, grid};
 use crate::{
-    config::{Config, Theme, corners},
+    config::{Config, Theme, ThemeName, corners},
     contrast::Contrast,
     fonts::StyledFont,
     herdr_settings,
@@ -128,6 +128,54 @@ impl SettingsWindow {
             )
     }
 
+    /// The switch for a theme that follows the system, and, while it does,
+    /// which side the grid below edits.
+    fn render_system_theme_controls(
+        &self,
+        button: &impl Fn(&'static str, String, bool) -> gpui::Stateful<Div>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let value = self.drafted_theme();
+        let following = ThemeName::follows_system(value);
+        div()
+            .debug_selector(|| "settings-theme-system".into())
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                self.control_switch(
+                    "theme-system",
+                    "Match system appearance",
+                    following,
+                    !self.busy(),
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_system_theme(cx))),
+            )
+            .when(following, |row| {
+                row.children(
+                    [
+                        ("theme-system-light", "Light", true),
+                        ("theme-system-dark", "Dark", false),
+                    ]
+                    .map(|(id, label, light)| {
+                        button(
+                            id,
+                            format!("{label}: {}", ThemeName::side(value, light)),
+                            self.themes.editing_light == light,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                let focus = this.themes.search.read(cx).focus.clone();
+                                window.focus(&focus, cx);
+                                this.edit_theme_side(light, cx);
+                            },
+                        ))
+                    }),
+                )
+            })
+    }
+
     pub(in crate::settings_window) fn render_appearance(
         &mut self,
         window: &Window,
@@ -221,6 +269,7 @@ impl SettingsWindow {
                         "Ghostty includes native built-ins and files. Shared Herdr themes are read-only on this platform."
                     }),
             )
+            .child(self.render_system_theme_controls(&button, cx))
             .child(
                 div()
                     .debug_selector(|| "settings-theme-search".into())
@@ -248,6 +297,9 @@ impl SettingsWindow {
             .child(
                 div()
                     .debug_selector(|| "settings-theme-list".into())
+                    // The child list scrolls first; keep wheel events inside the
+                    // grid even at its edges or when the results are empty.
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                     .h(px(LIST_HEIGHT))
                     .flex_none()
                     .overflow_hidden()
@@ -283,10 +335,16 @@ impl SettingsWindow {
                                              let name = &choice.name;
                                             let draft =
                                                 this.theme_intent.as_ref().is_some_and(|intent| {
-                                                     intent.choice == choice
+                                                    intent.choice.scope == choice.scope
+                                                        && match choice.scope {
+                                                            Scope::App => {
+                                                                ThemeName::side(&intent.choice.name, this.themes.editing_light) == name
+                                                            }
+                                                            Scope::Herdr => intent.choice.name == *name,
+                                                        }
                                                 });
                                              let saved = match choice.scope {
-                                                 Scope::App => *name == this.config.theme,
+                                                 Scope::App => name == this.edited_theme(),
                                                 Scope::Herdr => {
                                                     this.shared.as_ref().is_some_and(|shared| {
                                                          shared.theme_name == *name

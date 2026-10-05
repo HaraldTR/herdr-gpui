@@ -15,6 +15,8 @@ pub(crate) enum Page {
     /// A saved SSH device's context menu, from its sidebar host header.
     Host,
     RenameDevice,
+    /// Names a saved SSH device's port to forward to this computer.
+    ForwardPort,
     RemoveDevice,
     Keybinds,
     Themes,
@@ -41,6 +43,11 @@ pub(crate) enum Page {
     /// Titlebar Git actions for the focused checkout, and its commit dialog.
     Git,
     GitCommit,
+    /// The open pull request's checks and review conversation.
+    PrReview,
+    PrComment,
+    /// Choosing a merge method, and confirming it.
+    PrMerge,
     Dialog(WorkspaceAction),
     /// Moving a linked worktree to another host.
     Teleport,

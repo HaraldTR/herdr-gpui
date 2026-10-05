@@ -96,6 +96,7 @@ impl HerdrWindow {
             self.write_preference(save, cx);
             return;
         }
+        let light = crate::app::light_appearance(cx);
         let text_system = cx.text_system().clone();
         self.load_gui_config_with(
             move || {
@@ -105,7 +106,7 @@ impl HerdrWindow {
                 let theme = if config.theme == "Follow Herdr" {
                     Default::default()
                 } else {
-                    config.theme()?
+                    config.theme(light)?
                 };
                 Ok((config, theme))
             },
@@ -298,6 +299,11 @@ impl HerdrWindow {
                 "preferences-confirm-close-tab",
                 "Confirm tab close",
                 self.config.confirm_close_tab.to_string(),
+            ))
+            .child(row(
+                "preferences-confirm-close-pane",
+                "Confirm pane close",
+                self.config.confirm_close_pane.to_string(),
             ))
             .child(row(
                 "preferences-layout",

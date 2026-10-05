@@ -140,7 +140,7 @@ pub(crate) fn run(options: MockupOptions) -> std::process::ExitCode {
         Config::default()
     });
     let yours = config
-        .theme()
+        .theme(false)
         .map_err(|error| eprintln!("mockup: using a built-in theme: {error}"))
         .ok();
     let themes = themes(&config, yours);
@@ -170,6 +170,7 @@ pub(crate) fn run(options: MockupOptions) -> std::process::ExitCode {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(640.), px(400.))),
                     titlebar: Some(crate::titlebar::options(&title)),
+                    app_owns_titlebar_drag: cfg!(target_os = "macos"),
                     app_id: Some("so.pen.herdr-gpui.mockup".into()),
                     ..Default::default()
                 },

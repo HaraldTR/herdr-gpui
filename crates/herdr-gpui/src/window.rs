@@ -153,10 +153,14 @@ pub(crate) struct HerdrWindow {
     /// The workspace a finished teleport keeps steering to until focused.
     pub(crate) teleport_follow: Option<crate::teleport::Follow>,
     pub(crate) git: git::Git,
+    /// Comment, merge, and review reads for the focused branch's open PR.
+    pub(crate) pr_actions: crate::pr_actions::Actions,
     pub(crate) usage: crate::usage::Usage,
     pub(crate) system_load: crate::system_load::SystemLoad,
     /// Snapshots of checkouts taken at agent turns, and the dialog listing them.
     pub(crate) checkpoints: crate::checkpoint::Checkpoints,
+    /// Remote ports forwarded to this machine; they end with the window.
+    pub(crate) port_forwards: crate::port_forward::PortForwards,
     pub(crate) listening_ports: crate::listening_ports::ListeningPorts,
     /// SSH tunnels to remote ports that listen on their host's loopback only.
     pub(crate) tunnels: crate::listening_ports::Tunnels,
@@ -415,6 +419,7 @@ impl HerdrWindow {
             cx.notify();
         }
         self.update_checkpoints(cx);
+        self.update_port_forwards(cx);
         if self.update_listening_ports() {
             cx.notify();
         }
@@ -538,6 +543,33 @@ impl HerdrWindow {
                 )),
             };
             self.show_flash(flash, cx);
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// Forwards outlive a dropped connection, since SSH may still reach the
+    /// host, but end once their host is removed or disabled. A report the
+    /// user did not just ask for is flashed.
+    pub(crate) fn update_port_forwards(&mut self, cx: &mut Context<Self>) {
+        let endpoints = &self.endpoints;
+        let mut changed = self.port_forwards.retain_hosts(|target| {
+            endpoints.iter().any(|endpoint| {
+                endpoint.enabled
+                    && endpoint
+                        .saved_ssh()
+                        .is_some_and(|(saved, _)| saved == target)
+            })
+        });
+        let notices = self.port_forwards.poll();
+        if let Some(notice) = notices.last() {
+            let flash = match notice {
+                crate::port_forward::Notice::Listening { .. } => Flash::success(notice.text()),
+                crate::port_forward::Notice::Ended { .. } => Flash::warning(notice.text()),
+            };
+            self.show_flash(flash, cx);
+            changed = true;
         }
         if changed {
             cx.notify();
@@ -676,9 +708,11 @@ impl HerdrWindow {
             teleport_marks: crate::teleport::Marks::start(),
             teleport_follow: None,
             git: git::Git::default(),
+            pr_actions: Default::default(),
             usage: Default::default(),
             system_load: Default::default(),
             checkpoints: Default::default(),
+            port_forwards: Default::default(),
             listening_ports: Default::default(),
             tunnels: Default::default(),
             install_warning_shown: false,
@@ -735,9 +769,17 @@ impl HerdrWindow {
             }),
             _appearance: cx.observe_window_appearance(window, |this, _, cx| {
                 this.apply_shared_theme(cx);
+                this.apply_system_theme(cx);
                 cx.notify();
             }),
         };
+        // Quitting need not drop this window, so its SSH children are killed
+        // here rather than left forwarding after the app is gone.
+        cx.on_app_quit(|this, _| {
+            this.port_forwards.stop_all();
+            async {}
+        })
+        .detach();
         #[cfg(feature = "integration-test")]
         if sidebar_test {
             this._poll = Task::ready(());

@@ -1,7 +1,7 @@
 //! Search-only samples and explicit app-wide theme intents. Disk work stays off the UI thread.
 use super::SettingsWindow;
 use crate::{
-    config::{Config, Theme},
+    config::{Config, Theme, ThemeName},
     contrast::Contrast,
     herdr_settings::{self, Edit},
     search_input::{Changed, SearchInput},
@@ -9,6 +9,7 @@ use crate::{
 use gpui::{prelude::*, *};
 mod appearance;
 mod grid;
+mod system;
 
 const FOLLOW: &str = "Follow Herdr";
 const LIST_HEIGHT: f32 = 168.;
@@ -130,6 +131,8 @@ pub(super) struct ThemeBrowser {
     preview_error: Option<String>,
     contrast: Contrast,
     grid: grid::Grid,
+    /// Which side of a theme that follows the system the grid edits.
+    editing_light: bool,
 }
 
 impl ThemeBrowser {
@@ -166,6 +169,7 @@ impl ThemeBrowser {
             preview_error: None,
             contrast: Contrast::Standard,
             grid: grid::Grid::default(),
+            editing_light: false,
         }
     }
 
@@ -308,16 +312,20 @@ impl SettingsWindow {
         move || {
             #[cfg(test)]
             if let Some(resolve) = resolve {
-                return resolve(&config.theme);
+                return resolve(ThemeName::side(&config.theme, light));
             }
             match (choice.scope, shared) {
                 (Scope::Herdr, Some(shared)) => shared
                     .preview_theme(&config.theme, light)
                     .map(|theme| theme.with_contrast(config.contrast)),
                 (Scope::Herdr, None) => Err(crate::Error::MissingHome),
-                (Scope::App, Some(shared)) if config.theme == FOLLOW => shared.theme(light),
-                (Scope::App, None) if config.theme == FOLLOW => Err(crate::Error::MissingHome),
-                _ => config.theme(),
+                (Scope::App, Some(shared)) if ThemeName::side(&config.theme, light) == FOLLOW => {
+                    shared.theme(light)
+                }
+                (Scope::App, None) if ThemeName::side(&config.theme, light) == FOLLOW => {
+                    Err(crate::Error::MissingHome)
+                }
+                _ => config.theme(light),
             }
         }
     }
@@ -343,15 +351,7 @@ impl SettingsWindow {
             (Scope::Herdr, Some(shared)) => {
                 shared.preview_theme(&choice.name, self.theme_light).ok()
             }
-            (Scope::App, Some(shared)) if choice.name == FOLLOW => {
-                shared.theme(self.theme_light).ok()
-            }
-            (Scope::App, _) => Theme::builtin(&choice.name).or_else(|| {
-                self.theme_cache
-                    .iter()
-                    .find(|(name, _)| *name == choice.name)
-                    .map(|(_, theme)| theme.clone())
-            }),
+            (Scope::App, _) => self.prepared_app_theme(&choice.name, self.theme_light),
             _ => None,
         };
         self.theme_intent = Some(ThemeIntent {
@@ -372,18 +372,14 @@ impl SettingsWindow {
         if self.quitting || self.theme_load_failed {
             return;
         }
+        let light = crate::app::light_appearance(cx);
         if let Some(intent) = &mut self.theme_intent
             && intent.choice.scope == Scope::App
-            && intent.choice.name == FOLLOW
+            && ThemeName::side(&intent.choice.name, light) == FOLLOW
             && let Some(shared) = &self.shared
+            && let Ok(theme) = shared.theme(light)
         {
-            let light = matches!(
-                cx.window_appearance(),
-                WindowAppearance::Light | WindowAppearance::VibrantLight
-            );
-            if let Ok(theme) = shared.theme(light) {
-                intent.theme = Some(theme);
-            }
+            intent.theme = Some(theme);
         }
         let Some(intent) = self.theme_intent.clone() else {
             self.finish_close(cx);
@@ -395,6 +391,7 @@ impl SettingsWindow {
             }
             self.theme_loading = true;
             let load = self.theme_loader(intent.choice.clone());
+            let light = self.theme_light;
             let retained = cx.entity();
             let work = cx.background_executor().spawn(async move { load() });
             cx.spawn(async move |_, cx| {
@@ -409,13 +406,12 @@ impl SettingsWindow {
                     {
                         match result {
                             Ok(theme) => {
-                                if intent.choice.scope == Scope::App && intent.choice.name != FOLLOW
-                                {
+                                let name = ThemeName::side(&intent.choice.name, light);
+                                if intent.choice.scope == Scope::App && name != FOLLOW {
                                     if this.theme_cache.len() == 64 {
                                         this.theme_cache.pop_front();
                                     }
-                                    this.theme_cache
-                                        .push_back((intent.choice.name, theme.clone()));
+                                    this.theme_cache.push_back((name.to_owned(), theme.clone()));
                                 }
                                 current.theme = Some(theme);
                             }
@@ -552,18 +548,18 @@ impl SettingsWindow {
         self.themes.initialized = true;
         self.themes.contrast = self.config.contrast;
         self.themes.preview = Some(self.theme.clone());
-        self.themes.preview_name = Some(self.config.theme.clone());
+        self.themes.editing_light = crate::app::light_appearance(cx);
+        self.themes.preview_name = Some(self.edited_theme().to_owned());
         self.themes.names = Theme::BUILTIN_NAMES
             .iter()
             .map(|name| (*name).into())
             .collect();
-        self.themes.names.push(self.config.theme.clone());
-        self.themes.names.retain(|name| name != FOLLOW);
+        self.themes.names.extend(self.selected_theme_names());
         self.themes.names.sort();
         self.themes.names.dedup();
         self.themes.filter(Some(&Choice {
             scope: Scope::App,
-            name: self.config.theme.clone(),
+            name: self.edited_theme().to_owned(),
         }));
         self.themes.search.update(cx, |search, cx| {
             search.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
@@ -575,8 +571,13 @@ impl SettingsWindow {
 
     pub(super) fn sync_theme_browser(&mut self, cx: &mut Context<Self>) {
         self.themes.contrast = self.config.contrast;
-        if self.config.theme != FOLLOW && !self.themes.names.contains(&self.config.theme) {
-            self.themes.names.push(self.config.theme.clone());
+        let missing: Vec<_> = self
+            .selected_theme_names()
+            .into_iter()
+            .filter(|name| !self.themes.names.contains(name))
+            .collect();
+        if !missing.is_empty() {
+            self.themes.names.extend(missing);
             self.themes
                 .names
                 .sort_by_cached_key(|name| (name.to_lowercase(), name.clone()));
@@ -605,9 +606,7 @@ impl SettingsWindow {
                 this.themes.discovering = false;
                 match result {
                     Ok(mut names) => {
-                        if this.config.theme != FOLLOW && !names.contains(&this.config.theme) {
-                            names.push(this.config.theme.clone());
-                        }
+                        names.extend(this.selected_theme_names());
                         names.retain(|name| name != FOLLOW);
                         names.sort_by_cached_key(|name| (name.to_lowercase(), name.clone()));
                         names.dedup();
@@ -654,10 +653,7 @@ impl SettingsWindow {
         let revision = browser.revision;
         browser.attempted = Some(revision);
         let contrast = browser.contrast;
-        let light = matches!(
-            cx.window_appearance(),
-            WindowAppearance::Light | WindowAppearance::VibrantLight
-        );
+        let light = crate::app::light_appearance(cx);
         if choice.scope == Scope::Herdr && self.shared.is_none() {
             browser.preview_error = Some(
                 "Herdr settings are unavailable. Reload settings to preview shared themes.".into(),
@@ -675,7 +671,7 @@ impl SettingsWindow {
                 (Scope::Herdr, Some(shared)) => shared
                     .preview_theme(&config.theme, light)
                     .map(|theme| theme.with_contrast(contrast)),
-                _ => config.theme(),
+                _ => config.theme(light),
             }
         });
         cx.spawn(async move |this, cx| {
@@ -698,7 +694,14 @@ impl SettingsWindow {
             .scroll
             .scroll_to_item(index / self.themes.grid.columns, ScrollStrategy::Center);
         self.request_theme_preview(cx);
-        if let Some(choice) = self.themes.choice() {
+        if let Some(mut choice) = self.themes.choice() {
+            if choice.scope == Scope::App {
+                choice.name = ThemeName::with_side(
+                    self.drafted_theme(),
+                    self.themes.editing_light,
+                    &choice.name,
+                );
+            }
             self.accept_theme_choice(choice, cx);
         }
     }

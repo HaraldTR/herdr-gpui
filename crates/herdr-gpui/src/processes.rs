@@ -304,7 +304,8 @@ fn sight(
 fn refresh(system: &mut System) {
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
-        ProcessRefreshKind::new()
+        true,
+        ProcessRefreshKind::nothing()
             .with_cpu()
             .with_memory()
             .with_cmd(UpdateKind::OnlyIfNotSet),

@@ -286,6 +286,28 @@ pub enum Error {
     GitHubNetwork(#[source] ureq::Error),
     #[error("GitHub query failed. Check token repository permissions and rate limits.")]
     GitHubQuery,
+    /// GitHub's own refusal of a requested change, cleaned and bounded.
+    #[error("GitHub refused the request: {0}")]
+    GitHubRejected(String),
+    #[error("A pull request action is already running.")]
+    PrActionBusy,
+    #[error(
+        "This pull request cannot be acted on here: it is not open, or its details are incomplete. Refresh and try again."
+    )]
+    PrActionTarget,
+    #[error("Enter a comment of at most 4096 characters.")]
+    PrCommentBody,
+    #[error("The branch changed since this dialog opened. Review the pull request again.")]
+    PrMergeChanged,
+    #[error("The repository does not allow this merge method.")]
+    PrMergeMethod,
+    #[error("Pull request worker stopped. Check the pull request on GitHub before retrying.")]
+    PrActionWorker,
+    #[error("Could not start the pull request worker.")]
+    PrActionProcess {
+        #[source]
+        source: io::Error,
+    },
     #[error("Invalid GitHub authorization header.")]
     GitHubHeader(#[source] ureq::http::header::InvalidHeaderValue),
     #[error("Invalid GitHub device authorization response.")]
@@ -388,6 +410,12 @@ pub enum Error {
     CheckpointThread(#[source] io::Error),
     #[error("The checkpoint worker stopped.")]
     CheckpointWorker,
+    #[error("Enter a port number from 1 to 65535.")]
+    ForwardPort,
+    #[error("Port {0} is already forwarded from this host.")]
+    ForwardDuplicate(u16),
+    #[error("At most {0} ports can be forwarded at once.")]
+    ForwardLimit(usize),
     #[error("Could not read listening ports on this host.")]
     ListeningPorts(#[source] Box<Error>),
     #[error("Neither ss nor lsof is installed on this host, so listening ports cannot be read.")]
@@ -543,6 +571,8 @@ pub enum Error {
     InvalidSidebarGap,
     #[error("theme must be a name, absolute path, or ~/ path")]
     InvalidThemePath,
+    #[error("a theme that follows the system must name both sides: light:NAME,dark:NAME")]
+    InvalidThemePair,
     #[error("keybindings.{0} is not a command; see the keybindings list in config-gpui.toml")]
     UnknownKeybinding(String),
     #[error("keybindings.{command}: invalid keystroke {keystroke:?}")]

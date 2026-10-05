@@ -19,6 +19,8 @@
 # Built-ins: Default, Nord, Dracula, Catppuccin Mocha, Catppuccin Latte.
 # Also accepts a Ghostty theme name, an absolute path, or a ~/ path.
 # Set "Follow Herdr" in config-gpui.local.toml to follow the local Herdr theme.
+# To follow the system light/dark appearance, name a theme for each side, as
+# Ghostty does: theme = "light:Catppuccin Latte,dark:Catppuccin Mocha"
 theme = "Default"
 # How far the app's own colors (status dots, pull request badges, diff counts,
 # warnings, dim labels) stand off the sidebar and menus. "standard" moves a
@@ -28,8 +30,10 @@ theme = "Default"
 contrast = "standard"
 
 # Ask before closing a tab (closing terminates its terminal processes).
-# Pane close confirmation is independent and remains enabled.
 confirm_close_tab = true
+# Ask before closing a pane, independently of tabs. The dialog's "Do not ask
+# again" checkbox sets this to false in config-gpui.local.toml.
+confirm_close_pane = true
 # Show the Agents section below Spaces in the sidebar.
 show_agents = true
 # Show CPU and memory: the selected host's in the status bar, and each host's

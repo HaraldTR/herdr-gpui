@@ -71,7 +71,6 @@ fn collapsed_sidebar_is_a_rail_in_every_layout_that_navigates(cx: &mut TestAppCo
         assert!(terminal.left() >= rail.right(), "{mode:?}");
         // Every workspace, and every agent, keeps a mark inside the rail.
         for selector in [
-            "rail-expand",
             "rail-workspace-local-w0",
             "rail-workspace-local-w5",
             "rail-agent-local-p0",
@@ -109,8 +108,11 @@ fn collapsed_sidebar_is_a_rail_in_every_layout_that_navigates(cx: &mut TestAppCo
             assert!(!view.sidebar_visible);
         });
     }
-    // The rail's own control expands the sidebar again.
-    let expand = cx.debug_bounds("rail-expand").unwrap();
+    // The rail has no expand control of its own; the one sidebar toggle,
+    // leading the tab row, expands the sidebar again.
+    assert!(cx.debug_bounds("rail-expand").is_none());
+    let expand = cx.debug_bounds("toggle-sidebar").unwrap();
+    assert!(expand.left() >= cx.debug_bounds("sidebar-rail").unwrap().right());
     cx.simulate_click(expand.center(), Modifiers::default());
     cx.update(|window, cx| full_draw(window, cx).clear(cx));
     assert!(view.read_with(cx, |view, _| view.sidebar_visible));

@@ -38,7 +38,11 @@ fn device_footer_filters_both_lists_and_keeps_settings_visible(cx: &mut gpui::Te
     let sidebar = cx.debug_bounds("sidebar").unwrap();
     assert_eq!(footer.bottom(), sidebar.bottom());
     let status = cx.debug_bounds("connection-status").unwrap();
-    assert_eq!(sidebar.bottom(), px(600.));
+    // A worktree build's banner sits at the window's foot, under both.
+    let banner = cx
+        .debug_bounds("worktree-banner")
+        .map_or(px(0.), |b| b.size.height);
+    assert_eq!(sidebar.bottom(), px(600.) - banner);
     assert_eq!(status.bottom(), sidebar.bottom());
     assert_eq!(status.left(), sidebar.right());
     assert_eq!(footer.size.height, px(40.));

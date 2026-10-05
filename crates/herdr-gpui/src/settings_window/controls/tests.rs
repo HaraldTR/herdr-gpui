@@ -1,6 +1,8 @@
 use super::*;
 use core::prelude::v1::test;
 
+mod session_restore;
+
 pub(super) fn skill_fixture(
     window: &mut Window,
     cx: &mut Context<SettingsWindow>,
@@ -108,6 +110,7 @@ fn general_shows_shared_tab_bar_and_copy_controls_and_holds_them_while_busy(
         "settings-tab-bar-bottom",
         "settings-hide-single-tab-bar",
         "settings-copy-on-select",
+        "settings-pane-history",
     ] {
         let control = cx.debug_bounds(id).unwrap();
         // A save in flight owns the shared snapshot: clicks wait for it.
@@ -118,6 +121,7 @@ fn general_shows_shared_tab_bar_and_copy_controls_and_holds_them_while_busy(
             assert!(!shared.copy_on_select);
             assert_eq!(shared.tab_bar_position, TabBarPosition::Bottom);
             assert!(!shared.hide_tab_bar_when_single_tab);
+            assert!(!shared.pane_history);
         });
     }
 }

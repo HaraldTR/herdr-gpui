@@ -283,6 +283,9 @@ impl HerdrWindow {
                 | Page::RemoveDevice
                 | Page::Git
                 | Page::GitCommit
+                | Page::PrReview
+                | Page::PrComment
+                | Page::PrMerge
         );
         let mut panel = div()
             .id("menu-panel")
@@ -343,21 +346,31 @@ impl HerdrWindow {
                     .overflow_hidden()
                     .shadow_lg()
             })
-            .when(matches!(page, Page::Git | Page::GitCommit), |panel| {
-                panel
-                    .w((viewport.width - px(24.))
-                        .max(px(0.))
-                        .min(px(if page == Page::Git { 340. } else { 420. })))
-                    .max_h((viewport.height - px(24.)).max(px(0.)))
-                    .when(page == Page::Git, |panel| {
-                        let top = crate::titlebar::HEIGHT
-                            + crate::worktree_banner::reserved(env!("HERDR_BUILD_WORKTREE") == "1")
-                            + 6.;
-                        panel
-                            .max_h((viewport.height - px(top + 12.)).max(px(0.)))
-                            .shadow_lg()
-                    })
-            })
+            .when(
+                matches!(
+                    page,
+                    Page::Git | Page::GitCommit | Page::PrReview | Page::PrComment | Page::PrMerge
+                ),
+                |panel| {
+                    panel
+                        .w((viewport.width - px(24.))
+                            .max(px(0.))
+                            .min(px(if page == Page::Git { 340. } else { 420. })))
+                        .max_h((viewport.height - px(24.)).max(px(0.)))
+                        .when(page == Page::Git, |panel| {
+                            let top = crate::titlebar::HEIGHT
+                                + crate::worktree_banner::reserved(
+                                    env!("HERDR_BUILD_WORKTREE") == "1",
+                                )
+                                + 6.;
+                            panel
+                                .max_h((viewport.height - px(top + 12.)).max(px(0.)))
+                                .shadow_lg()
+                        })
+                        // Its lists scroll inside; the panel never outgrows the window.
+                        .when(page == Page::PrReview, |panel| panel.overflow_hidden())
+                },
+            )
             .when(
                 matches!(
                     page,
@@ -374,7 +387,10 @@ impl HerdrWindow {
                 |panel| {
                     panel
                         .w((viewport.width - px(24.)).max(px(0.)).min(px(
-                            if matches!(page, Page::Tab | Page::Pane | Page::Host) {
+                            if page == Page::Host && self.host_menu_lists_forwards() {
+                                // Room for a forward's port, state, and actions.
+                                260.
+                            } else if matches!(page, Page::Tab | Page::Pane | Page::Host) {
                                 180.
                             } else if page == Page::PaneProcesses {
                                 // Name, command, pid, CPU and memory columns.
@@ -418,6 +434,7 @@ impl HerdrWindow {
                         | Page::AddDevice
                         | Page::Usage(_)
                         | Page::RenameDevice
+                        | Page::ForwardPort
                 ),
                 |panel| {
                     // Dialogs draw their own full-bleed header and footer rules,
@@ -456,7 +473,10 @@ impl HerdrWindow {
                     .max_h((viewport.height - px(24.)).max(px(0.)))
             })
             .when(
-                matches!(page, Page::AppUpdate | Page::AddDevice | Page::RenameDevice),
+                matches!(
+                    page,
+                    Page::AppUpdate | Page::AddDevice | Page::RenameDevice | Page::ForwardPort
+                ),
                 |panel| panel.flex().flex_col().overflow_hidden().shadow_lg(),
             )
             .when(page == Page::About, |panel| {
@@ -623,7 +643,16 @@ impl HerdrWindow {
             panel = panel.child(self.render_git_menu(cx));
         } else if page == Page::GitCommit {
             panel = panel.child(self.render_git_commit(cx));
-        } else if matches!(page, Page::Host | Page::RenameDevice | Page::RemoveDevice) {
+        } else if page == Page::PrReview {
+            panel = panel.child(self.render_pr_review(cx));
+        } else if page == Page::PrComment {
+            panel = panel.child(self.render_pr_comment(cx));
+        } else if page == Page::PrMerge {
+            panel = panel.child(self.render_pr_merge(cx));
+        } else if matches!(
+            page,
+            Page::Host | Page::RenameDevice | Page::ForwardPort | Page::RemoveDevice
+        ) {
             panel = panel.child(self.render_host_menu(cx));
         } else if matches!(page, Page::Tab | Page::RenameTab) {
             panel = panel.child(self.render_tab_menu(cx));
