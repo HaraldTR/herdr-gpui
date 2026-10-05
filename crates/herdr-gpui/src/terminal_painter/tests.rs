@@ -9,6 +9,7 @@ mod glyph_cache;
 #[cfg(feature = "integration-test")]
 mod layers;
 mod placed_images;
+mod prompt_geometry;
 
 fn cell(symbol: &str) -> CellData {
     CellData {

@@ -6,7 +6,7 @@ mod images;
 use self::area::whole;
 pub(crate) use self::area::{Layer, Part, Span, cell_ranges, clip, covers};
 use self::glyphs::GlyphCache;
-use self::graphics::Graphic;
+use self::graphics::{CellSeparator, Graphic};
 use self::images::{ImageCache, ImageGeometry, below_text};
 pub(crate) use self::images::{ImageTarget, PlacedImages};
 use crate::config::Theme;
@@ -35,18 +35,37 @@ const SCROLLBAR_ALPHA: u32 = 0xc0;
 fn background_extent(
     grid: Size<Pixels>,
     available: Size<Pixels>,
-    cell: Size<Pixels>,
+    cell_width: Pixels,
 ) -> Size<Pixels> {
-    let extend = |grid, available, cell| {
-        if available > grid && available - grid < cell {
-            available
-        } else {
-            grid
-        }
+    let width = if available.width > grid.width && available.width - grid.width < cell_width {
+        available.width
+    } else {
+        grid.width
     };
-    size(
-        extend(grid.width, available.width, cell.width),
-        extend(grid.height, available.height, cell.height),
+    // The parent paints the vertical remainder with the terminal theme. Extending
+    // the last row's cell colors there makes bottom-row prompts taller than their glyphs.
+    size(width, grid.height)
+}
+
+/// Uses absolute grid corners, just like the backgrounds. Reconstructing the
+/// far edge as position + cell size can cross a device-pixel rounding tie.
+fn separator_bounds(
+    origin: Point<Pixels>,
+    column: usize,
+    row: usize,
+    cell_width: f32,
+    cell_height: f32,
+    snap: impl Fn(Point<Pixels>) -> Point<Pixels>,
+) -> Bounds<Pixels> {
+    Bounds::from_corners(
+        snap(origin + point(px(column as f32 * cell_width), px(row as f32 * cell_height))),
+        snap(
+            origin
+                + point(
+                    px((column + 1) as f32 * cell_width),
+                    px((row + 1) as f32 * cell_height),
+                ),
+        ),
     )
 }
 
@@ -144,6 +163,8 @@ pub(crate) struct TerminalPainter {
     /// Each image painted, with its z, in paint order.
     #[cfg(test)]
     painted_images: Vec<(i32, Bounds<Pixels>)>,
+    #[cfg(test)]
+    painted_separators: Vec<(Bounds<Pixels>, Rgba)>,
     #[cfg(feature = "integration-test")]
     pub uncached: bool,
 }
@@ -161,6 +182,8 @@ impl Default for TerminalPainter {
             images: ImageCache::default(),
             #[cfg(test)]
             painted_images: Vec::new(),
+            #[cfg(test)]
+            painted_separators: Vec::new(),
             #[cfg(feature = "integration-test")]
             uncached: false,
         }
@@ -491,15 +514,12 @@ impl TerminalPainter {
                 px(f32::from(frame.height) * self.cell_height),
             ),
         );
-        // Only fill a sub-cell remainder. Retained frames during resize and
-        // mirrored groups must not stretch across whole missing rows/columns.
-        // Popups have no remainder; their background stays inside their grid.
+        // Fill only a fractional right-edge remainder; the parent's theme
+        // background fills below the grid, keeping bottom-row colors cell-high.
+        // Retained frames must not stretch across missing columns or rows, and
+        // popups have no remainder at all.
         let background = available.map_or(grid.size, |available| {
-            background_extent(
-                grid.size,
-                available,
-                size(px(cell_width), px(self.cell_height)),
-            )
+            background_extent(grid.size, available, px(cell_width))
         });
         let whole_area;
         let area = match part {
@@ -545,6 +565,7 @@ impl TerminalPainter {
                     let row = &frame.cells[y * width..((y + 1) * width).min(frame.cells.len())];
                     let columns = range.start - y * width..range.end - y * width;
                     let mut paint = |start: usize, end: usize, color| {
+                        let left = px(start as f32 * cell_width);
                         let right = if end == usize::from(frame.width) {
                             background.width
                         } else {
@@ -555,20 +576,15 @@ impl TerminalPainter {
                         } else {
                             px((y + 1) as f32 * self.cell_height)
                         };
-                        window.paint_quad(fill(
-                            Bounds::new(
-                                origin
-                                    + point(
-                                        px(start as f32 * cell_width),
-                                        px(y as f32 * self.cell_height),
-                                    ),
-                                size(
-                                    right - px(start as f32 * cell_width),
-                                    bottom - px(y as f32 * self.cell_height),
-                                ),
+                        // Snap shared absolute edges before forming the size. Rebuilding
+                        // the right edge as left + width can cross a half-pixel rounding tie.
+                        let bounds = Bounds::from_corners(
+                            window.pixel_snap_point(
+                                origin + point(left, px(y as f32 * self.cell_height)),
                             ),
-                            rgb(color),
-                        ));
+                            window.pixel_snap_point(origin + point(right, bottom)),
+                        );
+                        window.paint_quad(fill(bounds, rgb(color)));
                         #[cfg(feature = "integration-test")]
                         {
                             counts.quads += 1;
@@ -829,6 +845,34 @@ impl TerminalPainter {
                 || in_bar(index)
                 || Graphic::from_symbol(&cell.symbol).is_some()
             {
+                continue;
+            }
+            if let Some(separator) = CellSeparator::from_symbol(&cell.symbol) {
+                let bounds = separator_bounds(
+                    origin,
+                    index % usize::from(frame.width),
+                    index / usize::from(frame.width),
+                    cell_width,
+                    self.cell_height,
+                    |point| window.pixel_snap_point(point),
+                );
+                match separator.path(bounds, |value| window.pixel_snap(value)) {
+                    Ok(path) => {
+                        let color = rgb(cell_colors(cell, &self.theme).0);
+                        #[cfg(test)]
+                        let bounds = path.bounds;
+                        window.paint_path(path, color);
+                        #[cfg(test)]
+                        self.painted_separators.push((bounds, color));
+                    }
+                    Err(_) => {
+                        paint_errors += 1;
+                        #[cfg(feature = "integration-test")]
+                        {
+                            counts.paint_errors += 1;
+                        }
+                    }
+                }
                 continue;
             }
             let style = glyphs::style(cell.modifier);

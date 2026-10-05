@@ -22,11 +22,16 @@ Runtime dependencies include GPUI, `herdr-client`, `serde_json` for API paramete
 as `config_loader`, TOML-only) for GUI configuration. `toml` preserves strict
 field types during deserialization; `toml_edit` preserves comments on settings saves.
 
-Solid light/heavy box-drawing characters and block elements (including fractional
-blocks and quadrants) are drawn on the terminal cell grid, with device-pixel-aligned
-edges. Borders and block-art logos remain joined across rows and columns regardless
-of font line spacing. Dashed, double, rounded and diagonal lines, shading characters,
-and graphemes with combining marks continue to use font rendering.
+Solid light/heavy box-drawing characters, block elements (including fractional
+blocks and quadrants), and the four solid prompt separators (U+E0B0, U+E0B2,
+U+E0B4, and U+E0B6) are drawn on the terminal cell grid, with device-pixel-aligned
+edges. Borders, block-art logos, and prompt caps reach the full cell height
+regardless of font line spacing. Colored backgrounds stay cell-high on the last
+row, and adjacent background runs share snapped absolute edges to prevent
+one-pixel seams at fractional cell widths. This rendering is independent of the
+program producing the terminal cells.
+Dashed, double, rounded and diagonal box lines, shading characters, and
+graphemes with combining marks continue to use font rendering.
 
 ```sh
 cargo run -p herdr-gpui

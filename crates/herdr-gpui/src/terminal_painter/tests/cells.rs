@@ -28,7 +28,9 @@ fn link_underlines_stay_inside_the_frame() {
 }
 
 #[gpui::test]
-fn edge_backgrounds_reach_the_canvas_without_stretching_popups(cx: &mut TestAppContext) {
+fn right_edge_backgrounds_fill_fractional_width_without_stretching_rows_or_popups(
+    cx: &mut TestAppContext,
+) {
     let (_, cx) = cx.add_window_view(|_, _| Empty);
     for extend in [false, true] {
         cx.draw(Point::default(), size(px(100.), px(100.)), |_, _| {
@@ -74,14 +76,8 @@ fn edge_backgrounds_reach_the_canvas_without_stretching_popups(cx: &mut TestAppC
             for (x, y, width, height, color) in [
                 (17., 23., 10., 20., 0x123456),
                 (27., 23., if extend { 13. } else { 10. }, 20., 0x654321),
-                (17., 43., 10., if extend { 27. } else { 20. }, 0xabcdef),
-                (
-                    27.,
-                    43.,
-                    if extend { 13. } else { 10. },
-                    if extend { 27. } else { 20. },
-                    0xfedcba,
-                ),
+                (17., 43., 10., 20., 0xabcdef),
+                (27., 43., if extend { 13. } else { 10. }, 20., 0xfedcba),
             ] {
                 let bounds = Bounds::new(point(px(x), px(y)), size(px(width), px(height)))
                     .scale(window.scale_factor());
@@ -96,8 +92,8 @@ fn edge_backgrounds_reach_the_canvas_without_stretching_popups(cx: &mut TestAppC
 }
 
 #[test]
-fn backgrounds_fill_only_fractional_cell_remainders() {
-    let cell = size(px(10.), px(20.));
+fn backgrounds_fill_only_fractional_horizontal_remainders() {
+    let cell_width = px(10.);
     let available = size(px(103.), px(67.));
     let viewport = viewport(103., 67., 10., 20.);
     let grid = size(
@@ -105,15 +101,19 @@ fn backgrounds_fill_only_fractional_cell_remainders() {
         px(f32::from(viewport.rows) * 20.),
     );
     assert_eq!(grid, size(px(100.), px(60.)));
-    assert_eq!(background_extent(grid, available, cell), available);
+    assert_eq!(
+        background_extent(grid, available, cell_width),
+        size(px(103.), px(60.))
+    );
     for (available, expected) in [
         (size(px(100.), px(60.)), grid),
         (size(px(99.), px(59.)), grid),
+        (size(px(100.), px(67.)), grid),
         (size(px(110.), px(80.)), grid),
-        (size(px(111.), px(67.)), size(px(100.), px(67.))),
+        (size(px(111.), px(67.)), grid),
         (size(px(103.), px(81.)), size(px(103.), px(60.))),
     ] {
-        assert_eq!(background_extent(grid, available, cell), expected);
+        assert_eq!(background_extent(grid, available, cell_width), expected);
     }
 }
 
