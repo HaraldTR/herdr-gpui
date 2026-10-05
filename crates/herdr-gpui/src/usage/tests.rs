@@ -11,6 +11,8 @@ use crate::Error;
 use std::time::{Duration, Instant, SystemTime};
 
 mod browser_cookies;
+#[cfg(unix)]
+mod claude_keychain;
 mod keychain_access;
 mod labels;
 mod provider_data;
