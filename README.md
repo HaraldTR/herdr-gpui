@@ -17,8 +17,8 @@
   <a href="#star-history">Star history</a>
 </p>
 
-A native Rust/GPUI client for a [Herdr](https://herdr.dev/) daemon you installed
-yourself. It paints the daemon's terminal cells, split panes included, without
+A native Rust/GPUI client for macOS, Linux, and Windows, for a
+[Herdr](https://herdr.dev/) daemon you installed yourself. It paints the daemon's terminal cells, split panes included, without
 running another terminal emulator or wrapping the TUI.
 
 > **Unaffiliated project.** Not affiliated with, endorsed by, or supported by
