@@ -7,7 +7,7 @@ use gpui::{
     MouseUpEvent, point, px, size,
 };
 use herdr_client::{
-    ClientEvent, Method,
+    ClientEvent, Method, SavedHost,
     protocol::{endpoint::*, *},
 };
 use std::{

@@ -363,13 +363,12 @@ impl SettingsWindow {
                     // Direct loads here can overwrite its active picker preview.
                     if shared && saved.is_ok() {
                         // Use the existing connection, without stealing its response lane.
-                        if let Some(endpoint) = source.endpoints.iter().find(|endpoint| {
-                            !matches!(
-                                endpoint.connection.target,
-                                herdr_client::ConnectTarget::Ssh { .. }
-                            )
-                        }) && let (Some(handle), Some(snapshot)) =
-                            (&endpoint.connection.handle, &endpoint.live.snapshot)
+                        if let Some(endpoint) = source
+                            .endpoints
+                            .iter()
+                            .find(|endpoint| !endpoint.connection.target.is_remote())
+                            && let (Some(handle), Some(snapshot)) =
+                                (&endpoint.connection.handle, &endpoint.live.snapshot)
                             && endpoint.live.status.is_connected()
                         {
                             let status = match handle.request(

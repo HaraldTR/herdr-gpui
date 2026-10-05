@@ -5,7 +5,7 @@ use super::{
     state::ConnectionStatus,
 };
 use gpui::Context;
-use herdr_client::{ClientHandle, ConnectOptions, ConnectTarget, SavedHost};
+use herdr_client::{ClientHandle, ConnectOptions, ConnectTarget};
 use std::{
     collections::HashSet,
     sync::{
@@ -24,6 +24,9 @@ pub(super) const LOCAL: &str = "local";
 /// Saved SSH endpoints are keyed `ssh:<profile-id>`, so no catalog ID can
 /// collide with `LOCAL`.
 const SAVED_PREFIX: &str = "ssh:";
+/// Saved WSL distributions are keyed `wsl:<distribution>`; a distribution is
+/// saved at most once.
+pub(crate) const WSL_PREFIX: &str = "wsl:";
 
 /// The catalog profile ID behind a saved SSH endpoint's ID, which is what the
 /// `herdr machine` commands and per-device credentials are keyed by.
@@ -128,10 +131,11 @@ pub(super) struct Endpoint {
     pub label: String,
     pub connection: ConnectionBridge,
     pub enabled: bool,
-    /// The saved entry this endpoint was last reconciled against. Its own session
-    /// may have been picked in the sessions list since, so a catalog change can
-    /// only be told from such a pick by remembering what the catalog said.
-    saved_host: Option<SavedHost>,
+    /// The target the saved entry named when this endpoint was last reconciled
+    /// against it. Its own session may have been picked in the sessions list
+    /// since, so a catalog change can only be told from such a pick by
+    /// remembering what the catalog said.
+    saved: Option<ConnectTarget>,
     pub collapsed: bool,
     pub collapsed_repos: HashSet<String>,
     pub live: LiveState,
@@ -182,7 +186,7 @@ impl Endpoint {
             label,
             connection: ConnectionBridge::new(target),
             enabled,
-            saved_host: None,
+            saved: None,
             collapsed: false,
             collapsed_repos: HashSet::new(),
             live: LiveState::default(),
@@ -214,13 +218,16 @@ impl Endpoint {
     /// own menu) reads this instead. One never reconciled against the catalog
     /// has only its live target to go on.
     pub(crate) fn saved_ssh(&self) -> Option<(&str, &str)> {
-        if let Some(host) = &self.saved_host {
-            return Some((&host.target, &host.session));
-        }
-        match &self.connection.target {
+        match self.saved_target() {
             ConnectTarget::Ssh { target, session } => Some((target, session)),
             _ => None,
         }
+    }
+
+    /// The target this device was saved with, SSH or WSL alike; see
+    /// [`Self::saved_ssh`].
+    pub(crate) fn saved_target(&self) -> &ConnectTarget {
+        self.saved.as_ref().unwrap_or(&self.connection.target)
     }
 
     /// Point this endpoint at another target, retiring the old transport. The
@@ -342,14 +349,12 @@ impl HerdrWindow {
                         development: false,
                     })
                 }
-                ConnectTarget::Ssh {
-                    target: host,
-                    session,
-                } if session != "default" && endpoint.connection.target == *target => {
-                    Some(ConnectTarget::Ssh {
-                        target: host.clone(),
-                        session: "default".into(),
-                    })
+                _ if target
+                    .remote_session()
+                    .is_some_and(|session| session != "default")
+                    && endpoint.connection.target == *target =>
+                {
+                    target.remote_host().map(|host| host.target("default"))
                 }
                 _ => None,
             };
@@ -487,15 +492,12 @@ impl HerdrWindow {
         else {
             return;
         };
-        // Only an SSH device has a session to name; the local endpoint has its
-        // own path through `select_local_session`.
-        let ConnectTarget::Ssh { target, .. } = &self.endpoints[index].connection.target else {
+        // Only a remote device has a session to name; the local endpoint has
+        // its own path through `select_local_session`.
+        let Some(host) = self.endpoints[index].connection.target.remote_host() else {
             return;
         };
-        let target = ConnectTarget::Ssh {
-            target: target.clone(),
-            session: session.to_owned(),
-        };
+        let target = host.target(session);
         if self.selected_endpoint == index && self.endpoints[index].connection.target == target {
             return;
         }

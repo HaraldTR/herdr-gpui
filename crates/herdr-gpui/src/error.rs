@@ -430,6 +430,10 @@ pub enum Error {
     ListeningPortsTool,
     #[error("Listening ports cannot be read on this platform.")]
     ListeningPortsUnsupported,
+    /// Probes that open a shell on the host (usage, load, ports, checkpoints)
+    /// have no route into a WSL distribution yet.
+    #[error("This is not available for WSL distributions yet.")]
+    WslHostUnsupported,
     #[error("No free local port for an SSH tunnel.")]
     TunnelPort(#[source] io::Error),
     #[error("Could not start ssh for a tunnel.")]

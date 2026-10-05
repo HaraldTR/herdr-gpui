@@ -18,6 +18,10 @@ pub(crate) enum Page {
     /// Names a saved SSH device's port to forward to this computer.
     ForwardPort,
     RemoveDevice,
+    /// Picking a WSL distribution to save as a device.
+    AddWsl,
+    /// Confirming a saved WSL distribution should be forgotten.
+    RemoveWsl,
     Keybinds,
     Themes,
     Fonts,
