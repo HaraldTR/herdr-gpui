@@ -68,7 +68,7 @@ pub(super) fn check_workspace_menu_rows(
     assert_eq!(new.top(), rename.top());
     assert!(new.right() <= rename.left());
     assert!(rename.bottom() <= close.top());
-    // Rarer actions keep the session picker's trailing 14px icon in a 24px slot.
+    // Rarer actions lead with a 16px icon, in the delete strip's column.
     let label = "workspace-menu-Open worktree...";
     let row = cx.debug_bounds(label).unwrap();
     let icon = cx
@@ -77,11 +77,11 @@ pub(super) fn check_workspace_menu_rows(
     let text = cx
         .debug_bounds("workspace-menu-label-Open worktree...")
         .unwrap();
-    assert_eq!(icon.size, size(px(14.), px(14.)), "{label}");
-    assert_eq!(row.right() - icon.right(), px(13.), "{label}");
+    assert_eq!(icon.size, size(px(16.), px(16.)), "{label}");
+    assert_eq!(icon.left() - row.left(), px(10.), "{label}");
     assert!(
-        text.right() <= icon.left(),
-        "{label}: label must precede icon"
+        icon.right() <= text.left(),
+        "{label}: icon must precede label"
     );
     assert!(
         (icon.center().y - row.center().y).abs() <= px(1.),

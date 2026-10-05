@@ -30,6 +30,35 @@ const SLOTS: [(&[WorkspaceMenuAction], WorkspaceMenuAction, &str); 6] = {
 
 const COLUMNS: usize = 3;
 
+/// The rows under the grid share one icon column and one label column: the
+/// same inset, a fixed icon slot each icon centres in whatever its size, and
+/// the same gap before the label.
+const ROW_INSET: f32 = 8.;
+const ICON_SLOT: f32 = 20.;
+const ICON_SIZE: f32 = 16.;
+const ROW_GAP: f32 = 8.;
+
+/// A row's leading icon, centred in the shared slot. An action without an
+/// icon keeps the empty slot so its label still lines up.
+fn leading_icon(action: WorkspaceMenuAction, label: &'static str, color: Rgba) -> Div {
+    div()
+        .size(px(ICON_SLOT))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .when_some(action.icon(), |slot, icon| {
+            slot.child(
+                svg()
+                    .path(icon)
+                    .size(px(ICON_SIZE))
+                    .flex_none()
+                    .text_color(color)
+                    .debug_selector(move || format!("workspace-menu-icon-{label}")),
+            )
+        })
+}
+
 /// One grid cell: the action it runs, its menu label, and whether this
 /// workspace can take it now. A grayed tile keeps the grid's shape stable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -243,7 +272,8 @@ impl HerdrWindow {
             })
     }
 
-    /// A rarer action, as a plain row with the menus' trailing icon.
+    /// A rarer action, as a plain row. Its icon leads, in the same column as
+    /// the destructive strip's, so the rows read as one list under the tiles.
     fn render_workspace_row(
         &self,
         action: WorkspaceMenuAction,
@@ -255,15 +285,25 @@ impl HerdrWindow {
         div()
             .id(label)
             .debug_selector(move || format!("workspace-menu-{label}"))
+            .mx(px(2.))
             .min_h(px(self.config.ui.line_height() + 12.))
-            .px(px(8.))
+            .px(px(ROW_INSET))
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(px(ROW_GAP))
             .cursor_pointer()
             .rounded(px(crate::config::corners::CONTROL))
             .when(selected, |row| row.bg(rgb(theme.active)))
             .on_hover(Self::workspace_hover(action, cx))
+            .child(leading_icon(
+                action,
+                label,
+                rgb(if selected {
+                    theme.foreground
+                } else {
+                    theme.muted
+                }),
+            ))
             .child(
                 div()
                     .flex_1()
@@ -272,18 +312,6 @@ impl HerdrWindow {
                     .debug_selector(move || format!("workspace-menu-label-{label}"))
                     .child(label),
             )
-            .when_some(action.icon(), |row, icon| {
-                row.child(crate::menu::action_icon(
-                    icon,
-                    format!("workspace-menu-icon-{label}"),
-                    rgb(if selected {
-                        theme.foreground
-                    } else {
-                        theme.muted
-                    }),
-                    rgb(theme.foreground),
-                ))
-            })
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
                 this.activate_workspace_menu(action, window, cx);
@@ -306,11 +334,11 @@ impl HerdrWindow {
             .debug_selector(move || format!("workspace-menu-{label}"))
             .mt(px(6.))
             .mx(px(2.))
-            .min_h(px(self.config.ui.line_height() + 14.))
-            .px(px(10.))
+            .min_h(px(self.config.ui.line_height() + 12.))
+            .px(px(ROW_INSET))
             .flex()
             .items_center()
-            .gap(px(10.))
+            .gap(px(ROW_GAP))
             .cursor_pointer()
             .rounded(px(crate::config::corners::CONTROL))
             .bg(Rgba {
@@ -319,16 +347,7 @@ impl HerdrWindow {
             })
             .text_color(red)
             .on_hover(Self::workspace_hover(action, cx))
-            .when_some(action.icon(), |row, icon| {
-                row.child(
-                    svg()
-                        .path(icon)
-                        .size(px(16.))
-                        .flex_none()
-                        .text_color(red)
-                        .debug_selector(move || format!("workspace-menu-icon-{label}")),
-                )
-            })
+            .child(leading_icon(action, label, red))
             .child(
                 div()
                     .flex_1()
