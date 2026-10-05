@@ -2,6 +2,8 @@
 use super::*;
 use core::prelude::v1::test;
 
+mod scrolling;
+
 #[test]
 fn shared_scope_editability_matches_platform_support() {
     assert!(Scope::App.editable());

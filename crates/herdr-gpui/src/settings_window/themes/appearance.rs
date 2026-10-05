@@ -297,6 +297,9 @@ impl SettingsWindow {
             .child(
                 div()
                     .debug_selector(|| "settings-theme-list".into())
+                    // The child list scrolls first; keep wheel events inside the
+                    // grid even at its edges or when the results are empty.
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                     .h(px(LIST_HEIGHT))
                     .flex_none()
                     .overflow_hidden()
