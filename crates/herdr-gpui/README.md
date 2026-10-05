@@ -2008,8 +2008,12 @@ Windows setup) nothing is saved and the window says so.
   Cmd-, opens Settings; Cmd-/ opens the grouped native shortcut reference.
   Native shortcut labels and keycaps come from the shared `controls::COMMANDS`
   catalog, overridden by the config's `[keybindings]` table, with Cmd-V semantic
-  paste shown separately. Search filters by action,
-  section, or key combination. Preferences, keybinds, theme/palette pickers, and
+  paste shown separately. **Plugin & custom commands** lists the connected
+  daemon's `[[keys.command]]` entries, including plugin actions, with their
+  effective prefix and key combinations. Bindings that conflict with GUI
+  commands or cannot run in this build are marked **Unavailable in this build**.
+  Commands without bindings show **No shortcut assigned**. Search filters by
+  action, section, or key combination. Preferences, keybinds, theme/palette pickers, and
   close confirmations use themed centered modals and configured UI fonts;
   modal input does not reach the terminal.
 - Ordinary creation shortcuts omit `cwd`, labels, environment overrides, and split ratio: the

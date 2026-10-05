@@ -401,6 +401,35 @@ impl Keymap {
         labels
     }
 
+    /// Reference labels include bindings that cannot run, so a conflicting
+    /// or unsupported shortcut remains discoverable. The boolean says whether
+    /// the same trigger can reach the command through this keymap.
+    pub(crate) fn custom_reference_labels(
+        &self,
+        command: &ClientShellCommand,
+    ) -> Vec<(String, bool)> {
+        let mut labels = Vec::new();
+        for (index, raw) in command.binding_labels.iter().enumerate() {
+            let triggers = daemon::triggers(raw);
+            if triggers.is_empty() {
+                labels.push((raw.clone(), false));
+            }
+            for (_, trigger) in triggers {
+                let runnable = index < MAX_KEYSTROKES && self.runs_custom(&trigger);
+                let label = match trigger {
+                    Trigger::Direct(bound) => bound.unparse(),
+                    Trigger::Prefixed(bound) => self.prefixes.first().map_or_else(
+                        || format!("prefix+{}", bound.unparse()),
+                        |prefix| format!("{} {}", prefix.unparse(), bound.unparse()),
+                    ),
+                };
+                labels.push((label, runnable));
+            }
+        }
+        labels.dedup();
+        labels
+    }
+
     /// Whether a custom command's trigger can run it here. Herdr resolves
     /// its own actions before custom commands, so a keystroke this keymap
     /// already binds, or the prefix itself, never reaches one, and a direct

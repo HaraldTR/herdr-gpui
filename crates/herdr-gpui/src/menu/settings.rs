@@ -299,7 +299,14 @@ impl HerdrWindow {
         let mut groups = [
             ("WORKSPACES & PANES", Vec::new()),
             ("NAVIGATION", Vec::new()),
-            ("APPLICATION", vec![(vec!["cmd-v"], "Paste into terminal")]),
+            (
+                "APPLICATION",
+                vec![(
+                    vec![("cmd-v".to_owned(), true)],
+                    "Paste into terminal".to_owned(),
+                )],
+            ),
+            ("PLUGIN & CUSTOM COMMANDS", Vec::new()),
         ];
         for info in COMMANDS {
             let mut keys: Vec<&str> = self.keymap().shortcuts(info.command).collect();
@@ -374,7 +381,28 @@ impl HerdrWindow {
                 | Command::ReloadConfig => 2,
                 Command::OpenNotificationTarget => 1,
             };
-            groups[group].1.push((keys, info.label));
+            groups[group].1.push((
+                keys.into_iter().map(|key| (key.to_owned(), true)).collect(),
+                info.label.to_owned(),
+            ));
+        }
+        if let Some(snapshot) = self
+            .live
+            .snapshot
+            .as_ref()
+            .filter(|_| self.live.status.is_connected())
+        {
+            groups[3].1.extend(snapshot.commands.iter().map(|command| {
+                let description = command
+                    .description
+                    .as_deref()
+                    .filter(|description| !description.trim().is_empty())
+                    .unwrap_or(&command.command_id);
+                (
+                    self.keymap().custom_reference_labels(command),
+                    description.to_owned(),
+                )
+            }));
         }
         let total: usize = groups.iter().map(|(_, shortcuts)| shortcuts.len()).sum();
         let mut count = 0;
@@ -382,8 +410,10 @@ impl HerdrWindow {
             let shortcuts: Vec<_> = shortcuts
                 .into_iter()
                 .filter(|(keys, description)| {
-                    keys.iter()
-                        .any(|keys| shortcut_matches(query, keys, description, section))
+                    shortcut_matches(query, "", description, section)
+                        || keys
+                            .iter()
+                            .any(|(keys, _)| shortcut_matches(query, keys, description, section))
                 })
                 .collect();
             if shortcuts.is_empty() {
@@ -417,22 +447,41 @@ impl HerdrWindow {
                                 .flex()
                                 .flex_wrap()
                                 .gap(px(10.))
-                                .children(keys.into_iter().map(|keys| {
-                                    div().flex().flex_wrap().gap(px(4.)).children(
-                                        keycaps(keys).map(|key| {
-                                            div()
-                                                .flex_none()
-                                                .px(px(6.))
-                                                .py(px(2.))
-                                                .rounded(px(crate::config::corners::SMALL))
-                                                .border_1()
-                                                .border_color(rgb(theme.active))
-                                                .bg(rgb(theme.background))
-                                                .text_size(px(font.size * 0.9))
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .child(key)
-                                        }),
+                                .when(keys.is_empty(), |column| {
+                                    column.child(
+                                        div()
+                                            .text_color(rgb(theme.muted))
+                                            .child("No shortcut assigned"),
                                     )
+                                })
+                                .children(keys.into_iter().map(|(keys, runnable)| {
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(3.))
+                                        .child(div().flex().flex_wrap().gap(px(4.)).children(
+                                            keycaps(&keys).map(|key| {
+                                                div()
+                                                    .flex_none()
+                                                    .px(px(6.))
+                                                    .py(px(2.))
+                                                    .rounded(px(crate::config::corners::SMALL))
+                                                    .border_1()
+                                                    .border_color(rgb(theme.active))
+                                                    .bg(rgb(theme.background))
+                                                    .text_size(px(font.size * 0.9))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .child(key)
+                                            }),
+                                        ))
+                                        .when(!runnable, |binding| {
+                                            binding.child(
+                                                div()
+                                                    .text_size(px(font.size * 0.85))
+                                                    .text_color(rgb(theme.muted))
+                                                    .child("Unavailable in this build"),
+                                            )
+                                        })
                                 })),
                         )
                         .child(
@@ -458,7 +507,7 @@ impl HerdrWindow {
             div()
                 .py(px(14.))
                 .text_color(rgb(theme.subtext()))
-                .child("Includes the prefix chords from Herdr's [keys] in config.toml. Daemon actions with no GUI command, and terminal applications, keep their own shortcuts."),
+                .child("Includes Herdr's [keys] prefix chords and the connected daemon's plugin and custom commands. Unavailable bindings cannot run through this build's keymap. Terminal applications keep their own shortcuts."),
         );
         div()
             .flex()
@@ -588,13 +637,14 @@ fn shortcut_matches(query: &str, keys: &str, description: &str, section: &str) -
         .is_some_and(|token| matches!(token, "cmd" | "ctrl" | "alt" | "shift"))
     {
         // A key combination should match keycaps, not letters in an action's name.
+        let keys = keys.to_lowercase();
         return query
             .split_whitespace()
-            .all(|token| keys.split(['-', ' ']).any(|key| key == token));
+            .all(|token| keys.split(['-', '+', ' ']).any(|key| key == token));
     }
     let text = format!("{keys} {description} {section}")
         .to_lowercase()
-        .replace('-', " ");
+        .replace(['-', '+'], " ");
     query.split_whitespace().all(|token| text.contains(token))
 }
 
