@@ -219,6 +219,11 @@ impl HerdrWindow {
                 self.submit_workspace_dialog(window, cx)
             }
             "enter" if self.menu.page == Some(Page::GitCommit) => self.submit_git_commit(cx),
+            "enter" if self.menu.page == Some(Page::PrComment) => self.submit_pr_comment(cx),
+            "enter" if self.menu.page == Some(Page::PrMerge) => self.submit_pr_merge(cx),
+            "up" | "down" if self.menu.page == Some(Page::PrMerge) => {
+                self.cycle_merge_method(event.keystroke.key == "down", cx)
+            }
             "up" | "down" if self.menu.page == Some(Page::Workspace) => {
                 let actions = self.workspace_menu_actions();
                 let selected = self
