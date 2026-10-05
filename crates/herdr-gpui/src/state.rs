@@ -66,6 +66,9 @@ pub struct LiveState {
     pub status: ConnectionStatus,
     pub error: Option<String>,
     pub missing_installation: bool,
+    /// Why the last handshake was refused, when updating one side fixes it.
+    /// Cleared by the next accepted handshake.
+    pub version_mismatch: Option<herdr_client::VersionMismatch>,
     /// Same-user peer at the owned standard socket, not executable attestation.
     pub(crate) local_daemon_peer: bool,
     /// `pane.clear` arrived after Herdr 0.9.1; older daemons reject it.
@@ -166,6 +169,7 @@ impl Default for LiveState {
             status: ConnectionStatus::Connecting,
             error: None,
             missing_installation: false,
+            version_mismatch: None,
             local_daemon_peer: false,
             supports_pane_clear: false,
             supports_tab_move: false,
@@ -214,6 +218,7 @@ impl LiveState {
             status,
             error,
             missing_installation,
+            version_mismatch,
             local_daemon_peer,
             supports_pane_clear,
             supports_tab_move,
@@ -262,6 +267,7 @@ impl LiveState {
             && *status == self.status
             && *error == self.error
             && *missing_installation == self.missing_installation
+            && *version_mismatch == self.version_mismatch
             && *local_daemon_peer == self.local_daemon_peer
             && *supports_pane_clear == self.supports_pane_clear
             && *supports_tab_move == self.supports_tab_move
@@ -421,6 +427,7 @@ impl LiveState {
                             welcome.capabilities.iter().any(|value| value == capability)
                         });
                 self.missing_installation = false;
+                self.version_mismatch = None;
                 // The daemon reports the mode to each new connection.
                 self.keyboard_report_all = false;
                 self.status = ConnectionStatus::AwaitingSnapshot;
@@ -484,6 +491,8 @@ impl LiveState {
                 }
             }
             ClientEvent::SurfaceImages(images) => self.surface_images = images,
+            // The `Disconnected` that follows carries the reason text.
+            ClientEvent::VersionMismatch(mismatch) => self.version_mismatch = Some(mismatch),
             ClientEvent::Disconnected { reason } => {
                 self.settings_reload = false;
                 self.notifications.clear();

@@ -263,6 +263,14 @@ Homebrew paths are skipped), then waits up to 20 seconds to
 connect without blocking the UI. If Herdr cannot be found, an installation modal
 offers an **Install** button that opens [herdr.dev](https://herdr.dev/); it never
 downloads or runs an installer. After installing, choose Terminal > Reconnect.
+A daemon that refuses the handshake because it is too old, or newer than this
+app supports, opens a notice naming the host, its reported version, and which
+side to update. For an old daemon it shows `herdr update`, which **Copy Command**
+puts on the clipboard; nothing runs it, since updating may stop that host's
+sessions. For a newer daemon, **Check for Updates** opens the app updater. The
+notice appears once per refused endpoint, retries continue with backoff so an
+updated daemon reconnects on its own, and the device list reads "Herdr update
+needed" or "app update needed" until a handshake succeeds.
 **QA > Show herdr non-detected modal** previews the warning without restarting,
 disconnecting, or changing daemon detection. Closing the GUI leaves the daemon
 and its terminals running.

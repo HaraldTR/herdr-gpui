@@ -466,19 +466,50 @@ pub(crate) fn connect(
         // Do not inherit a GUI terminal or collect unbounded/secret-bearing diagnostics.
         .stderr(Stdio::null());
     let child = SshChild(command.spawn()?);
-    let started = Instant::now();
+    choose_bridge(&mut stream, stop, Instant::now())?;
+    Ok((stream, child))
+}
+
+/// Accept the first installed Herdr that can serve this client. When every
+/// one was skipped, the script exits and the first refusal says why, instead
+/// of the closed bridge every other failure also ends in.
+#[cfg(unix)]
+fn choose_bridge(
+    stream: &mut (impl Read + Write + ?Sized),
+    stop: &AtomicBool,
+    started: Instant,
+) -> Result<()> {
+    let mut refused = None;
     loop {
-        let status = await_ready(&mut stream, stop, started)?;
+        let status = match await_ready(stream, stop, started) {
+            Err(Error::SshClosed) => return Err(refused.unwrap_or(Error::SshClosed)),
+            result => result?,
+        };
         if let Some(idle_timeout) = compatible_status(&status) {
             stream.write_all(if idle_timeout {
                 b"accept-idle\n"
             } else {
                 b"accept\n"
             })?;
-            return Ok((stream, child));
+            return Ok(());
         }
+        refused = refused.or_else(|| incompatible_status(&status));
         stream.write_all(b"skip\n")?;
     }
+}
+
+/// Why a candidate's `status client --json` was skipped, if it reported one.
+#[cfg(unix)]
+fn incompatible_status(output: &[u8]) -> Option<Error> {
+    let status = output
+        .split(|b| *b == b'\n')
+        .find_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())?;
+    Some(Error::SshIncompatible {
+        generation: status["endpoint_protocol_generation"]
+            .as_u64()
+            .and_then(|generation| u32::try_from(generation).ok()),
+        version: status["version"].as_str().and_then(crate::compat::label),
+    })
 }
 
 /// Windows rejects SSH endpoints before spawning anything. Handing a socket to a

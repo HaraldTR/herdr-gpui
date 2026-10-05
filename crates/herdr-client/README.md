@@ -265,8 +265,18 @@ SurfaceImages(Arc<SurfaceImages>)
 Response { request_id: String, response: serde_json::Value }
 CommandRejected { request_id: Option<String>, reason: Error }
 Message(ServerMessage)
+VersionMismatch(VersionMismatch)
 Disconnected { reason: String }
 ```
+
+`VersionMismatch` precedes the `Disconnected` of a connection refused because one
+side must be updated: `DaemonOutdated` for a daemon that answers the hello with
+a pre-endpoint welcome, reports an older generation, lacks a required
+capability, or, over SSH, has no installed Herdr able to serve this client;
+`ClientOutdated` for a newer generation. Each carries the daemon's reported
+version, stripped of controls and capped at 64 characters, when it gave one.
+`Error::version_mismatch` applies the same classification to an error. Other
+failures, including an SSH host with no Herdr at all, are not mismatches.
 
 The receiver is `crossbeam_channel::Receiver`, re-exported as `Receiver`.
 Responses preserve either the endpoint's `{id,result}` or `{id,error}` object;

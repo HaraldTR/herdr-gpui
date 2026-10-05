@@ -8,6 +8,7 @@ mod daemon_messages;
 mod focus_acks;
 mod requests;
 mod surfaces;
+mod version_mismatch;
 
 fn snapshot() -> Arc<ClientShellSnapshot> {
     Arc::new(

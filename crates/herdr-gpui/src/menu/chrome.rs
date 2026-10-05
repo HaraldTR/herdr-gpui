@@ -467,11 +467,17 @@ impl HerdrWindow {
                     .overflow_hidden()
                     .shadow_lg()
             })
-            .when(matches!(page, Page::Install | Page::AgentSkill), |panel| {
-                panel
-                    .w((viewport.width - px(24.)).max(px(0.)).min(px(420.)))
-                    .max_h((viewport.height - px(24.)).max(px(0.)))
-            })
+            .when(
+                matches!(
+                    page,
+                    Page::Install | Page::AgentSkill | Page::VersionMismatch
+                ),
+                |panel| {
+                    panel
+                        .w((viewport.width - px(24.)).max(px(0.)).min(px(420.)))
+                        .max_h((viewport.height - px(24.)).max(px(0.)))
+                },
+            )
             .when(
                 matches!(
                     page,
@@ -600,6 +606,8 @@ impl HerdrWindow {
             panel = panel.child(self.render_about(cx));
         } else if page == Page::AgentSkill {
             panel = panel.child(self.render_agent_skill_offer(cx));
+        } else if page == Page::VersionMismatch {
+            panel = panel.child(self.render_version_mismatch(cx));
         } else if page == Page::Install {
             panel = panel
                 .child(div().p(px(8.)).child("Herdr must be installed"))

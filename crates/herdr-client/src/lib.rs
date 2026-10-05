@@ -5,6 +5,7 @@
 
 mod catalog;
 mod clipboard;
+mod compat;
 mod connect;
 mod discovery;
 mod error;
@@ -40,6 +41,7 @@ pub use catalog::{
     valid_profile_id,
 };
 pub use clipboard::{ClipboardImageCancellation, ClipboardImageUpload};
+pub use compat::VersionMismatch;
 pub use connect::{connect, connect_with_connector, connect_with_surface_active};
 pub use discovery::{ConnectTarget, session_socket};
 /// Error returned when queueing commands; also available as the crate's `Error`.
