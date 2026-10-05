@@ -42,7 +42,9 @@ fn paths_resolve_under_home_or_the_pane_directory() {
 #[test]
 fn only_documents_and_plain_folders_open_themselves() {
     let root = tempfile::tempdir().unwrap();
-    let real = std::fs::canonicalize(root.path()).unwrap();
+    // Symlinks resolved, as on macOS where the temporary folder is behind
+    // one; not `canonicalize`, which also expands Windows short names.
+    let real = real_path(root.path()).unwrap();
     let file = |name: &str| {
         let path = root.path().join(name);
         std::fs::write(&path, "x").unwrap();
@@ -228,7 +230,7 @@ fn a_link_modifier_click_opens_a_printed_file_that_exists(cx: &mut gpui::TestApp
 
     cx.simulate_click(found, Modifiers::secondary_key());
     cx.run_until_parked();
-    let real = std::fs::canonicalize(root.path().join("docs/notes.txt")).unwrap();
+    let real = real_path(&root.path().join("docs/notes.txt")).unwrap();
     let expected = url::Url::from_file_path(real).unwrap();
     assert_eq!(cx.opened_url().as_deref(), Some(expected.as_str()));
 }
