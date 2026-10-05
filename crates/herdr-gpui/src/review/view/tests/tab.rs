@@ -52,17 +52,26 @@ fn a_restored_review_tab_gets_its_state_and_a_closed_one_loses_it(cx: &mut gpui:
 
 #[test]
 fn saved_review_tabs_are_checked_when_read() {
-    let good =
-        r#"{"kind":"review","checkout":{"repo_key":"/r/.git","branch":"main","checkout":"/r"}}"#;
-    let location: Location = serde_json::from_str(good).unwrap();
+    // Absolute on every platform: Windows needs a drive, Unix a root.
+    let root = std::env::temp_dir().join("repo");
+    let repo = root.join(".git");
+    let (root, repo) = (root.to_str().unwrap(), repo.to_str().unwrap());
+    let saved = |repo_key: &str, branch: &str, checkout: Option<&str>| {
+        serde_json::json!({
+            "kind": "review",
+            "checkout": { "repo_key": repo_key, "branch": branch, "checkout": checkout },
+        })
+        .to_string()
+    };
+    let location: Location = serde_json::from_str(&saved(repo, "main", Some(root))).unwrap();
     assert!(!location.is_page());
     assert_eq!(location.default_title(), "Review \u{00b7} main");
     for bad in [
-        r#"{"kind":"review","checkout":{"repo_key":"relative","branch":"main","checkout":null}}"#,
-        r#"{"kind":"review","checkout":{"repo_key":"/r/.git","branch":"","checkout":null}}"#,
-        r#"{"kind":"review","checkout":{"repo_key":"/r/.git","branch":"a\nb","checkout":null}}"#,
-        r#"{"kind":"review","checkout":{"repo_key":"/r/.git","branch":"main","checkout":"r"}}"#,
+        saved("relative", "main", None),
+        saved(repo, "", None),
+        saved(repo, "a\nb", None),
+        saved(repo, "main", Some("relative")),
     ] {
-        assert!(serde_json::from_str::<Location>(bad).is_err(), "{bad}");
+        assert!(serde_json::from_str::<Location>(&bad).is_err(), "{bad}");
     }
 }
