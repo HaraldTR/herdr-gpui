@@ -86,6 +86,7 @@ fn open_deferred(cx: &mut App) {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(620.), px(360.))),
             titlebar: Some(crate::titlebar::options("Logs")),
+            app_owns_titlebar_drag: cfg!(target_os = "macos"),
             ..Default::default()
         },
         |window, cx| cx.new(|cx| LogWindow::new(window, cx)),

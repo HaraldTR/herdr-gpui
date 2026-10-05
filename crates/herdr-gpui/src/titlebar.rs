@@ -1,6 +1,9 @@
 //! Native chrome and GitHub account access.
 mod decorations;
 mod status;
+mod tabs;
+
+pub(crate) use tabs::{Ends, strip_height};
 
 use decorations::controls;
 pub(crate) use decorations::frame;
@@ -205,119 +208,125 @@ impl HerdrWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let image = self.pr_profile().and_then(|p| p.avatar.clone());
         // The toggle leads the bar so it stays put whether or not the sidebar
         // below it is showing, and can always bring the sidebar back.
-        render(
-            self.theme.surface,
-            Some(
+        render(self.theme.surface, Some(self.sidebar_toggle(cx)), window)
+            .child(
                 div()
-                    .id("toggle-sidebar")
-                    .debug_selector(|| "toggle-sidebar".into())
-                    .flex_none()
-                    .self_center()
-                    .mr(px(4.))
-                    .size(px(28.))
+                    .debug_selector(|| "titlebar-center".into())
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .when(self.config.usage.topbar, |center| {
+                        center.child(status::render(&self.live, &self.config.ui, &self.theme))
+                    }),
+            )
+            .child(self.titlebar_end(window, cx))
+    }
+
+    fn sidebar_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("toggle-sidebar")
+            .debug_selector(|| "toggle-sidebar".into())
+            .flex_none()
+            .self_center()
+            .mr(px(4.))
+            .size(px(28.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(crate::config::corners::CONTROL))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(self.theme.active)))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, window, cx| {
+                cx.stop_propagation();
+                this.command(crate::controls::Command::ToggleSidebar, window, cx);
+            }))
+            .child(sidebar_glyph(self.sidebar_visible, &self.theme))
+            .into_any_element()
+    }
+
+    /// What ends the bar: git actions, the account, and the window controls
+    /// a client-decorated window draws.
+    fn titlebar_end(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let image = self.pr_profile().and_then(|p| p.avatar.clone());
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .children(self.render_git_button(cx))
+            .child(
+                div()
+                    .debug_selector(|| "titlebar-account-slot".into())
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(crate::config::corners::CONTROL))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(self.theme.active)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.command(crate::controls::Command::ToggleSidebar, window, cx);
-                    }))
-                    .child(sidebar_glyph(self.sidebar_visible, &self.theme))
-                    .into_any_element(),
-            ),
-            window,
-        )
-        .child(
-            div()
-                .debug_selector(|| "titlebar-center".into())
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .when(self.config.usage.topbar, |center| {
-                    center.child(status::render(&self.live, &self.config.ui, &self.theme))
-                }),
-        )
-        .children(self.render_git_button(cx))
-        .child(
-            div()
-                .debug_selector(|| "titlebar-account-slot".into())
-                .flex()
-                .items_center()
-                .justify_center()
-                .flex_none()
-                .w(px(40.))
-                .h_full()
-                .child(
-                    div()
-                        .id("titlebar-avatar")
-                        .group("titlebar-account")
-                        .debug_selector(|| "titlebar-avatar".into())
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .size(px(28.))
-                        .rounded_full()
-                        .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.open_profile(true, window, cx);
-                        }))
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(|this, _, window, cx| {
+                    .flex_none()
+                    .w(px(40.))
+                    .h_full()
+                    .child(
+                        div()
+                            .id("titlebar-avatar")
+                            .group("titlebar-account")
+                            .debug_selector(|| "titlebar-avatar".into())
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(28.))
+                            .rounded_full()
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, window, cx| {
                                 cx.stop_propagation();
-                                this.open_profile(false, window, cx);
-                            }),
-                        )
-                        .child(
-                            div()
-                                .debug_selector(|| "titlebar-avatar-circle".into())
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .size(px(AVATAR))
-                                .rounded_full()
-                                .group_hover("titlebar-account", |s| {
-                                    s.shadow(vec![BoxShadow {
-                                        color: rgba((self.theme.foreground << 8) | 0x38).into(),
-                                        offset: point(px(0.), px(0.)),
-                                        blur_radius: px(5.),
-                                        spread_radius: px(1.),
-                                        inset: false,
-                                    }])
-                                })
-                                .map(|circle| match image {
-                                    Some(image) => {
-                                        circle.child(img(image).size(px(AVATAR)).rounded_full())
-                                    }
-                                    None => circle.child(
-                                        svg()
-                                            .path("icons/github.svg")
-                                            .size(px(AVATAR))
-                                            .text_color(rgb(self.theme.foreground)),
-                                    ),
+                                this.open_profile(true, window, cx);
+                            }))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(|this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.open_profile(false, window, cx);
                                 }),
-                        ),
-                ),
-        )
-        .children(controls(window, &self.theme, |window, _| {
-            window.remove_window();
-        }))
+                            )
+                            .child(
+                                div()
+                                    .debug_selector(|| "titlebar-avatar-circle".into())
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .size(px(AVATAR))
+                                    .rounded_full()
+                                    .group_hover("titlebar-account", |s| {
+                                        s.shadow(vec![BoxShadow {
+                                            color: rgba((self.theme.foreground << 8) | 0x38).into(),
+                                            offset: point(px(0.), px(0.)),
+                                            blur_radius: px(5.),
+                                            spread_radius: px(1.),
+                                            inset: false,
+                                        }])
+                                    })
+                                    .map(|circle| match image {
+                                        Some(image) => {
+                                            circle.child(img(image).size(px(AVATAR)).rounded_full())
+                                        }
+                                        None => circle.child(
+                                            svg()
+                                                .path("icons/github.svg")
+                                                .size(px(AVATAR))
+                                                .text_color(rgb(self.theme.foreground)),
+                                        ),
+                                    }),
+                            ),
+                    ),
+            )
+            .children(controls(window, &self.theme, |window, _| {
+                window.remove_window();
+            }))
     }
 }
 
 /// `leading` sits right after the traffic lights, ahead of the draggable center.
 pub(super) fn render(surface: u32, leading: Option<AnyElement>, window: &Window) -> Stateful<Div> {
-    // AppKit or the platform frame owns dragging unless the window draws its
-    // own decorations.
     let bar = div()
         .id("titlebar")
         .debug_selector(|| "titlebar".into())
@@ -328,29 +337,39 @@ pub(super) fn render(surface: u32, leading: Option<AnyElement>, window: &Window)
         .bg(rgb(surface).blend(rgba(0xffffff1a)))
         .child(div().flex_none().w(px(LEADING)).h_full())
         .children(leading);
-    if !decorations::client(window) {
-        return bar.on_click(|event, window, _| {
-            if event.click_count() == 2 {
-                window.titlebar_double_click();
-            }
-        });
+    movable(bar, window)
+}
+
+/// Makes `area` do a title bar's job: pressing it moves the window, and a
+/// double-click acts as the platform's does. Its controls stop their own
+/// presses so they never start a move.
+///
+/// macOS windows own titlebar dragging (`app_owns_titlebar_drag`), so AppKit
+/// never moves the window from under a tab, and a client-decorated window has
+/// nothing else to move it. A server-drawn frame moves the window from its own
+/// title bar, so there `area` is left alone.
+pub(crate) fn movable<E: InteractiveElement>(area: E, window: &Window) -> E {
+    let client = decorations::client(window);
+    if !cfg!(target_os = "macos") && !client {
+        return area;
     }
-    // Nothing else moves a client-decorated window. The move starts on the
-    // press: pointer motion during a press is claimed by window-level drag
-    // handlers (selection, splits) before it bubbles up to the bar.
+    // The move starts on the press: pointer motion during a press is claimed
+    // by window-level drag handlers (selection, splits) before it bubbles up.
     let supported = window.window_controls();
-    bar.on_mouse_down(MouseButton::Left, move |event, window, _| {
-        if event.click_count == 2 && supported.maximize {
-            window.zoom_window();
-        } else {
-            window.start_window_move();
+    let area = area.on_mouse_down(MouseButton::Left, move |event, window, _| {
+        match event.click_count {
+            2 if !client => window.titlebar_double_click(),
+            2 if supported.maximize => window.zoom_window(),
+            _ => window.start_window_move(),
         }
-    })
-    .when(supported.window_menu, |bar| {
-        bar.on_mouse_down(MouseButton::Right, |event, window, _| {
+    });
+    if client && supported.window_menu {
+        area.on_mouse_down(MouseButton::Right, |event, window, _| {
             window.show_window_menu(event.position);
         })
-    })
+    } else {
+        area
+    }
 }
 
 /// The bar a secondary window shows: macOS always draws one under its
@@ -402,11 +421,28 @@ pub(crate) fn sidebar_glyph(expanded: bool, theme: &crate::config::Theme) -> Div
 mod tests {
     #![allow(clippy::unwrap_used)]
     use crate::menu::Page;
-    use gpui::{Bounds, Modifiers, MouseButton, MouseDownEvent, TestAppContext, point, px, size};
+    use gpui::{
+        Bounds, Context, Modifiers, MouseButton, MouseDownEvent, TestAppContext, Window, point, px,
+        size,
+    };
+
+    /// The fixture window with Herdr's tab bar at the bottom, so it keeps the
+    /// full-width header these tests measure.
+    pub(crate) fn header_window(
+        window: &mut Window,
+        cx: &mut Context<crate::HerdrWindow>,
+    ) -> crate::HerdrWindow {
+        let mut view = crate::sidebar::layout_tests::fixture_window(window, cx);
+        view.settings.shared = Some(
+            crate::herdr_settings::Settings::parse_text("[ui]\ntab_bar_position = 'bottom'")
+                .unwrap(),
+        );
+        view
+    }
 
     #[gpui::test]
     fn sidebar_button_collapses_and_reopens_without_moving(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let (view, cx) = cx.add_window_view(header_window);
         for width in [1200., 360.] {
             cx.simulate_resize(size(px(width), px(600.)));
             for visible in [true, false] {
@@ -429,7 +465,7 @@ mod tests {
     fn account_icon_keeps_the_same_bounds_when_signed_out_failed_or_connected(
         cx: &mut TestAppContext,
     ) {
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let (view, cx) = cx.add_window_view(header_window);
         for width in [1200., 360.] {
             cx.simulate_resize(size(px(width), px(400.)));
             for state in 0..4 {
@@ -479,7 +515,7 @@ mod tests {
 
     #[gpui::test]
     fn profile_slot_bounds_and_context_menu_do_not_start_auth(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let (view, cx) = cx.add_window_view(header_window);
         for (width, height) in [(1200., 780.), (640., 400.), (360., 400.)] {
             cx.simulate_resize(size(px(width), px(height)));
             cx.run_until_parked();
@@ -541,7 +577,7 @@ mod native_chrome_tests {
 
     #[gpui::test]
     fn header_bounds_above_body_in_windowed_and_fullscreen(cx: &mut TestAppContext) {
-        let (_, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let (_, cx) = cx.add_window_view(super::tests::header_window);
         for fullscreen in [false, true, false] {
             cx.update(|window, _| {
                 if window.is_fullscreen() != fullscreen {

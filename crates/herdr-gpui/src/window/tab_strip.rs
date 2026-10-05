@@ -10,6 +10,7 @@ use crate::{
     fonts::StyledFont,
     herdr_settings::TabBarPosition,
     sidebar::{Indicators, status_indicator},
+    titlebar::Ends,
 };
 use gpui::{prelude::*, *};
 use herdr_client::protocol::AgentStatus;
@@ -131,11 +132,22 @@ impl HerdrWindow {
     }
 
     /// Height of a group's tab strip, which grows with the tab font.
-    pub(super) fn tab_strip_height(&self) -> f32 {
-        (self.config.tabs.size * 1.6 + 4.).max(TAB_HEIGHT)
+    pub(crate) fn tab_strip_height(&self) -> f32 {
+        crate::titlebar::strip_height(
+            (self.config.tabs.size * 1.6 + 4.).max(TAB_HEIGHT),
+            self.tab_bar_position() == TabBarPosition::Top,
+        )
     }
 
-    fn render_tab_strip(&mut self, slot: Slot, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    /// `ends` says which of the header's parts the strip carries, when it
+    /// stands in for the header.
+    fn render_tab_strip(
+        &mut self,
+        slot: Slot,
+        ends: Option<Ends>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let pick = self.group_pick(slot.id);
         let indicators = Indicators::new(
             self.settings.shared.as_ref(),
@@ -200,8 +212,7 @@ impl HerdrWindow {
             .overflow_x_scroll()
             .track_scroll(&scroll)
             .bg(rgb(self.theme.surface))
-            .text_color(rgb(self.theme.foreground))
-            .items_center();
+            .text_color(rgb(self.theme.foreground));
         if let Some(snapshot) = &self.live.snapshot {
             for tab in snapshot.tabs.iter().filter(|t| {
                 Some(&t.workspace_id) == snapshot.focused_workspace_id.as_ref()
@@ -427,6 +438,10 @@ impl HerdrWindow {
             .when(self.tab_drag_in(slot.id), |strip| {
                 strip.child(self.tab_drag_listeners(cx))
             })
+            .children(
+                ends.filter(|ends| ends.leading)
+                    .and_then(|_| self.strip_leading(window, cx)),
+            )
             // Tabs size to their content and shrink when the row is full, so
             // the button sits after the last tab instead of at the far right
             // of the window.
@@ -459,7 +474,7 @@ impl HerdrWindow {
                         this.command(Command::Tab, window, cx);
                     })),
             )
-            .child(div().flex_1().min_w_0())
+            .child(self.strip_room(ends, window))
             .child(self.strip_button(
                 slot,
                 "split-editor",
@@ -476,6 +491,9 @@ impl HerdrWindow {
                     this.open_group_menu(slot.id, event.position(), window, cx);
                 },
             ))
+            .when(ends.is_some_and(|ends| ends.trailing), |strip| {
+                strip.child(self.strip_trailing(window, cx))
+            })
     }
 
     /// A tab as the strip places it: armed to lift for reordering, slid
@@ -536,6 +554,8 @@ impl HerdrWindow {
         deferred(
             div()
                 .flex_none()
+                // A flex box, so the held tab keeps the strip's full height.
+                .flex()
                 .relative()
                 .left(px(shift))
                 .cursor_grabbing()
@@ -717,7 +737,7 @@ impl HerdrWindow {
     }
 
     /// Where Herdr's shared config puts the tab row.
-    fn tab_bar_position(&self) -> TabBarPosition {
+    pub(crate) fn tab_bar_position(&self) -> TabBarPosition {
         self.settings
             .shared
             .as_ref()
@@ -729,7 +749,7 @@ impl HerdrWindow {
     /// `hide_tab_bar_when_single_tab`: only when the window is not split, so
     /// every group keeps the strip that names it and takes dropped tabs, and
     /// only while the strip would list one tab at most, browser tabs counted.
-    pub(super) fn strip_hidden(&self, group: GroupId, cx: &App) -> bool {
+    pub(crate) fn strip_hidden(&self, group: GroupId, cx: &App) -> bool {
         self.settings
             .shared
             .as_ref()
@@ -742,16 +762,17 @@ impl HerdrWindow {
 
     /// One group: its strip above or below what it shows, as Herdr's
     /// `tab_bar_position` places it. Pressing anywhere in it makes it the
-    /// group in use.
+    /// group in use. `ends` is set while the strips stand in for the header.
     pub(super) fn render_group(
         &mut self,
         slot: Slot,
         body: AnyElement,
+        ends: Option<Ends>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let strip =
-            (!self.strip_hidden(slot.id, cx)).then(|| self.render_tab_strip(slot, window, cx));
+        let strip = (!self.strip_hidden(slot.id, cx))
+            .then(|| self.render_tab_strip(slot, ends, window, cx));
         let bottom = self.tab_bar_position() == TabBarPosition::Bottom;
         let share = (self.is_split() || !self.folding_groups().is_empty())
             .then(|| self.group_share(slot.id));

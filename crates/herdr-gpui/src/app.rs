@@ -104,6 +104,7 @@ pub(crate) fn open_window(
             display_id,
             window_min_size: Some(size(px(640.), px(400.))),
             titlebar: Some(titlebar::options(WINDOW_TITLE)),
+            app_owns_titlebar_drag: cfg!(target_os = "macos"),
             app_id: Some(crate::constants::APP_ID.into()),
             ..Default::default()
         },

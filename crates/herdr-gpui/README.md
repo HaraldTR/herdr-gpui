@@ -538,7 +538,8 @@ already waiting in a connection inbox from the disabled period are discarded too
 Failed reloads preserve current settings. QA
 previews remain available regardless of delivery settings.
 
-The sidebar button at the left of the titlebar hides or shows the sidebar.
+The sidebar button at the left of the titlebar (the sidebar's top row, or the
+leftmost tab strip while the sidebar is collapsed) hides or shows the sidebar.
 It stays available when the sidebar is hidden; the existing View menu command and shortcut still work.
 In **Settings > General**, toggle **Show usage** to turn the bottom quota display on or off.
 The choice is saved to `config-gpui.local.toml` and follows the existing `[usage] show` setting.
@@ -832,6 +833,21 @@ audio deduplication. Native playback and device-switch/unplug behavior require m
 
 ## Title Bar
 
+With Herdr's tab bar at the top (`ui.tab_bar_position = "top"`, the default),
+the tab row is the title bar, as in Chrome or Conductor, and the window draws
+no separate header. Strips along the top grow to the header's 34px. The
+sidebar column starts with a row holding the traffic-light clearance and the
+sidebar toggle; with the sidebar collapsed to its rail or hidden, the leftmost
+group's strip leads with whatever clearance the column leaves and the toggle.
+The rightmost group's strip ends with the header's status text, Git button,
+account, and window controls. Every strip keeps at least 40px of empty room
+after its tabs that moves the window, so the window stays movable however many
+tabs a strip holds; tabs beyond the strip's width scroll as before. A bottom
+tab bar, or a lone tab hidden by `hide_tab_bar_when_single_tab`, brings back
+the full-width header described below, and so does a window with no strips.
+The worktree banner moves to the window's foot in this layout so it never sits
+under the traffic lights.
+
 macOS keeps `Some(TitlebarOptions)` and the native Herdr window title/traffic lights,
 with transparent chrome and lights positioned at (9, 9) logical pixels. A full-width
 34px header blends `theme.surface` roughly 10% toward white, subtly lifting dark
@@ -871,12 +887,12 @@ Build identity and icon selection are described in the
 [release notes](../../scripts/release/README.md#build-identity).
 
 The reference is Zed's `crates/platform_title_bar/src/platform_title_bar.rs` and
-window options in `crates/zed/src/zed.rs`, not a build dependency. Double-click calls
-`Window::titlebar_double_click()` to honor the OS preference. We leave `is_movable`
-unchanged and rely on native AppKit dragging, with no custom drag handlers or platform
-patches. That choice predates GPUI 0.3.6: 0.2.2 had no macOS `start_window_move`
-implementation and ignored `WindowControlArea::Drag`, while 0.3.6 implements
-`start_window_move`.
+window options in `crates/zed/src/zed.rs`, not a build dependency. On macOS every
+window sets `app_owns_titlebar_drag`, so AppKit never moves the window from under a
+tab or delays titlebar clicks; pressing the header, the sidebar's top row, or a
+strip's empty room calls `Window::start_window_move`, and a double-click calls
+`Window::titlebar_double_click()` to honor the OS preference. `is_movable` stays
+unchanged, so the Window menu's tiling items stay enabled.
 
 Headless tests check the actual root header/center/account-slot bounds at wide,
 minimum, and narrow sizes, including mock fullscreen entry/exit, and that the
@@ -1631,8 +1647,9 @@ Windows setup) nothing is saved and the window says so.
   checks/reviews or an unknown merge status, and orange for a blocked/behind branch
   without a more specific check/review status. Drafts remain gray, merged PRs
   purple, and closed PRs red.
-- The header shows the selected daemon's status segments, including usage
-  percentages supplied by plugins, to the left of the Git and account controls.
+- The header, or the rightmost tab strip when tabs form the title bar, shows the
+  selected daemon's status segments, including usage percentages supplied by
+  plugins, to the left of the Git and account controls.
   Long text truncates to keep those controls reachable; status clears on disconnect.
 - The top-right titlebar profile control starts native GitHub device sign-in on
   a signed-out click, shows the authenticated user's avatar, and offers Sign out

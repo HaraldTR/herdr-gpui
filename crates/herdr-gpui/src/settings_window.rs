@@ -138,6 +138,7 @@ fn open_with(
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(680.), px(560.))),
             titlebar: Some(crate::titlebar::options("Settings")),
+            app_owns_titlebar_drag: cfg!(target_os = "macos"),
             ..Default::default()
         },
         move |window, cx| {
