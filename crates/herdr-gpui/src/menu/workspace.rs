@@ -492,6 +492,9 @@ impl HerdrWindow {
         if self.checkpoint_checkout().is_some() {
             items.push((WorkspaceMenuAction::Checkpoints, "Checkpoints..."));
         }
+        if let Some(label) = self.fan_out_item() {
+            items.push((WorkspaceMenuAction::FanOut, label));
+        }
         // Only a workspace that heads a group of checkouts can fold anything.
         if let Some(key) = target.group_key() {
             items.push(if self.collapsed_repos_for_selection().contains(key) {
@@ -540,7 +543,7 @@ impl HerdrWindow {
     }
 
     /// The main-checkout target a linked checkout's menu creates through.
-    fn linked_new_worktree_target(&self) -> Option<WorkspaceTarget> {
+    pub(super) fn linked_new_worktree_target(&self) -> Option<WorkspaceTarget> {
         let target = self
             .menu
             .target
@@ -674,6 +677,7 @@ impl HerdrWindow {
             WorkspaceMenuAction::TeleportBack => self.teleport_back(window, cx),
             WorkspaceMenuAction::ClearTeleported => self.clear_teleport_mark(window, cx),
             WorkspaceMenuAction::Checkpoints => self.open_checkpoints(window, cx),
+            WorkspaceMenuAction::FanOut => self.open_fan_out(window, cx),
         }
     }
 }

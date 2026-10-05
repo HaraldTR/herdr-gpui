@@ -432,3 +432,11 @@ fn pi_session_dirs_match_pi() {
         "--Users-penso-.herdr-worktrees-moltis-moltis-ui--"
     );
 }
+
+#[test]
+fn every_kind_is_listed_once_and_parses_back() {
+    for (index, kind) in AgentKind::ALL.iter().enumerate() {
+        assert_eq!(AgentKind::parse(kind.name()), Some(*kind));
+        assert!(!AgentKind::ALL[..index].contains(kind), "{kind:?}");
+    }
+}

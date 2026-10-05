@@ -121,12 +121,17 @@ impl Render for HerdrWindow {
         );
         // Like the highlight, the link underline paints with the frame that
         // owns its cells, and only while that frame shows the content the
-        // daemon resolved it from.
+        // daemon resolved it from. Without one, the row-local reading under
+        // the pointer is underlined instead.
         let link_rows: Vec<_> = surface
             .as_deref()
             .zip(self.hovered_daemon_link())
             .filter(|(surface, link)| link.cell.current(surface))
             .map(|(_, link)| link.frame_rows().collect())
+            .or_else(|| {
+                let link = self.hovered_local_link()?;
+                Some(vec![(link.row, link.columns.clone())])
+            })
             .unwrap_or_default();
         // Search matches, mapped onto the frame on screen, tint below the
         // selection, which reads as chosen over them. A popup covers the
@@ -298,7 +303,8 @@ impl Render for HerdrWindow {
                     {
                         return;
                     }
-                    this.pressed_terminal_link = this.terminal_link_press(event.position);
+                    this.pressed_terminal_link =
+                        this.terminal_link_press(event.position, event.modifiers);
                     if this.menu.page.is_some() {
                         return;
                     }

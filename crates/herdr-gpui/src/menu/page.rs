@@ -53,6 +53,8 @@ pub(crate) enum Page {
     Teleport,
     /// A checkout's agent checkpoints, and restoring one.
     Checkpoints,
+    /// One prompt sent to several agents, and their comparison.
+    FanOut,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +87,8 @@ pub(crate) enum WorkspaceMenuAction {
     /// Forget that this checkout's work was teleported away.
     ClearTeleported,
     Checkpoints,
+    /// Send one prompt to several agents, or reopen their comparison.
+    FanOut,
 }
 
 impl WorkspaceMenuAction {
@@ -106,6 +110,7 @@ impl WorkspaceMenuAction {
             Self::TeleportBack => "icons/teleport-back.svg",
             Self::ClearTeleported => "icons/x.svg",
             Self::Checkpoints => "icons/refresh.svg",
+            Self::FanOut => "icons/split.svg",
             Self::PullRequest => return None,
         })
     }

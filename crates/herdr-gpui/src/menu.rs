@@ -7,6 +7,7 @@ mod checkpoints;
 mod chrome;
 mod colors;
 mod devices;
+mod fan_out;
 mod git;
 mod github;
 mod page;

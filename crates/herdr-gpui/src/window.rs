@@ -10,6 +10,7 @@ mod config_diagnostic;
 mod copy_mode;
 mod double_shift;
 mod file_drop;
+mod file_links;
 mod find;
 mod flash;
 pub(crate) use flash::Flash;
@@ -152,6 +153,9 @@ pub(crate) struct HerdrWindow {
     pub(crate) teleport_marks: crate::teleport::Marks,
     /// The workspace a finished teleport keeps steering to until focused.
     pub(crate) teleport_follow: Option<crate::teleport::Follow>,
+    /// A prompt fanned out to several agents; once launched it outlives its
+    /// dialog so the lanes can be compared later.
+    pub(crate) fan_out: Option<crate::fan_out::FanOut>,
     pub(crate) git: git::Git,
     /// Comment, merge, and review reads for the focused branch's open PR.
     pub(crate) pr_actions: crate::pr_actions::Actions,
@@ -387,6 +391,7 @@ impl HerdrWindow {
         self.poll_file_transfer(cx);
         self.update_workspace_dialog(window, cx);
         self.poll_teleport(window, cx);
+        self.poll_fan_out(window, cx);
         self.poll_device_setup(window, cx);
         self.poll_worktree_source(cx);
         self.poll_hover_menu(std::time::Instant::now(), window, cx);
@@ -707,6 +712,7 @@ impl HerdrWindow {
             teleport: None,
             teleport_marks: crate::teleport::Marks::start(),
             teleport_follow: None,
+            fan_out: None,
             git: git::Git::default(),
             pr_actions: Default::default(),
             usage: Default::default(),

@@ -109,6 +109,10 @@ impl HerdrWindow {
             self.checkpoints_key(event, window, cx);
             return;
         }
+        if self.menu.page == Some(Page::FanOut) {
+            self.fan_out_key(event, window, cx);
+            return;
+        }
         if matches!(
             self.menu.page,
             Some(Page::Host | Page::RenameDevice | Page::ForwardPort | Page::RemoveDevice)
