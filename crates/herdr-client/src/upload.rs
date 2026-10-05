@@ -447,6 +447,17 @@ complete=1
                 if eof {
                     return Ok(());
                 }
+                // The script has exited, so nothing of ours writes any more, and
+                // whatever it wrote is already buffered. EOF itself can be held
+                // back indefinitely: macOS marks a socket pair close-on-exec only
+                // after creating it, so a process another thread spawns in
+                // between inherits the child's end and keeps it open.
+                return match stream.read(&mut byte) {
+                    Ok(0) => Ok(()),
+                    Ok(_) => Err(Error::UploadResponse),
+                    Err(e) if retry(&e) => Ok(()),
+                    Err(e) => Err(Error::UploadIo(e)),
+                };
             }
             thread::sleep(POLL);
         }
