@@ -330,7 +330,13 @@ impl HerdrWindow {
                 if self.menu.close.is_some() {
                     // Keep the original endpoint fence, rather than reopening the menu.
                     self.menu.page = Some(Page::ConfirmClose);
-                    cx.notify();
+                    if self.config.confirm_close_pane {
+                        cx.notify();
+                    } else {
+                        // As from the keyboard: close at once, and a refusal
+                        // stays visible in the dialog.
+                        self.confirm_close(window, cx);
+                    }
                 }
             }
             Action::Processes => self.open_pane_processes(cx),

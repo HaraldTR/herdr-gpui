@@ -187,7 +187,7 @@ impl HerdrWindow {
         }
     }
 
-    fn confirm_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn confirm_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(edit) = self.send_close(window, cx) {
             self.save_preference(move || crate::config::Config::save_preference(edit), cx);
         }
