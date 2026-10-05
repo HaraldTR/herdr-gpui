@@ -392,6 +392,15 @@ impl PullRequest {
             .join(" / ")
     }
 
+    /// The outcome the checks add up to: any failure, else anything still
+    /// running, else passed. `None` when nothing but skipped checks reported.
+    pub fn checks_outcome(&self) -> Option<Outcome> {
+        let outcomes = || self.check_list().map(|(_, outcome)| outcome);
+        [Outcome::Failed, Outcome::Pending, Outcome::Passed]
+            .into_iter()
+            .find(|wanted| outcomes().any(|outcome| outcome == *wanted))
+    }
+
     pub fn merge_status(&self) -> &'static str {
         self.merge_state_status.label()
     }

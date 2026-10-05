@@ -544,95 +544,12 @@ impl HerdrWindow {
         } else if page == Page::GitHub {
             panel = panel.child(self.render_github_auth(cx));
         } else if page == Page::Workspace {
-            if let Some(target) = &self.menu.target {
-                panel = panel.child(
-                    div()
-                        .debug_selector(|| "workspace-menu-header".into())
-                        .px(px(8.))
-                        .py(px(6.))
-                        .mb(px(4.))
-                        .border_b_1()
-                        .border_color(rgb(theme.active))
-                        .child(
-                            div()
-                                .debug_selector(|| "workspace-menu-name".into())
-                                .truncate()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(crate::sidebar::label_text(&target.label)),
-                        )
-                        .when_some(
-                            target
-                                .branch
-                                .as_deref()
-                                .filter(|branch| !branch.trim().is_empty()),
-                            |header, branch| {
-                                header.child(
-                                    div()
-                                        .debug_selector(|| "workspace-menu-branch".into())
-                                        .truncate()
-                                        .text_color(rgb(theme.muted))
-                                        .text_size(px(font.size * 0.9))
-                                        .child(crate::sidebar::label_text(branch)),
-                                )
-                            },
-                        ),
-                );
-            }
-            for (action, label) in self.workspace_items() {
-                panel = panel.child(
-                    div()
-                        .id(label)
-                        .debug_selector(move || format!("workspace-menu-{label}"))
-                        .min_h(px(font.line_height() + 12.))
-                        .px(px(8.))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .cursor_pointer()
-                        .rounded(px(crate::config::corners::CONTROL))
-                        .when(Some(action) == self.menu.workspace_selected, |row| {
-                            row.bg(rgb(theme.active))
-                        })
-                        .on_hover(cx.listener(move |this, hovered, _, cx| {
-                            if *hovered {
-                                this.menu.workspace_selected = Some(action);
-                            } else if this.menu.workspace_selected == Some(action) {
-                                this.menu.workspace_selected = None;
-                            }
-                            cx.notify();
-                        }))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .debug_selector(move || format!("workspace-menu-label-{label}"))
-                                .child(label),
-                        )
-                        .when_some(action.icon(), |row, icon| {
-                            row.child(super::action_icon(
-                                icon,
-                                format!("workspace-menu-icon-{label}"),
-                                rgb(if Some(action) == self.menu.workspace_selected {
-                                    theme.foreground
-                                } else {
-                                    theme.muted
-                                }),
-                                rgb(theme.foreground),
-                            ))
-                        })
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.activate_workspace_menu(action, window, cx);
-                        })),
-                );
-            }
-            if self.pr_profile().is_some() {
-                panel = panel.child(self.render_workspace_pr(
-                    (px(340.).min((viewport.width - px(24.)).max(px(0.))) - px(30.)).max(px(0.)),
-                    cx,
-                ));
-            }
+            // The PR card's text width: the panel's inset and border, and the
+            // card's own margin, border, and padding.
+            panel = panel.child(self.render_workspace_popover(
+                (px(340.).min((viewport.width - px(24.)).max(px(0.))) - px(36.)).max(px(0.)),
+                cx,
+            ));
         } else if let Page::Dialog(action) = page {
             panel = panel.child(self.render_workspace_dialog(action, cx));
         } else if page == Page::Teleport {

@@ -110,7 +110,7 @@ impl WorkspaceMenuAction {
             Self::TeleportBack => "icons/teleport-back.svg",
             Self::ClearTeleported => "icons/x.svg",
             Self::Checkpoints => "icons/refresh.svg",
-            Self::FanOut => "icons/split.svg",
+            Self::FanOut => "icons/fan-out.svg",
             Self::PullRequest => return None,
         })
     }

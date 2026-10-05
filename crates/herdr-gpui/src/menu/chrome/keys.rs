@@ -232,18 +232,21 @@ impl HerdrWindow {
             "up" | "down" if self.menu.page == Some(Page::PrMerge) => {
                 self.cycle_merge_method(event.keystroke.key == "down", cx)
             }
-            "up" | "down" if self.menu.page == Some(Page::Workspace) => {
+            // The tiles read row by row, so left and right walk the same
+            // order as up and down.
+            "up" | "down" | "left" | "right" if self.menu.page == Some(Page::Workspace) => {
                 let actions = self.workspace_menu_actions();
                 let selected = self
                     .menu
                     .workspace_selected
                     .and_then(|selected| actions.iter().position(|action| *action == selected));
+                let back = matches!(event.keystroke.key.as_str(), "up" | "left");
                 if !actions.is_empty() {
-                    let index = match (selected, event.keystroke.key.as_str()) {
-                        (None, "up") => actions.len() - 1,
-                        (None, _) => 0,
-                        (Some(index), "up") => (index + actions.len() - 1) % actions.len(),
-                        (Some(index), _) => (index + 1) % actions.len(),
+                    let index = match (selected, back) {
+                        (None, true) => actions.len() - 1,
+                        (None, false) => 0,
+                        (Some(index), true) => (index + actions.len() - 1) % actions.len(),
+                        (Some(index), false) => (index + 1) % actions.len(),
                     };
                     self.menu.workspace_selected = Some(actions[index]);
                 }
