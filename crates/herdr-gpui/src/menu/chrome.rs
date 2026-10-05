@@ -637,6 +637,8 @@ impl HerdrWindow {
             panel = panel.child(self.render_workspace_dialog(action, cx));
         } else if page == Page::Teleport {
             panel = panel.child(self.render_teleport(cx));
+        } else if page == Page::Checkpoints {
+            panel = panel.child(self.render_checkpoints(cx));
         } else if page == Page::FanOut {
             panel = panel.child(self.render_fan_out(cx));
         } else if page == Page::Git {

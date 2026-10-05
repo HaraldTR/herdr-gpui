@@ -105,6 +105,10 @@ impl HerdrWindow {
             self.teleport_key(event, window, cx);
             return;
         }
+        if self.menu.page == Some(Page::Checkpoints) {
+            self.checkpoints_key(event, window, cx);
+            return;
+        }
         if self.menu.page == Some(Page::FanOut) {
             self.fan_out_key(event, window, cx);
             return;

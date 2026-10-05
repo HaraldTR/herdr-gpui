@@ -40,6 +40,13 @@ show_agents = true
 # on its sidebar row. Connected remote hosts are read over SSH every couple of
 # seconds; false stops all sampling. Also under Settings > General.
 show_system_load = true
+# Checkpoint a worktree each time one of its agents starts or finishes a turn,
+# locally or over SSH, so its files can be rolled back from the workspace
+# menu's Checkpoints. Snapshots include untracked (not ignored) files, live in
+# hidden refs/herdr-gpui/checkpoints/ refs, and the newest 50 per branch are
+# kept. Taking one never changes the index or files. Also under
+# Settings > General.
+agent_checkpoints = true
 # Show the TCP ports each workspace's servers listen on, under its sidebar row
 # and in the status bar; click one to open it in a browser tab. Hosts are
 # scanned every five seconds with ss or lsof, a remote one over SSH; false

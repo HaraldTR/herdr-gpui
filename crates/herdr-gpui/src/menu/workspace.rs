@@ -489,6 +489,9 @@ impl HerdrWindow {
             }
             items.push((WorkspaceMenuAction::Teleport, "Teleport..."));
         }
+        if self.checkpoint_checkout().is_some() {
+            items.push((WorkspaceMenuAction::Checkpoints, "Checkpoints..."));
+        }
         if let Some(label) = self.fan_out_item() {
             items.push((WorkspaceMenuAction::FanOut, label));
         }
@@ -673,6 +676,7 @@ impl HerdrWindow {
             WorkspaceMenuAction::GoToTeleported => self.go_to_teleported(window, cx),
             WorkspaceMenuAction::TeleportBack => self.teleport_back(window, cx),
             WorkspaceMenuAction::ClearTeleported => self.clear_teleport_mark(window, cx),
+            WorkspaceMenuAction::Checkpoints => self.open_checkpoints(window, cx),
             WorkspaceMenuAction::FanOut => self.open_fan_out(window, cx),
         }
     }

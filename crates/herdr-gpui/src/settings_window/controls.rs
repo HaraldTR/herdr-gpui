@@ -691,6 +691,15 @@ impl SettingsWindow {
                 cx,
             ))
             .child(self.preference_switch(
+                "settings-agent-checkpoints",
+                "Checkpoint agent turns",
+                self.config.agent_checkpoints,
+                crate::config::preferences::Preference::AgentCheckpoints(
+                    !self.config.agent_checkpoints,
+                ),
+                cx,
+            ))
+            .child(self.preference_switch(
                 "settings-listening-ports",
                 "Show listening ports",
                 self.config.show_listening_ports,

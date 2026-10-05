@@ -7,6 +7,7 @@ pub(crate) enum Preference {
     ConfirmCloseTab(bool),
     ConfirmClosePane(bool),
     ShowSystemLoad(bool),
+    AgentCheckpoints(bool),
     ShowListeningPorts(bool),
     NotificationEnabled(Option<bool>),
     NotificationDelay(Option<u64>),
@@ -38,6 +39,9 @@ impl Config {
                     (None, "confirm_close_pane", Some(value.into()))
                 }
                 Preference::ShowSystemLoad(value) => (None, "show_system_load", Some(value.into())),
+                Preference::AgentCheckpoints(value) => {
+                    (None, "agent_checkpoints", Some(value.into()))
+                }
                 Preference::ShowListeningPorts(value) => {
                     (None, "show_listening_ports", Some(value.into()))
                 }
@@ -144,6 +148,7 @@ mod tests {
             Preference::ConfirmCloseTab(false),
             Preference::ConfirmClosePane(false),
             Preference::ShowSystemLoad(false),
+            Preference::AgentCheckpoints(false),
             Preference::ShowListeningPorts(false),
             Preference::NotificationEnabled(Some(true)),
             Preference::NotificationDelay(Some(3600)),
@@ -164,6 +169,7 @@ mod tests {
         assert_eq!(table["confirm_close_tab"].as_bool(), Some(false));
         assert_eq!(table["confirm_close_pane"].as_bool(), Some(false));
         assert_eq!(table["show_system_load"].as_bool(), Some(false));
+        assert_eq!(table["agent_checkpoints"].as_bool(), Some(false));
         assert_eq!(table["show_listening_ports"].as_bool(), Some(false));
         assert_eq!(table["layout"]["mode"].as_str(), Some("orca"));
         assert_eq!(table["layout"]["sidebar_gap"].as_float(), Some(7.5));

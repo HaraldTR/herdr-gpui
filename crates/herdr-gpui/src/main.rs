@@ -13,6 +13,7 @@ mod avatars;
 mod bell;
 mod browser;
 mod caffeine;
+mod checkpoint;
 mod cli;
 mod close_modal;
 mod config;
