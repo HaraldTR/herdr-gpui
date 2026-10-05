@@ -331,8 +331,19 @@ pub fn color(value: u32, default: u32, theme: &Theme) -> u32 {
     }
 }
 
+fn is_default(value: u32) -> bool {
+    match value >> 24 {
+        0 => !(1..=16).contains(&(value & 255)),
+        1 | 2 => false,
+        _ => true,
+    }
+}
+
 pub fn cell_colors(cell: &CellData, theme: &Theme) -> (u32, u32) {
-    let mut fg = color(cell.fg, theme.foreground, theme);
+    let mut fg = match theme.bold {
+        Some(bold) if cell.modifier & BOLD != 0 && is_default(cell.fg) => bold,
+        _ => color(cell.fg, theme.foreground, theme),
+    };
     let mut bg = color(cell.bg, theme.background, theme);
     if cell.modifier & REVERSED != 0 {
         std::mem::swap(&mut fg, &mut bg);
