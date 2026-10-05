@@ -2,15 +2,15 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementInputHandler,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, Pixels,
-    Point, ShapedLine, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, canvas, div,
-    fill, point, prelude::*, px, rgb, size,
+    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, EntityInputHandler,
+    EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, Pixels, Point, ShapedLine,
+    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, canvas, div, fill, point,
+    prelude::*, px, rgb, size,
 };
 
-use crate::actions;
 use crate::config::{Config, FontConfig, Theme};
 use crate::fonts::StyledFont;
+use crate::{actions, input::ElementInputHandler};
 
 pub struct Changed;
 
