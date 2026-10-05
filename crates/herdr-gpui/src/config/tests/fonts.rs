@@ -260,7 +260,7 @@ fn defaults_and_partial_settings() -> anyhow::Result<()> {
         Config::parse("")?,
         Config::parse(DEFAULT_CONFIG)?,
     ] {
-        assert_eq!(config.theme()?, Theme::default());
+        assert_eq!(config.theme(false)?, Theme::default());
         assert!(config.github.oauth_client_id.is_none());
         // Every feature ships off, including in the example config.
         assert_eq!(config.features, Features::default());

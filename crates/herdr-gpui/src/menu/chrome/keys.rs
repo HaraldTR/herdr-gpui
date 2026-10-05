@@ -107,7 +107,7 @@ impl HerdrWindow {
         }
         if matches!(
             self.menu.page,
-            Some(Page::Host | Page::RenameDevice | Page::RemoveDevice)
+            Some(Page::Host | Page::RenameDevice | Page::ForwardPort | Page::RemoveDevice)
         ) {
             self.host_menu_key(event, window, cx);
             return;
@@ -120,7 +120,10 @@ impl HerdrWindow {
             self.group_menu_key(event, window, cx);
             return;
         }
-        if matches!(self.menu.page, Some(Page::Pane | Page::RenamePane)) {
+        if matches!(
+            self.menu.page,
+            Some(Page::Pane | Page::RenamePane | Page::PaneProcesses | Page::KillProcesses)
+        ) {
             self.pane_menu_key(event, window, cx);
             return;
         }

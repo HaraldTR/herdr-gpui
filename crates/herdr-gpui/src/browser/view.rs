@@ -7,7 +7,7 @@ use super::{
     Location, Scope, Store, TabId, WebUrl,
     groups::{GroupId, GroupIds, Layout, Pick, SavedLayout},
 };
-use crate::{HerdrWindow, search_input::SearchInput, window::Flash};
+use crate::{HerdrWindow, NavigationTarget, search_input::SearchInput, window::Flash};
 use gpui::{prelude::*, *};
 #[cfg(any(target_os = "macos", windows))]
 use present::Freeze;
@@ -203,6 +203,47 @@ impl HerdrWindow {
             Some(id) => self.show_browser_tab(id, window, cx),
             None => self.show_flash(Flash::warning("Too many browser tabs are open"), cx),
         }
+    }
+
+    /// Opens `url` in a tab of one endpoint's workspace and shows it there,
+    /// as clicking a listening port does. The page's tab is reused when the
+    /// workspace already has one on that address. Builds that cannot embed a
+    /// page hand it to the system browser.
+    pub(crate) fn open_workspace_page(
+        &mut self,
+        endpoint: &str,
+        workspace: &str,
+        url: WebUrl,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !super::EMBEDDED {
+            cx.open_url(url.as_str());
+            return;
+        }
+        let Some(index) = self.endpoints.iter().position(|e| e.id == endpoint) else {
+            return;
+        };
+        let scope = scope(&self.endpoints[index]);
+        let location = Location::Web { url };
+        let before =
+            store(cx).and_then(|store| store.opened_before(&scope, workspace, None, &location));
+        let opened = before.or_else(|| {
+            Store::update(cx, |store| {
+                store.open(scope, workspace, Some(location), None)
+            })
+        });
+        let Some(id) = opened else {
+            self.show_flash(Flash::warning("Too many browser tabs are open"), cx);
+            return;
+        };
+        if !self.navigate_endpoint(endpoint, NavigationTarget::Workspace(workspace), cx) {
+            return;
+        }
+        // Recorded against the workspace, so the tab shows once the
+        // navigation lands even if it is still in flight.
+        self.show_browser_tab(id, window, cx);
+        cx.notify();
     }
 
     /// Applies page reports, drops tabs other windows closed, and forgets the

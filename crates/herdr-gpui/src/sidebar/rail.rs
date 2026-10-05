@@ -366,14 +366,8 @@ impl HerdrWindow {
             .bg(rgb(theme.sidebar_background()))
             .border_r_1()
             .border_color(rgb(theme.active))
-            .child(
-                rail_button("rail-expand", font, look, theme)
-                    .tooltip(hint.with("Expand sidebar"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.command(Command::ToggleSidebar, window, cx);
-                    }))
-                    .child(crate::titlebar::sidebar_glyph(false, theme)),
-            )
+            // No expand control of its own: the title bar's sidebar toggle,
+            // in the header or leading the tab row, is always on screen.
             .child(
                 div()
                     .debug_selector(|| "rail-spaces-section".into())

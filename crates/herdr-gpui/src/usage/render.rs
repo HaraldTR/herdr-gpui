@@ -172,7 +172,17 @@ impl HerdrWindow {
                 );
             }));
         let Some(report) = &reading.report else {
-            return segment;
+            // Waiting on Keychain access: the lock says why there are no
+            // numbers, and the click opens the panel that asks.
+            return segment.when(reading.access.is_some(), |segment| {
+                segment.child(
+                    svg()
+                        .path("icons/lock.svg")
+                        .size(px(11.))
+                        .flex_none()
+                        .text_color(rgb(theme.muted)),
+                )
+            });
         };
         if let Some(tightest) = report.tightest() {
             segment = segment.child(meter(tightest, theme));

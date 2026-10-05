@@ -96,6 +96,7 @@ impl HerdrWindow {
             self.write_preference(save, cx);
             return;
         }
+        let light = crate::app::light_appearance(cx);
         let text_system = cx.text_system().clone();
         self.load_gui_config_with(
             move || {
@@ -105,7 +106,7 @@ impl HerdrWindow {
                 let theme = if config.theme == "Follow Herdr" {
                     Default::default()
                 } else {
-                    config.theme()?
+                    config.theme(light)?
                 };
                 Ok((config, theme))
             },
@@ -262,6 +263,25 @@ impl HerdrWindow {
             )
             .child(
                 toggle(
+                    "preferences-show-listening-ports",
+                    "Show listening ports",
+                    self.config.show_listening_ports,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    let show = !this.config.show_listening_ports;
+                    this.save_preference(
+                        move || {
+                            Config::save_preference(
+                                crate::config::preferences::Preference::ShowListeningPorts(show),
+                            )
+                        },
+                        cx,
+                    );
+                })),
+            )
+            .child(
+                toggle(
                     "preferences-high-contrast",
                     "High contrast",
                     self.config.contrast == Contrast::High,
@@ -279,6 +299,11 @@ impl HerdrWindow {
                 "preferences-confirm-close-tab",
                 "Confirm tab close",
                 self.config.confirm_close_tab.to_string(),
+            ))
+            .child(row(
+                "preferences-confirm-close-pane",
+                "Confirm pane close",
+                self.config.confirm_close_pane.to_string(),
             ))
             .child(row(
                 "preferences-layout",

@@ -277,6 +277,8 @@ impl HerdrWindow {
                 | Page::Group
                 | Page::Pane
                 | Page::RenamePane
+                | Page::PaneProcesses
+                | Page::KillProcesses
                 | Page::Host
                 | Page::RemoveDevice
                 | Page::Git
@@ -364,14 +366,22 @@ impl HerdrWindow {
                         | Page::Group
                         | Page::Pane
                         | Page::RenamePane
+                        | Page::PaneProcesses
+                        | Page::KillProcesses
                         | Page::Host
                         | Page::RemoveDevice
                 ),
                 |panel| {
                     panel
                         .w((viewport.width - px(24.)).max(px(0.)).min(px(
-                            if matches!(page, Page::Tab | Page::Pane | Page::Host) {
+                            if page == Page::Host && self.host_menu_lists_forwards() {
+                                // Room for a forward's port, state, and actions.
+                                260.
+                            } else if matches!(page, Page::Tab | Page::Pane | Page::Host) {
                                 180.
+                            } else if page == Page::PaneProcesses {
+                                // Name, command, pid, CPU and memory columns.
+                                560.
                             } else if page == Page::Group {
                                 240.
                             } else {
@@ -411,6 +421,7 @@ impl HerdrWindow {
                         | Page::AddDevice
                         | Page::Usage(_)
                         | Page::RenameDevice
+                        | Page::ForwardPort
                 ),
                 |panel| {
                     // Dialogs draw their own full-bleed header and footer rules,
@@ -449,7 +460,10 @@ impl HerdrWindow {
                     .max_h((viewport.height - px(24.)).max(px(0.)))
             })
             .when(
-                matches!(page, Page::AppUpdate | Page::AddDevice | Page::RenameDevice),
+                matches!(
+                    page,
+                    Page::AppUpdate | Page::AddDevice | Page::RenameDevice | Page::ForwardPort
+                ),
                 |panel| panel.flex().flex_col().overflow_hidden().shadow_lg(),
             )
             .when(page == Page::About, |panel| {
@@ -614,13 +628,19 @@ impl HerdrWindow {
             panel = panel.child(self.render_git_menu(cx));
         } else if page == Page::GitCommit {
             panel = panel.child(self.render_git_commit(cx));
-        } else if matches!(page, Page::Host | Page::RenameDevice | Page::RemoveDevice) {
+        } else if matches!(
+            page,
+            Page::Host | Page::RenameDevice | Page::ForwardPort | Page::RemoveDevice
+        ) {
             panel = panel.child(self.render_host_menu(cx));
         } else if matches!(page, Page::Tab | Page::RenameTab) {
             panel = panel.child(self.render_tab_menu(cx));
         } else if page == Page::Group {
             panel = panel.child(self.render_group_menu(cx));
-        } else if matches!(page, Page::Pane | Page::RenamePane) {
+        } else if matches!(
+            page,
+            Page::Pane | Page::RenamePane | Page::PaneProcesses | Page::KillProcesses
+        ) {
             panel = panel.child(self.render_pane_menu(cx));
         } else if page == Page::Keybinds {
             panel = panel.child(self.render_keybinds(cx));

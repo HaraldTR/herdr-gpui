@@ -9,7 +9,7 @@ use gpui::{Modifiers, MouseButton, MouseDownEvent, TestAppContext, px, size};
 
 #[gpui::test]
 fn git_button_sits_left_of_the_account_slot_and_opens_its_menu(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+    let (view, cx) = cx.add_window_view(crate::titlebar::tests::header_window);
     let draw = |cx: &mut gpui::VisualTestContext| {
         cx.update(|window, cx| {
             window.refresh();
@@ -92,7 +92,7 @@ fn git_button_sits_left_of_the_account_slot_and_opens_its_menu(cx: &mut TestAppC
 #[gpui::test]
 fn uncommitted_changes_hide_zero_counts(cx: &mut TestAppContext) {
     for (additions, deletions, untracked) in [(0, 0, 1), (12, 0, 0), (0, 3, 0), (433, 28, 1)] {
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let (view, cx) = cx.add_window_view(crate::titlebar::tests::header_window);
         cx.simulate_resize(size(px(360.), px(600.)));
         cx.update(|_, cx| {
             view.update(cx, |view, cx| {
@@ -135,7 +135,7 @@ fn uncommitted_changes_hide_zero_counts(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn a_clean_checkout_shows_no_counts(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+    let (view, cx) = cx.add_window_view(crate::titlebar::tests::header_window);
     cx.simulate_resize(size(px(900.), px(600.)));
     cx.update(|_, cx| {
         view.update(cx, |view, cx| {
@@ -165,7 +165,7 @@ fn a_clean_checkout_shows_no_counts(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn a_cached_pull_request_replaces_the_uncommitted_counts(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+    let (view, cx) = cx.add_window_view(crate::titlebar::tests::header_window);
     let input = Input {
         checkout: None,
         repo_key: REPO_KEY.into(),
@@ -225,7 +225,7 @@ fn a_cached_pull_request_replaces_the_uncommitted_counts(cx: &mut TestAppContext
         let number = cx.debug_bounds("titlebar-git-pr").unwrap();
         let churn = cx.debug_bounds("titlebar-git-pr-lines").unwrap();
         let button = cx.debug_bounds("titlebar-git").unwrap();
-        assert!(number.left() >= px(80.));
+        assert!(number.left() >= cx.debug_bounds("toggle-sidebar").unwrap().right());
         assert!(number.right() <= churn.left());
         assert!(churn.right() <= button.left());
         for selector in [
@@ -254,7 +254,7 @@ fn a_cached_pull_request_replaces_the_uncommitted_counts(cx: &mut TestAppContext
 
 #[gpui::test]
 fn a_clean_checkout_with_a_pull_request_shows_no_dot(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+    let (view, cx) = cx.add_window_view(crate::titlebar::tests::header_window);
     let input = Input {
         checkout: None,
         repo_key: REPO_KEY.into(),

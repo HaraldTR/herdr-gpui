@@ -372,10 +372,19 @@ mod tests {
 
     #[test]
     fn reads_the_cli_key_go_entry_first() {
-        use crate::usage::{cookies::CookieJar, probe::Exec};
+        use crate::usage::{
+            cookies::CookieJar,
+            probe::{Consent, Exec},
+        };
         let mut exec = Exec::Local;
         let mut jar = CookieJar::default();
-        let mut probe = Probe::new(&mut exec, Provider(&Opencodego), None, &mut jar, false);
+        let mut probe = Probe::new(
+            &mut exec,
+            Provider(&Opencodego),
+            None,
+            &mut jar,
+            Consent::Quiet,
+        );
         let auth = |text: &str| Secret::from(secrecy::SecretString::from(text.to_owned()));
         // Numeric keys read back through `text`, which parses JSON scalars.
         let both =

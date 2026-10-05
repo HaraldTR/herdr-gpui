@@ -1,4 +1,9 @@
-use crate::{HerdrWindow, config::Theme, menu::Page, search_input::SearchInput};
+use crate::{
+    HerdrWindow,
+    config::{Theme, ThemeName},
+    menu::Page,
+    search_input::SearchInput,
+};
 use gpui::{prelude::*, *};
 
 pub(super) struct ThemePicker {
@@ -99,15 +104,18 @@ impl HerdrWindow {
             .iter()
             .map(|name| (*name).into())
             .collect();
-        if !picker.names.contains(&self.config.theme) {
-            picker.names.push(self.config.theme.clone());
+        // A theme that follows the system is picked one side at a time: the
+        // side the current appearance shows.
+        let current = ThemeName::side(&self.config.theme, crate::app::light_appearance(cx));
+        if !picker.names.iter().any(|name| name == current) {
+            picker.names.push(current.to_owned());
         }
         picker.names.sort();
         picker.filter("");
         picker.selected = picker
             .filtered
             .iter()
-            .position(|name| name == &self.config.theme)
+            .position(|name| name == current)
             .unwrap_or(0);
         picker.search.update(cx, |input, cx| {
             input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
@@ -157,8 +165,9 @@ impl HerdrWindow {
             Ok(mut names) => {
                 // Theme directories are process-wide, not picker-session state.
                 // Reuse a running scan on reopen, adding the current explicit selection.
-                if !names.contains(&self.config.theme) {
-                    names.push(self.config.theme.clone());
+                let current = ThemeName::side(&self.config.theme, crate::app::light_appearance(cx));
+                if !names.iter().any(|name| name == current) {
+                    names.push(current.to_owned());
                     names.sort_by_cached_key(|name| (name.to_lowercase(), name.clone()));
                 }
                 let selected = picker.filtered.get(picker.selected).cloned();
@@ -285,14 +294,15 @@ impl HerdrWindow {
         picker.saving = saving;
         picker.in_flight = Some(token);
         let window = picker.window;
+        let light = crate::app::light_appearance(cx);
         let mut config = self.config.clone();
-        config.theme = name.clone();
+        config.theme = ThemeName::with_side(&self.config.theme, light, &name);
         let theme = self.theme.clone();
         let task = cx.background_executor().spawn(async move {
             if saving {
-                config.save_theme(&name).map(|()| theme)
+                config.save_theme(&config.theme).map(|()| theme)
             } else {
-                config.theme()
+                config.theme(light)
             }
         });
         cx.spawn(async move |this, cx| {
@@ -335,7 +345,11 @@ impl HerdrWindow {
                 });
                 if saving {
                     if let Some(name) = &picker.desired {
-                        self.config.theme = name.clone();
+                        self.config.theme = ThemeName::with_side(
+                            &self.config.theme,
+                            crate::app::light_appearance(cx),
+                            name,
+                        );
                     }
                     crate::log_window::set_appearance(&self.config, &self.theme, cx);
                     picker.baseline = None;
@@ -476,7 +490,11 @@ impl HerdrWindow {
                                 .map(|index| {
                                     let name = picker.filtered[index].clone();
                                     let selected = index == picker.selected;
-                                    let current = name == this.config.theme;
+                                    let current = name
+                                        == ThemeName::side(
+                                            &this.config.theme,
+                                            crate::app::light_appearance(cx),
+                                        );
                                     div()
                                         .id(index)
                                         .debug_selector(move || format!("theme-row-{index}"))

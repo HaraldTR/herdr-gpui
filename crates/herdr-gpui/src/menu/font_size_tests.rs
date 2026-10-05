@@ -223,7 +223,7 @@ fn a_reload_moves_the_baseline_and_discards_a_session_size(cx: &mut gpui::TestAp
     let load = move || {
         let mut config = Config::default();
         config.terminal.size = configured;
-        let theme = config.theme()?;
+        let theme = config.theme(false)?;
         Ok((config, theme))
     };
 

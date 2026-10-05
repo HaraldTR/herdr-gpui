@@ -126,7 +126,7 @@ impl SettingsWindow {
                             .ok_or(crate::Error::MissingHome)
                             .and_then(|shared| shared.preview_theme(&choice.name, light))
                             .map(|theme| theme.with_contrast(config.contrast)),
-                        Scope::App => config.theme(),
+                        Scope::App => config.theme(light),
                     };
                     (choice, result.ok())
                 })

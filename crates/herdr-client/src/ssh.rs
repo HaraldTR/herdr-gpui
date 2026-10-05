@@ -274,7 +274,7 @@ fn run_remote(
 /// Runs `command` with a deadline, keeping at most `PROBE_OUTPUT_LIMIT` bytes
 /// of stdout and discarding stderr.
 #[cfg(unix)]
-fn run(
+pub(crate) fn run(
     command: &mut Command,
     timeout: Duration,
     cancelled: impl Fn() -> bool,
@@ -357,6 +357,15 @@ pub fn remote_config_value(
 /// it must not leave a persistent background process behind.
 #[cfg(unix)]
 pub(super) fn command(target: &str, remote_command: &str) -> Command {
+    let mut command = noninteractive();
+    command.args(["-o", "ClearAllForwardings=yes", "--", target]);
+    command.arg(remote_command);
+    command
+}
+
+/// `ssh` with the bridge's connection policy and nothing to connect yet.
+#[cfg(unix)]
+fn noninteractive() -> Command {
     let mut command = Command::new("ssh");
     command.args([
         "-T",
@@ -378,14 +387,56 @@ pub(super) fn command(target: &str, remote_command: &str) -> Command {
         "-o",
         "ForwardX11=no",
         "-o",
-        "ClearAllForwardings=yes",
-        "-o",
         "ControlMaster=no",
+    ]);
+    command
+}
+
+/// The line a [`forward_command`] child prints on stdout once its forward is
+/// bound.
+pub const FORWARD_READY: &str = "herdr-forward-ready";
+
+/// A noninteractive `ssh` child that runs no remote command and forwards
+/// `127.0.0.1:<local>` on this machine to `localhost:<remote>` on `target`,
+/// so a server listening only on the remote host's loopback can be opened
+/// here. Forwarding is this child's whole purpose, so unlike the bridge it
+/// keeps forwardings.
+///
+/// Readiness comes from SSH itself, never from connecting to the port, which
+/// another local process could have bound first: `ExitOnForwardFailure` ends
+/// the child when the bind fails, and OpenSSH runs `LocalCommand` only after
+/// its forwards are set up, so [`FORWARD_READY`] on stdout means this child
+/// holds the port. `ControlPath=none` keeps the forward in this child rather
+/// than in a shared master, so killing the child closes it; a host that needs
+/// an interactively authenticated master cannot be tunnelled. The caller owns
+/// the child: its streams, readiness, and reaping.
+#[cfg(unix)]
+pub fn forward_command(target: &str, local: u16, remote: u16) -> Result<Command> {
+    validate_target(target)?;
+    let mut command = noninteractive();
+    command.args([
+        "-N",
+        "-o",
+        "ControlPath=none",
+        "-o",
+        "PermitLocalCommand=yes",
+        "-o",
+        &format!("LocalCommand=echo {FORWARD_READY}"),
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-L",
+        &format!("127.0.0.1:{local}:localhost:{remote}"),
         "--",
         target,
     ]);
-    command.arg(remote_command);
-    command
+    Ok(command)
+}
+
+/// Windows rejects SSH endpoints, so it has no host to forward from.
+#[cfg(windows)]
+pub fn forward_command(target: &str, _local: u16, _remote: u16) -> Result<std::process::Command> {
+    validate_target(target)?;
+    Err(Error::SshUnsupported)
 }
 
 /// A one-shot, noninteractive `ssh` child that runs `script` under the remote

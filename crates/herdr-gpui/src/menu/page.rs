@@ -15,6 +15,8 @@ pub(crate) enum Page {
     /// A saved SSH device's context menu, from its sidebar host header.
     Host,
     RenameDevice,
+    /// Names a saved SSH device's port to forward to this computer.
+    ForwardPort,
     RemoveDevice,
     Keybinds,
     Themes,
@@ -32,6 +34,10 @@ pub(crate) enum Page {
     Group,
     Pane,
     RenamePane,
+    /// The processes under the pane menu's pane.
+    PaneProcesses,
+    /// Confirming the processes chosen there should end.
+    KillProcesses,
     Workspace,
     GitHub,
     /// Titlebar Git actions for the focused checkout, and its commit dialog.

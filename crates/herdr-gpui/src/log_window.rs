@@ -86,6 +86,7 @@ fn open_deferred(cx: &mut App) {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(620.), px(360.))),
             titlebar: Some(crate::titlebar::options("Logs")),
+            app_owns_titlebar_drag: cfg!(target_os = "macos"),
             ..Default::default()
         },
         |window, cx| cx.new(|cx| LogWindow::new(window, cx)),
@@ -477,8 +478,11 @@ impl Render for LogWindow {
                 offset_in_item: px(0.),
             });
         }
+        let header = crate::titlebar::header(&self.appearance.theme, window, |window, _| {
+            window.remove_window();
+        });
         let Appearance { config, theme } = &self.appearance;
-        div()
+        let root = div()
             .key_context("LogWindow")
             .track_focus(&self.focus)
             .on_action(cx.listener(|_, _: &Close, window, _| window.remove_window()))
@@ -500,11 +504,7 @@ impl Render for LogWindow {
             .text_font(&config.ui)
             .text_size(px(config.ui.size))
             .line_height(px(config.ui.line_height()))
-            .map(|root| {
-                #[cfg(target_os = "macos")]
-                let root = root.child(crate::titlebar::render(theme.surface, None));
-                root
-            })
+            .children(header)
             .child(
                 div()
                     .flex_none()
@@ -703,7 +703,9 @@ impl Render for LogWindow {
                         if self.following { "LIVE" } else { "PAUSED" },
                         self.status
                     )),
-            )
+            );
+        let border = theme.active;
+        crate::titlebar::frame(window, border, root)
     }
 }
 

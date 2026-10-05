@@ -691,11 +691,29 @@ impl SettingsWindow {
                 cx,
             ))
             .child(self.preference_switch(
+                "settings-listening-ports",
+                "Show listening ports",
+                self.config.show_listening_ports,
+                crate::config::preferences::Preference::ShowListeningPorts(
+                    !self.config.show_listening_ports,
+                ),
+                cx,
+            ))
+            .child(self.preference_switch(
                 "settings-confirm-close",
                 "Confirm tab close",
                 self.config.confirm_close_tab,
-                crate::config::preferences::Preference::ConfirmClose(
+                crate::config::preferences::Preference::ConfirmCloseTab(
                     !self.config.confirm_close_tab,
+                ),
+                cx,
+            ))
+            .child(self.preference_switch(
+                "settings-confirm-close-pane",
+                "Confirm pane close",
+                self.config.confirm_close_pane,
+                crate::config::preferences::Preference::ConfirmClosePane(
+                    !self.config.confirm_close_pane,
                 ),
                 cx,
             ));

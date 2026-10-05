@@ -344,6 +344,10 @@ pub enum Error {
     UsageNotSignedIn,
     #[error("This account has no plan with usage limits to show.")]
     UsageNoPlan,
+    #[error("Reading this sign-in needs Keychain access, which macOS asks for.")]
+    UsageKeychainAccess,
+    #[error("Keychain access was denied, so this sign-in cannot be read.")]
+    UsageKeychainDenied,
     #[error("Usage request mixes this machine's settings with the remote host's sign-in.")]
     UsageMixedSecrets,
     #[error("Usage command failed: {0}.")]
@@ -374,6 +378,42 @@ pub enum Error {
     SystemLoadUnsupported(String),
     #[error("CPU and memory output was not understood.")]
     SystemLoadOutput,
+    #[error("Enter a port number from 1 to 65535.")]
+    ForwardPort,
+    #[error("Port {0} is already forwarded from this host.")]
+    ForwardDuplicate(u16),
+    #[error("At most {0} ports can be forwarded at once.")]
+    ForwardLimit(usize),
+    #[error("Could not read listening ports on this host.")]
+    ListeningPorts(#[source] Box<Error>),
+    #[error("Neither ss nor lsof is installed on this host, so listening ports cannot be read.")]
+    ListeningPortsTool,
+    #[error("Listening ports cannot be read on this platform.")]
+    ListeningPortsUnsupported,
+    #[error("No free local port for an SSH tunnel.")]
+    TunnelPort(#[source] io::Error),
+    #[error("Could not start ssh for a tunnel.")]
+    TunnelStart(#[source] io::Error),
+    #[error("SSH ended before the tunnel opened ({0}).")]
+    TunnelExited(std::process::ExitStatus),
+    #[error("The SSH tunnel did not open in time.")]
+    TunnelTimeout,
+    #[error("Could not ask Herdr which process the pane runs.")]
+    ProcessesQuery(#[source] herdr_client::Error),
+    #[error("Herdr's answer about the pane's process was not understood.")]
+    ProcessesAnswer(#[source] serde_json::Error),
+    #[error("Herdr did not name a process for this pane.")]
+    ProcessesNoRoot,
+    #[error("The pane's process has exited.")]
+    ProcessesRootExited,
+    #[error("The herdr executable's path is not valid UTF-8.")]
+    ProcessesExecutable,
+    #[error("Still ending the last processes. Try again in a moment.")]
+    ProcessesBusy,
+    #[error("The process list stopped updating. Reopen it to try again.")]
+    ProcessesStopped,
+    #[error("Could not start watching the pane's processes.")]
+    ProcessesWorker(#[source] io::Error),
     #[error("{0}")]
     Update(#[from] UpdateError),
     #[error("{0}")]
@@ -499,6 +539,8 @@ pub enum Error {
     InvalidSidebarGap,
     #[error("theme must be a name, absolute path, or ~/ path")]
     InvalidThemePath,
+    #[error("a theme that follows the system must name both sides: light:NAME,dark:NAME")]
+    InvalidThemePair,
     #[error("keybindings.{0} is not a command; see the keybindings list in config-gpui.toml")]
     UnknownKeybinding(String),
     #[error("keybindings.{command}: invalid keystroke {keystroke:?}")]

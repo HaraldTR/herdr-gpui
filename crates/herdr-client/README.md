@@ -403,6 +403,19 @@ unanswered probe. Any complete inbound message satisfies a probe, independently
 of the initial-snapshot deadline. As with local connections, continuously drain
 events: event backpressure pauses transport processing, including health checks.
 
+`PortForward::start(target, remote_port)` forwards a saved host's loopback port
+to `127.0.0.1` and returns at once. A worker thread starts one `ssh -N` master
+on a control socket in a fresh owner-only directory, waits for it to
+authenticate, and asks it to listen with `ssh -O forward -L`: the preferred port
+(`preferred_local_port`), then once more on a port the system picks. That
+request succeeds only when this master itself binds the port, so a listener
+another process took first is never reported. It reports
+`ForwardEvent::Listening`, then `ForwardEvent::Ended` when the master exits,
+every port is refused, or the master does not connect within 30 seconds.
+`stop`, or dropping the handle, kills the master without waiting; the worker
+reaps it and removes its directory. Nothing reconnects. Callers name the remote
+port, so discovery stays elsewhere. Windows returns `Error::SshUnsupported`.
+
 Limitations: POSIX remote hosts only, reachable from a Unix client only. The
 bridge hands the `ssh` child a socket pair as its standard streams, which needs
 `OwnedFd`; a Windows client therefore validates the target and session and then
