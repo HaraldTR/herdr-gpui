@@ -48,15 +48,16 @@ impl SettingsWindow {
 
     pub(in crate::settings_window) fn control_switch(
         &self,
-        id: &'static str,
-        label: &'static str,
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
         checked: bool,
         enabled: bool,
     ) -> Stateful<Div> {
         let (track, thumb) = switch_colors(&self.theme, checked);
+        let id = id.into();
         div()
-            .id(id)
-            .debug_selector(move || id.into())
+            .id(ElementId::Name(id.clone()))
+            .debug_selector(move || id.to_string())
             .flex()
             .items_center()
             .justify_between()
@@ -64,7 +65,7 @@ impl SettingsWindow {
             .py(px(8.))
             .when(enabled, |row| row.cursor_pointer())
             .when(!enabled, |row| row.opacity(0.5))
-            .child(label)
+            .child(label.into())
             .child(
                 div()
                     .w(px(36.))

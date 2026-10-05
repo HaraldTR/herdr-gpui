@@ -5,6 +5,7 @@ pub(crate) use layouts::{apply_loaded_layout, layout_load_revision};
 #[cfg(all(feature = "integration-test", target_os = "macos"))]
 mod native;
 mod persistence;
+mod remote_history;
 #[cfg(test)]
 use persistence::SizeIo;
 use persistence::{Loaded, SaveCompletion};
@@ -202,6 +203,7 @@ struct SettingsWindow {
     layout_saving: bool,
     #[cfg(test)]
     layout_io: Option<layouts::LayoutIo>,
+    remote_history: remote_history::RemoteHistory,
     theme_loading: bool,
     theme_waiting: bool,
     theme_light: bool,
@@ -279,6 +281,7 @@ impl SettingsWindow {
             layout_saving: false,
             #[cfg(test)]
             layout_io: None,
+            remote_history: Default::default(),
             theme_loading: false,
             theme_waiting: false,
             theme_light: false,
@@ -317,6 +320,9 @@ impl SettingsWindow {
         if self.section == Section::Integrations {
             cx.notify();
         }
+        if self.section == Section::General {
+            self.sync_remote_history(false, cx);
+        }
     }
 
     fn retarget_source(&mut self, source: WeakEntity<HerdrWindow>, cx: &mut Context<Self>) {
@@ -340,6 +346,9 @@ impl SettingsWindow {
             .map(|endpoint| endpoint.connection.target.clone());
         if self.section == Section::Integrations {
             owner.update(cx, |source, cx| source.load_integrations(cx));
+        }
+        if self.section == Section::General {
+            self.sync_remote_history(false, cx);
         }
         cx.notify();
     }
@@ -496,6 +505,9 @@ impl SettingsWindow {
             let _ = self
                 .source
                 .update(cx, |source, cx| source.load_integrations(cx));
+        }
+        if section == Section::General {
+            self.sync_remote_history(false, cx);
         }
         cx.notify();
     }
