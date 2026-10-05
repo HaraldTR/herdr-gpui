@@ -54,25 +54,68 @@ impl FileLink {
     }
 }
 
-/// Whether `path` names a share on another machine, which Windows would
-/// reach out to, credentials and all, merely to look at.
+/// Symlinks followed while resolving one path, Linux's `MAXSYMLINKS`.
+const MAX_SYMLINKS: usize = 40;
+
+/// Whether `path` names a share on another machine, which the system would
+/// reach out to, credentials and all, merely to look at: a Windows network
+/// path, or the automounter's `/net` host map.
 fn remote(path: &Path) -> bool {
-    matches!(
-        path.components().next(),
-        Some(Component::Prefix(prefix)) if matches!(
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => matches!(
             prefix.kind(),
             Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(..)
-        )
-    )
+        ),
+        _ => cfg!(unix) && path.starts_with("/net"),
+    }
+}
+
+/// `path` with every symlink resolved, one step at a time, so a link that
+/// leads to another machine is refused before anything follows it, unlike
+/// `canonicalize`. `None` when a step is missing, remote, or loops.
+fn real_path(path: &Path) -> Option<PathBuf> {
+    let mut resolved = PathBuf::new();
+    let mut pending: Vec<_> = path
+        .components()
+        .map(|c| c.as_os_str().to_owned())
+        .collect();
+    pending.reverse();
+    let mut followed = 0;
+    while let Some(part) = pending.pop() {
+        match Path::new(&part).components().next()? {
+            Component::CurDir => continue,
+            Component::ParentDir => {
+                resolved.pop();
+                continue;
+            }
+            // A root or prefix, from the path or an absolute link target,
+            // starts over from there.
+            Component::RootDir | Component::Prefix(_) => resolved.push(&part),
+            Component::Normal(name) => resolved.push(name),
+        }
+        if remote(&resolved) {
+            return None;
+        }
+        if !std::fs::symlink_metadata(&resolved).ok()?.is_symlink() {
+            continue;
+        }
+        followed += 1;
+        if followed > MAX_SYMLINKS {
+            return None;
+        }
+        let target = std::fs::read_link(&resolved).ok()?;
+        resolved.pop();
+        pending.extend(target.components().rev().map(|c| c.as_os_str().to_owned()));
+    }
+    Some(resolved)
 }
 
 /// What a click on `path` opens, once symlinks are resolved: a plain folder
-/// or a document itself, and otherwise the folder holding it. `None` when
-/// the path does not exist or leads to another machine.
+/// or a document itself, and otherwise the nearest folder holding it that
+/// is not itself a bundle the system would launch. `None` when the path
+/// does not exist or leads to another machine.
 fn opened(path: &Path) -> Option<PathBuf> {
-    let real = std::fs::canonicalize(path)
-        .ok()
-        .filter(|real| !remote(real))?;
+    let real = real_path(path)?;
     let metadata = std::fs::metadata(&real).ok()?;
     let extension = real
         .extension()
@@ -87,10 +130,13 @@ fn opened(path: &Path) -> Option<PathBuf> {
             && extension.is_none_or(|extension| DOCUMENTS.contains(&extension.as_str()))
     };
     if opens {
-        Some(real)
-    } else {
-        real.parent().map(Path::to_owned)
+        return Some(real);
     }
+    // The folder holding `Tool.app/run.sh` is a bundle too.
+    real.ancestors()
+        .skip(1)
+        .find(|folder| folder.extension().is_none())
+        .map(Path::to_owned)
 }
 
 /// Whether a regular file carries an execute bit, which the system may honor
@@ -147,7 +193,7 @@ impl HerdrWindow {
     pub(crate) fn open_file_link(&mut self, link: FileLink, cx: &mut Context<Self>) {
         let found = cx.background_executor().spawn(async move {
             let home = crate::config::home().ok();
-            let path = link.resolve(home.as_deref()).filter(|path| !remote(path))?;
+            let path = link.resolve(home.as_deref())?;
             url::Url::from_file_path(opened(&path)?).ok()
         });
         cx.spawn(async move |this, cx| {

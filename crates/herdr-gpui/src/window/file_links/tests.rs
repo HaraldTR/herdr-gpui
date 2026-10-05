@@ -78,7 +78,24 @@ fn only_documents_and_plain_folders_open_themselves() {
         let disguise = root.path().join("notes.md");
         std::os::unix::fs::symlink(&bundle, &disguise).unwrap();
         assert_eq!(opened(&disguise), Some(real.clone()));
+        // Nor does a folder named like one hide a bundle above it.
+        let inside = bundle.join("run.sh");
+        std::fs::write(&inside, "x").unwrap();
+        assert_eq!(opened(&inside), Some(real.clone()));
+        // A link into the automounter's host map is refused before it is
+        // followed, and so is a loop.
+        std::os::unix::fs::symlink("/net/elsewhere/share", root.path().join("share")).unwrap();
+        assert_eq!(opened(&root.path().join("share/notes.txt")), None);
+        std::os::unix::fs::symlink("loop", root.path().join("loop")).unwrap();
+        assert_eq!(opened(&root.path().join("loop")), None);
+        // Relative links and `..` resolve as the system would.
+        std::os::unix::fs::symlink("docs/../notes.txt", root.path().join("alias.txt")).unwrap();
+        assert_eq!(
+            opened(&root.path().join("alias.txt")),
+            Some(real.join("notes.txt"))
+        );
     }
+    assert!(remote(Path::new("/net/host/share")) == cfg!(unix));
     #[cfg(windows)]
     for share in [r"\\server\share\a.txt", r"\\?\UNC\server\share\a.txt"] {
         assert!(remote(Path::new(share)), "{share}");
