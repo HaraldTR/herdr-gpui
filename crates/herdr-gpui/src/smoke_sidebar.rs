@@ -17,6 +17,7 @@ fn symbol_cascade(window: &mut Window, cx: &mut App) -> Result<&'static str> {
         family: "Menlo".into(),
         size: crate::terminal::FONT_SIZE,
         fallbacks: Some(detected.clone()),
+        line_height_multiple: None,
     }
     .font();
     // Fallback faces never enter `get_font_for_id`, and a cascade gives the

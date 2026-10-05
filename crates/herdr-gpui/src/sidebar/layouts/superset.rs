@@ -345,6 +345,7 @@ mod tests {
             family: "Menlo".into(),
             size: 12.,
             fallbacks: None,
+            line_height_multiple: None,
         };
         let theme = Theme::default();
         let indicators = Indicators::new(None, false, &theme);
