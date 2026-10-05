@@ -634,6 +634,10 @@ pub struct Chrome {
     /// The sort the user picked with the panel toggle, like upstream's
     /// `agent_panel_sort` preference. `None` follows the daemon's config.
     pub agent_sort: Option<AgentSort>,
+    /// The notes panel's width, once dragged; `None` is its default.
+    pub notes_width: Option<f32>,
+    /// The review's file list's width, once dragged.
+    pub review_files_width: Option<f32>,
 }
 
 pub struct Preferences {
@@ -788,10 +792,23 @@ fn read_chrome(path: &Path) -> crate::Result<Chrome> {
         .and_then(serde_json::Value::as_f64)
         .map(|split| split as f32)
         .filter(|split| split.is_finite() && (0.1..=0.9).contains(split));
+    // A damaged panel width is forgotten rather than failing the whole file.
+    let notes_width = object
+        .get("notes_width_px")
+        .and_then(serde_json::Value::as_f64)
+        .map(|width| width as f32)
+        .filter(|width| width.is_finite() && *width > 0.0);
+    let review_files_width = object
+        .get("review_files_width_px")
+        .and_then(serde_json::Value::as_f64)
+        .map(|width| width as f32)
+        .filter(|width| width.is_finite() && *width > 0.0);
     Ok(Chrome {
         sidebar_width,
         sidebar_split,
         agent_sort,
+        notes_width,
+        review_files_width,
     })
 }
 
@@ -827,6 +844,10 @@ fn write_chrome(path: &Path, chrome: Chrome) -> crate::Result<()> {
                     split.is_finite() && (0.1..=0.9).contains(split)
                 }),
                 "agent_sort_manual": chrome.agent_sort.map(|sort| sort.to_string()),
+                "notes_width_px": chrome.notes_width.filter(|width| width.is_finite() && *width > 0.0),
+                "review_files_width_px": chrome
+                    .review_files_width
+                    .filter(|width| width.is_finite() && *width > 0.0),
             }),
         )?;
         file.write_all(b"\n")?;

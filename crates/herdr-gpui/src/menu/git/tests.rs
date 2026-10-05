@@ -265,7 +265,34 @@ fn the_menu_commits_through_a_dialog_and_refuses_an_empty_message(cx: &mut TestA
                 .into_iter()
                 .map(|(_, label)| label)
                 .collect();
-            assert_eq!(rows, ["Commit...", "Push", "Create pull request"]);
+            assert_eq!(
+                rows,
+                [
+                    "Review changes...",
+                    "Commit...",
+                    "Push",
+                    "Create pull request"
+                ]
+            );
+            // Review opens a tab on the tracked checkout and closes the popup.
+            view.activate_git_row(Row::ReviewChanges, window, cx);
+            assert_eq!(view.menu.page, None);
+            assert_eq!(view.reviews.len(), 1);
+            // A second review of the same checkout brings the tab back.
+            view.open_git_menu(point(px(900.), px(20.)), window, cx);
+            view.activate_git_row(Row::ReviewChanges, window, cx);
+            assert_eq!(view.reviews.len(), 1);
+            let reviews = cx.try_global::<crate::browser::Store>().map_or(0, |store| {
+                (0..64)
+                    .filter_map(|id| store.get(crate::browser::TabId::test(id)))
+                    .filter(|tab| {
+                        matches!(tab.location, Some(crate::browser::Location::Review { .. }))
+                    })
+                    .count()
+            });
+            assert_eq!(reviews, 1);
+            view.open_git_menu(point(px(900.), px(20.)), window, cx);
+            assert_eq!(view.menu.page, Some(Page::Git));
             view.activate_git_row(Row::Commit, window, cx);
             assert_eq!(view.menu.page, Some(Page::GitCommit));
             assert!(view.menu.input.is_some(), "the dialog opens with a field");

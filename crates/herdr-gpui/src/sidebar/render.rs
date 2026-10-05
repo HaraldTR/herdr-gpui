@@ -796,7 +796,7 @@ impl HerdrWindow {
                             .cursor(CursorStyle::ResizeUpDown)
                             .border_t_1()
                             .border_color(rgb(theme.active))
-                            .hover(|s| s.bg(rgba(0x78a9ff44)))
+                            .hover(|s| s.bg(rgba(crate::panel_resize::RESIZE_HOVER)))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -844,7 +844,7 @@ impl HerdrWindow {
                     .h_full()
                     .w(px(6.))
                     .cursor(CursorStyle::ResizeLeftRight)
-                    .hover(|s| s.bg(rgba(0x78a9ff44)))
+                    .hover(|s| s.bg(rgba(crate::panel_resize::RESIZE_HOVER)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {

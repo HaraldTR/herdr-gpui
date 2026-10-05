@@ -157,6 +157,16 @@ pub(crate) struct HerdrWindow {
     /// dialog so the lanes can be compared later.
     pub(crate) fan_out: Option<crate::fan_out::FanOut>,
     pub(crate) git: git::Git,
+    /// Notes waiting for their agents to be ready for them.
+    pub(crate) deliveries: crate::agent_notes::Deliveries,
+    /// The notes panel beside a review or an annotated page; both share it.
+    pub(crate) notes_width: crate::panel_resize::PanelWidth,
+    /// The review's list of changed files.
+    pub(crate) review_files_width: crate::panel_resize::PanelWidth,
+    /// Each review tab's state, by its tab.
+    pub(crate) reviews: std::collections::HashMap<crate::browser::TabId, crate::review::Review>,
+    /// The window's width at its last render, which caps side panels.
+    pub(crate) viewport_width: f32,
     /// Comment, merge, and review reads for the focused branch's open PR.
     pub(crate) pr_actions: crate::pr_actions::Actions,
     pub(crate) usage: crate::usage::Usage,
@@ -301,6 +311,12 @@ impl HerdrWindow {
         }
         if !self.sidebar_split_modified {
             self.sidebar_split = chrome.sidebar_split;
+        }
+        if self.notes_width.chosen().is_none() {
+            self.notes_width.restore(chrome.notes_width);
+        }
+        if self.review_files_width.chosen().is_none() {
+            self.review_files_width.restore(chrome.review_files_width);
         }
         if !self.agent_sort_modified
             && let Some(sort) = chrome.agent_sort
@@ -667,6 +683,11 @@ impl HerdrWindow {
             teleport_follow: None,
             fan_out: None,
             git: git::Git::default(),
+            deliveries: Default::default(),
+            notes_width: crate::panel_resize::NOTES,
+            review_files_width: crate::panel_resize::REVIEW_FILES,
+            reviews: Default::default(),
+            viewport_width: 0.,
             pr_actions: Default::default(),
             usage: Default::default(),
             system_load: Default::default(),

@@ -154,6 +154,10 @@ impl AssetSource for Icons {
             "icons/split.svg" => include_bytes!("../../../assets/icons/split.svg"),
             "icons/more.svg" => include_bytes!("../../../assets/icons/more.svg"),
             "icons/zoom.svg" => include_bytes!("../../../assets/icons/zoom.svg"),
+            "icons/diff-unified.svg" => include_bytes!("../../../assets/icons/diff-unified.svg"),
+            "icons/diff-split.svg" => include_bytes!("../../../assets/icons/diff-split.svg"),
+            "icons/panel-left.svg" => include_bytes!("../../../assets/icons/panel-left.svg"),
+            "icons/panel-right.svg" => include_bytes!("../../../assets/icons/panel-right.svg"),
             "icons/window-minimize.svg" => {
                 include_bytes!("../../../assets/icons/window-minimize.svg")
             }
@@ -204,6 +208,10 @@ impl AssetSource for Icons {
             "icons/split.svg",
             "icons/more.svg",
             "icons/zoom.svg",
+            "icons/diff-unified.svg",
+            "icons/diff-split.svg",
+            "icons/panel-left.svg",
+            "icons/panel-right.svg",
             "icons/window-minimize.svg",
             "icons/window-maximize.svg",
             "icons/window-restore.svg",
@@ -244,7 +252,7 @@ mod tests {
         assert!(Icons.load("unknown.svg").unwrap().is_none());
         assert_eq!(
             Icons.list("icons/").unwrap().len(),
-            34 + AgentIcon::ALL.len() + crate::usage::icon_paths().count()
+            38 + AgentIcon::ALL.len() + crate::usage::icon_paths().count()
         );
     }
 

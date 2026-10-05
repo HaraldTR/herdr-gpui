@@ -3,6 +3,7 @@
 
 mod about;
 mod actions;
+mod agent_notes;
 mod agent_skill;
 mod app;
 #[cfg(any(target_os = "macos", test))]
@@ -57,6 +58,7 @@ mod notifications;
 mod osc52;
 mod palette;
 mod pane_menu;
+mod panel_resize;
 mod port_forward;
 mod pr_actions;
 mod preferences;
@@ -67,6 +69,7 @@ mod pull_request;
 mod release_notes;
 mod reorder;
 mod repo_items;
+mod review;
 mod scrollback;
 mod search_input;
 mod sessions;

@@ -1379,6 +1379,81 @@ them to the agent that opened it, so it can change the page.
 - Tabs you open yourself have no agent to send to; **Copy** is offered
   instead.
 
+### Reviewing An Agent's Changes
+
+**Review changes...** in the title bar's Git popup opens a review tab on the
+focused local checkout's changes, with untracked text files as wholly added,
+and lets you send review notes to the agent that made them, like inline
+comments on a pull request.
+
+- The review is a tab like a browser tab: it sits in the group in use, can be
+  moved to a group of its own beside the terminal, take the whole window, or
+  close, and it is restored with the other tabs. Opening the review again
+  brings back the checkout's tab and reads its changes afresh. Its notes go
+  to the pane of the agent that was focused when it opened.
+- The icons at either end of its header show or hide the list of changed
+  files and the notes. A review narrower than 1,000 px starts with both
+  hidden so the diff has the room; once toggled, the choice holds. Writing a
+  note always shows the notes, and the notes icon counts the queued ones.
+  Shown in a narrow group, each panel keeps to 30% of the review.
+
+- **Uncommitted** shows what is not committed yet (`git diff HEAD`).
+  **Branch** shows everything the branch's pull request will hold: the
+  working tree against where the branch left its base, so its commits and
+  uncommitted work together. The base is the pull request's base branch when
+  GitHub reported one, else `origin/HEAD`, then `main` or `master`, whichever
+  exists locally; nothing is fetched. The choice is remembered.
+- The two icons in the header draw the diff **unified**, removed lines above
+  the ones that replaced them, or **side by side**, the old version on the
+  left and the new on the right, each run of removed lines paired with the
+  added lines that follow it. Either side's line can take a note, notes and
+  their numbers carry over when switching, and the choice is remembered.
+  Side by side, drag the line between the halves to give either more room
+  (each keeps at least a fifth); a double-click on it evens them again.
+- A list of the changed files sits left of the diff, as on a pull request:
+  grouped under their folders, each with how it changed (A, M, D, R),
+  its added and removed lines, and how many notes are queued on it.
+  Clicking one brings it to the top of the diff, in either layout, and the
+  file at the top of the diff is marked. The list resizes by its right edge
+  and its width is remembered.
+- Code is coloured by its language, chosen by file extension from the
+  grammars bundled with [syntect](https://github.com/trishume/syntect).
+  Removed lines are read in the old file's order and added lines in the new
+  file's, each hunk afresh. Colouring runs in the background after the plain
+  diff shows, and the colours come from the theme's palette, so they follow
+  theme changes.
+- A scrollbar along the diff's right edge shows how much of it is in view
+  and where; drag its thumb to move through a long change.
+- Large changes stay reviewable. Line counts come first
+  (`git diff --numstat`), so a file with more than 5,000 changed lines, one
+  larger than 1 MiB on disk, or any file past 15,000 changed lines in total
+  is left out of the diff and listed as "Large change not shown" with its
+  counts; its file header still takes a note. Marking notes is a lookup per
+  note, not a pass over the diff.
+- The notes panel resizes by dragging its left edge, with the sidebar's
+  cursor and hover tint, and a double-click on the edge restores its
+  default. Settings' section list resizes the same way by its right edge.
+  The review and an annotated page share the width, which is remembered
+  with the sidebar's.
+
+- Click a line, added, removed or unchanged, or a file name, write what should
+  change, and press Enter or **Add note**. Escape drops the note being
+  written. Noted lines carry the note's number, and unsent notes stay while
+  the tab is open.
+- Notes go to the agent in the focused pane, or else to the first agent Herdr
+  reports in the focused workspace; the header names it. **Send to agent**
+  turns them into one prompt: the checkout, then for each note the
+  `path:line`, the quoted line, and your note. Line numbers are the working
+  tree's in both views; a removed line names the revision it is numbered in
+  (`HEAD`, or the base and commit), so notes from either view stay exact and
+  stay queued when you switch. It reaches the agent the same one way as page notes above,
+  including `browser feedback`. Without an agent, **Copy** is offered.
+- Git runs in the background, never on the UI thread, with explicit `a/`/`b/`
+  prefixes and no external diff tools or text conversion. Diff text is
+  cleaned of control characters and bounded (20,000 rows, 400 characters a
+  row, 64 untracked files up to 256 KiB each; links and binaries are not
+  read). Only the local daemon's checkouts can be reviewed.
+
 ### Local Pages
 
 `herdr-gpui browser open ./mockup.html` shows a local file. The app serves it,

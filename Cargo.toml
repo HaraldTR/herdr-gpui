@@ -71,6 +71,9 @@ serde_json           = "1"
 serde_ignored        = "0.1.14"
 sha1                 = "0.11.0"
 sha2                 = "0.11.0"
+# Diff syntax colouring: bundled grammars, parsed with the pure-Rust regex
+# engine, no themes (colours come from the app's theme).
+syntect              = { default-features = false, features = ["default-syntaxes", "parsing", "regex-fancy"], version = "5.3" }
 # The version GPUI's screen capture already locks; only CPU and memory are read.
 sysinfo              = { default-features = false, features = ["system"], version = "0.39.6" }
 tar                  = "0.4"
