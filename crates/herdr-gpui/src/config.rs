@@ -257,11 +257,11 @@ const MAX_DAEMON_CONFIG_BYTES: u64 = 1 << 20;
 
 impl Default for Config {
     fn default() -> Self {
-        let (monospace, ui) = if cfg!(target_os = "linux") {
-            (fonts::LINUX_MONOSPACE, fonts::LINUX_SANS)
-        } else {
-            ("Menlo", ".SystemUIFont")
-        };
+        let fonts::DefaultFonts {
+            monospace,
+            sans: ui,
+            ..
+        } = fonts::PLATFORM_FONTS;
         let font = |family: &str, size| FontConfig {
             family: family.into(),
             size,

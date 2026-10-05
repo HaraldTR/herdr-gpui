@@ -183,28 +183,31 @@ project_roots = []
 # Preferences offers a searchable picker for all four families together or each row.
 # Platform default removes the local family override; fallback cascades remain active.
 [sidebar]
-# Default: "Menlo" on macOS, "DejaVu Sans Mono" on Linux (or an installed
-# monospace family such as Noto Sans Mono when DejaVu is missing).
+# Default: "Menlo" on macOS, "Cascadia Mono" on Windows (Consolas when
+# missing), "DejaVu Sans Mono" on Linux (or an installed monospace family such
+# as Noto Sans Mono when DejaVu is missing).
 # family = "DejaVu Sans Mono"
 size = 12
 # fallback = ["Symbols Nerd Font Mono"]
 
 [tabs]
-# Default: "Menlo" on macOS, "DejaVu Sans Mono" on Linux (or an installed
-# monospace family such as Noto Sans Mono when DejaVu is missing).
+# Default: "Menlo" on macOS, "Cascadia Mono" on Windows (Consolas when
+# missing), "DejaVu Sans Mono" on Linux (or an installed monospace family such
+# as Noto Sans Mono when DejaVu is missing).
 # family = "DejaVu Sans Mono"
 size = 12
 # fallback = ["Symbols Nerd Font Mono"]
 
 [terminal]
-# Default: "Menlo" on macOS, "DejaVu Sans Mono" on Linux (or an installed
-# monospace family such as Noto Sans Mono when DejaVu is missing).
+# Default: "Menlo" on macOS, "Cascadia Mono" on Windows (Consolas when
+# missing), "DejaVu Sans Mono" on Linux (or an installed monospace family such
+# as Noto Sans Mono when DejaVu is missing).
 # family = "DejaVu Sans Mono"
 size = 14
 # fallback = ["Symbols Nerd Font Mono"]
 
 [ui]
-# Default: ".SystemUIFont" on macOS, "DejaVu Sans" on Linux (or an installed
+# Default: ".SystemUIFont" on macOS and Windows, "DejaVu Sans" on Linux (or an installed
 # sans family such as Noto Sans when DejaVu is missing).
 # family = "DejaVu Sans"
 size = 12

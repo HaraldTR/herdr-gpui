@@ -90,31 +90,66 @@ impl FontSettings {
     }
 }
 
-/// Linux defaults, chosen because most distributions install DejaVu.
-pub(super) const LINUX_MONOSPACE: &str = "DejaVu Sans Mono";
-pub(super) const LINUX_SANS: &str = "DejaVu Sans";
+/// A platform's default families and the installed alternatives that replace
+/// them when missing. GPUI shapes a missing family with whatever face the
+/// platform finds first, usually proportional, which breaks the cell grid.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct DefaultFonts {
+    pub(super) monospace: &'static str,
+    pub(super) sans: &'static str,
+    /// Tried in order before any other installed text `Mono` family.
+    monospace_alternatives: &'static [&'static str],
+    sans_alternatives: &'static [&'static str],
+}
 
 /// Linux distributions disagree on which fonts ship by default (Omarchy has no
-/// DejaVu) and GPUI bundles none there, so a missing default would shape with
-/// whatever proportional face the font database finds and break the cell grid.
-/// These are tried in order before any other installed `Mono` family.
-const MONOSPACE_ALTERNATIVES: &[&str] = &[
-    "Noto Sans Mono",
-    "Liberation Mono",
-    "Ubuntu Mono",
-    "JetBrains Mono",
-    "Cascadia Mono",
-    "Fira Mono",
-    "Source Code Pro",
-    "Hack",
-];
-const SANS_ALTERNATIVES: &[&str] = &[
-    "Noto Sans",
-    "Cantarell",
-    "Ubuntu",
-    "Liberation Sans",
-    "IBM Plex Sans",
-];
+/// DejaVu), and GPUI bundles none there.
+pub(super) const LINUX_FONTS: DefaultFonts = DefaultFonts {
+    monospace: "DejaVu Sans Mono",
+    sans: "DejaVu Sans",
+    monospace_alternatives: &[
+        "Noto Sans Mono",
+        "Liberation Mono",
+        "Ubuntu Mono",
+        "JetBrains Mono",
+        "Cascadia Mono",
+        "Fira Mono",
+        "Source Code Pro",
+        "Hack",
+    ],
+    sans_alternatives: &[
+        "Noto Sans",
+        "Cantarell",
+        "Ubuntu",
+        "Liberation Sans",
+        "IBM Plex Sans",
+    ],
+};
+
+/// Cascadia Mono ships with Windows 11 and Windows Terminal; Consolas with
+/// every release since Vista. GPUI resolves `.SystemUIFont` to Segoe UI.
+pub(super) const WINDOWS_FONTS: DefaultFonts = DefaultFonts {
+    monospace: "Cascadia Mono",
+    sans: ".SystemUIFont",
+    monospace_alternatives: &["Consolas", "Lucida Console", "Courier New"],
+    sans_alternatives: &[],
+};
+
+/// Menlo and the system UI font ship with every macOS release.
+pub(super) const MACOS_FONTS: DefaultFonts = DefaultFonts {
+    monospace: "Menlo",
+    sans: ".SystemUIFont",
+    monospace_alternatives: &[],
+    sans_alternatives: &[],
+};
+
+pub(super) const PLATFORM_FONTS: DefaultFonts = if cfg!(target_os = "linux") {
+    LINUX_FONTS
+} else if cfg!(windows) {
+    WINDOWS_FONTS
+} else {
+    MACOS_FONTS
+};
 
 /// A text face with fixed-width glyphs, judged by name. Symbols-only and
 /// proportional (`Propo`) Nerd Font variants carry no usable text glyphs.
@@ -125,39 +160,48 @@ fn is_text_monospace(family: &str) -> bool {
         && (lowercase.ends_with("mono") || lowercase.contains("mono "))
 }
 
-fn installed_monospace(installed: &BTreeSet<String>) -> Option<&str> {
-    MONOSPACE_ALTERNATIVES
+fn first_installed<'a>(candidates: &[&'a str], installed: &BTreeSet<String>) -> Option<&'a str> {
+    candidates
         .iter()
         .copied()
         .find(|family| installed.contains(*family))
-        .or_else(|| {
+}
+
+impl DefaultFonts {
+    /// Whether `family` is one of these defaults that resolution may replace.
+    /// A platform without alternatives always ships its defaults, and
+    /// dot-prefixed names are aliases GPUI resolves itself, never listed as
+    /// installed, so neither costs a font enumeration.
+    pub(super) fn is_replaceable(&self, family: &str) -> bool {
+        !self.monospace_alternatives.is_empty()
+            && !family.starts_with('.')
+            && (family == self.monospace || family == self.sans)
+    }
+
+    fn installed_monospace<'a>(&'a self, installed: &'a BTreeSet<String>) -> Option<&'a str> {
+        first_installed(self.monospace_alternatives, installed).or_else(|| {
             installed
                 .iter()
                 .map(String::as_str)
                 .find(|family| is_text_monospace(family))
         })
-}
-
-/// The installed family that replaces a Linux default missing from this
-/// machine, or `None` when `family` is installed or is not a default. The
-/// sans face falls back to monospace text rather than to no face at all.
-pub(super) fn linux_default_substitute(
-    family: &str,
-    installed: &BTreeSet<String>,
-) -> Option<String> {
-    if installed.contains(family) {
-        return None;
     }
-    let substitute = match family {
-        LINUX_MONOSPACE => installed_monospace(installed),
-        LINUX_SANS => SANS_ALTERNATIVES
-            .iter()
-            .copied()
-            .find(|family| installed.contains(*family))
-            .or_else(|| installed_monospace(installed)),
-        _ => None,
-    };
-    substitute.map(str::to_owned)
+
+    /// The installed family that replaces a default missing from this
+    /// machine, or `None` when `family` is installed or is not a default. The
+    /// sans face falls back to monospace text rather than to no face at all.
+    pub(super) fn substitute(&self, family: &str, installed: &BTreeSet<String>) -> Option<String> {
+        if !self.is_replaceable(family) || installed.contains(family) {
+            return None;
+        }
+        let substitute = if family == self.monospace {
+            self.installed_monospace(installed)
+        } else {
+            first_installed(self.sans_alternatives, installed)
+                .or_else(|| self.installed_monospace(installed))
+        };
+        substitute.map(str::to_owned)
+    }
 }
 
 /// Nerd Font patches keep this marker in every patched family name, so matching
@@ -230,7 +274,7 @@ pub fn symbol_fallbacks(installed: impl IntoIterator<Item = String>) -> Vec<Stri
 
 impl Config {
     /// Gives every face the config left alone an automatic icon-font cascade
-    /// and, on Linux, replaces a default family this machine lacks. `installed`
+    /// and replaces a default family this machine lacks. `installed`
     /// is consulted only when some face still needs it, because enumerating
     /// system fonts is slow enough to keep off the UI thread.
     pub fn resolve_fonts<I>(&mut self, installed: impl FnOnce() -> I)
@@ -243,17 +287,16 @@ impl Config {
             &mut self.terminal,
             &mut self.ui,
         ];
-        let check_defaults = cfg!(target_os = "linux")
-            && faces
-                .iter()
-                .any(|face| matches!(face.family.as_str(), LINUX_MONOSPACE | LINUX_SANS));
+        let check_defaults = faces
+            .iter()
+            .any(|face| PLATFORM_FONTS.is_replaceable(&face.family));
         if !check_defaults && faces.iter().all(|face| face.fallbacks.is_some()) {
             return;
         }
         let installed: BTreeSet<String> = installed().into_iter().collect();
         if check_defaults {
             for face in faces.iter_mut() {
-                if let Some(family) = linux_default_substitute(&face.family, &installed) {
+                if let Some(family) = PLATFORM_FONTS.substitute(&face.family, &installed) {
                     face.family = family;
                 }
             }

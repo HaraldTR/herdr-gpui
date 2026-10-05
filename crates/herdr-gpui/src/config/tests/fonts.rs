@@ -252,7 +252,14 @@ fn defaults_and_partial_settings() -> anyhow::Result<()> {
         "DejaVu Sans Mono",
         "DejaVu Sans",
     ];
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    let families = [
+        "Cascadia Mono",
+        "Cascadia Mono",
+        "Cascadia Mono",
+        ".SystemUIFont",
+    ];
+    #[cfg(not(any(target_os = "linux", windows)))]
     let families = ["Menlo", "Menlo", "Menlo", ".SystemUIFont"];
 
     for config in [
