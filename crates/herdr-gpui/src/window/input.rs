@@ -32,7 +32,14 @@ impl HerdrWindow {
         };
         let in_tab = (self.config.open_links_in == crate::config::LinkTarget::BrowserTab)
             != event.down.modifiers.alt;
-        if self.activate_terminal_link(&pressed, event.up.position, in_tab, window, cx) {
+        if self.activate_terminal_link(
+            &pressed,
+            event.up.position,
+            event.down.modifiers,
+            in_tab,
+            window,
+            cx,
+        ) {
             cx.stop_propagation();
         }
     }
@@ -49,7 +56,8 @@ impl HerdrWindow {
         modifiers.shift
             || (modifiers.secondary()
                 && (self.terminal_link_at(position).is_some()
-                    || self.daemon_link_at(position).is_some()))
+                    || self.daemon_link_at(position).is_some()
+                    || self.file_link_at(position).is_some()))
     }
 
     /// Whether a left click here would open a link, which the pointer shows.
@@ -58,12 +66,14 @@ impl HerdrWindow {
         position: gpui::Point<gpui::Pixels>,
         modifiers: gpui::Modifiers,
     ) -> bool {
-        (self.terminal_link_at(position).is_some() || self.daemon_link_at(position).is_some())
+        let web = (self.terminal_link_at(position).is_some()
+            || self.daemon_link_at(position).is_some())
             && (modifiers.secondary()
                 || modifiers.shift
                 || self
                     .terminal_mouse_at(position)
-                    .is_none_or(|hit| !hit.mouse_reporting))
+                    .is_none_or(|hit| !hit.mouse_reporting));
+        web || (modifiers.secondary() && self.file_link_at(position).is_some())
     }
 
     pub(crate) fn terminal_link_at(&self, position: gpui::Point<gpui::Pixels>) -> Option<String> {

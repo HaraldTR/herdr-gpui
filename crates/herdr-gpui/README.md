@@ -1203,7 +1203,19 @@ never left the half-cell it pressed in.
 
 Plain URL detection is limited to one row within one pane; links that wrap or
 reach the right edge need explicit terminal hyperlink metadata. Other URI schemes
-and local file paths are not activated.
+are not activated.
+
+Cmd-click (Ctrl-click elsewhere) a file path a pane prints, such as
+`src/main.rs:12:5`, `./build/out`, `~/notes.md`, or a `file://` hyperlink, to
+open it with the system's default application. Holding the modifier underlines
+the path under the pointer. Relative paths resolve against the pane's working
+directory, and a path opens only if it exists; the line and column are not
+passed on. Terminal output is untrusted, so a click never launches anything:
+only a plain folder or a non-executable document (text, source, Markdown, JSON,
+images, PDF, and similar) opens itself, judged by where symlinks lead. An
+application, script, or unknown file type opens the folder that holds it, and a
+network path opens nothing. A bare name needs a location (`main.rs:3`) to count as a path, and
+paths are not detected in panes on SSH hosts, whose files live on that host.
 
 Set `open_links_in = "browser-tab"` to open links in a [browser tab](#browser-tabs)
 instead. Alt-click (Option-click on macOS) opens a link in the other target.

@@ -10,6 +10,7 @@ mod config_diagnostic;
 mod copy_mode;
 mod double_shift;
 mod file_drop;
+mod file_links;
 mod find;
 mod flash;
 pub(crate) use flash::Flash;

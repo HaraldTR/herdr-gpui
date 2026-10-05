@@ -107,7 +107,7 @@ impl HerdrWindow {
         self.selected_is_remote() && self.accepts_image_input()
     }
 
-    fn selected_is_remote(&self) -> bool {
+    pub(super) fn selected_is_remote(&self) -> bool {
         matches!(
             self.endpoints[self.selected_endpoint].connection.target,
             ConnectTarget::Ssh { .. }
