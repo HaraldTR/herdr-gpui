@@ -2,6 +2,7 @@ use super::*;
 use anyhow::Context as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod default_fonts;
 mod discovery;
 mod fonts;
 mod github;

@@ -19,6 +19,8 @@ fn concrete_default_fonts_and_shared_native_decoration() {
         appearance.config.terminal.family,
         if cfg!(target_os = "linux") {
             "DejaVu Sans Mono"
+        } else if cfg!(windows) {
+            "Cascadia Mono"
         } else {
             "Menlo"
         }

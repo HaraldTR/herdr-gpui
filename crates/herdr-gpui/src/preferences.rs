@@ -102,7 +102,7 @@ impl HerdrWindow {
             move || {
                 save()?;
                 let mut config = Config::load()?;
-                config.resolve_font_fallbacks(|| text_system.all_font_names());
+                config.resolve_fonts(|| text_system.all_font_names());
                 let theme = if config.theme == "Follow Herdr" {
                     Default::default()
                 } else {

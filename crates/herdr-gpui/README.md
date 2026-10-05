@@ -2114,8 +2114,11 @@ GPUI native action/menu/keybinding patterns.
 
 ## Deliberate Limitations
 
-- macOS defaults to Menlo and the system font; Linux defaults to DejaVu Sans Mono
-  and DejaVu Sans. No bundled Nerd Font.
+- macOS defaults to Menlo and the system font; Windows defaults to Cascadia Mono
+  (Consolas when missing) and the system font; Linux defaults to DejaVu Sans Mono
+  and DejaVu Sans, or, when DejaVu is not installed, the first installed common
+  monospace and sans family (JetBrains Mono, Noto, Liberation, Ubuntu, any other
+  `Mono` family). No bundled Nerd Font.
   Private-use icons may be missing. Fonts and palettes are configured locally,
   not synchronized from the host terminal's theme.
 - No draggable scrollback UI, split dragging,

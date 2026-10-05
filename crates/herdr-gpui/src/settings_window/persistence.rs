@@ -147,7 +147,7 @@ impl SettingsWindow {
         let text_system = cx.text_system().clone();
         move || {
             let mut config = Config::load()?;
-            config.resolve_font_fallbacks(|| text_system.all_font_names());
+            config.resolve_fonts(|| text_system.all_font_names());
             let (shared, error, theme) = match herdr_settings::Settings::load() {
                 Ok(shared) => {
                     config.apply_shared_notifications(&shared);

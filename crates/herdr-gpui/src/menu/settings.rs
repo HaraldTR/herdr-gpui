@@ -148,7 +148,7 @@ impl HerdrWindow {
         self.load_gui_config_with(
             move || {
                 let mut config = Config::load()?;
-                config.resolve_font_fallbacks(|| text_system.all_font_names());
+                config.resolve_fonts(|| text_system.all_font_names());
                 // Follow Herdr is resolved from the latest prepared snapshot on completion.
                 let theme = if config.theme == "Follow Herdr" {
                     Default::default()
