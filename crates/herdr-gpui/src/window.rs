@@ -718,6 +718,7 @@ impl HerdrWindow {
             }),
             _appearance: cx.observe_window_appearance(window, |this, _, cx| {
                 this.apply_shared_theme(cx);
+                this.apply_system_theme(cx);
                 cx.notify();
             }),
         };

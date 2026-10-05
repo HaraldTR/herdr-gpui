@@ -10,6 +10,76 @@ use std::{
 
 const FOLLOW_HERDR: &str = "Follow Herdr";
 
+/// A `theme` value: one theme, or Ghostty's `light:NAME,dark:NAME`, which
+/// follows the system appearance. Either side may itself be a built-in, file,
+/// path, or `Follow Herdr`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThemeName<'a> {
+    Single(&'a str),
+    System { light: &'a str, dark: &'a str },
+}
+
+impl<'a> ThemeName<'a> {
+    pub(crate) fn parse(value: &'a str) -> Result<Self> {
+        let value = value.trim();
+        let side = |part: &'a str| {
+            let part = part.trim();
+            part.strip_prefix("light:")
+                .map(|name| (true, name.trim()))
+                .or_else(|| part.strip_prefix("dark:").map(|name| (false, name.trim())))
+        };
+        if side(value).is_none() {
+            return Ok(Self::Single(value));
+        }
+        let mut parts = value.split(',');
+        match (
+            parts.next().and_then(side),
+            parts.next().and_then(side),
+            parts.next(),
+        ) {
+            (Some((true, light)), Some((false, dark)), None)
+            | (Some((false, dark)), Some((true, light)), None)
+                if !light.is_empty() && !dark.is_empty() =>
+            {
+                Ok(Self::System { light, dark })
+            }
+            _ => Err(Error::InvalidThemePair),
+        }
+    }
+
+    /// The theme shown for the given system appearance.
+    pub(crate) fn get(self, light: bool) -> &'a str {
+        match self {
+            Self::Single(name) => name,
+            Self::System { light: name, .. } if light => name,
+            Self::System { dark, .. } => dark,
+        }
+    }
+
+    /// The name `value` shows for `light`, or `value` itself when invalid.
+    pub(crate) fn side(value: &str, light: bool) -> &str {
+        ThemeName::parse(value).map_or(value, |name| name.get(light))
+    }
+
+    pub(crate) fn follows_system(value: &str) -> bool {
+        matches!(ThemeName::parse(value), Ok(ThemeName::System { .. }))
+    }
+
+    /// `value` with the side for `light` replaced by `name`. A single theme
+    /// is replaced outright.
+    pub(crate) fn with_side(value: &str, light: bool, name: &str) -> String {
+        match ThemeName::parse(value) {
+            Ok(ThemeName::System { dark, .. }) if light => Self::system(name, dark),
+            Ok(ThemeName::System { light, .. }) => Self::system(light, name),
+            _ => name.into(),
+        }
+    }
+
+    pub(crate) fn system(light: &str, dark: &str) -> String {
+        format!("light:{light},dark:{dark}")
+    }
+}
+
 fn theme_directories() -> Result<Vec<PathBuf>> {
     let root = config_root()?;
     let mut directories = vec![root.join("herdr/themes"), root.join("ghostty/themes")];
@@ -67,27 +137,41 @@ impl Config {
                 }
             }
         }
-        let selected = self.theme.trim();
-        if Path::new(selected).is_absolute() || selected.starts_with("~/") {
-            names.push(self.theme.clone());
+        let selected = ThemeName::parse(&self.theme).unwrap_or(ThemeName::Single(&self.theme));
+        for selected in [selected.get(true), selected.get(false)] {
+            if Path::new(selected).is_absolute() || selected.starts_with("~/") {
+                names.push(selected.to_owned());
+            }
         }
         names.sort_by_cached_key(|name| (name.to_lowercase(), name.clone()));
         names.dedup();
         Ok(names)
     }
 
-    pub fn theme(&self) -> Result<Theme> {
-        self.theme_with_directories(theme_directories)
+    /// The theme for the system appearance: `light` picks a side of a
+    /// `light:…,dark:…` value, and Herdr's light palette for `Follow Herdr`.
+    pub fn theme(&self, light: bool) -> Result<Theme> {
+        self.theme_with_directories(light, theme_directories)
             .map(|theme| theme.with_contrast(self.contrast))
+    }
+
+    /// Resolves every side, so a pair is refused before it is saved rather
+    /// than when the system next changes appearance.
+    pub(crate) fn validate_theme(&self) -> Result<()> {
+        if ThemeName::follows_system(&self.theme) {
+            self.theme(true)?;
+        }
+        self.theme(false).map(drop)
     }
 
     pub(super) fn theme_with_directories(
         &self,
+        light: bool,
         directories: impl FnOnce() -> Result<Vec<PathBuf>>,
     ) -> Result<Theme> {
-        let name = self.theme.trim();
+        let name = ThemeName::parse(&self.theme)?.get(light);
         if name == FOLLOW_HERDR {
-            return crate::herdr_settings::Settings::load()?.theme(false);
+            return crate::herdr_settings::Settings::load()?.theme(light);
         }
         if let Some(theme) = Theme::builtin(name) {
             return Ok(theme);

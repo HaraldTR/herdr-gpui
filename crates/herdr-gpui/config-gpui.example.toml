@@ -19,6 +19,8 @@
 # Built-ins: Default, Nord, Dracula, Catppuccin Mocha, Catppuccin Latte.
 # Also accepts a Ghostty theme name, an absolute path, or a ~/ path.
 # Set "Follow Herdr" in config-gpui.local.toml to follow the local Herdr theme.
+# To follow the system light/dark appearance, name a theme for each side, as
+# Ghostty does: theme = "light:Catppuccin Latte,dark:Catppuccin Mocha"
 theme = "Default"
 # How far the app's own colors (status dots, pull request badges, diff counts,
 # warnings, dim labels) stand off the sidebar and menus. "standard" moves a

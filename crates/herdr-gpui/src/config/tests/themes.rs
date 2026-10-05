@@ -44,7 +44,7 @@ fn contrast_parses_reaches_the_theme_and_saves_in_place() -> anyhow::Result<()> 
     assert_eq!(Config::parse("")?.contrast, Contrast::Standard);
     let high = Config::parse("theme = 'Catppuccin Latte'\ncontrast = 'high'")?;
     assert_eq!(high.contrast, Contrast::High);
-    assert_eq!(high.theme()?.contrast, Contrast::High);
+    assert_eq!(high.theme(false)?.contrast, Contrast::High);
     assert!(Config::parse("contrast = 'loud'").is_err());
     assert!(Config::parse("contrast = true").is_err());
 
@@ -149,7 +149,7 @@ fn save_validates_theme_and_toml_before_writing() -> anyhow::Result<()> {
     config.save_theme_path(custom_name, &new_path)?;
     assert_eq!(
         Config::parse(&fs::read_to_string(&new_path)?)?
-            .theme()?
+            .theme(false)?
             .background,
         0x112233
     );
@@ -174,7 +174,7 @@ fn default_palette_and_builtins() -> anyhow::Result<()> {
             theme: name.into(),
             ..Config::default()
         }
-        .theme()?;
+        .theme(false)?;
         assert_ne!(theme, default);
         assert_ne!(theme.surface, theme.background);
         assert_eq!(theme.palette[255], default.palette[255]);
