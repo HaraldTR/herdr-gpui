@@ -31,13 +31,14 @@ fn missing_linux_defaults_take_the_first_known_alternative() {
 }
 
 #[test]
-fn missing_linux_monospace_falls_back_to_an_installed_text_mono_family() {
-    // Omarchy ships Nerd Font patched faces but no DejaVu or listed family.
+fn omarchy_gets_its_jetbrains_mono_nerd_font() {
+    // Omarchy's default font, alongside the Noto fonts Arch also installs.
     let fonts = installed(&[
-        "Symbols Nerd Font Mono",
-        "JetBrainsMono Nerd Font Propo",
-        "JetBrainsMono Nerd Font Mono",
+        "CaskaydiaMono Nerd Font",
         "JetBrainsMono Nerd Font",
+        "JetBrainsMono Nerd Font Mono",
+        "Noto Sans",
+        "Noto Sans Mono",
         "Noto Color Emoji",
     ]);
     assert_eq!(
@@ -46,10 +47,31 @@ fn missing_linux_monospace_falls_back_to_an_installed_text_mono_family() {
             .as_deref(),
         Some("JetBrainsMono Nerd Font")
     );
+    assert_eq!(
+        LINUX_FONTS.substitute("DejaVu Sans", &fonts).as_deref(),
+        Some("Noto Sans")
+    );
+}
+
+#[test]
+fn missing_linux_monospace_falls_back_to_an_installed_text_mono_family() {
+    // No listed family: any text `Mono` face beats a proportional fallback.
+    let fonts = installed(&[
+        "Symbols Nerd Font Mono",
+        "Iosevka Nerd Font Propo",
+        "Iosevka Nerd Font Mono",
+        "Noto Color Emoji",
+    ]);
+    assert_eq!(
+        LINUX_FONTS
+            .substitute("DejaVu Sans Mono", &fonts)
+            .as_deref(),
+        Some("Iosevka Nerd Font Mono")
+    );
     // With no sans family, the UI reads in monospace text, not a missing face.
     assert_eq!(
         LINUX_FONTS.substitute("DejaVu Sans", &fonts).as_deref(),
-        Some("JetBrainsMono Nerd Font")
+        Some("Iosevka Nerd Font Mono")
     );
 }
 

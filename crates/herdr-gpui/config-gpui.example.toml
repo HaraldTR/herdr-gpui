@@ -185,7 +185,7 @@ project_roots = []
 [sidebar]
 # Default: "Menlo" on macOS, "Cascadia Mono" on Windows (Consolas when
 # missing), "DejaVu Sans Mono" on Linux (or an installed monospace family such
-# as Noto Sans Mono when DejaVu is missing).
+# as JetBrains Mono when DejaVu is missing).
 # family = "DejaVu Sans Mono"
 size = 12
 # fallback = ["Symbols Nerd Font Mono"]
@@ -193,7 +193,7 @@ size = 12
 [tabs]
 # Default: "Menlo" on macOS, "Cascadia Mono" on Windows (Consolas when
 # missing), "DejaVu Sans Mono" on Linux (or an installed monospace family such
-# as Noto Sans Mono when DejaVu is missing).
+# as JetBrains Mono when DejaVu is missing).
 # family = "DejaVu Sans Mono"
 size = 12
 # fallback = ["Symbols Nerd Font Mono"]
@@ -201,7 +201,7 @@ size = 12
 [terminal]
 # Default: "Menlo" on macOS, "Cascadia Mono" on Windows (Consolas when
 # missing), "DejaVu Sans Mono" on Linux (or an installed monospace family such
-# as Noto Sans Mono when DejaVu is missing).
+# as JetBrains Mono when DejaVu is missing).
 # family = "DejaVu Sans Mono"
 size = 14
 # fallback = ["Symbols Nerd Font Mono"]

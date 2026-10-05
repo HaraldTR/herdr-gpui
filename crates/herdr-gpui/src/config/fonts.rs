@@ -103,15 +103,18 @@ pub(super) struct DefaultFonts {
 }
 
 /// Linux distributions disagree on which fonts ship by default (Omarchy has no
-/// DejaVu), and GPUI bundles none there.
+/// DejaVu), and GPUI bundles none there. JetBrains Mono comes first because a
+/// distribution that installs it, like Omarchy, chose it as its terminal face
+/// over the Noto fonts it also ships; the Nerd Font build also covers icons.
 pub(super) const LINUX_FONTS: DefaultFonts = DefaultFonts {
     monospace: "DejaVu Sans Mono",
     sans: "DejaVu Sans",
     monospace_alternatives: &[
+        "JetBrainsMono Nerd Font",
+        "JetBrains Mono",
         "Noto Sans Mono",
         "Liberation Mono",
         "Ubuntu Mono",
-        "JetBrains Mono",
         "Cascadia Mono",
         "Fira Mono",
         "Source Code Pro",
