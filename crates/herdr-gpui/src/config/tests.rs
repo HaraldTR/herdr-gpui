@@ -6,6 +6,7 @@ mod discovery;
 mod fonts;
 mod github;
 mod keybindings;
+mod linux_default_fonts;
 mod loading;
 mod notification_settings;
 mod preferences;

@@ -167,7 +167,7 @@ fn detection_ranks_symbol_and_mono_faces_and_ignores_text_families() {
 #[test]
 fn detection_fills_only_the_faces_the_config_left_alone() -> anyhow::Result<()> {
     let mut config = Config::parse("[terminal]\nfallback = ['Menlo']\n[ui]\nfallback = []")?;
-    config.resolve_font_fallbacks(installed);
+    config.resolve_fonts(installed);
     assert_eq!(
         config.terminal.fallbacks.as_deref(),
         Some(["Menlo".to_owned()].as_slice())
@@ -187,12 +187,12 @@ fn detection_fills_only_the_faces_the_config_left_alone() -> anyhow::Result<()> 
 #[test]
 fn detection_does_not_enumerate_fonts_when_every_face_is_configured() -> anyhow::Result<()> {
     // Enumerating installed families is slow, so a fully configured file
-    // must not pay for it.
+    // must not pay for it, even on Linux where defaults are checked.
     let mut config = Config::parse(
-        "[sidebar]\nfallback = []\n[tabs]\nfallback = []\n\
-             [terminal]\nfallback = []\n[ui]\nfallback = []",
+        "[sidebar]\nfamily = 'A'\nfallback = []\n[tabs]\nfamily = 'A'\nfallback = []\n\
+             [terminal]\nfamily = 'A'\nfallback = []\n[ui]\nfamily = 'A'\nfallback = []",
     )?;
-    config.resolve_font_fallbacks(|| -> Vec<String> { panic!("enumerated installed fonts") });
+    config.resolve_fonts(|| -> Vec<String> { panic!("enumerated installed fonts") });
     Ok(())
 }
 
