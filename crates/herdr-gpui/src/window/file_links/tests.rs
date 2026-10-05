@@ -97,8 +97,18 @@ fn only_documents_and_plain_folders_open_themselves() {
     }
     assert!(remote(Path::new("/net/host/share")) == cfg!(unix));
     #[cfg(windows)]
-    for share in [r"\\server\share\a.txt", r"\\?\UNC\server\share\a.txt"] {
-        assert!(remote(Path::new(share)), "{share}");
+    {
+        for share in [
+            r"\\server\share\a.txt",
+            r"\\?\UNC\server\share\a.txt",
+            r"\\.\UNC\server\share\a.txt",
+            r"\\?\GLOBALROOT\Device\Mup\server\share\a.txt",
+        ] {
+            assert!(remote(Path::new(share)), "{share}");
+        }
+        for local in [r"C:\a.txt", r"\\?\C:\a.txt"] {
+            assert!(!remote(Path::new(local)), "{local}");
+        }
     }
 }
 

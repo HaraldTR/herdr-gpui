@@ -57,15 +57,16 @@ impl FileLink {
 /// Symlinks followed while resolving one path, Linux's `MAXSYMLINKS`.
 const MAX_SYMLINKS: usize = 40;
 
-/// Whether `path` names a share on another machine, which the system would
-/// reach out to, credentials and all, merely to look at: a Windows network
-/// path, or the automounter's `/net` host map.
+/// Whether `path` may name a share on another machine, which the system
+/// would reach out to, credentials and all, merely to look at. On Windows
+/// only a drive letter is known to be local: a UNC path, a device path, or
+/// a verbatim one such as `\\?\GLOBALROOT\Device\Mup\…` can reach the
+/// network. Elsewhere it is the automounter's `/net` host map.
 fn remote(path: &Path) -> bool {
     match path.components().next() {
-        Some(Component::Prefix(prefix)) => matches!(
-            prefix.kind(),
-            Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(..)
-        ),
+        Some(Component::Prefix(prefix)) => {
+            !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+        }
         _ => cfg!(unix) && path.starts_with("/net"),
     }
 }
