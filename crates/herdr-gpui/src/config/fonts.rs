@@ -64,7 +64,9 @@ pub(super) struct FontSettings {
     family: Option<String>,
     size: Option<f32>,
     fallback: Option<Vec<String>>,
-    line_height: Option<f32>,
+    /// Untyped because only the terminal takes it: elsewhere it is discarded
+    /// as unknown, so its type must not fail the whole file first.
+    line_height: Option<toml::Value>,
 }
 
 impl FontSettings {
@@ -94,6 +96,11 @@ impl FontSettings {
             font.fallbacks = Some(fallback);
         }
         if let Some(line_height) = self.line_height {
+            let line_height = match line_height {
+                toml::Value::Float(value) => value as f32,
+                toml::Value::Integer(value) => value as f32,
+                _ => return Err(Error::InvalidLineHeight(name)),
+            };
             if !line_height.is_finite() || !LINE_HEIGHT_RANGE.contains(&line_height) {
                 return Err(Error::InvalidLineHeight(name));
             }

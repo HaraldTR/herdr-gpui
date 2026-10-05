@@ -53,7 +53,9 @@ fn local_line_height_merges_over_managed_defaults() -> anyhow::Result<()> {
 
 #[test]
 fn rejects_line_heights_outside_the_range() {
-    for value in ["0.99", "2.01", "0", "-1.3", "nan", "inf"] {
+    for value in [
+        "0.99", "2.01", "0", "-1.3", "nan", "inf", "'1.3'", "true", "[1.3]",
+    ] {
         assert!(
             matches!(
                 Config::parse(&format!("[terminal]\nline_height = {value}")),
@@ -62,7 +64,6 @@ fn rejects_line_heights_outside_the_range() {
             "accepted line_height = {value}"
         );
     }
-    assert!(Config::parse("[terminal]\nline_height = '1.3'").is_err());
 }
 
 #[test]
@@ -78,6 +79,15 @@ fn line_height_outside_terminal_is_reported_and_ignored() -> anyhow::Result<()> 
     for font in [&config.sidebar, &config.tabs, &config.ui] {
         assert_eq!(font.line_height_multiple, None);
     }
+
+    // Nor is its type checked: a quoted number is still only reported.
+    let config = Config::parse(
+        "[sidebar]\nline_height = '1.2'\n[tabs]\nline_height = true\n[ui]\nline_height = [1]",
+    )?;
+    assert_eq!(
+        config.unknown_keys,
+        ["sidebar.line_height", "tabs.line_height", "ui.line_height"]
+    );
     Ok(())
 }
 

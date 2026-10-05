@@ -571,7 +571,7 @@ pub enum Error {
     EmptyFontFamily(&'static str),
     #[error("{0}.size must be finite and between 8 and 48 logical pixels")]
     InvalidFontSize(&'static str),
-    #[error("{0}.line_height must be finite and between 1 and 2 times the font size")]
+    #[error("{0}.line_height must be a finite number between 1 and 2 times the font size")]
     InvalidLineHeight(&'static str),
     #[error("{0}.fallback families must not be empty")]
     EmptyFontFallback(&'static str),
