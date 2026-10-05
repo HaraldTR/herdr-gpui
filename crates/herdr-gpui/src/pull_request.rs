@@ -14,7 +14,10 @@ pub(crate) use {
     cache::Cache,
     fetch::{local_checkout, origin_repository, run},
     lookup::Lookup,
-    model::{Input, MergeMethod, Origin, Outcome, PullRequest, State, clean, repository_input},
+    model::{
+        Input, MergeMethod, Origin, Outcome, PullRequest, ReviewDecision, State, clean,
+        repository_input,
+    },
 };
 
 pub(crate) use fetch::local_repository;

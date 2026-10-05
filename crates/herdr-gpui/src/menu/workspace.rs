@@ -2,6 +2,7 @@
 //! which sibling workspaces close with it, and the dialogs that carry those
 //! requests to the daemon and report what came back.
 
+pub(super) mod popover;
 mod render;
 mod requests;
 
@@ -456,27 +457,22 @@ impl HerdrWindow {
         true
     }
 
+    /// The actions this workspace offers, in the order the popover shows them
+    /// and arrow keys walk them: the tile grid row by row (work, then moving
+    /// or leaving), the plain rows, and the destructive action last.
     pub(super) fn workspace_items(&self) -> Vec<(WorkspaceMenuAction, &'static str)> {
         use WorkspaceMenuAction::Dialog;
         let Some(target) = &self.menu.target else {
             return vec![];
         };
-        let mut items = vec![
-            (Dialog(WorkspaceAction::Rename), "Rename"),
-            (Dialog(WorkspaceAction::Close), target.close_label()),
-        ];
-        if target.can_create() {
-            items.push((Dialog(WorkspaceAction::NewWorktree), "New worktree"));
-            items.push((Dialog(WorkspaceAction::OpenWorktree), "Open worktree..."));
-        } else if self.linked_new_worktree_target().is_some() {
+        let mut items = Vec::new();
+        if target.can_create() || self.linked_new_worktree_target().is_some() {
             items.push((Dialog(WorkspaceAction::NewWorktree), "New worktree"));
         }
-        if target.can_delete() {
-            items.push((
-                Dialog(WorkspaceAction::DeleteWorktree),
-                "Delete worktree checkout",
-            ));
+        if let Some(label) = self.fan_out_item() {
+            items.push((WorkspaceMenuAction::FanOut, label));
         }
+        items.push((Dialog(WorkspaceAction::Rename), "Rename"));
         if self.teleport_mark().is_some() {
             items.push((WorkspaceMenuAction::GoToTeleported, "Go to teleported copy"));
             items.push((
@@ -484,16 +480,17 @@ impl HerdrWindow {
                 "Clear teleported mark",
             ));
         } else if self.can_teleport() {
+            items.push((WorkspaceMenuAction::Teleport, "Teleport..."));
             if self.teleport_origin().is_some() {
                 items.push((WorkspaceMenuAction::TeleportBack, "Teleport back"));
             }
-            items.push((WorkspaceMenuAction::Teleport, "Teleport..."));
         }
+        items.push((Dialog(WorkspaceAction::Close), target.close_label()));
         if self.checkpoint_checkout().is_some() {
             items.push((WorkspaceMenuAction::Checkpoints, "Checkpoints..."));
         }
-        if let Some(label) = self.fan_out_item() {
-            items.push((WorkspaceMenuAction::FanOut, label));
+        if target.can_create() {
+            items.push((Dialog(WorkspaceAction::OpenWorktree), "Open worktree..."));
         }
         // Only a workspace that heads a group of checkouts can fold anything.
         if let Some(key) = target.group_key() {
@@ -502,6 +499,12 @@ impl HerdrWindow {
             } else {
                 (WorkspaceMenuAction::Collapse, "Collapse group")
             });
+        }
+        if target.can_delete() {
+            items.push((
+                Dialog(WorkspaceAction::DeleteWorktree),
+                "Delete worktree checkout",
+            ));
         }
         items
     }
