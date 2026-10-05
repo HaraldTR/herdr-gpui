@@ -47,6 +47,8 @@ herdr-client         = { path = "crates/herdr-client" }
 herdr-protocol       = { path = "crates/herdr-protocol" }
 interprocess         = "2.4.2"
 image                = { default-features = false, features = ["gif", "jpeg", "png", "webp"], version = "0.25.10" }
+# Helix's fzf-style scorer behind the command palette.
+nucleo-matcher       = "0.3.1"
 nix                  = { default-features = false, features = ["socket", "user"], version = "=0.31.3" }
 objc                 = "0.2"
 # The Secret Service client GPUI's Linux platform links, with its async-io backend.

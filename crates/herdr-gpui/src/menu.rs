@@ -6,10 +6,12 @@
 mod chrome;
 mod colors;
 mod devices;
+mod fan_out;
 mod git;
 mod github;
 mod page;
 mod pr;
+mod pr_actions;
 mod sessions;
 mod settings;
 mod state;

@@ -1,6 +1,6 @@
 //! Loading and saving preferences off the UI thread, then reconciling the result,
 //! including the config watcher and the saves that finish when the app quits.
-use super::{SettingsWindow, layouts, themes};
+use super::{Section, SettingsWindow, layouts, themes};
 use crate::{
     config::{Config, FontFace, Theme},
     herdr_settings::{self, Edit},
@@ -212,6 +212,9 @@ impl SettingsWindow {
     }
 
     pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
+        if self.section == Section::General {
+            self.sync_remote_history(true, cx);
+        }
         self.reload_with(Self::loader(cx), cx);
     }
 

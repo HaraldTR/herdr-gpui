@@ -6,6 +6,7 @@ use std::{fs, path::Path};
 // Every test in `edits` is Unix-only.
 #[cfg(unix)]
 mod edits;
+mod pane_history;
 mod reading;
 mod save_safety;
 mod theme_palettes;

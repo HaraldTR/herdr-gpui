@@ -275,12 +275,12 @@ fn the_menu_commits_through_a_dialog_and_refuses_an_empty_message(cx: &mut TestA
                 ]
             );
             // Review opens a tab on the tracked checkout and closes the popup.
-            view.activate_git_row(Row::Review, window, cx);
+            view.activate_git_row(Row::ReviewChanges, window, cx);
             assert_eq!(view.menu.page, None);
             assert_eq!(view.reviews.len(), 1);
             // A second review of the same checkout brings the tab back.
             view.open_git_menu(point(px(900.), px(20.)), window, cx);
-            view.activate_git_row(Row::Review, window, cx);
+            view.activate_git_row(Row::ReviewChanges, window, cx);
             assert_eq!(view.reviews.len(), 1);
             let reviews = cx.try_global::<crate::browser::Store>().map_or(0, |store| {
                 (0..64)
