@@ -221,6 +221,8 @@ pub enum Error {
         "No base branch to compare with: neither the pull request's base nor origin/HEAD, main, or master exists locally."
     )]
     ReviewNoBase,
+    #[error("A saved review tab names a checkout that is not a local absolute path.")]
+    InvalidReviewCheckout,
     #[error("These changes are too large to review here, even leaving out the largest files.")]
     ReviewTooLarge,
     #[error("Could not {operation}.")]

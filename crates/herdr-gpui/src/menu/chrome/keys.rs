@@ -101,11 +101,6 @@ impl HerdrWindow {
             self.git_key(event, window, cx);
             return;
         }
-        if self.menu.page == Some(Page::Review) {
-            // The note composer edits itself, IME included.
-            self.review_key(event, window, cx);
-            return;
-        }
         if self.menu.page == Some(Page::Teleport) {
             self.teleport_key(event, window, cx);
             return;

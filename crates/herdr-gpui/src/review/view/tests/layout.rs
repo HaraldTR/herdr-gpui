@@ -1,5 +1,5 @@
 //! Drawing the review unified or side by side.
-use super::{changes, note, window};
+use super::{changes, note, the, window};
 use crate::review::view::Layout;
 
 fn draw(cx: &mut gpui::VisualTestContext) {
@@ -9,7 +9,7 @@ fn draw(cx: &mut gpui::VisualTestContext) {
 #[gpui::test]
 fn side_by_side_pairs_lines_and_notes_either_side(cx: &mut gpui::TestAppContext) {
     let (view, cx) = window(cx, None);
-    cx.update(|_, cx| view.update(cx, |view, cx| view.seed_review(changes(), cx)));
+    cx.update(|window, cx| view.update(cx, |view, cx| view.seed_review(changes(), window, cx)));
     draw(cx);
     // Unified: the removed line sits above the one that replaced it.
     let removed = cx.debug_bounds("review-row-3").unwrap();
@@ -17,7 +17,9 @@ fn side_by_side_pairs_lines_and_notes_either_side(cx: &mut gpui::TestAppContext)
     assert!(removed.top() < added.top());
 
     cx.update(|_, cx| {
-        view.update(cx, |view, cx| view.set_review_layout(Layout::Split, cx));
+        view.update(cx, |view, cx| {
+            view.set_review_layout(the(view), Layout::Split, cx)
+        });
     });
     draw(cx);
     assert!(cx.debug_bounds("review-row-3").is_none());
@@ -40,7 +42,7 @@ fn side_by_side_pairs_lines_and_notes_either_side(cx: &mut gpui::TestAppContext)
     note(&view, cx, 4, "Implement this");
     draw(cx);
     view.read_with(cx, |view, _| {
-        let review = view.menu.review.as_ref().unwrap();
+        let review = view.reviews.values().next().unwrap();
         assert_eq!(review.notes.len(), 2);
         assert_eq!(review.marks.get(&3), Some(&1));
         assert_eq!(review.marks.get(&4), Some(&2));
@@ -48,12 +50,14 @@ fn side_by_side_pairs_lines_and_notes_either_side(cx: &mut gpui::TestAppContext)
 
     // Back to one column, with the notes still queued.
     cx.update(|_, cx| {
-        view.update(cx, |view, cx| view.set_review_layout(Layout::Unified, cx));
+        view.update(cx, |view, cx| {
+            view.set_review_layout(the(view), Layout::Unified, cx)
+        });
     });
     draw(cx);
     assert!(cx.debug_bounds("review-row-3").is_some());
     assert!(cx.debug_bounds("review-left-3").is_none());
     view.read_with(cx, |view, _| {
-        assert_eq!(view.menu.review.as_ref().unwrap().notes.len(), 2);
+        assert_eq!(view.reviews.values().next().unwrap().notes.len(), 2);
     });
 }

@@ -1,4 +1,5 @@
 //! The list of changed files beside the diff.
+use super::the;
 use super::window;
 use crate::review::{
     diff::{Diff, Scope},
@@ -74,15 +75,26 @@ fn files_sit_under_their_folders_and_count_their_lines() {
 #[gpui::test]
 fn clicking_a_file_brings_it_to_the_top_in_either_layout(cx: &mut gpui::TestAppContext) {
     let (view, cx) = window(cx, None);
-    cx.update(|_, cx| view.update(cx, |view, cx| view.seed_review(many_files(), cx)));
+    cx.update(|window, cx| view.update(cx, |view, cx| view.seed_review(many_files(), window, cx)));
     draw(cx);
     draw(cx);
     let top = |cx: &mut gpui::VisualTestContext| {
-        view.read_with(cx, |view, _| view.menu.review.as_ref().unwrap().top_file())
+        view.read_with(cx, |view, _| {
+            view.reviews.values().next().unwrap().top_file()
+        })
     };
     assert_eq!(top(cx), Some(0));
+    // A file whose header already shows still moves to the top.
+    assert!(cx.debug_bounds("review-row-6").is_some(), "src/a.rs shows");
+    let shown = cx.debug_bounds("review-file-1").unwrap();
+    cx.simulate_click(shown.center(), Modifiers::default());
+    draw(cx);
+    draw(cx);
+    assert_eq!(top(cx), Some(1));
     for layout in [Layout::Unified, Layout::Split] {
-        cx.update(|_, cx| view.update(cx, |view, cx| view.set_review_layout(layout, cx)));
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| view.set_review_layout(the(view), layout, cx))
+        });
         draw(cx);
         let file = cx.debug_bounds("review-file-3").unwrap();
         cx.simulate_click(file.center(), Modifiers::default());
@@ -102,10 +114,13 @@ fn clicking_a_file_brings_it_to_the_top_in_either_layout(cx: &mut gpui::TestAppC
 #[gpui::test]
 fn the_file_list_resizes_by_its_right_edge(cx: &mut gpui::TestAppContext) {
     let (view, cx) = window(cx, None);
-    cx.update(|_, cx| view.update(cx, |view, cx| view.seed_review(many_files(), cx)));
+    cx.update(|window, cx| view.update(cx, |view, cx| view.seed_review(many_files(), window, cx)));
     draw(cx);
     let list = cx.debug_bounds("review-files").unwrap();
     assert_eq!(list.size.width, px(240.));
+    // A file's line, and so the current file's band, spans the list.
+    let line = cx.debug_bounds("review-file-0").unwrap();
+    assert!(line.size.width > px(200.), "{line:?}");
     let edge = cx.debug_bounds("review-files-resize").unwrap();
     assert!(
         (edge.right() - list.right()).abs() <= px(1.),

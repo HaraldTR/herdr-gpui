@@ -159,6 +159,8 @@ pub(crate) struct HerdrWindow {
     pub(crate) notes_width: crate::panel_resize::PanelWidth,
     /// The review's list of changed files.
     pub(crate) review_files_width: crate::panel_resize::PanelWidth,
+    /// Each review tab's state, by its tab.
+    pub(crate) reviews: std::collections::HashMap<crate::browser::TabId, crate::review::Review>,
     /// The window's width at its last render, which caps side panels.
     pub(crate) viewport_width: f32,
     pub(crate) usage: crate::usage::Usage,
@@ -610,6 +612,7 @@ impl HerdrWindow {
             deliveries: Default::default(),
             notes_width: crate::panel_resize::NOTES,
             review_files_width: crate::panel_resize::REVIEW_FILES,
+            reviews: Default::default(),
             viewport_width: 0.,
             usage: Default::default(),
             system_load: Default::default(),

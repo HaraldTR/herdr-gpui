@@ -2,6 +2,7 @@
 //! Every line cell starts a note on its own row, so a side-by-side change is
 //! noted on the side the user clicked.
 use super::Layout;
+use crate::browser::TabId;
 use crate::{
     HerdrWindow,
     config::Theme,
@@ -128,24 +129,24 @@ impl HerdrWindow {
     /// can take a note. `id` keeps cells of one list row distinct.
     fn review_cell(
         &self,
+        id: TabId,
         index: usize,
-        id: ElementId,
+        element: ElementId,
         numbers: Numbers,
         line_height: f32,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let theme = &self.theme;
         let cell = div()
-            .id(id)
+            .id(element)
             .h(px(line_height))
             .flex()
             .items_center()
             .whitespace_nowrap()
             .overflow_hidden();
         let Some((review, loaded)) = self
-            .menu
-            .review
-            .as_ref()
+            .reviews
+            .get(&id)
             .and_then(|review| Some((review, review.loaded()?)))
         else {
             return cell;
@@ -175,7 +176,7 @@ impl HerdrWindow {
                     .hover(|cell| cell.bg(rgb(theme.active)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
-                        this.begin_review_note(index, window, cx);
+                        this.begin_review_note(id, index, window, cx);
                     }))
             })
             .child(mark_slot(theme, mark))
@@ -198,11 +199,12 @@ impl HerdrWindow {
     /// The list's rows in `range`, in the review's layout.
     pub(super) fn review_rows(
         &mut self,
+        id: TabId,
         range: std::ops::Range<usize>,
         line_height: f32,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let Some(review) = self.menu.review.as_ref() else {
+        let Some(review) = self.reviews.get(&id) else {
             return Vec::new();
         };
         let Some(loaded) = review.loaded().cloned() else {
@@ -217,6 +219,7 @@ impl HerdrWindow {
                         let index = position;
                         diff.rows.get(index)?;
                         self.review_cell(
+                            id,
                             index,
                             ("review-row", index).into(),
                             Numbers::Both,
@@ -231,6 +234,7 @@ impl HerdrWindow {
                     Layout::Split => match *review.split.get(position)? {
                         SplitRow::Across(index) => self
                             .review_cell(
+                                id,
                                 index,
                                 ("review-row", index).into(),
                                 Numbers::Both,
@@ -249,6 +253,7 @@ impl HerdrWindow {
                                     let half = match index {
                                         Some(index) => this
                                             .review_cell(
+                                                id,
                                                 index,
                                                 (
                                                     if numbers == Numbers::Old {
@@ -304,8 +309,13 @@ impl HerdrWindow {
 
     /// Moves the line between the sides to the pointer at `x`, within the
     /// list laid out at `bounds`; whether it moved.
-    pub(super) fn drag_review_split(&mut self, bounds: Bounds<Pixels>, x: Pixels) -> bool {
-        let Some(review) = self.menu.review.as_mut() else {
+    pub(super) fn drag_review_split(
+        &mut self,
+        id: TabId,
+        bounds: Bounds<Pixels>,
+        x: Pixels,
+    ) -> bool {
+        let Some(review) = self.reviews.get_mut(&id) else {
             return false;
         };
         let width = f32::from(bounds.size.width);
@@ -321,55 +331,61 @@ impl HerdrWindow {
     }
 
     /// Back to even sides.
-    pub(super) fn reset_review_split(&mut self) {
-        if let Some(review) = self.menu.review.as_mut() {
+    pub(super) fn reset_review_split(&mut self, id: TabId) {
+        if let Some(review) = self.reviews.get_mut(&id) {
             review.split_ratio = EVEN_SPLIT;
         }
     }
 
     /// Shows the diff unified or side by side; notes and scroll stay.
-    pub(crate) fn set_review_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
-        if let Some(review) = self.menu.review.as_mut() {
+    pub(crate) fn set_review_layout(&mut self, id: TabId, layout: Layout, cx: &mut Context<Self>) {
+        if let Some(review) = self.reviews.get_mut(&id) {
             review.layout = layout;
         }
         cx.notify();
     }
 
     /// The two layout icons in the header.
-    pub(super) fn render_review_layout(&self, current: Layout, cx: &mut Context<Self>) -> Div {
+    pub(super) fn render_review_layout(
+        &self,
+        id: TabId,
+        current: Layout,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let theme = &self.theme;
         let (foreground, surface) = (theme.foreground, theme.surface);
-        let button = |id: &'static str, icon: &'static str, hint: &'static str, layout: Layout| {
-            let chosen = layout == current;
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .size(px(22.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(crate::config::corners::CONTROL))
-                .cursor_pointer()
-                .when(chosen, |button| button.bg(rgb(theme.active)))
-                .hover(|button| button.bg(rgb(theme.active)))
-                .child(svg().path(icon).size(px(14.)).text_color(rgb(if chosen {
-                    theme.foreground
-                } else {
-                    theme.muted
-                })))
-                .tooltip(move |_, cx| {
-                    cx.new(|_| crate::usage::Hint {
-                        text: hint.into(),
-                        foreground,
-                        surface,
+        let button =
+            |name: &'static str, icon: &'static str, hint: &'static str, layout: Layout| {
+                let chosen = layout == current;
+                div()
+                    .id(name)
+                    .debug_selector(move || name.into())
+                    .size(px(22.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(crate::config::corners::CONTROL))
+                    .cursor_pointer()
+                    .when(chosen, |button| button.bg(rgb(theme.active)))
+                    .hover(|button| button.bg(rgb(theme.active)))
+                    .child(svg().path(icon).size(px(14.)).text_color(rgb(if chosen {
+                        theme.foreground
+                    } else {
+                        theme.muted
+                    })))
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| crate::usage::Hint {
+                            text: hint.into(),
+                            foreground,
+                            surface,
+                        })
+                        .into()
                     })
-                    .into()
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.set_review_layout(layout, cx);
-                }))
-        };
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.set_review_layout(id, layout, cx);
+                    }))
+            };
         div()
             .flex()
             .flex_none()

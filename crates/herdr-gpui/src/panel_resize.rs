@@ -204,14 +204,17 @@ impl crate::HerdrWindow {
         }
     }
 
-    /// Makes a window panel resizable by the edge facing its content, at
-    /// `width`. Its width is saved with the window's chrome when a drag
-    /// ends; the review's and a page's notes share one.
+    /// Makes a window panel resizable by the edge facing its content. Its
+    /// width is saved with the window's chrome when a drag ends; the review's
+    /// and a page's notes share one. `share`, when given, caps the panel at
+    /// that share of the row it sits in, so panels inside a narrow group
+    /// leave their content room.
     pub(crate) fn resizable_panel(
         &self,
         panel: Stateful<Div>,
         id: &'static str,
         drag: PanelDrag,
+        share: Option<f32>,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let Some((width, side)) = self.panel_at(drag) else {
@@ -230,6 +233,7 @@ impl crate::HerdrWindow {
         panel
             .relative()
             .w(px(width))
+            .when_some(share, |panel, share| panel.max_w(relative(share)))
             .on_drag_move(
                 cx.listener(move |this, event: &DragMoveEvent<PanelDrag>, _, cx| {
                     if *event.drag(cx) == drag

@@ -236,6 +236,7 @@ impl HerdrWindow {
             panel,
             "annotations-resize",
             crate::panel_resize::PanelDrag::PageNotes,
+            None,
             cx,
         )
         .into_any_element()

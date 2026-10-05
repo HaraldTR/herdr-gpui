@@ -3,6 +3,7 @@
 //! line counts and the notes queued on it. Clicking one brings its header to
 //! the top of the diff; the file at the top of the diff is marked.
 use super::{Layout, Review};
+use crate::browser::TabId;
 use crate::{
     HerdrWindow,
     config::Theme,
@@ -105,12 +106,15 @@ impl Review {
 
 impl HerdrWindow {
     /// Brings file entry `index`'s header to the top of the diff.
-    pub(super) fn jump_to_review_file(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(review) = self.menu.review.as_ref() else {
+    pub(super) fn jump_to_review_file(&mut self, id: TabId, index: usize, cx: &mut Context<Self>) {
+        let Some(review) = self.reviews.get(&id) else {
             return;
         };
+        // Strict: a header already in view still moves to the top.
         if let Some(position) = review.header_position(index) {
-            review.scroll.scroll_to_item(position, ScrollStrategy::Top);
+            review
+                .scroll
+                .scroll_to_item_strict(position, ScrollStrategy::Top);
         }
         cx.notify();
     }
@@ -118,6 +122,7 @@ impl HerdrWindow {
     /// The file list, resizable by its right edge.
     pub(super) fn render_review_files(
         &self,
+        id: TabId,
         review: &Review,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -150,24 +155,31 @@ impl HerdrWindow {
                     "review-file-list",
                     count,
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                        this.review_file_rows(range, line_height, cx)
+                        this.review_file_rows(id, range, line_height, cx)
                     }),
                 )
                 .track_scroll(&review.files_scroll)
                 .flex_1()
                 .min_h_0(),
             );
-        self.resizable_panel(panel, "review-files-resize", PanelDrag::ReviewFiles, cx)
+        self.resizable_panel(
+            panel,
+            "review-files-resize",
+            PanelDrag::ReviewFiles,
+            Some(super::PANEL_SHARE),
+            cx,
+        )
     }
 
     fn review_file_rows(
         &mut self,
+        id: TabId,
         range: std::ops::Range<usize>,
         line_height: f32,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let theme = &self.theme;
-        let Some(review) = self.menu.review.as_ref() else {
+        let Some(review) = self.reviews.get(&id) else {
             return Vec::new();
         };
         let Some(loaded) = review.loaded().cloned() else {
@@ -182,7 +194,9 @@ impl HerdrWindow {
         }
         range
             .filter_map(|position| {
+                // Each line spans the list, so the current file's band does.
                 let row = div()
+                    .w_full()
                     .h(px(line_height))
                     .px_2()
                     .flex()
@@ -255,7 +269,7 @@ impl HerdrWindow {
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
-                                this.jump_to_review_file(index, cx);
+                                this.jump_to_review_file(id, index, cx);
                             }))
                             .into_any_element()
                     }

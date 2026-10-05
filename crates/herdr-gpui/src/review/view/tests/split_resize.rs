@@ -1,6 +1,6 @@
 //! Moving the line between a side-by-side diff's halves, and drawing the
 //! diff's syntax colours.
-use super::{changes, window};
+use super::{changes, the, window};
 use crate::review::view::Layout;
 use gpui::{Modifiers, MouseButton, MouseDownEvent, point, px};
 
@@ -17,10 +17,10 @@ fn the_line_between_the_sides_drags_and_resets(cx: &mut gpui::TestAppContext) {
         loaded.diff.rows.iter().any(|row| !row.spans.is_empty()),
         "coloured"
     );
-    cx.update(|_, cx| {
+    cx.update(|window, cx| {
         view.update(cx, |view, cx| {
-            view.seed_review(loaded, cx);
-            view.set_review_layout(Layout::Split, cx);
+            view.seed_review(loaded, window, cx);
+            view.set_review_layout(the(view), Layout::Split, cx);
         })
     });
     // The list lays out once before the line knows where to sit.
@@ -71,7 +71,7 @@ fn the_line_between_the_sides_drags_and_resets(cx: &mut gpui::TestAppContext) {
         Modifiers::default(),
     );
     view.read_with(cx, |view, _| {
-        let ratio = view.menu.review.as_ref().unwrap().split_ratio;
+        let ratio = view.reviews.values().next().unwrap().split_ratio;
         assert!((ratio - 0.2).abs() < 0.001, "{ratio}");
     });
 
@@ -87,14 +87,18 @@ fn the_line_between_the_sides_drags_and_resets(cx: &mut gpui::TestAppContext) {
     });
     draw(cx);
     view.read_with(cx, |view, _| {
-        assert_eq!(view.menu.review.as_ref().unwrap().split_ratio, 0.5);
+        assert_eq!(view.reviews.values().next().unwrap().split_ratio, 0.5);
     });
     assert!(
         (cx.debug_bounds("review-left-3").unwrap().size.width - left.size.width).abs() <= px(1.)
     );
 
     // Unified, there is no line to drag.
-    cx.update(|_, cx| view.update(cx, |view, cx| view.set_review_layout(Layout::Unified, cx)));
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.set_review_layout(the(view), Layout::Unified, cx)
+        })
+    });
     draw(cx);
     assert!(cx.debug_bounds("review-split-divider").is_none());
 }

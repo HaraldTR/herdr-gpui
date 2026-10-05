@@ -240,6 +240,7 @@ impl HerdrWindow {
         self.forget_closed_workspaces(cx);
         self.forget_closed_herdr_tabs(cx);
         self.poll_deliveries(cx);
+        self.poll_reviews(cx);
         self.sync_addresses(false, window, cx);
     }
 

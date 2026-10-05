@@ -1,6 +1,12 @@
 #![allow(clippy::unwrap_used)]
 // Not `super::*`: it brings in `gpui::test`, which `#[test]` would then name.
 use super::{Agent, HerdrWindow, Loaded, State, pick_agent};
+use crate::browser::TabId;
+
+/// The window's one review tab.
+fn the(view: &HerdrWindow) -> TabId {
+    *view.reviews.keys().next().unwrap()
+}
 use gpui::Entity;
 use herdr_client::protocol::ClientShellSnapshot;
 use std::{collections::HashMap, sync::Arc};
@@ -77,10 +83,10 @@ fn changes() -> Loaded {
 fn note(view: &Entity<HerdrWindow>, cx: &mut gpui::VisualTestContext, row: usize, comment: &str) {
     cx.update(|window, cx| {
         view.update(cx, |view, cx| {
-            view.begin_review_note(row, window, cx);
-            let input = view.menu.review.as_ref().unwrap().input.clone();
+            view.begin_review_note(the(view), row, window, cx);
+            let input = view.reviews.values().next().unwrap().input.clone();
             input.update(cx, |input, cx| input.set_text_selected(comment, cx));
-            view.add_review_note(window, cx);
+            view.add_review_note(the(view), window, cx);
         });
     });
 }
@@ -95,7 +101,7 @@ fn kept(cx: &mut gpui::VisualTestContext) -> Option<String> {
 #[gpui::test]
 fn notes_on_lines_reach_the_agent_that_made_the_changes(cx: &mut gpui::TestAppContext) {
     let (view, cx) = window(cx, Some("working"));
-    cx.update(|_, cx| view.update(cx, |view, cx| view.seed_review(changes(), cx)));
+    cx.update(|window, cx| view.update(cx, |view, cx| view.seed_review(changes(), window, cx)));
     cx.update(|window, cx| crate::sidebar::layout_tests::full_draw(window, cx).clear(cx));
     // Hunk headers take no notes; an empty note is refused.
     note(&view, cx, 1, "ignored");
@@ -103,7 +109,7 @@ fn notes_on_lines_reach_the_agent_that_made_the_changes(cx: &mut gpui::TestAppCo
     note(&view, cx, 4, "Implement this");
     note(&view, cx, 0, "Add a test");
     view.read_with(cx, |view, _| {
-        let review = view.menu.review.as_ref().unwrap();
+        let review = view.reviews.values().next().unwrap();
         assert_eq!(review.notes.len(), 2);
         assert_eq!(review.marks, HashMap::from([(4, 1), (0, 2)]));
         assert!(review.draft.is_none());
@@ -117,11 +123,11 @@ fn notes_on_lines_reach_the_agent_that_made_the_changes(cx: &mut gpui::TestAppCo
 
     // The agent is working: the notes wait for it, and the queue is
     // emptied at once so Send cannot repeat them.
-    cx.update(|window, cx| view.update(cx, |view, cx| view.send_review(window, cx)));
+    cx.update(|_, cx| view.update(cx, |view, cx| view.send_review(the(view), cx)));
     view.read_with(cx, |view, _| {
         assert_eq!(view.deliveries.len(), 1);
         assert!(view.menu.page.is_none());
-        assert!(view.menu.review.as_ref().unwrap().notes.is_empty());
+        assert!(view.reviews.values().next().unwrap().notes.is_empty());
     });
     cx.update(|_, cx| view.update(cx, |view, cx| view.poll_deliveries(cx)));
     assert_eq!(view.read_with(cx, |view, _| view.deliveries.len()), 1);
@@ -150,9 +156,9 @@ fn notes_on_lines_reach_the_agent_that_made_the_changes(cx: &mut gpui::TestAppCo
 #[gpui::test]
 fn without_an_agent_the_notes_are_copied(cx: &mut gpui::TestAppContext) {
     let (view, cx) = window(cx, None);
-    cx.update(|_, cx| view.update(cx, |view, cx| view.seed_review(changes(), cx)));
+    cx.update(|window, cx| view.update(cx, |view, cx| view.seed_review(changes(), window, cx)));
     note(&view, cx, 3, "Why remove this?");
-    cx.update(|window, cx| view.update(cx, |view, cx| view.send_review(window, cx)));
+    cx.update(|_, cx| view.update(cx, |view, cx| view.send_review(the(view), cx)));
     let copied = cx
         .update(|_, cx| cx.read_from_clipboard())
         .and_then(|item| item.text());
@@ -163,14 +169,14 @@ fn without_an_agent_the_notes_are_copied(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn a_stale_load_never_replaces_a_newer_one(cx: &mut gpui::TestAppContext) {
     let (view, cx) = window(cx, None);
-    cx.update(|_, cx| {
+    cx.update(|window, cx| {
         view.update(cx, |view, cx| {
-            view.seed_review(changes(), cx);
-            view.review_loaded(0, Err(crate::Error::GitWorker));
-            let review = view.menu.review.as_ref().unwrap();
+            view.seed_review(changes(), window, cx);
+            view.review_loaded(the(view), 0, Err(crate::Error::GitWorker));
+            let review = view.reviews.values().next().unwrap();
             assert!(review.loaded().is_some());
-            view.review_loaded(1, Err(crate::Error::GitWorker));
-            let review = view.menu.review.as_ref().unwrap();
+            view.review_loaded(the(view), 1, Err(crate::Error::GitWorker));
+            let review = view.reviews.values().next().unwrap();
             assert!(matches!(review.state, State::Failed(_)));
         });
     });
@@ -206,3 +212,4 @@ mod resize;
 mod scope;
 mod scrollbar;
 mod split_resize;
+mod tab;

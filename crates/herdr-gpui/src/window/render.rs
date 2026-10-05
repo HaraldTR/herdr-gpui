@@ -576,6 +576,15 @@ impl Render for HerdrWindow {
                 (Shown::Terminal, _) if self.shows_parked_terminal(slot.id, cx) => {
                     self.render_parked_terminal(slot, gap, parked_font.clone(), cell_height, cx)
                 }
+                // A review tab is drawn by the app, never a page.
+                (Shown::Page(_), Some(tab))
+                    if tab
+                        .location
+                        .as_ref()
+                        .is_some_and(|location| !location.is_page()) =>
+                {
+                    self.render_review_tab(slot, &tab, gap, cx)
+                }
                 (Shown::Page(_), Some(tab)) => {
                     self.render_browser(slot, &tab, gap, owns_keyboard, cx)
                 }

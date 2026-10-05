@@ -32,6 +32,16 @@ impl HerdrWindow {
             .map(|tab| {
                 let id = tab.id;
                 let (background, text) = self.tab_colors(shown == Some(id), slot.id);
+                // A review tab shows a diff, not a page.
+                let icon = if tab
+                    .location
+                    .as_ref()
+                    .is_some_and(|location| !location.is_page())
+                {
+                    "icons/diff-unified.svg"
+                } else {
+                    "icons/globe.svg"
+                };
                 let tab = div()
                     .id(SharedString::from(format!("browser-tab-{id}")))
                     .debug_selector(move || slot.selector(&format!("browser-tab-{id}")))
@@ -51,7 +61,7 @@ impl HerdrWindow {
                     .text_color(rgb(text))
                     .child(
                         svg()
-                            .path("icons/globe.svg")
+                            .path(icon)
                             .size(px(12.))
                             .flex_none()
                             .text_color(rgb(text)),

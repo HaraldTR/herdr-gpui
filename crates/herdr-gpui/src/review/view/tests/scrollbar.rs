@@ -1,5 +1,5 @@
 //! The diff's scrollbar.
-use super::{changes, window};
+use super::{changes, the, window};
 use crate::review::diff::{Diff, Scope};
 use crate::review::view::Loaded;
 
@@ -22,7 +22,7 @@ fn long() -> Loaded {
 #[gpui::test]
 fn a_long_diff_has_a_thumb_that_drags_it(cx: &mut gpui::TestAppContext) {
     let (view, cx) = window(cx, None);
-    cx.update(|_, cx| view.update(cx, |view, cx| view.seed_review(long(), cx)));
+    cx.update(|window, cx| view.update(cx, |view, cx| view.seed_review(long(), window, cx)));
     // The list lays out once before its handle knows how far it scrolls.
     draw(cx);
     draw(cx);
@@ -38,8 +38,8 @@ fn a_long_diff_has_a_thumb_that_drags_it(cx: &mut gpui::TestAppContext) {
     // Dragging the thumb to the bottom scrolls to the end of the diff.
     let scrolled = cx.update(|_, cx| {
         view.update(cx, |view, _| {
-            view.grab_review_thumb(thumb.top() + gpui::px(1.));
-            view.drag_review_thumb(thumb.top() + gpui::px(5000.))
+            view.grab_review_thumb(the(view), thumb.top() + gpui::px(1.));
+            view.drag_review_thumb(the(view), thumb.top() + gpui::px(5000.))
         })
     });
     assert!(scrolled);
@@ -59,7 +59,7 @@ fn a_long_diff_has_a_thumb_that_drags_it(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn a_diff_that_fits_has_no_thumb(cx: &mut gpui::TestAppContext) {
     let (view, cx) = window(cx, None);
-    cx.update(|_, cx| view.update(cx, |view, cx| view.seed_review(changes(), cx)));
+    cx.update(|window, cx| view.update(cx, |view, cx| view.seed_review(changes(), window, cx)));
     draw(cx);
     draw(cx);
     assert!(cx.debug_bounds("review-row-0").is_some());

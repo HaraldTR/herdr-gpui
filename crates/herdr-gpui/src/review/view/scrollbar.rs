@@ -3,6 +3,7 @@
 //! and travel are the tab strip's thumb math, turned on its side. Side by
 //! side, the line between the halves drags here too, over every row.
 use super::Layout;
+use crate::browser::TabId;
 use crate::{
     HerdrWindow,
     browser::Thumb,
@@ -25,8 +26,8 @@ struct DiffThumb;
 
 impl HerdrWindow {
     /// The thumb as the list last laid out; none while it all fits.
-    fn review_thumb(&self) -> Option<(Thumb, Bounds<Pixels>, f32)> {
-        let review = self.menu.review.as_ref()?;
+    fn review_thumb(&self, id: TabId) -> Option<(Thumb, Bounds<Pixels>, f32)> {
+        let review = self.reviews.get(&id)?;
         let handle = review.scroll.0.borrow().base_handle.clone();
         let bounds = handle.bounds();
         let max = f32::from(handle.max_offset().y);
@@ -38,21 +39,21 @@ impl HerdrWindow {
         Some((thumb, bounds, max))
     }
 
-    pub(super) fn grab_review_thumb(&mut self, y: Pixels) {
-        let Some((thumb, bounds, _)) = self.review_thumb() else {
+    pub(super) fn grab_review_thumb(&mut self, id: TabId, y: Pixels) {
+        let Some((thumb, bounds, _)) = self.review_thumb(id) else {
             return;
         };
-        if let Some(review) = self.menu.review.as_mut() {
+        if let Some(review) = self.reviews.get_mut(&id) {
             review.grab = f32::from(y - bounds.top()) - thumb.left;
         }
     }
 
     /// Moves the thumb with the pointer at `y`; whether the list scrolled.
-    pub(super) fn drag_review_thumb(&mut self, y: Pixels) -> bool {
-        let Some((thumb, bounds, max)) = self.review_thumb() else {
+    pub(super) fn drag_review_thumb(&mut self, id: TabId, y: Pixels) -> bool {
+        let Some((thumb, bounds, max)) = self.review_thumb(id) else {
             return false;
         };
-        let Some(review) = self.menu.review.as_ref() else {
+        let Some(review) = self.reviews.get(&id) else {
             return false;
         };
         let top = f32::from(y - bounds.top()) - review.grab;
@@ -69,12 +70,13 @@ impl HerdrWindow {
     /// `list` with the scrollbar over its right edge.
     pub(super) fn review_scroll_area(
         &self,
+        id: TabId,
         list: impl IntoElement,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let muted = self.theme.muted;
         let color = move |alpha: u32| rgba((muted << 8) | alpha);
-        let thumb = self.review_thumb().map(|(thumb, _, _)| {
+        let thumb = self.review_thumb(id).map(|(thumb, _, _)| {
             div()
                 .id("review-scroll-thumb")
                 .debug_selector(|| "review-scroll-thumb".into())
@@ -91,15 +93,15 @@ impl HerdrWindow {
                 .active(|s| s.bg(color(HELD_ALPHA)))
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
-                        this.grab_review_thumb(event.position.y);
+                        this.grab_review_thumb(id, event.position.y);
                     }),
                 )
                 .on_drag(DiffThumb, |_, _, _, cx| cx.new(|_| EmptyView))
         });
         // The halves split the list's width, as it last laid out.
-        let split = self.menu.review.as_ref().and_then(|review| {
+        let split = self.reviews.get(&id).and_then(|review| {
             let width = review.scroll.0.borrow().base_handle.bounds().size.width;
             (review.layout == Layout::Split && width > px(0.)).then(|| width * review.split_ratio)
         });
@@ -108,8 +110,8 @@ impl HerdrWindow {
                 "review-split-divider",
                 x,
                 PanelDrag::DiffSides,
-                cx.listener(|this, _, _, cx| {
-                    this.reset_review_split();
+                cx.listener(move |this, _, _, cx| {
+                    this.reset_review_split(id);
                     cx.notify();
                 }),
             )
@@ -122,16 +124,16 @@ impl HerdrWindow {
             .flex()
             .flex_col()
             .on_drag_move(
-                cx.listener(|this, event: &DragMoveEvent<DiffThumb>, _, cx| {
-                    if this.drag_review_thumb(event.event.position.y) {
+                cx.listener(move |this, event: &DragMoveEvent<DiffThumb>, _, cx| {
+                    if this.drag_review_thumb(id, event.event.position.y) {
                         cx.notify();
                     }
                 }),
             )
             .on_drag_move(
-                cx.listener(|this, event: &DragMoveEvent<PanelDrag>, _, cx| {
+                cx.listener(move |this, event: &DragMoveEvent<PanelDrag>, _, cx| {
                     if *event.drag(cx) == PanelDrag::DiffSides
-                        && this.drag_review_split(event.bounds, event.event.position.x)
+                        && this.drag_review_split(id, event.bounds, event.event.position.x)
                     {
                         cx.notify();
                     }

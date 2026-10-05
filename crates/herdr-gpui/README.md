@@ -1268,10 +1268,21 @@ them to the agent that opened it, so it can change the page.
 
 ### Reviewing An Agent's Changes
 
-**Review changes...** in the title bar's Git popup shows the focused local
-checkout's changes, with untracked text files as wholly added, and lets you
-send review notes to the agent that made them, like inline comments on a pull
-request.
+**Review changes...** in the title bar's Git popup opens a review tab on the
+focused local checkout's changes, with untracked text files as wholly added,
+and lets you send review notes to the agent that made them, like inline
+comments on a pull request.
+
+- The review is a tab like a browser tab: it sits in the group in use, can be
+  moved to a group of its own beside the terminal, take the whole window, or
+  close, and it is restored with the other tabs. Opening the review again
+  brings back the checkout's tab and reads its changes afresh. Its notes go
+  to the pane of the agent that was focused when it opened.
+- The icons at either end of its header show or hide the list of changed
+  files and the notes. A review narrower than 1,000 px starts with both
+  hidden so the diff has the room; once toggled, the choice holds. Writing a
+  note always shows the notes, and the notes icon counts the queued ones.
+  Shown in a narrow group, each panel keeps to 30% of the review.
 
 - **Uncommitted** shows what is not committed yet (`git diff HEAD`).
   **Branch** shows everything the branch's pull request will hold: the
@@ -1308,13 +1319,14 @@ request.
   note, not a pass over the diff.
 - The notes panel resizes by dragging its left edge, with the sidebar's
   cursor and hover tint, and a double-click on the edge restores its
-  default. Settings' section list resizes the same way by its right edge. The review and an
-  annotated page share the width, which is remembered with the sidebar's.
+  default. Settings' section list resizes the same way by its right edge.
+  The review and an annotated page share the width, which is remembered
+  with the sidebar's.
 
 - Click a line, added, removed or unchanged, or a file name, write what should
   change, and press Enter or **Add note**. Escape drops the note being
-  written; a second Escape closes the review. Noted lines carry the note's
-  number. Unsent notes stay for the next look at the same checkout.
+  written. Noted lines carry the note's number, and unsent notes stay while
+  the tab is open.
 - Notes go to the agent in the focused pane, or else to the first agent Herdr
   reports in the focused workspace; the header names it. **Send to agent**
   turns them into one prompt: the checkout, then for each note the

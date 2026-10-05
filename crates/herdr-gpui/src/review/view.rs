@@ -5,17 +5,23 @@ use super::{
     diff::{FileEntry, Loaded, RowIndex, Scope, SplitRow},
     notes::{self, MAX_NOTES, Note},
 };
+use crate::browser::TabId;
 use crate::{
-    HerdrWindow, fonts::StyledFont, menu::Page, pull_request::Input, search_input::SearchInput,
-    window::Flash,
+    HerdrWindow, fonts::StyledFont, pull_request::Input, search_input::SearchInput, window::Flash,
 };
 use gpui::{prelude::*, *};
 use herdr_client::protocol::ClientShellSnapshot;
 use std::{collections::HashMap, sync::Arc};
 
 mod files;
+mod panels;
 mod rows;
 mod scrollbar;
+mod tab;
+
+/// The share of the review's width the file list and the notes may each
+/// take, so a review in a narrow group keeps most of its room for the diff.
+const PANEL_SHARE: f32 = 0.3;
 
 /// How the diff is drawn.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -55,16 +61,25 @@ pub(crate) fn pick_agent(snapshot: &ClientShellSnapshot) -> Option<Agent> {
                 .iter()
                 .find(|agent| agent.workspace_id == workspace)
         })?;
+    Some(describe(agent))
+}
+
+/// The agent Herdr sees in `pane`, as a review names it.
+pub(crate) fn agent_in(snapshot: &ClientShellSnapshot, pane: &str) -> Option<Agent> {
+    crate::agent_notes::agent(snapshot, pane).map(describe)
+}
+
+fn describe(agent: &herdr_client::protocol::ClientShellAgent) -> Agent {
     let label = [&agent.display_agent, &agent.agent, &agent.name]
         .into_iter()
         .flatten()
         .map(|label| crate::notifications::safe_text(label, 80))
         .find(|label| !label.trim().is_empty())
         .unwrap_or_else(|| "the agent".into());
-    Some(Agent {
+    Agent {
         pane_id: agent.pane_id.clone(),
         label,
-    })
+    }
 }
 
 enum State {
@@ -105,6 +120,14 @@ pub(crate) struct Review {
     grab: f32,
     /// Numbers loads, so only the latest one lands.
     request: u64,
+    /// Holds the keyboard while the tab is used.
+    focus: FocusHandle,
+    /// The file list and the notes: shown or hidden by the user, or `None`
+    /// to follow the review's width.
+    files_shown: Option<bool>,
+    notes_shown: Option<bool>,
+    /// The review's width at its last layout, which decides that.
+    width: std::rc::Rc<std::cell::Cell<f32>>,
 }
 
 impl Review {
@@ -146,70 +169,12 @@ impl Review {
 }
 
 impl HerdrWindow {
-    /// Opens the review of the focused checkout's uncommitted changes. Notes
-    /// already queued for the same checkout stay; its diff is read again.
-    pub(crate) fn open_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(checkout) = self.git.tracked().cloned() else {
-            self.show_flash(Flash::warning("No local checkout to review"), cx);
-            return;
-        };
-        if !self.open_menu(window, cx) {
-            return;
-        }
-        let agent = self.live.snapshot.as_deref().and_then(pick_agent);
-        let endpoint = self.selected_endpoint;
-        let review = match self.menu.review.take() {
-            Some(review) if review.checkout == checkout => review,
-            _ => {
-                let input = cx.new(|cx| {
-                    let mut input = SearchInput::new(cx);
-                    input.set_placeholder("Describe the change\u{2026}", cx);
-                    input
-                });
-                Review {
-                    checkout: checkout.clone(),
-                    scope: Scope::default(),
-                    layout: Layout::default(),
-                    split: Vec::new(),
-                    split_ratio: rows::EVEN_SPLIT,
-                    files: Vec::new(),
-                    file_items: Vec::new(),
-                    files_scroll: UniformListScrollHandle::new(),
-                    index: RowIndex::default(),
-                    agent: None,
-                    endpoint,
-                    state: State::Loading,
-                    draft: None,
-                    notes: Vec::new(),
-                    marks: HashMap::new(),
-                    input,
-                    scroll: UniformListScrollHandle::new(),
-                    grab: 0.,
-                    request: 0,
-                }
-            }
-        };
-        let mut review = Review {
-            agent,
-            endpoint,
-            ..review
-        };
-        review.refresh_marks();
-        let (ui, theme) = (self.config.ui.clone(), self.theme.clone());
-        review
-            .input
-            .update(cx, |input, cx| input.set_appearance(ui, theme, cx));
-        self.menu.review = Some(review);
-        self.menu.page = Some(Page::Review);
-        self.load_review(cx);
-    }
-
     /// Reads the review's changes again in its scope, off the UI thread.
     /// Only the latest read lands.
-    fn load_review(&mut self, cx: &mut Context<Self>) {
+    fn load_review(&mut self, id: TabId, cx: &mut Context<Self>) {
         // The pull request's base, when GitHub reported one for this branch.
         let base_hint = self.git_pull_request().map(|pr| pr.base_ref_name.clone());
-        let Some(review) = self.menu.review.as_mut() else {
+        let Some(review) = self.reviews.get_mut(&id) else {
             return;
         };
         review.request += 1;
@@ -223,7 +188,7 @@ impl HerdrWindow {
             let result = loading.await;
             let plain = result.as_ref().ok().map(|loaded| loaded.diff.clone());
             this.update(cx, |this, cx| {
-                this.review_loaded(request, result);
+                this.review_loaded(id, request, result);
                 cx.notify();
             })
             .ok();
@@ -239,7 +204,7 @@ impl HerdrWindow {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                this.review_coloured(request, coloured);
+                this.review_coloured(id, request, coloured);
                 cx.notify();
             })
             .ok();
@@ -249,58 +214,65 @@ impl HerdrWindow {
     }
 
     /// Shows uncommitted changes or the whole branch; queued notes stay.
-    pub(crate) fn set_review_scope(&mut self, scope: Scope, cx: &mut Context<Self>) {
-        let Some(review) = self.menu.review.as_mut() else {
+    pub(crate) fn set_review_scope(&mut self, id: TabId, scope: Scope, cx: &mut Context<Self>) {
+        let Some(review) = self.reviews.get_mut(&id) else {
             return;
         };
         if review.scope == scope {
             return;
         }
         review.scope = scope;
-        self.load_review(cx);
+        self.load_review(id, cx);
     }
 
-    /// Opens the dialog on `loaded` as if Git had just read it.
+    /// Opens a review tab in workspace `w0` on `loaded`, as if Git had
+    /// just read it, shown in the group in use. Its tab.
     #[cfg(test)]
-    fn seed_review(&mut self, loaded: Loaded, cx: &mut Context<Self>) {
-        let input = cx.new(SearchInput::new);
-        let checkout = Input {
-            checkout: Some("/work/repo".into()),
+    #[allow(clippy::expect_used)]
+    pub(super) fn seed_review(
+        &mut self,
+        loaded: Loaded,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> TabId {
+        let scope = crate::browser::scope(&self.endpoints[self.selected_endpoint]);
+        let checkout = crate::browser::ReviewCheckout {
             repo_key: "/work/repo/.git".into(),
             branch: "feature".into(),
+            checkout: Some("/work/repo".into()),
         };
         let agent = self.live.snapshot.as_deref().and_then(pick_agent);
-        let mut review = Review {
-            checkout,
-            scope: loaded.scope,
-            layout: Layout::default(),
-            split: Vec::new(),
-            split_ratio: rows::EVEN_SPLIT,
-            files: Vec::new(),
-            file_items: Vec::new(),
-            files_scroll: UniformListScrollHandle::new(),
-            index: RowIndex::default(),
+        let origin = agent.as_ref().map(|agent| agent.pane_id.clone());
+        let input_checkout = Input::from(&checkout);
+        let id = crate::browser::Store::update(cx, |store| {
+            store.open(
+                scope,
+                "w0",
+                Some(crate::browser::Location::Review { checkout }),
+                origin,
+            )
+        })
+        .expect("a tab");
+        let input = cx.new(SearchInput::new);
+        let mut review = Review::new(
+            input_checkout,
             agent,
-            endpoint: self.selected_endpoint,
-            state: State::Loading,
-            draft: None,
-            notes: Vec::new(),
-            marks: HashMap::new(),
+            self.selected_endpoint,
             input,
-            scroll: UniformListScrollHandle::new(),
-            grab: 0.,
-            request: 1,
-        };
+            cx.focus_handle(),
+        );
+        review.scope = loaded.scope;
+        review.request = 1;
         review.set_loaded(loaded);
-        self.menu.review = Some(review);
-        self.menu.page = Some(Page::Review);
+        self.reviews.insert(id, review);
+        self.show_browser_tab(id, window, cx);
+        id
     }
 
-    fn review_loaded(&mut self, request: u64, result: crate::Result<Loaded>) {
+    fn review_loaded(&mut self, id: TabId, request: u64, result: crate::Result<Loaded>) {
         let Some(review) = self
-            .menu
-            .review
-            .as_mut()
+            .reviews
+            .get_mut(&id)
             .filter(|review| review.request == request)
         else {
             return;
@@ -317,11 +289,10 @@ impl HerdrWindow {
 
     /// Swaps in the coloured rows of load `request`, if it is still the
     /// one shown. The rows are the same, so notes and markers stand.
-    fn review_coloured(&mut self, request: u64, diff: super::diff::Diff) {
+    fn review_coloured(&mut self, id: TabId, request: u64, diff: super::diff::Diff) {
         let Some(review) = self
-            .menu
-            .review
-            .as_mut()
+            .reviews
+            .get_mut(&id)
             .filter(|review| review.request == request)
         else {
             return;
@@ -343,11 +314,12 @@ impl HerdrWindow {
     /// Starts a note on `row`, typed in the composer.
     pub(crate) fn begin_review_note(
         &mut self,
+        id: TabId,
         row: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(review) = self.menu.review.as_mut() else {
+        let Some(review) = self.reviews.get_mut(&id) else {
             return;
         };
         if review.notes.len() >= MAX_NOTES {
@@ -371,8 +343,13 @@ impl HerdrWindow {
         cx.notify();
     }
 
-    pub(crate) fn add_review_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(review) = self.menu.review.as_mut() else {
+    pub(crate) fn add_review_note(
+        &mut self,
+        id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(review) = self.reviews.get_mut(&id) else {
             return;
         };
         let text = review.input.read(cx).text().to_owned();
@@ -391,20 +368,22 @@ impl HerdrWindow {
         review.draft = None;
         review.refresh_marks();
         review.input.update(cx, |input, cx| input.clear(cx));
-        window.focus(&self.menu.focus, cx);
+        let focus = review.focus.clone();
+        window.focus(&focus, cx);
         cx.notify();
     }
 
-    fn cancel_review_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(review) = self.menu.review.as_mut() {
+    fn cancel_review_note(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(review) = self.reviews.get_mut(&id) {
             review.draft = None;
+            let focus = review.focus.clone();
+            window.focus(&focus, cx);
         }
-        window.focus(&self.menu.focus, cx);
         cx.notify();
     }
 
-    fn remove_review_note(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(review) = self.menu.review.as_mut()
+    fn remove_review_note(&mut self, id: TabId, index: usize, cx: &mut Context<Self>) {
+        if let Some(review) = self.reviews.get_mut(&id)
             && index < review.notes.len()
         {
             review.notes.remove(index);
@@ -414,8 +393,8 @@ impl HerdrWindow {
     }
 
     /// The queued notes as the agent's prompt, with where they go.
-    fn review_prompt(&self) -> Option<(String, Option<String>, bool)> {
-        let review = self.menu.review.as_ref()?;
+    fn review_prompt(&self, id: TabId) -> Option<(String, Option<String>, bool)> {
+        let review = self.reviews.get(&id)?;
         let loaded = review.loaded()?;
         if review.notes.is_empty() {
             return None;
@@ -425,53 +404,31 @@ impl HerdrWindow {
         Some((text, pane, review.endpoint == self.selected_endpoint))
     }
 
-    /// Sends the notes to the agent and closes the review; the queue is
-    /// cleared at once so a second press cannot repeat it.
-    pub(crate) fn send_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((text, pane, here)) = self.review_prompt() else {
+    /// Sends the notes to the agent; the queue is cleared at once so a
+    /// second press cannot repeat it. The tab stays open for the next round.
+    pub(crate) fn send_review(&mut self, id: TabId, cx: &mut Context<Self>) {
+        let Some((text, pane, here)) = self.review_prompt(id) else {
             return;
         };
-        if let Some(review) = self.menu.review.as_mut() {
+        if let Some(review) = self.reviews.get_mut(&id) {
             review.notes.clear();
             review.refresh_marks();
         }
-        self.dismiss_menu(window, cx);
         self.deliver_notes(pane, here, text, cx);
+        cx.notify();
     }
 
-    fn copy_review(&mut self, cx: &mut Context<Self>) {
-        let Some((text, _, _)) = self.review_prompt() else {
+    fn copy_review(&mut self, id: TabId, cx: &mut Context<Self>) {
+        let Some((text, _, _)) = self.review_prompt(id) else {
             return;
         };
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.show_flash(Flash::success("Notes copied"), cx);
     }
 
-    /// Keys the dialog itself takes; the composer handles its own.
-    pub(crate) fn review_key(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if event.keystroke.key.as_str() == "escape" {
-            cx.stop_propagation();
-            if self
-                .menu
-                .review
-                .as_ref()
-                .is_some_and(|review| review.draft.is_some())
-            {
-                self.cancel_review_note(window, cx);
-            } else {
-                self.dismiss_menu(window, cx);
-            }
-        }
-    }
-
-    pub(crate) fn render_review(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_review(&self, id: TabId, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme.clone();
-        let Some(review) = self.menu.review.as_ref() else {
+        let Some(review) = self.reviews.get(&id) else {
             return div().into_any_element();
         };
         let line_height = self.config.terminal.line_height().max(14.);
@@ -487,13 +444,14 @@ impl HerdrWindow {
             .py_2()
             .border_b_1()
             .border_color(rgb(theme.active))
+            .child(self.render_review_panel_toggle(id, review, panels::Panel::Files, cx))
             .child(
                 div()
                     .flex_none()
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("Review changes"),
             )
-            .child(self.render_review_scope(review.scope, cx))
+            .child(self.render_review_scope(id, review.scope, cx))
             .child(
                 div()
                     .debug_selector(|| "review-against".into())
@@ -510,7 +468,8 @@ impl HerdrWindow {
                         },
                     ),
             )
-            .child(self.render_review_layout(review.layout, cx))
+            .child(self.render_review_layout(id, review.layout, cx))
+            .child(self.render_review_panel_toggle(id, review, panels::Panel::Notes, cx))
             .child(
                 div()
                     .debug_selector(|| "review-destination".into())
@@ -550,11 +509,12 @@ impl HerdrWindow {
                     .text_size(px(self.config.terminal.size))
                     .child(
                         self.review_scroll_area(
+                            id,
                             uniform_list(
                                 "review-diff",
                                 count,
                                 cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                                    this.review_rows(range, line_height, cx)
+                                    this.review_rows(id, range, line_height, cx)
                                 }),
                             )
                             .track_scroll(&review.scroll)
@@ -578,32 +538,37 @@ impl HerdrWindow {
         div()
             .id("review")
             .debug_selector(|| "review".into())
+            .relative()
             .size_full()
             .flex()
             .flex_col()
+            .child(panels::measure(review.width.clone()))
             .child(header)
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .when(!review.files.is_empty(), |row| {
-                        row.child(self.render_review_files(review, cx))
-                    })
+                    .when(
+                        !review.files.is_empty() && review.shows(panels::Panel::Files),
+                        |row| row.child(self.render_review_files(id, review, cx)),
+                    )
                     .child(div().flex_1().min_w_0().flex().flex_col().child(body))
-                    .child(self.render_review_notes(review, cx)),
+                    .when(review.shows(panels::Panel::Notes), |row| {
+                        row.child(self.render_review_notes(id, review, cx))
+                    }),
             )
             .into_any_element()
     }
 
     /// The switch between uncommitted changes and the whole branch.
-    fn render_review_scope(&self, current: Scope, cx: &mut Context<Self>) -> Div {
+    fn render_review_scope(&self, id: TabId, current: Scope, cx: &mut Context<Self>) -> Div {
         let theme = &self.theme;
-        let segment = |id: &'static str, label: &'static str, scope: Scope| {
+        let segment = |name: &'static str, label: &'static str, scope: Scope| {
             let chosen = scope == current;
             div()
-                .id(id)
-                .debug_selector(move || id.into())
+                .id(name)
+                .debug_selector(move || name.into())
                 .px_2()
                 .rounded(px(crate::config::corners::CONTROL))
                 .cursor_pointer()
@@ -620,7 +585,7 @@ impl HerdrWindow {
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
-                    this.set_review_scope(scope, cx);
+                    this.set_review_scope(id, scope, cx);
                 }))
         };
         div()
@@ -635,7 +600,12 @@ impl HerdrWindow {
             .child(segment("review-scope-branch", "Branch", Scope::Branch))
     }
 
-    fn render_review_notes(&self, review: &Review, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_review_notes(
+        &self,
+        id: TabId,
+        review: &Review,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let theme = &self.theme;
         let button = |id: &'static str, label: &'static str, primary: bool| {
             let background = if primary {
@@ -673,29 +643,30 @@ impl HerdrWindow {
                     div()
                         .id("review-input")
                         .debug_selector(|| "review-input".into())
-                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                             let composing = this
-                                .menu
-                                .review
-                                .as_ref()
+                                .reviews
+                                .get(&id)
                                 .is_some_and(|review| review.input.read(cx).is_composing());
                             if composing {
                                 return;
                             }
                             match event.keystroke.key.as_str() {
-                                "enter" => this.add_review_note(window, cx),
-                                "escape" => this.cancel_review_note(window, cx),
+                                "enter" => this.add_review_note(id, window, cx),
+                                "escape" => this.cancel_review_note(id, window, cx),
                                 _ => return,
                             }
                             cx.stop_propagation();
                         }))
                         .child(review.input.clone()),
                 )
-                .child(div().flex().child(
-                    button("review-add", "Add note", true).on_click(
-                        cx.listener(|this, _, window, cx| this.add_review_note(window, cx)),
-                    ),
-                ))
+                .child(
+                    div()
+                        .flex()
+                        .child(button("review-add", "Add note", true).on_click(cx.listener(
+                            move |this, _, window, cx| this.add_review_note(id, window, cx),
+                        ))),
+                )
         });
         let rows = review.notes.iter().enumerate().map(|(index, note)| {
             div()
@@ -748,62 +719,62 @@ impl HerdrWindow {
                                 .size(px(12.))
                                 .text_color(rgb(theme.muted)),
                         )
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.remove_review_note(index, cx)),
-                        ),
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.remove_review_note(id, index, cx)
+                        })),
                 )
         });
         let has_notes = !review.notes.is_empty();
         let has_agent = review.agent.is_some();
-        let panel = div()
-            .id("review-notes")
-            .debug_selector(|| "review-notes".into())
-            .flex_none()
-            .h_full()
-            .flex()
-            .flex_col()
-            .border_l_1()
-            .border_color(rgb(theme.active))
-            .children(composer)
-            .child(
-                div()
-                    .id("review-note-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .children(rows)
-                    .when(!has_notes && review.draft.is_none(), |list| {
-                        list.child(
-                            div()
-                                .p_2()
-                                .text_color(rgb(theme.muted))
-                                .child("Click a line or a file name to note what should change."),
-                        )
-                    }),
-            )
-            .when(has_notes, |panel| {
-                panel.child(
+        let panel =
+            div()
+                .id("review-notes")
+                .debug_selector(|| "review-notes".into())
+                .flex_none()
+                .h_full()
+                .flex()
+                .flex_col()
+                .border_l_1()
+                .border_color(rgb(theme.active))
+                .children(composer)
+                .child(
                     div()
-                        .flex()
-                        .gap_1()
-                        .p_2()
-                        .border_t_1()
-                        .border_color(rgb(theme.active))
-                        .when(has_agent, |row| {
-                            row.child(button("review-send", "Send to agent", true).on_click(
-                                cx.listener(|this, _, window, cx| this.send_review(window, cx)),
-                            ))
-                        })
-                        .child(
-                            button("review-copy", "Copy", !has_agent)
-                                .on_click(cx.listener(|this, _, _, cx| this.copy_review(cx))),
-                        ),
+                        .id("review-note-list")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .children(rows)
+                        .when(!has_notes && review.draft.is_none(), |list| {
+                            list.child(
+                                div().p_2().text_color(rgb(theme.muted)).child(
+                                    "Click a line or a file name to note what should change.",
+                                ),
+                            )
+                        }),
                 )
-            });
+                .when(has_notes, |panel| {
+                    panel.child(
+                        div()
+                            .flex()
+                            .gap_1()
+                            .p_2()
+                            .border_t_1()
+                            .border_color(rgb(theme.active))
+                            .when(has_agent, |row| {
+                                row.child(button("review-send", "Send to agent", true).on_click(
+                                    cx.listener(move |this, _, _, cx| this.send_review(id, cx)),
+                                ))
+                            })
+                            .child(button("review-copy", "Copy", !has_agent).on_click(
+                                cx.listener(move |this, _, _, cx| this.copy_review(id, cx)),
+                            )),
+                    )
+                });
         self.resizable_panel(
             panel,
             "review-notes-resize",
             crate::panel_resize::PanelDrag::ReviewNotes,
+            Some(PANEL_SHARE),
             cx,
         )
     }
