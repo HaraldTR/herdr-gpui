@@ -64,7 +64,7 @@ fn startup_appearance_read_timing() -> anyhow::Result<()> {
     for _ in 0..100 {
         let start = std::time::Instant::now();
         let config = Config::load_startup_path(&path, &daemon)?;
-        let theme = config.theme()?;
+        let theme = config.theme(false)?;
         samples.push(start.elapsed());
         assert_eq!(config.layout.mode, LayoutMode::from(Density::Compact));
         assert_eq!(Some(theme), Theme::builtin("Nord"));
@@ -390,7 +390,7 @@ fn refreshes_managed_config_and_loads_absolute_theme() -> anyhow::Result<()> {
             theme: theme_path.to_string_lossy().into_owned(),
             ..Config::default()
         };
-        assert_eq!(config.theme()?.background, 0x112233);
+        assert_eq!(config.theme(false)?.background, 0x112233);
         Ok(())
     })();
     fs::remove_dir_all(directory)?;

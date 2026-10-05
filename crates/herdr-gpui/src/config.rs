@@ -38,6 +38,7 @@ use std::{
     path::{Path, PathBuf},
 };
 pub use theme::Theme;
+pub(crate) use theme::ThemeName;
 pub(crate) use theme::mix;
 
 const DEFAULT_CONFIG: &str = include_str!("../config-gpui.example.toml");
@@ -610,6 +611,7 @@ impl Config {
             if theme.trim().is_empty() {
                 return Err(Error::EmptyTheme);
             }
+            ThemeName::parse(&theme)?;
             config.theme = theme;
         }
         config.confirm_close_tab = settings.confirm_close_tab.unwrap_or(true);

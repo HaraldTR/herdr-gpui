@@ -96,6 +96,7 @@ impl HerdrWindow {
             self.write_preference(save, cx);
             return;
         }
+        let light = crate::app::light_appearance(cx);
         let text_system = cx.text_system().clone();
         self.load_gui_config_with(
             move || {
@@ -105,7 +106,7 @@ impl HerdrWindow {
                 let theme = if config.theme == "Follow Herdr" {
                     Default::default()
                 } else {
-                    config.theme()?
+                    config.theme(light)?
                 };
                 Ok((config, theme))
             },

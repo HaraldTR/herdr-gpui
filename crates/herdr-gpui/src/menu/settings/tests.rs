@@ -92,7 +92,7 @@ fn enabling_system_delivery_does_not_post_the_backlog(cx: &mut gpui::TestAppCont
                 let mut config = Config::default();
                 config.notifications.system = true;
                 config.notifications.delay_seconds = 0;
-                let theme = config.theme()?;
+                let theme = config.theme(false)?;
                 Ok((config, theme))
             },
             cx,
@@ -147,7 +147,7 @@ fn notification_reload_retimes_pending_clears_disabled_and_keeps_failed_settings
                 config.layout.sidebar_gap = 16.;
                 config.layout.mode =
                     crate::config::LayoutMode::from(crate::config::Density::Compact);
-                let theme = config.theme()?;
+                let theme = config.theme(false)?;
                 Ok((config, theme))
             },
             cx,
@@ -204,7 +204,7 @@ fn config_reload_toggles_tab_flags_and_preserves_them_on_failure(cx: &mut gpui::
                         show_agents,
                         ..Default::default()
                     };
-                    let theme = config.theme()?;
+                    let theme = config.theme(false)?;
                     Ok((config, theme))
                 },
                 cx,
@@ -267,7 +267,7 @@ fn config_load_is_coherent_bounded_and_cancellable(cx: &mut gpui::TestAppContext
                     theme: "Nord".into(),
                     ..Default::default()
                 };
-                let theme = config.theme()?;
+                let theme = config.theme(false)?;
                 Ok((config, theme))
             },
             cx,
@@ -278,7 +278,7 @@ fn config_load_is_coherent_bounded_and_cancellable(cx: &mut gpui::TestAppContext
     cx.run_until_parked();
     view.update(cx, |view, cx| {
         assert_eq!(view.config.theme, "Nord");
-        assert_eq!(view.theme, view.config.theme().unwrap());
+        assert_eq!(view.theme, view.config.theme(false).unwrap());
         assert!(view.config_load.is_none());
         assert_eq!(view.config_load_revision, 1);
         view.load_gui_config_with(|| Err(crate::Error::EmptyTheme), cx);
@@ -287,7 +287,7 @@ fn config_load_is_coherent_bounded_and_cancellable(cx: &mut gpui::TestAppContext
     cx.update(|window, cx| {
         view.update(cx, |view, cx| {
             assert_eq!(view.config.theme, "Nord");
-            assert_eq!(view.theme, view.config.theme().unwrap());
+            assert_eq!(view.theme, view.config.theme(false).unwrap());
             assert_eq!(view.config_load_revision, 2);
             assert!(
                 view.local_error

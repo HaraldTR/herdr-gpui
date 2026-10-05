@@ -344,6 +344,7 @@ impl SettingsWindow {
     }
 
     fn apply_window_appearance(&mut self, cx: &mut Context<Self>) {
+        self.follow_system_appearance(cx);
         self.sync_appearance(cx);
         self.drive_theme_intent(cx);
         self.publish_appearance(cx);

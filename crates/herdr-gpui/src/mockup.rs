@@ -140,7 +140,7 @@ pub(crate) fn run(options: MockupOptions) -> std::process::ExitCode {
         Config::default()
     });
     let yours = config
-        .theme()
+        .theme(false)
         .map_err(|error| eprintln!("mockup: using a built-in theme: {error}"))
         .ok();
     let themes = themes(&config, yours);

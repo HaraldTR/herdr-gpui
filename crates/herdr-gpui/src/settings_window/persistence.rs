@@ -154,7 +154,7 @@ impl SettingsWindow {
                     let theme = if config.theme == "Follow Herdr" {
                         shared.theme(light)?.with_contrast(config.contrast)
                     } else {
-                        config.theme()?
+                        config.theme(light)?
                     };
                     (Some(shared), None, theme)
                 }
@@ -162,7 +162,7 @@ impl SettingsWindow {
                 Err(error) => (
                     None,
                     Some(format!("Load shared settings: {error}")),
-                    config.theme()?,
+                    config.theme(light)?,
                 ),
             };
             Ok(Loaded {
