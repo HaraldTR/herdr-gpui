@@ -1926,7 +1926,7 @@ Windows setup) nothing is saved and the window says so.
 - Cmd-Alt-N runs **Open Notification Target**, also available in Terminal and the
   command palette. It uses the visible card's safe click path; stale, targetless,
   queued, or menu-hidden cards do not navigate or change endpoint selection.
-- Cmd-1 through Cmd-9 focuses the corresponding numbered tab in the current
+- Cmd-1 through Cmd-9 focuses the tab at that position in the current
   workspace. Cmd-Alt-Left/Right/Up/Down focuses a pane in that direction;
   Cmd-Alt-] / Cmd-Alt-[ cycles next/previous pane within the current tab.
   Cmd-Shift-Enter toggles focused pane zoom. Cmd-K clears the focused pane's
