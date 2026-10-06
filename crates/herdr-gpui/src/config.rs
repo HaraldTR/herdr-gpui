@@ -266,6 +266,7 @@ impl Default for Config {
             family: family.into(),
             size,
             fallbacks: None,
+            line_height_multiple: None,
         };
         Self {
             theme: "Default".into(),
@@ -568,6 +569,17 @@ impl Config {
             }
             known
         });
+        // Only the terminal grid takes a line height. The other faces size
+        // fixed chrome, so there it is ignored like any other unknown key.
+        unknown_keys.extend(
+            [
+                ("sidebar", &mut settings.sidebar),
+                ("tabs", &mut settings.tabs),
+                ("ui", &mut settings.ui),
+            ]
+            .into_iter()
+            .filter_map(|(name, face)| face.reject_line_height(name)),
+        );
         // Unknown keys are ignored, but a credential pasted into the file is
         // refused so it is noticed and removed rather than left on disk.
         if let Some(name) = ["client_secret", "private_key", "token"]

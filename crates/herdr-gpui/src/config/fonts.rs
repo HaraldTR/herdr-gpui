@@ -12,6 +12,10 @@ pub const FONT_SIZE_RANGE: RangeInclusive<f32> = 8.0..=48.0;
 /// One logical pixel: the smallest step that can move the terminal cell grid.
 pub const FONT_SIZE_STEP: f32 = 1.0;
 
+/// A configured terminal line height. Below 1 rows overlap their neighbors;
+/// past 2 most of every row is blank.
+pub(super) const LINE_HEIGHT_RANGE: RangeInclusive<f32> = 1.0..=2.0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FontFace {
     Sidebar,
@@ -60,9 +64,20 @@ pub(super) struct FontSettings {
     family: Option<String>,
     size: Option<f32>,
     fallback: Option<Vec<String>>,
+    /// Untyped because only the terminal takes it: elsewhere it is discarded
+    /// as unknown, so its type must not fail the whole file first.
+    line_height: Option<toml::Value>,
 }
 
 impl FontSettings {
+    /// Takes `line_height` out of a face that lays out no terminal rows,
+    /// returning the key to report as unknown.
+    pub(super) fn reject_line_height(&mut self, name: &str) -> Option<String> {
+        self.line_height
+            .take()
+            .map(|_| format!("{name}.line_height"))
+    }
+
     /// Merges this face's configured keys over `font`, then validates the result.
     pub(super) fn apply(self, name: &'static str, font: &mut FontConfig) -> Result<()> {
         if let Some(family) = self.family {
@@ -79,6 +94,17 @@ impl FontSettings {
                 return Err(Error::EmptyFontFallback(name));
             }
             font.fallbacks = Some(fallback);
+        }
+        if let Some(line_height) = self.line_height {
+            let line_height = match line_height {
+                toml::Value::Float(value) => value as f32,
+                toml::Value::Integer(value) => value as f32,
+                _ => return Err(Error::InvalidLineHeight(name)),
+            };
+            if !line_height.is_finite() || !LINE_HEIGHT_RANGE.contains(&line_height) {
+                return Err(Error::InvalidLineHeight(name));
+            }
+            font.line_height_multiple = Some(line_height);
         }
         if font.family.trim().is_empty() {
             return Err(Error::EmptyFontFamily(name));
@@ -223,11 +249,18 @@ pub struct FontConfig {
     /// until the config names them or [`Config::resolve_fonts`]
     /// detects them; an empty list opts out of any cascade.
     pub fallbacks: Option<Vec<String>>,
+    /// Line height as a multiple of `size`, so it follows runtime font size
+    /// changes. `None` keeps the default of 20/14.
+    pub line_height_multiple: Option<f32>,
 }
 
 impl FontConfig {
     pub fn line_height(&self) -> f32 {
-        self.size * 20.0 / 14.0
+        match self.line_height_multiple {
+            Some(multiple) => self.size * multiple,
+            // 20 logical pixels at the terminal's default size of 14.
+            None => self.size * 20.0 / 14.0,
+        }
     }
 
     /// The shaping font for this face. Terminal prompts draw powerline
