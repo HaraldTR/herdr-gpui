@@ -611,6 +611,8 @@ impl HerdrWindow {
             panel = panel.child(self.render_about(cx));
         } else if page == Page::AgentSkill {
             panel = panel.child(self.render_agent_skill_offer(cx));
+        } else if page == Page::WorktreeScript {
+            panel = panel.child(self.render_worktree_script(cx));
         } else if page == Page::Install {
             panel = panel
                 .child(div().p(px(8.)).child("Herdr must be installed"))

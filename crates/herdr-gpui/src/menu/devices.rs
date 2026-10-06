@@ -2,6 +2,7 @@
 //! to one device or opens the Add Device dialog. Device scope is presentation
 //! state; connection ownership stays in `endpoint`.
 mod add_device;
+pub(crate) use add_device::enter;
 mod host_menu;
 mod setup;
 mod wsl;

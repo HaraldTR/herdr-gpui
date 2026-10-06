@@ -144,6 +144,7 @@ impl AssetSource for Icons {
                 include_bytes!("../../../assets/icons/teleport-back.svg")
             }
             "icons/refresh.svg" => include_bytes!("../../../assets/icons/refresh.svg"),
+            "icons/play.svg" => include_bytes!("../../../assets/icons/play.svg"),
             "icons/chart.svg" => include_bytes!("../../../assets/icons/chart.svg"),
             "icons/pulse.svg" => include_bytes!("../../../assets/icons/pulse.svg"),
             "icons/lock.svg" => include_bytes!("../../../assets/icons/lock.svg"),
@@ -199,6 +200,7 @@ impl AssetSource for Icons {
             "icons/teleport.svg",
             "icons/teleport-back.svg",
             "icons/refresh.svg",
+            "icons/play.svg",
             "icons/chart.svg",
             "icons/pulse.svg",
             "icons/lock.svg",
@@ -254,7 +256,7 @@ mod tests {
         assert!(Icons.load("unknown.svg").unwrap().is_none());
         assert_eq!(
             Icons.list("icons/").unwrap().len(),
-            39 + AgentIcon::ALL.len() + crate::usage::icon_paths().count()
+            40 + AgentIcon::ALL.len() + crate::usage::icon_paths().count()
         );
     }
 

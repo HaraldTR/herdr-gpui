@@ -5,6 +5,7 @@
 pub(super) mod popover;
 mod render;
 mod requests;
+mod scripts;
 
 use super::{Page, WorkspaceAction, WorkspaceMenuAction, state::Deletion};
 use crate::{HerdrWindow, dialog_input::DialogInput};
@@ -492,6 +493,18 @@ impl HerdrWindow {
         if target.can_create() {
             items.push((Dialog(WorkspaceAction::OpenWorktree), "Open worktree..."));
         }
+        // Whether the checkout defines scripts is only known once its file is
+        // read, so every Git checkout offers them and an absent one says so.
+        if target.worktree.is_some() {
+            use crate::worktree_scripts::ScriptKind;
+            items.push((WorkspaceMenuAction::Script(ScriptKind::Run), "Run script"));
+            if target.can_delete() {
+                items.push((
+                    WorkspaceMenuAction::Script(ScriptKind::Setup),
+                    "Run setup script",
+                ));
+            }
+        }
         // Only a workspace that heads a group of checkouts can fold anything.
         if let Some(key) = target.group_key() {
             items.push(if self.collapsed_repos_for_selection().contains(key) {
@@ -637,15 +650,14 @@ impl HerdrWindow {
                     Method::WorktreeList,
                     serde_json::json!({"workspace_id": target.id, "trust_repository": false}),
                 );
-            self.menu.deletion = Some(Deletion {
-                pending: result.as_ref().ok().cloned(),
-                path: None,
-                force: self.removal.as_ref().is_some_and(|removal| {
+            self.menu.deletion = Some(Deletion::new(
+                result.as_ref().ok().cloned(),
+                self.removal.as_ref().is_some_and(|removal| {
                     removal.force
                         && removal.workspace == target.id
                         && removal.boot_id == target.boot_id
                 }),
-            });
+            ));
             self.menu.error = result.err().map(|error| error.to_string());
         }
         cx.notify();
@@ -681,6 +693,7 @@ impl HerdrWindow {
             WorkspaceMenuAction::ClearTeleported => self.clear_teleport_mark(window, cx),
             WorkspaceMenuAction::Checkpoints => self.open_checkpoints(window, cx),
             WorkspaceMenuAction::FanOut => self.open_fan_out(window, cx),
+            WorkspaceMenuAction::Script(kind) => self.run_workspace_script(kind, window, cx),
         }
     }
 }

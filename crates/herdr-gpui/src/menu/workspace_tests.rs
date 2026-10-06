@@ -1,13 +1,14 @@
 #![allow(clippy::unwrap_used)]
 
 use super::{WorkspaceAction, WorkspaceMenuAction, WorkspaceTarget, state::Deletion};
-use crate::{HerdrWindow, dialog_input::DialogInput, sidebar};
+use crate::{HerdrWindow, dialog_input::DialogInput, sidebar, worktree_scripts::ArchiveCheck};
 use herdr_client::Method;
 
 mod close;
 mod dialog_layout;
 mod naming;
 mod pull_requests;
+mod scripts;
 mod targets;
 mod tiles;
 mod worktree_create;
@@ -72,9 +73,9 @@ pub(crate) fn submit_focus_change(
     }
     if action == WorkspaceAction::DeleteWorktree {
         view.menu.deletion = Some(Deletion {
-            pending: None,
             path: Some("/fixture/checkout".into()),
-            force: false,
+            archive: ArchiveCheck::Read(None),
+            ..Deletion::new(None, false)
         });
     }
     if action == WorkspaceAction::OpenWorktree {

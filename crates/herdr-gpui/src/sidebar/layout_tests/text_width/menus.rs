@@ -117,8 +117,8 @@ pub(super) fn check_pr_menu(view: &Entity<HerdrWindow>, cx: &mut gpui::VisualTes
             assert!(panel.left() >= px(0.) && panel.right() <= px(width));
             assert!(panel.bottom() <= px(600.));
             let open_row = cx.debug_bounds("workspace-menu-Open worktree...").unwrap();
-            // Preserve the content budget apart from the tile grid, the action
-            // row, and the target header.
+            // Preserve the content budget apart from the tile grid, the Open
+            // worktree and Run script rows, and the target header.
             let row_height = cx.update(|_, cx| px(view.read(cx).config.ui.line_height() + 12.));
             let header_height = cx
                 .debug_bounds("workspace-menu-header")
@@ -129,7 +129,7 @@ pub(super) fn check_pr_menu(view: &Entity<HerdrWindow>, cx: &mut gpui::VisualTes
             assert!((open_row.size.height - row_height).abs() <= px(1.));
             let tiles = cx.debug_bounds("workspace-menu-tiles").unwrap().size.height;
             assert!(
-                panel.size.height < px(320.) + row_height + header_height + tiles,
+                panel.size.height < px(320.) + row_height * 2. + header_height + tiles,
                 "PR menu should size to its content: {panel:?}"
             );
             assert!(cx.debug_bounds("workspace-pr").is_some());
