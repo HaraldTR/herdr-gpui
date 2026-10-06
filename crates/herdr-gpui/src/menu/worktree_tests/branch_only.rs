@@ -11,6 +11,9 @@ fn a_branch_only_workspace_still_lists_from_its_directory(cx: &mut gpui::TestApp
             let snapshot = std::sync::Arc::make_mut(view.live.snapshot.as_mut().unwrap());
             snapshot.workspaces = sidebar::layout_tests::snapshot(7).workspaces;
             assert!(snapshot.workspaces[0].worktree.is_none());
+            // The fixture's `/tmp` is not an absolute path on Windows.
+            snapshot.workspaces[0].new_workspace_cwd =
+                std::env::temp_dir().to_string_lossy().into_owned();
             view.live.status = crate::state::ConnectionStatus::Connected;
             view.live.local_daemon_peer = true;
             view.menu.reset();
