@@ -111,14 +111,29 @@ pub(crate) struct MenuState {
 pub(super) struct Deletion {
     pub(super) pending: Option<String>,
     pub(super) path: Option<String>,
+    /// The repository's main checkout, for the archive script's environment.
+    pub(super) root: Option<String>,
     pub(super) force: bool,
+    /// Whether the checkout has an archive script to run first.
+    pub(super) archive: crate::worktree_scripts::ArchiveCheck,
 }
 
 impl Deletion {
+    pub(super) fn new(pending: Option<String>, force: bool) -> Self {
+        Self {
+            pending,
+            path: None,
+            root: None,
+            force,
+            archive: crate::worktree_scripts::ArchiveCheck::Unread,
+        }
+    }
+
     /// Confirming is a single keypress, so the dialog may only submit once the
-    /// daemon has named the checkout and its lookup is no longer in flight.
+    /// daemon has named the checkout, its lookup is no longer in flight, and
+    /// the checkout is known to have an archive script or not.
     pub(super) fn ready(&self) -> bool {
-        self.pending.is_none() && self.path.is_some()
+        self.pending.is_none() && self.path.is_some() && self.archive.settled()
     }
 }
 
@@ -208,6 +223,7 @@ impl MenuState {
                 .and_then(|entry| entry["path"].as_str())
                 .filter(|path| !path.is_empty())
                 .map(str::to_owned);
+            deletion.root = crate::worktree_scripts::main_checkout(result);
             if deletion.path.is_none() {
                 self.error = Some("Daemon did not identify a unique linked checkout. Dismiss and reopen the menu.".into());
             }

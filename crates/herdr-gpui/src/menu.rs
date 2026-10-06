@@ -51,6 +51,7 @@ pub(crate) use {
     worktree_source::WorktreeSource,
 };
 
+pub(crate) use devices::enter as enter_key;
 use page::WorkspaceMenuAction;
 use state::Submission;
 use workspace::WorkspaceTarget;

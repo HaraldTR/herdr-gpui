@@ -669,7 +669,8 @@ impl HerdrWindow {
     }
 }
 
-pub(super) fn enter() -> ClientPaneInputEvent {
+/// The Enter key, which submits a line typed into a pane's shell.
+pub(crate) fn enter() -> ClientPaneInputEvent {
     ClientPaneInputEvent::Key {
         code: ClientKeyCode::Enter,
         modifiers: 0,

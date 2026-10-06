@@ -200,10 +200,10 @@ fn compact_pr_is_the_only_metadata_action(cx: &mut gpui::TestAppContext) {
         window.draw(cx).clear(cx);
     });
     // GPUI retains removed debug selectors; measure the remaining action panel.
-    // Five actions, in the tile grid and the rows below it, and the target
+    // Six actions, in the tile grid and the rows below it, and the target
     // header: no PR section or stale metadata.
     let rows = cx.update(|_, cx| view.read(cx).workspace_menu_actions().len());
-    assert_eq!(rows, 5);
+    assert_eq!(rows, 6);
     let panel = cx.debug_bounds("menu-panel").unwrap().size.height;
     let header = cx
         .debug_bounds("workspace-menu-header")

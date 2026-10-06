@@ -61,6 +61,8 @@ pub(crate) enum Page {
     Checkpoints,
     /// One prompt sent to several agents, and their comparison.
     FanOut,
+    /// Asks whether to trust a repository's worktree script before it runs.
+    WorktreeScript,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +97,8 @@ pub(crate) enum WorkspaceMenuAction {
     Checkpoints,
     /// Send one prompt to several agents, or reopen their comparison.
     FanOut,
+    /// Run one of the repository's worktree scripts in a new tab.
+    Script(crate::worktree_scripts::ScriptKind),
 }
 
 impl WorkspaceMenuAction {
@@ -117,6 +121,8 @@ impl WorkspaceMenuAction {
             Self::ClearTeleported => "icons/x.svg",
             Self::Checkpoints => "icons/refresh.svg",
             Self::FanOut => "icons/fan-out.svg",
+            Self::Script(crate::worktree_scripts::ScriptKind::Setup) => "icons/refresh.svg",
+            Self::Script(_) => "icons/play.svg",
             Self::PullRequest => return None,
         })
     }
