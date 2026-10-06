@@ -39,7 +39,7 @@ fn input(directory: &tempfile::TempDir) -> Input {
     let path = directory.path().canonicalize().unwrap();
     Input {
         checkout: Some(path.to_str().unwrap().to_owned()),
-        repo_key: path.join(".git").to_str().unwrap().to_owned(),
+        repo_key: Some(path.join(".git").to_str().unwrap().to_owned()),
         branch: "feature".into(),
     }
 }

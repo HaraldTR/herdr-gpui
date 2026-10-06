@@ -16,11 +16,11 @@ pub(crate) use {
     lookup::Lookup,
     model::{
         Input, MergeMethod, Origin, Outcome, PullRequest, ReviewDecision, State, clean,
-        repository_input,
+        repository_input, workspace_input,
     },
 };
 
-pub(crate) use fetch::local_repository;
+pub(crate) use fetch::{local_repository, repository_key};
 #[cfg(any(test, all(feature = "integration-test", target_os = "macos")))]
 pub(crate) use model::fixture;
 

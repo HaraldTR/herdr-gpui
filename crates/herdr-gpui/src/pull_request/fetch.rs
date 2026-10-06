@@ -54,12 +54,14 @@ impl Origins {
         deadline: Instant,
         cancelled: &impl Fn() -> bool,
     ) -> crate::Result<(String, String)> {
+        // A remote workspace without daemon metadata never gets this far.
+        let key = input.repo_key.as_deref().ok_or(Error::PrMetadata)?;
         self.0
             .retain(|(_, _, resolved, _)| now.duration_since(*resolved) < ORIGIN_TTL);
         if let Some((.., repository)) = self
             .0
             .iter()
-            .find(|(host, key, ..)| host == target && key == &input.repo_key)
+            .find(|(host, known, ..)| host == target && known == key)
         {
             return Ok(repository.clone());
         }
@@ -68,18 +70,14 @@ impl Origins {
             .ok_or(Error::PrTimeout)?;
         // The daemon's branch is trusted as reported: this client cannot run
         // local Git against the host's checkout to re-verify it.
-        let remote = herdr_client::remote_origin_url(target, &input.repo_key, timeout, cancelled)?
+        let remote = herdr_client::remote_origin_url(target, key, timeout, cancelled)?
             .ok_or(Error::PrOrigin)?;
         let repository = crate::avatars::github_repo(&remote).ok_or(Error::PrOrigin)?;
         if self.0.len() == ORIGIN_LIMIT {
             self.0.remove(0);
         }
-        self.0.push((
-            target.to_owned(),
-            input.repo_key.clone(),
-            now,
-            repository.clone(),
-        ));
+        self.0
+            .push((target.to_owned(), key.to_owned(), now, repository.clone()));
         Ok(repository)
     }
 }
@@ -127,16 +125,13 @@ pub(super) fn fetch_with_backoff(
         Origin::Ssh(target) => {
             let repository =
                 origins.resolve(target, input, Instant::now(), deadline, &cancelled)?;
-            let head = upstream_head(&input.branch, |key| {
+            let key = input.repo_key.as_deref().ok_or(Error::PrMetadata)?;
+            let head = upstream_head(&input.branch, |name| {
                 let timeout = deadline
                     .checked_duration_since(Instant::now())
                     .ok_or(Error::PrTimeout)?;
                 Ok(herdr_client::remote_config_value(
-                    target,
-                    &input.repo_key,
-                    key,
-                    timeout,
-                    &cancelled,
+                    target, key, name, timeout, &cancelled,
                 )?)
             })?;
             (repository, head)
@@ -236,6 +231,34 @@ pub(super) fn remote_host(remote: &str) -> &str {
         .map_or(authority, |(_, host)| host)
 }
 
+/// The Git common directory a lookup reads: the daemon's key, or, for a local
+/// workspace the daemon has no worktree metadata for, the repository Git finds
+/// at the workspace directory.
+pub(crate) fn repository_key(
+    input: &Input,
+    deadline: Instant,
+    cancelled: &impl Fn() -> bool,
+) -> crate::Result<String> {
+    let directory = match (&input.repo_key, &input.checkout) {
+        (Some(key), _) => return Ok(key.clone()),
+        (None, Some(directory)) => directory,
+        (None, None) => return Err(Error::PrMetadata),
+    };
+    if !Path::new(directory).is_absolute() {
+        return Err(Error::PrAbsolutePath);
+    }
+    git(
+        directory,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        deadline,
+        cancelled,
+    )
+    .map_err(|error| match error {
+        Error::PrCheckout => Error::PrWorkspaceRepository,
+        error => error,
+    })
+}
+
 /// Resolve the checkout a daemon workspace names and verify it still is that
 /// repository on that branch. Every local Git operation starts here, so a
 /// renamed branch or a moved worktree cannot be worked on by mistake.
@@ -248,7 +271,10 @@ pub(crate) fn local_checkout(
         .checkout
         .as_ref()
         .is_some_and(|path| !Path::new(path).is_absolute())
-        || !Path::new(&input.repo_key).is_absolute()
+        || input
+            .repo_key
+            .as_ref()
+            .is_some_and(|key| !Path::new(key).is_absolute())
     {
         return Err(Error::PrAbsolutePath);
     }
@@ -258,17 +284,29 @@ pub(crate) fn local_checkout(
     {
         return Err(Error::PrBranch);
     }
-    let checkout = match &input.checkout {
-        Some(path) => path.clone(),
-        None => {
-            // The daemon gives endpoint clients no checkout path. Use Git's own
-            // worktree registry, never pane cwd or the new-workspace policy.
+    let repo_key = repository_key(input, deadline, cancelled)?;
+    let checkout = match (&input.checkout, &input.repo_key) {
+        (Some(path), Some(_)) => path.clone(),
+        // No daemon metadata: the workspace directory may be any folder in the
+        // checkout, so work from its top level. This is the only case a
+        // workspace's own directory is trusted, and it is verified below.
+        (Some(directory), None) => git(
+            directory,
+            &["rev-parse", "--show-toplevel"],
+            deadline,
+            cancelled,
+        )?,
+        (None, _) => {
+            // The daemon gives endpoint clients no checkout path. With its
+            // metadata, use Git's own worktree registry, never pane cwd or the
+            // new-workspace directory; that directory is read only when the
+            // daemon has no metadata at all, and is verified like this one.
             let mut command = Command::new("git");
             command.args([
                 "-c",
                 "core.fsmonitor=false",
                 "--git-dir",
-                &input.repo_key,
+                &repo_key,
                 "worktree",
                 "list",
                 "--porcelain",
@@ -281,7 +319,8 @@ pub(crate) fn local_checkout(
             worktree_checkout(&output, &input.branch)?
         }
     };
-    // A Git registry candidate still must match both repository and live HEAD.
+    // Any candidate, registry or workspace directory, must still match both
+    // the repository and the branch's live HEAD.
     let common = git(
         &checkout,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -291,7 +330,7 @@ pub(crate) fn local_checkout(
     if Path::new(&common)
         .canonicalize()
         .ok()
-        .zip(Path::new(&input.repo_key).canonicalize().ok())
+        .zip(Path::new(&repo_key).canonicalize().ok())
         .is_none_or(|(actual, expected)| actual != expected)
     {
         return Err(Error::PrRepositoryMismatch);
@@ -549,7 +588,7 @@ mod origin_tests {
     fn input(key: &str) -> Input {
         Input {
             checkout: None,
-            repo_key: key.into(),
+            repo_key: Some(key.into()),
             branch: "main".into(),
         }
     }

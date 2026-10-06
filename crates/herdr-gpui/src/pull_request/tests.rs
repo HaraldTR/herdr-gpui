@@ -22,6 +22,7 @@ mod fetch;
 mod lookup;
 mod responses;
 mod upstream;
+mod workspace_directory;
 
 fn response() -> serde_json::Value {
     serde_json::json!([{

@@ -90,7 +90,7 @@ fn a_huge_file_is_listed_while_the_rest_of_the_diff_shows() {
 
     let input = Input {
         checkout: Some(checkout.clone()),
-        repo_key: path.join(".git").to_str().unwrap().to_owned(),
+        repo_key: Some(path.join(".git").to_str().unwrap().to_owned()),
         branch: "main".into(),
     };
     let loaded = load(&input, Scope::Uncommitted, None).unwrap();
