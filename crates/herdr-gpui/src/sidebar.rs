@@ -17,6 +17,7 @@ mod row;
 mod sticky;
 mod tokens;
 mod view;
+mod wash;
 mod workspaces;
 
 #[cfg(test)]

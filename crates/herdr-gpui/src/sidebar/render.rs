@@ -14,7 +14,7 @@ use super::{
     row::{RowIcon, RowLift, RowTree},
     sidebar_width, sticky,
     tokens::{self, SpaceContext},
-    visible_workspace_entries,
+    visible_workspace_entries, wash,
     workspaces::{displayed_workspace_status, workspace_badge, workspace_label},
 };
 use crate::{
@@ -89,6 +89,12 @@ impl HerdrWindow {
             }
             let selected = endpoint_index == self.selected_endpoint;
             let endpoint_id = endpoint.id.clone();
+            let mark = wash::HostMark::resolve(
+                &self.config.sidebar_style,
+                &endpoint.label,
+                selected,
+                theme,
+            );
             if multi {
                 host_rows.push((endpoint_index, space_rows));
                 spaces = spaces.child(self.host_row(endpoint, selected, look, width, false, cx));
@@ -101,6 +107,7 @@ impl HerdrWindow {
                 look,
                 width,
                 nest: if multi { look.nest_indent() } else { 0. },
+                mark,
                 host: (multi && endpoint_id != crate::endpoint::LOCAL)
                     .then_some(endpoint.label.as_str()),
             };

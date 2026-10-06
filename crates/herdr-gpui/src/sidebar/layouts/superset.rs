@@ -61,6 +61,7 @@ fn shell(key: &str, state: RowState, indent: f32, line: Line<'_>, cx: &RowContex
         .py(px(gap))
         .pl(px(cx.look.content_x() + indent))
         .cursor_pointer();
+    let row = cx.mark.apply(row, key, &cx.look);
     parts::mark(
         row,
         state,
@@ -357,6 +358,7 @@ mod tests {
             look: layout::for_mode(LayoutMode::Superset),
             width: 232.,
             nest: 0.,
+            mark: Default::default(),
             host: None,
         };
         let working = AgentStatus::Working;

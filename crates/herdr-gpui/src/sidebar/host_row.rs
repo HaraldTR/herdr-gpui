@@ -9,6 +9,7 @@ use super::{
     line_height,
     row::removing_dot,
     sticky::{self, HostHeader},
+    wash,
 };
 use crate::{HerdrWindow, endpoint::Endpoint};
 use gpui::{prelude::*, *};
@@ -88,6 +89,17 @@ impl HerdrWindow {
             .when(pinned, |row| {
                 row.bg(rgb(theme.sidebar_background()))
                     .block_mouse_except_scroll()
+            })
+            // The host's colour wash sits under its highlight, on the pinned
+            // copy too, so the header keeps its colour while it scrolls.
+            .map(|row| {
+                wash::HostMark::resolve(
+                    &self.config.sidebar_style,
+                    &endpoint.label,
+                    selected,
+                    theme,
+                )
+                .apply(row, &format!("{prefix}host-{endpoint_id}"), &look)
             })
             // Hosts mark selection only; they do not join the rows'
             // hover group.

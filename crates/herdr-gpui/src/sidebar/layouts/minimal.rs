@@ -40,6 +40,7 @@ fn shell(
         .flex()
         .items_center()
         .cursor_pointer()
+        .map(|row| cx.mark.apply(row, key, &look))
         .map(|row| look.mark(row, key, state, cx.theme))
         .child(
             line.into_div()

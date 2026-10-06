@@ -8,7 +8,7 @@ use crate::{
         agents::{agent_place, state_label, status_text},
         cell::{AgentRow, Cell, RowContext, RowData, layout_for},
         layout::SidebarLook,
-        line_height, tokens,
+        line_height, tokens, wash,
     },
 };
 use gpui::{prelude::*, *};
@@ -49,8 +49,15 @@ impl HerdrWindow {
                 theme,
                 look,
                 width,
-                // Agents list under their own heading, not under a host.
+                // Agents list under their own heading, not under a host, but
+                // each carries its host's colour.
                 nest: 0.,
+                mark: wash::HostMark::resolve(
+                    &self.config.sidebar_style,
+                    &endpoint.label,
+                    selected,
+                    theme,
+                ),
                 host: (multi && endpoint.id != crate::endpoint::LOCAL)
                     .then_some(endpoint.label.as_str()),
             };
