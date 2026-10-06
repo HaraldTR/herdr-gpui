@@ -100,7 +100,9 @@ fn plugin_shortcuts_keep_all_actions_and_unusable_bindings_visible(cx: &mut gpui
             "missing {description}"
         );
     }
-    for query in ["ctrl+b c", "cmd+t", "hyper+a", "ctrl+hyper+y"] {
+    // The platform key is labelled `cmd`, `super`, or `win` depending on the OS.
+    let platform = gpui::Keystroke::parse("cmd-t").unwrap().unparse();
+    for query in ["ctrl+b c", &platform, "hyper+a", "ctrl+hyper+y"] {
         search(&view, query, cx);
         assert!(
             cx.debug_bounds("shortcut-Audit review").is_some(),

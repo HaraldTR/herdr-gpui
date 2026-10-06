@@ -102,11 +102,13 @@ fn reserved_and_keymap_keystrokes_never_reach_a_custom_command() {
         "conflicts",
         &["cmd+v", "cmd+a", "prefix+c", "prefix+ctrl+b", "u"],
     )];
+    // GPUI spells the platform key per OS: `cmd`, `super`, or `win`.
+    let platform = |key: &str| keystroke(key).unparse();
     assert_eq!(
         reference(&keymap, &commands),
         [vec![
-            entry("cmd-v", Reach::Shadowed),
-            entry("cmd-a", Reach::Shadowed),
+            (platform("cmd-v"), Reach::Shadowed),
+            (platform("cmd-a"), Reach::Shadowed),
             entry("ctrl-b c", Reach::Shadowed),
             entry("ctrl-b ctrl-b", Reach::Shadowed),
             entry("u", Reach::NeedsModifier),
