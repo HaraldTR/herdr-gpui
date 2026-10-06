@@ -84,8 +84,11 @@ impl HerdrWindow {
         let Some(mismatch) = endpoint.version_mismatch.clone() else {
             return;
         };
-        let host = matches!(endpoint.connection.target, ConnectTarget::Ssh { .. })
-            .then(|| endpoint.label.clone());
+        let host = matches!(
+            endpoint.connection.target,
+            ConnectTarget::Ssh { .. } | ConnectTarget::Wsl { .. }
+        )
+        .then(|| endpoint.label.clone());
         if !self.open_menu(window, cx) {
             return;
         }

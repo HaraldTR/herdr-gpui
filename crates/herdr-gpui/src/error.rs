@@ -430,6 +430,10 @@ pub enum Error {
     ListeningPortsTool,
     #[error("Listening ports cannot be read on this platform.")]
     ListeningPortsUnsupported,
+    /// Probes that open a shell on the host (usage, load, ports, checkpoints)
+    /// have no route into a WSL distribution yet.
+    #[error("This is not available for WSL distributions yet.")]
+    WslHostUnsupported,
     #[error("No free local port for an SSH tunnel.")]
     TunnelPort(#[source] io::Error),
     #[error("Could not start ssh for a tunnel.")]
@@ -571,6 +575,8 @@ pub enum Error {
     EmptyFontFamily(&'static str),
     #[error("{0}.size must be finite and between 8 and 48 logical pixels")]
     InvalidFontSize(&'static str),
+    #[error("{0}.line_height must be a finite number between 1 and 2 times the font size")]
+    InvalidLineHeight(&'static str),
     #[error("{0}.fallback families must not be empty")]
     EmptyFontFallback(&'static str),
     #[error("{0}.fallback must list at most 8 families")]

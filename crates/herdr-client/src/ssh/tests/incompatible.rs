@@ -30,7 +30,7 @@ fn choose(statuses: &[&str]) -> Result<()> {
             }
         }
     });
-    let result = choose_bridge(&mut stream, &AtomicBool::new(false), Instant::now());
+    let result = handshake(&mut stream, &AtomicBool::new(false));
     script.join().unwrap();
     result
 }
@@ -40,11 +40,11 @@ fn an_outdated_remote_install_is_named_instead_of_a_closed_bridge() {
     let error = choose(&[r#"{"version":"0.8.0","endpoint_capabilities":[]}"#]).unwrap_err();
     assert!(matches!(
         &error,
-        Error::SshIncompatible { generation: None, version: Some(version) } if version == "0.8.0"
+        Error::BridgeIncompatible { generation: None, version: Some(version) } if version == "0.8.0"
     ));
     assert_eq!(
         error.to_string(),
-        "Herdr (version 0.8.0) on this SSH host cannot serve this app; run `herdr update` and reconnect"
+        "Herdr (version 0.8.0) on this host cannot serve this app; run `herdr update` and reconnect"
     );
     assert_eq!(
         error.version_mismatch(),

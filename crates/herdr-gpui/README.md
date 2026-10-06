@@ -2165,6 +2165,29 @@ there. Configuration and state
 follow upstream's Windows layout: `%APPDATA%\herdr` and `%LOCALAPPDATA%\herdr`,
 still overridden by `XDG_CONFIG_HOME` / `XDG_STATE_HOME` when they are set.
 
+### WSL distributions
+
+A Herdr daemon inside a WSL distribution is reachable as a device. Choose
+**Add Device…** in the device picker: on Windows it lists the installed
+distributions (`wsl.exe --list --quiet`, without Docker Desktop's own) and,
+for the one you pick, checks Herdr inside it and saves it once a compatible
+copy answers. A stopped server is started on the first connection, as for an
+SSH host. Install Herdr inside the distribution first; this app never installs
+or upgrades it there. Each connection runs Herdr's `remote-client-bridge`
+through `wsl.exe --exec`, so terminals, the sidebar, and the session list work
+as they do for an SSH host. Right-click a distribution's sidebar header to
+remove it, which only forgets it here.
+
+Saved distributions are kept in `gpui-wsl.json` beside upstream's endpoint
+catalog (`%LOCALAPPDATA%\herdr\client`), never in the catalog itself, whose
+strict schema cannot name one. The device you last chose, a distribution
+included, is selected again at startup.
+
+What still runs a shell on the host is not wired into a distribution yet and
+says so: plan usage, CPU and memory, listening ports, agent checkpoints,
+teleport, file transfers, and port forwards. WSL already forwards a
+distribution's `localhost` ports to Windows.
+
 These features are unavailable on Windows and say so rather than failing quietly:
 
 - **Saved SSH hosts.** The bridge gives the `ssh` child a socket pair as its

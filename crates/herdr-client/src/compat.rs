@@ -79,7 +79,7 @@ impl Error {
                     VersionMismatch::DaemonOutdated { server_version }
                 })
             }
-            Self::SshIncompatible {
+            Self::BridgeIncompatible {
                 generation: Some(generation),
                 version,
             } if *generation > ENDPOINT_PROTOCOL_GENERATION => {
@@ -87,7 +87,7 @@ impl Error {
                     server_version: version.clone(),
                 })
             }
-            Self::SshIncompatible { version, .. } => Some(VersionMismatch::DaemonOutdated {
+            Self::BridgeIncompatible { version, .. } => Some(VersionMismatch::DaemonOutdated {
                 server_version: version.clone(),
             }),
             Self::MissingSurfaceInterest { server_version }

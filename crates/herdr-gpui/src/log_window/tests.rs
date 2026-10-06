@@ -1,6 +1,8 @@
 use super::*;
 use core::prelude::v1::test;
 
+mod line_height;
+
 fn records() -> Vec<Arc<Record>> {
     [
         (Level::WARN, "slow paint elapsed_ms=32"),

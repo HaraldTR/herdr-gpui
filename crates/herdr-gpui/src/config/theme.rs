@@ -220,6 +220,7 @@ pub struct Theme {
     pub background: u32,
     pub foreground: u32,
     pub cursor: u32,
+    pub bold: Option<u32>,
     pub surface: u32,
     pub active: u32,
     pub muted: u32,
@@ -252,6 +253,7 @@ impl Default for Theme {
             background: 0x101419,
             foreground: 0xd8dee9,
             cursor: 0xd8dee9,
+            bold: None,
             surface: 0x1c1c22,
             active: 0x2b2933,
             muted: 0x827e91,
@@ -436,6 +438,7 @@ impl Theme {
                     theme.cursor = color(value)?;
                     cursor_set = true;
                 }
+                "bold-color" if value != "bright" => theme.bold = Some(color(value)?),
                 "palette" => {
                     let (index, value) = value
                         .split_once('=')
