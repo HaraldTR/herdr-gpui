@@ -315,7 +315,12 @@ impl HerdrWindow {
                 "Sidebar gap",
                 format!("{} px", self.config.layout.sidebar_gap),
             ))
-            .child(note("Edit [layout] mode and sidebar_gap (0-64 logical pixels) in the local override file below; saved changes reload automatically."));
+            .child(row(
+                "preferences-sidebar-style",
+                "Sidebar style",
+                sidebar_style_summary(&self.config.sidebar_style),
+            ))
+            .child(note("Edit [layout] mode and sidebar_gap (0-64 logical pixels), and [sidebar] indent, row_padding, gap, host_gap, select, and hosts, in the local override file below; saved changes reload automatically."));
         }
         if self.settings.tab == crate::settings_panel::Tab::Font {
             body = body.child(section("FONTS"));
@@ -867,6 +872,37 @@ fn write_chrome(path: &Path, chrome: Chrome) -> crate::Result<()> {
 mod tests;
 
 // A sibling of `tests`: its glob import shadows `#[test]` with GPUI's macro.
+/// One line for the Preferences panel: the spacing keys the file set, the
+/// selection mode, and how many hosts have a colour.
+fn sidebar_style_summary(style: &crate::config::SidebarStyle) -> String {
+    let overrides = style.overrides;
+    let mut parts: Vec<String> = crate::config::SidebarOverrides::BANDS
+        .into_iter()
+        .map(|(key, _)| key)
+        .zip([
+            overrides.indent,
+            overrides.row_padding,
+            overrides.gap,
+            overrides.host_gap,
+        ])
+        .filter_map(|(key, value)| value.map(|value| format!("{key} {value} px")))
+        .collect();
+    parts.push(format!(
+        "select {}",
+        match style.select {
+            crate::config::SelectMode::Row => "row",
+            crate::config::SelectMode::Group => "group",
+            crate::config::SelectMode::GroupDim => "group-dim",
+        }
+    ));
+    match style.hosts.len() {
+        0 => {}
+        1 => parts.push("1 host colour".into()),
+        n => parts.push(format!("{n} host colours")),
+    }
+    parts.join(", ")
+}
+
 #[cfg(test)]
 mod busy_load_tests {
     #[gpui::test]

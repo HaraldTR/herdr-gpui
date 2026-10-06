@@ -189,6 +189,27 @@ project_roots = []
 # family = "DejaVu Sans Mono"
 size = 12
 # fallback = ["Symbols Nerd Font Mono"]
+# Spacing written over the layout chosen above, in logical pixels. Each key
+# left out keeps the layout's own value. The indent is how far each nesting
+# level steps in: workspaces under their host, worktrees under their
+# repository. Bands: indent 0..=48, row_padding 0..=16, gap 0..=32,
+# host_gap 0..=48.
+# indent = 14
+# row_padding = 2
+# gap = 6
+# host_gap = 10
+# What selecting a workspace marks besides its own row: "row" (only the row),
+# "group" (a stronger wash over the whole host group), or "group-dim" (that,
+# and the other hosts' rows dimmed). Hosts without a colour below use the
+# theme's active colour for the wash.
+# select = "row"
+
+# A colour per host, keyed by the host's name in the sidebar, as #rgb or
+# #rrggbb. It washes the host's header, its workspace rows, and its agents'
+# rows faintly, so a long list reads by colour. Names with spaces go in quotes.
+# [sidebar.hosts]
+# Personal = "#3a4a6b"
+# "Mac mini" = "#5a3a3a"
 
 [tabs]
 # Default: "Menlo" on macOS, "Cascadia Mono" on Windows (Consolas when

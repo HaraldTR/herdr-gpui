@@ -609,6 +609,10 @@ pub enum Error {
     TooManyFontFallbacks(&'static str),
     #[error("layout.sidebar_gap must be finite and between 0 and 64 logical pixels")]
     InvalidSidebarGap,
+    #[error("sidebar.{key} must be finite and between 0 and {max} logical pixels")]
+    InvalidSidebarMetric { key: &'static str, max: f32 },
+    #[error("sidebar.hosts.{host:?} must be a #rgb or #rrggbb colour, not {value:?}")]
+    InvalidHostColor { host: String, value: String },
     #[error("theme must be a name, absolute path, or ~/ path")]
     InvalidThemePath,
     #[error("a theme that follows the system must name both sides: light:NAME,dark:NAME")]

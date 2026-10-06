@@ -109,7 +109,7 @@ impl RowLayout for Orca {
             + if tree == RowTree::None {
                 0.
             } else {
-                cx.look.density.padding()
+                cx.look.density.card_indent()
             };
         let width = inner(cx, indent);
         // Children are named by their branch already; repeating it is noise.

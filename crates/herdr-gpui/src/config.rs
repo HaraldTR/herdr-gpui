@@ -13,6 +13,7 @@ mod layout;
 mod notifications;
 pub(crate) mod preferences;
 pub(crate) mod sidebar;
+mod sidebar_style;
 mod theme;
 pub(crate) mod watch;
 
@@ -31,6 +32,7 @@ use serde::Deserialize;
 pub(crate) use sidebar::{
     AgentLayout, AgentToken, Rows, SidebarLayout, SpaceLayout, SpaceToken, TokenStyle,
 };
+pub use sidebar_style::{SelectMode, SidebarOverrides, SidebarStyle};
 use std::{
     collections::BTreeMap,
     env, fs,
@@ -89,6 +91,8 @@ pub struct Config {
     pub clipboard_toast: ClipboardToast,
     pub bell: BellConfig,
     pub layout: Layout,
+    /// Spacing overrides, host colours, and selection marking for the sidebar.
+    pub sidebar_style: SidebarStyle,
     /// Daemon sidebar rows, falling back to defaults when invalid.
     pub sidebar_layout: SidebarLayout,
     pub keybindings: Keymap,
@@ -288,6 +292,7 @@ impl Default for Config {
             clipboard_toast: ClipboardToast::default(),
             bell: BellConfig::default(),
             layout: Layout::default(),
+            sidebar_style: SidebarStyle::default(),
             sidebar_layout: SidebarLayout::default(),
             keybindings: Keymap::default(),
             keybinding_overrides: BTreeMap::new(),
@@ -320,7 +325,7 @@ struct Settings {
     option_as_alt: OptionAsAlt,
     open_links_in: LinkTarget,
     keep_selection_after_copy: Option<bool>,
-    sidebar: FontSettings,
+    sidebar: sidebar_style::SidebarSettings,
     tabs: FontSettings,
     terminal: FontSettings,
     ui: FontSettings,
@@ -573,7 +578,7 @@ impl Config {
         // fixed chrome, so there it is ignored like any other unknown key.
         unknown_keys.extend(
             [
-                ("sidebar", &mut settings.sidebar),
+                ("sidebar", &mut settings.sidebar.font),
                 ("tabs", &mut settings.tabs),
                 ("ui", &mut settings.ui),
             ]
@@ -614,6 +619,7 @@ impl Config {
             return Err(Error::InvalidSidebarGap);
         }
         config.layout = settings.layout;
+        config.sidebar_style = settings.sidebar.style()?;
         config.keybindings =
             Keymap::with_overrides(&settings.keybindings, &settings.pane_keys, &base.keys)?;
         config.keybinding_overrides = settings.keybindings;
@@ -643,7 +649,7 @@ impl Config {
         config.open_links_in = settings.open_links_in;
         config.keep_selection_after_copy = settings.keep_selection_after_copy.unwrap_or(true);
         for (name, font, settings) in [
-            ("sidebar", &mut config.sidebar, settings.sidebar),
+            ("sidebar", &mut config.sidebar, settings.sidebar.font),
             ("tabs", &mut config.tabs, settings.tabs),
             ("terminal", &mut config.terminal, settings.terminal),
             ("ui", &mut config.ui, settings.ui),

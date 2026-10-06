@@ -5,7 +5,7 @@
 use super::{
     CHILD_INDENT, HOST_GAP, LABEL_GAP, ROW_PADDING, STATUS_WIDTH, cell::RowState, row::RowLift,
 };
-use crate::config::{Density, LayoutMode, Style, Theme};
+use crate::config::{Density, LayoutMode, SidebarOverrides, Style, Theme};
 use gpui::{
     Div, InteractiveElement, ParentElement, Styled, div, prelude::FluentBuilder, px, rgb, rgba,
 };
@@ -25,6 +25,9 @@ pub(crate) struct SidebarMetrics {
     pub(crate) child_indent: f32,
     /// How far rows step in under a host header.
     pub(crate) nest: f32,
+    /// How far the card layouts (superset, orca) step a worktree in: their
+    /// own padding, unless an indent is configured.
+    pub(crate) card_indent: f32,
     pub(crate) header_padding: f32,
     pub(crate) host_padding: f32,
     /// Space between a host header's parts: arrow, label, gauges, status.
@@ -67,6 +70,7 @@ impl SidebarMetrics {
             row_padding: 4.,
             child_indent: CHILD_INDENT,
             nest: CHILD_INDENT,
+            card_indent: ROW_PADDING,
             header_padding: 6.,
             host_padding: 8.,
             host_gap: HOST_GAP,
@@ -88,6 +92,7 @@ impl SidebarMetrics {
             row_padding: 0.,
             child_indent: STATUS_WIDTH + gap + 8.,
             nest: STATUS_WIDTH + gap + 8.,
+            card_indent: 8.,
             header_padding: 4.,
             host_padding: 2.,
             host_gap: HOST_GAP,
@@ -107,6 +112,7 @@ impl SidebarMetrics {
             row_padding: 0.,
             child_indent: STATUS_WIDTH + gap + 8.,
             nest: STATUS_WIDTH + gap + 8.,
+            card_indent: 6.,
             header_padding: 2.,
             host_padding: 0.,
             host_gap: HOST_GAP,
@@ -127,6 +133,7 @@ impl SidebarMetrics {
         row_padding: 0.,
         child_indent: 0.,
         nest: 0.,
+        card_indent: 0.,
         header_padding: 0.,
         host_padding: 0.,
         host_gap: HOST_GAP,
@@ -161,6 +168,20 @@ impl SidebarMetrics {
         }
     }
 
+    /// The preset with every key the config file set written over it. The
+    /// indent sets both nesting levels, so a tree keeps one rhythm.
+    pub(crate) fn with(self, overrides: &SidebarOverrides) -> Self {
+        Self {
+            child_indent: overrides.indent.unwrap_or(self.child_indent),
+            nest: overrides.indent.unwrap_or(self.nest),
+            card_indent: overrides.indent.unwrap_or(self.card_indent),
+            row_padding: overrides.row_padding.unwrap_or(self.row_padding),
+            gap: overrides.gap.unwrap_or(self.gap),
+            host_gap: overrides.host_gap.unwrap_or(self.host_gap),
+            ..self
+        }
+    }
+
     pub(super) fn padding(&self) -> f32 {
         self.padding
     }
@@ -169,6 +190,9 @@ impl SidebarMetrics {
     }
     pub(super) fn child_indent(&self) -> f32 {
         self.child_indent
+    }
+    pub(super) fn card_indent(&self) -> f32 {
+        self.card_indent
     }
     pub(super) fn workspace_details(&self) -> bool {
         self.workspace_details
@@ -380,5 +404,12 @@ const LIFT_RADIUS: f32 = 4.;
 pub(super) fn for_mode(mode: LayoutMode) -> SidebarLook {
     SidebarLook {
         density: SidebarMetrics::for_mode(mode),
+    }
+}
+
+/// The look a window's config asks for: its layout with its overrides.
+pub(super) fn for_config(config: &crate::config::Config) -> SidebarLook {
+    SidebarLook {
+        density: SidebarMetrics::for_mode(config.layout.mode).with(&config.sidebar_style.overrides),
     }
 }

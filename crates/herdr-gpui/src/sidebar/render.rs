@@ -35,7 +35,7 @@ impl HerdrWindow {
     ) -> Stateful<Div> {
         let width = sidebar_width(self.sidebar_width, f32::from(window.viewport_size().width));
         let split = self.sidebar_split.unwrap_or(0.5).clamp(0.1, 0.9);
-        let look = layout::for_mode(self.config.layout.mode);
+        let look = layout::for_config(&self.config);
         let rows = layout_for(self.config.layout.mode);
         // The row a workspace menu was opened for keeps looking hovered while
         // the pointer is over the menu.

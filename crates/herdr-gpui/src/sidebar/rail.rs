@@ -101,7 +101,7 @@ impl HerdrWindow {
         let width = SidebarMode::Rail
             .width(None, f32::from(window.viewport_size().width))
             .unwrap_or(0.);
-        let look = layout::for_mode(self.config.layout.mode);
+        let look = layout::for_config(&self.config);
         let font = &self.config.sidebar;
         let theme = &self.theme;
         let hint = Hint::new(theme);

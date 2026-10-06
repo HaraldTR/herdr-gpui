@@ -176,7 +176,7 @@ impl RowLayout for Superset {
             + if tree == RowTree::None {
                 0.
             } else {
-                cx.look.density.padding()
+                cx.look.density.card_indent()
             };
         let pr = badge.as_ref().and_then(|badge| badge.pr.as_ref());
         let dirty = badge.as_ref().is_some_and(|badge| badge.dirty);

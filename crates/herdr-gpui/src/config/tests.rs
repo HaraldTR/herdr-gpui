@@ -13,6 +13,7 @@ mod loading;
 mod notification_settings;
 mod preferences;
 mod sidebar_settings;
+mod sidebar_style;
 mod system_themes;
 mod theme_files;
 mod themes;
