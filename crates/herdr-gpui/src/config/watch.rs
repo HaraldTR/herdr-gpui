@@ -8,7 +8,7 @@ use std::{
     path::Path,
 };
 
-type Fingerprint = Result<u64, io::ErrorKind>;
+pub(crate) type Fingerprint = Result<u64, io::ErrorKind>;
 
 pub(crate) fn fingerprint(path: &Path) -> Fingerprint {
     let read = || -> io::Result<u64> {
