@@ -1,5 +1,7 @@
 use super::*;
 
+mod bold_color;
+
 #[test]
 fn wheel_preserves_fractions_and_resets_on_target_direction_or_gesture_change() {
     let mut wheel = WheelAccumulator::default();
