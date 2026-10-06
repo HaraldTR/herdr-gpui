@@ -2083,8 +2083,16 @@ Windows setup) nothing is saved and the window says so.
   Cmd-, opens Settings; Cmd-/ opens the grouped native shortcut reference.
   Native shortcut labels and keycaps come from the shared `controls::COMMANDS`
   catalog, overridden by the config's `[keybindings]` table, with Cmd-V semantic
-  paste shown separately. Search filters by action,
-  section, or key combination. Preferences, keybinds, theme/palette pickers, and
+  paste shown separately. **Plugin & custom commands** lists the connected
+  daemon's `[[keys.command]]` entries, including plugin actions, with their
+  effective prefix and key combinations. A binding that cannot run says why:
+  a Herdr or GUI shortcut (Cmd-V paste and the Edit menu included) holds it,
+  an earlier command holds it, it lacks a modifier, no usable prefix exists,
+  it is past the eight-shortcut limit, or this client cannot type it (such as
+  Herdr's `hyper`). A command named like a GUI action or an earlier command
+  is numbered, such as "Audit (2)". Commands without bindings show **No shortcut assigned**,
+  and none run or appear while disconnected. Search filters by
+  action, section, or key combination. Preferences, keybinds, theme/palette pickers, and
   close confirmations use themed centered modals and configured UI fonts;
   modal input does not reach the terminal.
 - Ordinary creation shortcuts omit `cwd`, labels, environment overrides, and split ratio: the
