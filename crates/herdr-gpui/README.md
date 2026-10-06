@@ -270,6 +270,14 @@ Homebrew paths are skipped), then waits up to 20 seconds to
 connect without blocking the UI. If Herdr cannot be found, an installation modal
 offers an **Install** button that opens [herdr.dev](https://herdr.dev/); it never
 downloads or runs an installer. After installing, choose Terminal > Reconnect.
+A daemon that refuses the handshake because it is too old, or newer than this
+app supports, opens a notice naming the host, its reported version, and which
+side to update. For an old daemon it shows `herdr update`, which **Copy Command**
+puts on the clipboard; nothing runs it, since updating may stop that host's
+sessions. For a newer daemon, **Check for Updates** opens the app updater. The
+notice appears once per refused endpoint, retries continue with backoff so an
+updated daemon reconnects on its own, and the device list reads "Herdr update
+needed" or "app update needed" until a handshake succeeds.
 **QA > Show herdr non-detected modal** previews the warning without restarting,
 disconnecting, or changing daemon detection. Closing the GUI leaves the daemon
 and its terminals running.
@@ -2075,8 +2083,16 @@ Windows setup) nothing is saved and the window says so.
   Cmd-, opens Settings; Cmd-/ opens the grouped native shortcut reference.
   Native shortcut labels and keycaps come from the shared `controls::COMMANDS`
   catalog, overridden by the config's `[keybindings]` table, with Cmd-V semantic
-  paste shown separately. Search filters by action,
-  section, or key combination. Preferences, keybinds, theme/palette pickers, and
+  paste shown separately. **Plugin & custom commands** lists the connected
+  daemon's `[[keys.command]]` entries, including plugin actions, with their
+  effective prefix and key combinations. A binding that cannot run says why:
+  a Herdr or GUI shortcut (Cmd-V paste and the Edit menu included) holds it,
+  an earlier command holds it, it lacks a modifier, no usable prefix exists,
+  it is past the eight-shortcut limit, or this client cannot type it (such as
+  Herdr's `hyper`). A command named like a GUI action or an earlier command
+  is numbered, such as "Audit (2)". Commands without bindings show **No shortcut assigned**,
+  and none run or appear while disconnected. Search filters by
+  action, section, or key combination. Preferences, keybinds, theme/palette pickers, and
   close confirmations use themed centered modals and configured UI fonts;
   modal input does not reach the terminal.
 - Ordinary creation shortcuts omit `cwd`, labels, environment overrides, and split ratio: the

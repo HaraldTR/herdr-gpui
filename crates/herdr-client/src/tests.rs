@@ -35,6 +35,7 @@ mod host_themes;
 mod session_state;
 mod surface_encoding;
 mod surfaces;
+mod version_mismatch;
 const SNAPSHOT: &str =
     include_str!("../../herdr-protocol/tests/fixtures/endpoint-snapshot-v1.json");
 const WELCOME: &str = include_str!("../../herdr-protocol/tests/fixtures/endpoint-welcome-v1.json");

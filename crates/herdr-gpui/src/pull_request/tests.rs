@@ -19,6 +19,7 @@ use std::{
 mod actions;
 mod cache;
 mod fetch;
+mod fork_branch;
 mod lookup;
 mod responses;
 mod upstream;

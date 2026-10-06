@@ -30,6 +30,8 @@ pub(crate) enum Page {
     Update,
     AppUpdate,
     Install,
+    /// A daemon refused the handshake until one side is updated.
+    VersionMismatch,
     /// The one-time offer to install the agent skill for browser tabs.
     AgentSkill,
     Tab,

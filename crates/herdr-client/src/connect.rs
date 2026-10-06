@@ -2,7 +2,7 @@
 //! the caller's thread; failures arrive as events rather than as a return value.
 
 use crate::{
-    ConnectTarget, Result, catalog,
+    ConnectTarget, Error, Result, catalog,
     discovery::session_socket,
     event::{ClientEvent, deliver},
     handle::{Client, ClientHandle, HandleInner},
@@ -109,6 +109,9 @@ pub fn connect_with_connector(
                 tracing::info!("connection ended");
             }
             if !worker_stop.load(Ordering::Acquire) {
+                if let Some(mismatch) = result.as_ref().err().and_then(Error::version_mismatch) {
+                    let _ = deliver(&tx, ClientEvent::VersionMismatch(mismatch), &worker_stop);
+                }
                 let reason = result
                     .err()
                     .map(|e| {

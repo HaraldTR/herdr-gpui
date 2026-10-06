@@ -5,7 +5,7 @@ use super::{
     state::ConnectionStatus,
 };
 use gpui::Context;
-use herdr_client::{ClientHandle, ConnectOptions, ConnectTarget};
+use herdr_client::{ClientHandle, ConnectOptions, ConnectTarget, VersionMismatch};
 use std::{
     collections::HashSet,
     sync::{
@@ -143,6 +143,9 @@ pub(super) struct Endpoint {
     pub(crate) toasts: crate::notifications::Toasts,
     /// Derived from `live.snapshot`; refreshed by `sync_live` whenever `live` changes.
     pub(crate) config_diagnostic: crate::config_diagnostic::ConfigDiagnostic,
+    /// The last refused handshake's update advice. Unlike `live`, it survives
+    /// the retries that reset the bridge, until a handshake is accepted.
+    pub(crate) version_mismatch: Option<VersionMismatch>,
     retry_at: Instant,
     attempts: u32,
     online_since: Option<Instant>,
@@ -193,6 +196,7 @@ impl Endpoint {
             generation: 0,
             toasts: Default::default(),
             config_diagnostic: Default::default(),
+            version_mismatch: None,
             retry_at: Instant::now(),
             attempts: 0,
             online_since: None,
@@ -238,6 +242,7 @@ impl Endpoint {
         self.connection = ConnectionBridge::new(target);
         self.detached = false;
         self.attempts = 0;
+        self.version_mismatch = None;
         // The replacement transport has produced no state of its own yet.
         self.live = LiveState::default();
         self.sync_live();
@@ -275,6 +280,11 @@ impl Endpoint {
                 self.toasts.entries.clear();
             }
             self.toasts.receive(state.notifications.drain(..));
+            if state.version_mismatch.is_some() {
+                self.version_mismatch = state.version_mismatch.clone();
+            } else if state.status.is_connected() {
+                self.version_mismatch = None;
+            }
             self.live = state;
             self.sync_live();
         }
@@ -313,6 +323,11 @@ impl Endpoint {
             "detached"
         } else if self.live.status.is_connected() {
             "online"
+        } else if let Some(mismatch) = &self.version_mismatch {
+            match mismatch {
+                VersionMismatch::DaemonOutdated { .. } => "Herdr update needed",
+                VersionMismatch::ClientOutdated { .. } => "app update needed",
+            }
         } else if self.live.error.is_some() {
             "reconnecting"
         } else {
@@ -372,6 +387,7 @@ impl HerdrWindow {
             return;
         }
         self.install_warning_shown = false;
+        self.version_notice_shown = false;
         self.endpoints[index].attempts = 0;
         self.endpoints[index].connect(self.options, index == 0);
         self.reset_selected();
