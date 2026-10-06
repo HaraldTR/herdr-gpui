@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 mod processes;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[derive(Clone)]
 struct Target {
@@ -322,21 +322,14 @@ impl HerdrWindow {
                 cx.notify();
             }
             Action::Close => {
-                self.menu.close = self
+                // Keep the original endpoint fence, rather than reopening the menu.
+                if let Some(close) = self
                     .live
                     .snapshot
                     .as_ref()
-                    .and_then(|s| CloseConfirmation::capture_pane(s, &target.pane));
-                if self.menu.close.is_some() {
-                    // Keep the original endpoint fence, rather than reopening the menu.
-                    self.menu.page = Some(Page::ConfirmClose);
-                    if self.config.confirm_close_pane {
-                        cx.notify();
-                    } else {
-                        // As from the keyboard: close at once, and a refusal
-                        // stays visible in the dialog.
-                        self.confirm_close(window, cx);
-                    }
+                    .and_then(|s| CloseConfirmation::capture_pane(s, &target.pane))
+                {
+                    self.present_close(close, window, cx);
                 }
             }
             Action::Processes => self.open_pane_processes(cx),
