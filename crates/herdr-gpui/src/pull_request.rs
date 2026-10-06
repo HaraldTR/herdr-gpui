@@ -25,7 +25,7 @@ pub(crate) use fetch::local_repository;
 pub(crate) use model::fixture;
 
 use fetch::{Origins, fetch_with_backoff};
-use parse::parse_graphql;
+use parse::{parse_graphql, parse_numbered};
 
 /// Absence is a successful lookup with no PR, not an error.
 type Result = crate::Result<Option<PullRequest>>;
