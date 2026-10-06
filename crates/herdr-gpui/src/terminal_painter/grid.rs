@@ -1,7 +1,6 @@
 //! Cell-grid geometry shared by every rectangle and path the painter draws on
 //! the grid, so neighboring primitives meet on the same device pixel.
-use crate::config::Theme;
-use crate::terminal::cell_colors;
+use super::graphics::CellSeparator;
 use gpui::{Bounds, Pixels, Point, Size, Window, size};
 use herdr_client::protocol::FrameData;
 
@@ -23,24 +22,21 @@ pub(super) fn background_extent(
     )
 }
 
-/// The remainder below the grid continues the last row only when that row is
-/// one background color, as a full-screen app's usually is. A mixed row, such
-/// as a colored prompt, would grow segments taller than their separator caps.
-pub(super) fn last_row_is_uniform(frame: &FrameData, theme: &Theme) -> bool {
+/// The remainder below the grid continues the last row's backgrounds, as a
+/// full-screen app expects, unless that row holds a prompt separator: its cap
+/// stays cell-high, so the colors beside it would show as strips beneath it.
+pub(super) fn last_row_has_separator(frame: &FrameData) -> bool {
     let Some(last) = usize::from(frame.height).checked_sub(1) else {
         return false;
     };
     let width = usize::from(frame.width);
     let start = last * width;
-    let mut colors = frame
+    frame
         .cells
         .get(start..(start + width).min(frame.cells.len()))
         .unwrap_or_default()
         .iter()
-        .map(|cell| cell_colors(cell, theme).1);
-    colors
-        .next()
-        .is_some_and(|first| colors.all(|color| color == first))
+        .any(|cell| CellSeparator::from_symbol(&cell.symbol).is_some())
 }
 
 /// Snaps a rectangle's absolute grid corners before `Bounds` forms its size.

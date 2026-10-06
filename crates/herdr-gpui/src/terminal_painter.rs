@@ -8,7 +8,7 @@ use self::area::whole;
 pub(crate) use self::area::{Layer, Part, Span, cell_ranges, clip, covers};
 use self::glyphs::GlyphCache;
 use self::graphics::{CellSeparator, Graphic};
-use self::grid::{background_extent, grid_corners, grid_rect, last_row_is_uniform};
+use self::grid::{background_extent, grid_corners, grid_rect, last_row_has_separator};
 use self::images::{ImageCache, ImageGeometry, below_text};
 pub(crate) use self::images::{ImageTarget, PlacedImages};
 use crate::config::Theme;
@@ -490,7 +490,7 @@ impl TerminalPainter {
             )
         });
         let extend_last_row =
-            background.height > grid.size.height && last_row_is_uniform(frame, &self.theme);
+            background.height > grid.size.height && !last_row_has_separator(frame);
         let whole_area;
         let area = match part {
             Some(part) => part.area,

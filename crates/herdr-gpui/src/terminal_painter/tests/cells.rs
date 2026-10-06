@@ -28,12 +28,9 @@ fn link_underlines_stay_inside_the_frame() {
 }
 
 #[gpui::test]
-fn edge_backgrounds_reach_the_canvas_without_stretching_popups_or_mixed_last_rows(
-    cx: &mut TestAppContext,
-) {
+fn edge_backgrounds_reach_the_canvas_without_stretching_popups_or_prompts(cx: &mut TestAppContext) {
     let (_, cx) = cx.add_window_view(|_, _| Empty);
-    for (extend, uniform) in [(false, false), (true, false), (false, true), (true, true)] {
-        let last = if uniform { 0xabcdef } else { 0xfedcba };
+    for (extend, prompt) in [(false, false), (true, false), (false, true), (true, true)] {
         cx.draw(Point::default(), size(px(100.), px(100.)), |_, _| {
             canvas(
                 |_, _, _| (),
@@ -41,11 +38,16 @@ fn edge_backgrounds_reach_the_canvas_without_stretching_popups_or_mixed_last_row
                     let frame = FrameData {
                         width: 2,
                         height: 2,
-                        cells: [0x123456, 0x654321, 0xabcdef, last]
+                        cells: [0x123456, 0x654321, 0xabcdef, 0xfedcba]
                             .into_iter()
-                            .map(|bg| CellData {
+                            .enumerate()
+                            .map(|(index, bg)| CellData {
                                 bg: 0x02000000 | bg,
-                                ..cell(" ")
+                                ..cell(if prompt && index == 3 {
+                                    "\u{e0b0}"
+                                } else {
+                                    " "
+                                })
                             })
                             .collect(),
                         cursor: None,
@@ -74,17 +76,14 @@ fn edge_backgrounds_reach_the_canvas_without_stretching_popups_or_mixed_last_row
         cx.update(|window, _| {
             let quads = window.painted_quads();
             let right = if extend { 13. } else { 10. };
-            let mut expected = vec![
+            // A separator cap stays cell-high, so its row does not continue below.
+            let bottom = if extend && !prompt { 27. } else { 20. };
+            let expected = [
                 (17., 23., 10., 20., 0x123456),
                 (27., 23., right, 20., 0x654321),
+                (17., 43., 10., bottom, 0xabcdef),
+                (27., 43., right, bottom, 0xfedcba),
             ];
-            // Only a one-color last row, painted as one span, continues into the
-            // remainder below; a mixed row stays cell-high.
-            expected.extend(if uniform {
-                vec![(17., 43., 10. + right, if extend { 27. } else { 20. }, last)]
-            } else {
-                vec![(17., 43., 10., 20., 0xabcdef), (27., 43., right, 20., last)]
-            });
             assert_eq!(quads.len(), expected.len());
             for (x, y, width, height, color) in expected {
                 let bounds = Bounds::new(point(px(x), px(y)), size(px(width), px(height)))
@@ -93,7 +92,7 @@ fn edge_backgrounds_reach_the_canvas_without_stretching_popups_or_mixed_last_row
                     quads
                         .iter()
                         .any(|quad| quad.bounds == bounds && quad.background == rgb(color).into()),
-                    "extend={extend} uniform={uniform} {bounds:?}"
+                    "extend={extend} prompt={prompt} {bounds:?}"
                 );
             }
         });

@@ -20,29 +20,25 @@ fn row(colors: &[u32], modifier: u16) -> FrameData {
 }
 
 #[test]
-fn only_a_one_color_last_row_continues_below_the_grid() {
-    let theme = Theme::default();
-    assert!(last_row_is_uniform(&row(&[0xabcdef; 4], 0), &theme));
-    // A prompt: colored segments, then the default background.
-    let mut prompt = row(&[0xd79921, 0xd79921, 0x689d6a, 0], 0);
-    prompt.cells[3].bg = 0;
-    assert!(!last_row_is_uniform(&prompt, &theme));
-    // Resolved colors decide: a reversed cell shows its foreground behind it.
-    let mut reversed = row(&[0x123456, 0x654321], 0);
-    reversed.cells[1].fg = 0x0212_3456;
-    reversed.cells[1].modifier = REVERSED;
-    assert!(last_row_is_uniform(&reversed, &theme));
+fn only_a_last_row_without_separators_continues_below_the_grid() {
+    // A full-screen app's status line, whatever its colors.
+    assert!(!last_row_has_separator(&row(&[0x111111, 0x222222, 0], 0)));
+    let mut prompt = row(&[0xd79921, 0x689d6a, 0], 0);
+    prompt.cells[1].symbol = "\u{e0b4}".into();
+    assert!(last_row_has_separator(&prompt));
     // Only the last row matters.
-    let mut two_rows = row(&[0x111111, 0x222222, 0x333333, 0x333333], 0);
-    two_rows.width = 2;
-    two_rows.height = 2;
-    assert!(last_row_is_uniform(&two_rows, &theme));
+    let mut two_rows = row(&[0, 0, 0, 0], 0);
+    (two_rows.width, two_rows.height) = (2, 2);
+    two_rows.cells[0].symbol = "\u{e0b0}".into();
+    assert!(!last_row_has_separator(&two_rows));
+    two_rows.cells[3].symbol = "\u{e0b6}".into();
+    assert!(last_row_has_separator(&two_rows));
     let empty = FrameData {
         height: 0,
         cells: vec![],
         ..row(&[0], 0)
     };
-    assert!(!last_row_is_uniform(&empty, &theme));
+    assert!(!last_row_has_separator(&empty));
 }
 
 /// Paints one row at a fractional cell width where rebuilding a right edge as
