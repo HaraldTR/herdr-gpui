@@ -28,7 +28,7 @@ fn notice_names_the_side_to_update_and_where() {
     };
     assert_eq!(
         remote.body(),
-        "The Herdr server on build box is too old for this app. Run this command on build box; the app reconnects once the updated server is running."
+        "The Herdr server on build box did not answer this app's handshake. This app needs Herdr 0.9.0 or newer. Run this command on build box; the app reconnects once the updated server is running."
     );
 
     let newer = VersionNotice {

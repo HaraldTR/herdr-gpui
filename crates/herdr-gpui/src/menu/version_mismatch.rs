@@ -5,7 +5,7 @@
 use super::Page;
 use crate::{HerdrWindow, fonts::StyledFont, notifications::safe_text, window::Flash};
 use gpui::{prelude::*, *};
-use herdr_client::{ConnectTarget, VersionMismatch};
+use herdr_client::{ConnectTarget, MIN_HERDR_VERSION, VersionMismatch};
 
 pub(crate) const UPDATE_COMMAND: &str = "herdr update";
 
@@ -31,18 +31,28 @@ impl Notice {
             Some(host) => safe_text(host, 64),
             None => "this device".into(),
         };
-        let server = match self.mismatch.server_version() {
+        let version = self.mismatch.server_version();
+        let server = match version {
             Some(version) => format!("The Herdr server on {place} (version {version})"),
             None => format!("The Herdr server on {place}"),
         };
-        match (&self.mismatch, &self.host) {
-            (VersionMismatch::DaemonOutdated { .. }, None) => format!(
-                "{server} is too old for this app. Run this command in a terminal; the app reconnects once the updated server is running."
+        // Releases before the endpoint protocol report no version to this
+        // app, so only the requirement can be stated, not their age.
+        let problem = match version {
+            Some(_) => format!("{server} is too old for this app."),
+            None => format!(
+                "{server} did not answer this app's handshake. This app needs Herdr {MIN_HERDR_VERSION} or newer."
             ),
-            (VersionMismatch::DaemonOutdated { .. }, Some(_)) => format!(
-                "{server} is too old for this app. Run this command on {place}; the app reconnects once the updated server is running."
+        };
+        let wherever = match &self.host {
+            Some(_) => format!("on {place}"),
+            None => "in a terminal".into(),
+        };
+        match &self.mismatch {
+            VersionMismatch::DaemonOutdated { .. } => format!(
+                "{problem} Run this command {wherever}; the app reconnects once the updated server is running."
             ),
-            (VersionMismatch::ClientOutdated { .. }, _) => {
+            VersionMismatch::ClientOutdated { .. } => {
                 format!("{server} is newer than this app supports. Update this app to connect.")
             }
         }

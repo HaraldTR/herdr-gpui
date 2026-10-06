@@ -315,7 +315,16 @@ pub(crate) fn run_connection(
         if !commands.wait(&stream, timeout)? {
             continue;
         }
-        let Some(message) = reader.poll_batch(&mut stream)? else {
+        let message = match reader.poll_batch(&mut stream) {
+            // Daemons before the endpoint protocol cannot decode the hello and
+            // close without a word. SSH discovery vets the remote binary first,
+            // so only a local close this early is read as an outdated daemon.
+            Err(Error::SocketClosed) if session.welcome.is_none() && !remote => {
+                return Err(Error::ClosedBeforeWelcome);
+            }
+            result => result?,
+        };
+        let Some(message) = message else {
             continue;
         };
         session.handle_message(message, |event| deliver(tx, event, stop))?;

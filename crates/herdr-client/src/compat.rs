@@ -4,6 +4,9 @@
 use crate::Error;
 use herdr_protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION;
 
+/// The first Herdr release with the endpoint protocol this client speaks.
+pub const MIN_HERDR_VERSION: &str = "0.9.0";
+
 /// Daemon version text is untrusted; keep only a short, printable label.
 const MAX_VERSION_CHARS: usize = 64;
 
@@ -60,9 +63,11 @@ impl Error {
     /// rather than by retrying. Only handshake failures qualify.
     pub fn version_mismatch(&self) -> Option<VersionMismatch> {
         match self {
-            Self::LegacyDaemon => Some(VersionMismatch::DaemonOutdated {
-                server_version: None,
-            }),
+            Self::LegacyDaemon | Self::ClosedBeforeWelcome => {
+                Some(VersionMismatch::DaemonOutdated {
+                    server_version: None,
+                })
+            }
             Self::EndpointGeneration {
                 generation,
                 server_version,

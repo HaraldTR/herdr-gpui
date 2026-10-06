@@ -270,8 +270,10 @@ Disconnected { reason: String }
 ```
 
 `VersionMismatch` precedes the `Disconnected` of a connection refused because one
-side must be updated: `DaemonOutdated` for a daemon that answers the hello with
-a pre-endpoint welcome, reports an older generation, lacks a required
+side must be updated: `DaemonOutdated` for a local daemon that closes after the
+hello without any welcome (as releases before `MIN_HERDR_VERSION`, 0.9.0, do
+when they cannot decode it), one that answers with a pre-endpoint welcome,
+reports an older generation, or lacks a required
 capability, or, over SSH, has no installed Herdr able to serve this client;
 `ClientOutdated` for a newer generation. Each carries the daemon's reported
 version, stripped of controls and capped at 64 characters, when it gave one.

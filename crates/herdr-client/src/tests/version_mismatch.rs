@@ -174,3 +174,45 @@ fn connection_reports_the_mismatch_before_disconnecting() {
     );
     drop(daemon.join().unwrap());
 }
+
+/// Releases before 0.9.0 cannot decode the endpoint hello and close without
+/// any reply, as Herdr 0.7.5 and 0.8.2 were observed to do.
+fn closed_after_hello(remote: bool, welcome_first: bool) -> Error {
+    let (client, mut server, worker) = test_client_mode(true, remote);
+    receive(&mut server);
+    if welcome_first {
+        send(&mut server, welcome_with(|_| {}));
+    }
+    drop(server);
+    let error = worker.join().unwrap().unwrap_err();
+    drop(client);
+    error
+}
+
+#[test]
+fn a_local_daemon_closing_before_any_welcome_is_outdated() {
+    let error = closed_after_hello(false, false);
+    assert!(matches!(error, Error::ClosedBeforeWelcome), "{error}");
+    assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    assert_eq!(
+        error.version_mismatch(),
+        Some(VersionMismatch::DaemonOutdated {
+            server_version: None
+        })
+    );
+    assert!(error.to_string().contains("older than 0.9.0"), "{error}");
+}
+
+#[test]
+fn closes_after_a_welcome_or_over_ssh_stay_plain_disconnects() {
+    // SSH discovery vets the remote binary, so an early close there is a
+    // transport failure, and a daemon that answered is not outdated.
+    for (remote, welcome_first) in [(true, false), (false, true)] {
+        let error = closed_after_hello(remote, welcome_first);
+        assert!(
+            matches!(error, Error::SocketClosed),
+            "{remote} {welcome_first}: {error}"
+        );
+        assert_eq!(error.version_mismatch(), None);
+    }
+}
