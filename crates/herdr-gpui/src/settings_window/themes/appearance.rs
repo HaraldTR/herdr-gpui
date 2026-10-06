@@ -463,6 +463,7 @@ impl SettingsWindow {
                     .debug_selector(|| "settings-theme-actions".into())
                     .flex()
                     .flex_wrap()
+                    .items_center()
                     .gap(px(8.))
                     .child(
                         button(
