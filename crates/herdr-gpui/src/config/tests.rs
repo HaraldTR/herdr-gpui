@@ -7,6 +7,7 @@ mod discovery;
 mod fonts;
 mod github;
 mod keybindings;
+mod line_height;
 mod loading;
 mod notification_settings;
 mod preferences;

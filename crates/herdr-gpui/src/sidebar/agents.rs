@@ -366,6 +366,7 @@ mod tests {
             family: "Menlo".into(),
             size: 16.,
             fallbacks: None,
+            line_height_multiple: None,
         };
         for style in [IndicatorStyle::Dots, IndicatorStyle::Symbols] {
             let indicators = Indicators {

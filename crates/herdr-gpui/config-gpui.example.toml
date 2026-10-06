@@ -205,6 +205,10 @@ size = 12
 # family = "DejaVu Sans Mono"
 size = 14
 # fallback = ["Symbols Nerd Font Mono"]
+# Row height as a multiple of size, 1 to 2. Default 20/14 (about 1.43), which
+# is 20 logical pixels at size 14. Lower it for tighter rows. Only [terminal]
+# takes this key.
+# line_height = 1.3
 
 [ui]
 # Default: ".SystemUIFont" on macOS and Windows, "DejaVu Sans" on Linux (or an installed

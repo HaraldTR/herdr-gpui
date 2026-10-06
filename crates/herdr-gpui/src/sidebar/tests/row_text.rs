@@ -9,6 +9,7 @@ fn section_headings_use_the_configured_sidebar_font_size() {
             family: "Menlo".into(),
             size,
             fallbacks: None,
+            line_height_multiple: None,
         };
         for label in ["spaces", "agents"] {
             let mut heading = header(
