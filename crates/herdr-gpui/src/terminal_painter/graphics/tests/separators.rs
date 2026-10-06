@@ -10,21 +10,17 @@ fn separator_shapes_reach_the_cell_edges_at_fractional_sizes() -> anyhow::Result
     ] {
         assert_eq!(CellSeparator::from_symbol(symbol), Some(shape));
         assert!(Graphic::from_symbol(symbol).is_none());
-        for scale in [1., 1.25, 1.5, 2., 3.] {
-            let cell = Bounds::new(point(px(3.27), px(7.13)), size(px(22.75), px(51.2)));
-            let snap = |value: Pixels| px((f32::from(value) * scale).round() / scale);
-            let path = shape.path(cell, snap)?;
-            assert_eq!(path.bounds.left(), snap(cell.left()), "{symbol} at {scale}");
+        // The painter passes snapped corners; the path keeps them exactly.
+        for (top_left, bottom_right) in [
+            (point(px(3.25), px(7.5)), point(px(26.), px(58.75))),
+            (point(px(0.5), px(20.5)), point(px(10.5), px(40.5))),
+        ] {
+            let path = shape.path(top_left, bottom_right)?;
+            assert_eq!(path.bounds.origin, top_left, "{symbol}");
             assert_eq!(
-                path.bounds.right(),
-                snap(cell.right()),
-                "{symbol} at {scale}"
-            );
-            assert_eq!(path.bounds.top(), snap(cell.top()), "{symbol} at {scale}");
-            assert_eq!(
-                path.bounds.bottom(),
-                snap(cell.bottom()),
-                "{symbol} at {scale}"
+                path.bounds.origin + point(path.bounds.size.width, path.bounds.size.height),
+                bottom_right,
+                "{symbol}"
             );
             assert!(!path.vertices.is_empty());
         }
@@ -43,6 +39,7 @@ fn separator_shapes_reach_the_cell_edges_at_fractional_sizes() -> anyhow::Result
 
 #[gpui::test]
 fn separator_paths_match_gpui_backgrounds_at_half_device_pixels(cx: &mut gpui::TestAppContext) {
+    use crate::terminal_painter::grid::grid_corners;
     use gpui::{Empty, Point, Styled, canvas, fill, rgb};
     use std::{cell::RefCell, rc::Rc};
     let (_, cx) = cx.add_window_view(|_, _| Empty);
@@ -54,14 +51,13 @@ fn separator_paths_match_gpui_backgrounds_at_half_device_pixels(cx: &mut gpui::T
             move |_, _, window, _| {
                 let scale = window.scale_factor();
                 for offset in [0.5, -0.5, 1.5, -1.5] {
-                    let cell = Bounds::new(
+                    let (near, far) = (
                         point(px(offset / scale), px((20. + offset) / scale)),
-                        size(px(20. / scale), px(40. / scale)),
+                        point(px((20. + offset) / scale), px((60. + offset) / scale)),
                     );
-                    window.paint_quad(fill(cell, rgb(0x123456)));
-                    let Ok(path) =
-                        CellSeparator::LeftRound.path(cell, |value| window.pixel_snap(value))
-                    else {
+                    window.paint_quad(fill(Bounds::from_corners(near, far), rgb(0x123456)));
+                    let (near, far) = grid_corners(window, Point::default(), near, far);
+                    let Ok(path) = CellSeparator::LeftRound.path(near, far) else {
                         panic!("simple cap path must tessellate");
                     };
                     assert_eq!(path.bounds.left(), px(offset.trunc() / scale));

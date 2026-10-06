@@ -1,6 +1,6 @@
 //! Terminal graphics occupy the cell, not the font's ink bounds. Keep their
 //! edges on the same device-pixel grid even with fractional cell metrics.
-use gpui::{Bounds, Path, PathBuilder, Pixels, point, px};
+use gpui::{Bounds, Path, PathBuilder, Pixels, Point, point, px};
 
 #[derive(Clone, Copy)]
 pub(super) enum Graphic {
@@ -35,15 +35,15 @@ impl CellSeparator {
         }
     }
 
+    /// Takes the cell's snapped absolute corners rather than a `Bounds`, whose
+    /// far edge would be rebuilt as origin + size and drift off the pixel grid
+    /// the background quads share.
     pub(super) fn path(
         self,
-        cell: Bounds<Pixels>,
-        snap: impl Fn(Pixels) -> Pixels,
+        top_left: Point<Pixels>,
+        bottom_right: Point<Pixels>,
     ) -> gpui::Result<Path<Pixels>> {
-        // The painter supplies GPUI's pixel_snap, including its half-pixel tie
-        // rule, so these edges match the background quads exactly.
-        let [left, top, right, bottom] =
-            [cell.left(), cell.top(), cell.right(), cell.bottom()].map(snap);
+        let (left, top, right, bottom) = (top_left.x, top_left.y, bottom_right.x, bottom_right.y);
         let middle = (top + bottom) / 2.;
         let width = right - left;
         let half_height = (bottom - top) / 2.;

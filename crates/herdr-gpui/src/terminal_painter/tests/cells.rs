@@ -28,11 +28,12 @@ fn link_underlines_stay_inside_the_frame() {
 }
 
 #[gpui::test]
-fn right_edge_backgrounds_fill_fractional_width_without_stretching_rows_or_popups(
+fn edge_backgrounds_reach_the_canvas_without_stretching_popups_or_mixed_last_rows(
     cx: &mut TestAppContext,
 ) {
     let (_, cx) = cx.add_window_view(|_, _| Empty);
-    for extend in [false, true] {
+    for (extend, uniform) in [(false, false), (true, false), (false, true), (true, true)] {
+        let last = if uniform { 0xabcdef } else { 0xfedcba };
         cx.draw(Point::default(), size(px(100.), px(100.)), |_, _| {
             canvas(
                 |_, _, _| (),
@@ -40,7 +41,7 @@ fn right_edge_backgrounds_fill_fractional_width_without_stretching_rows_or_popup
                     let frame = FrameData {
                         width: 2,
                         height: 2,
-                        cells: [0x123456, 0x654321, 0xabcdef, 0xfedcba]
+                        cells: [0x123456, 0x654321, 0xabcdef, last]
                             .into_iter()
                             .map(|bg| CellData {
                                 bg: 0x02000000 | bg,
@@ -72,19 +73,27 @@ fn right_edge_backgrounds_fill_fractional_width_without_stretching_rows_or_popup
         });
         cx.update(|window, _| {
             let quads = window.painted_quads();
-            assert_eq!(quads.len(), 4);
-            for (x, y, width, height, color) in [
+            let right = if extend { 13. } else { 10. };
+            let mut expected = vec![
                 (17., 23., 10., 20., 0x123456),
-                (27., 23., if extend { 13. } else { 10. }, 20., 0x654321),
-                (17., 43., 10., 20., 0xabcdef),
-                (27., 43., if extend { 13. } else { 10. }, 20., 0xfedcba),
-            ] {
+                (27., 23., right, 20., 0x654321),
+            ];
+            // Only a one-color last row, painted as one span, continues into the
+            // remainder below; a mixed row stays cell-high.
+            expected.extend(if uniform {
+                vec![(17., 43., 10. + right, if extend { 27. } else { 20. }, last)]
+            } else {
+                vec![(17., 43., 10., 20., 0xabcdef), (27., 43., right, 20., last)]
+            });
+            assert_eq!(quads.len(), expected.len());
+            for (x, y, width, height, color) in expected {
                 let bounds = Bounds::new(point(px(x), px(y)), size(px(width), px(height)))
                     .scale(window.scale_factor());
                 assert!(
                     quads
                         .iter()
-                        .any(|quad| quad.bounds == bounds && quad.background == rgb(color).into())
+                        .any(|quad| quad.bounds == bounds && quad.background == rgb(color).into()),
+                    "extend={extend} uniform={uniform} {bounds:?}"
                 );
             }
         });
@@ -92,8 +101,8 @@ fn right_edge_backgrounds_fill_fractional_width_without_stretching_rows_or_popup
 }
 
 #[test]
-fn backgrounds_fill_only_fractional_horizontal_remainders() {
-    let cell_width = px(10.);
+fn backgrounds_fill_only_fractional_cell_remainders() {
+    let cell = size(px(10.), px(20.));
     let available = size(px(103.), px(67.));
     let viewport = viewport(103., 67., 10., 20.);
     let grid = size(
@@ -101,19 +110,15 @@ fn backgrounds_fill_only_fractional_horizontal_remainders() {
         px(f32::from(viewport.rows) * 20.),
     );
     assert_eq!(grid, size(px(100.), px(60.)));
-    assert_eq!(
-        background_extent(grid, available, cell_width),
-        size(px(103.), px(60.))
-    );
+    assert_eq!(background_extent(grid, available, cell), available);
     for (available, expected) in [
         (size(px(100.), px(60.)), grid),
         (size(px(99.), px(59.)), grid),
-        (size(px(100.), px(67.)), grid),
         (size(px(110.), px(80.)), grid),
-        (size(px(111.), px(67.)), grid),
+        (size(px(111.), px(67.)), size(px(100.), px(67.))),
         (size(px(103.), px(81.)), size(px(103.), px(60.))),
     ] {
-        assert_eq!(background_extent(grid, available, cell_width), expected);
+        assert_eq!(background_extent(grid, available, cell), expected);
     }
 }
 

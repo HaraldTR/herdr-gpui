@@ -10,28 +10,26 @@ fn separator_paths_share_absolute_grid_edges_at_rounding_ties(cx: &mut TestAppCo
             (point(px(23.), px(17.)), 0, 149, 40., 8.015),
             (point(px(3.25), px(7.13)), 50, 4, 23.750_002, 51.2),
         ] {
-            let bounds = separator_bounds(origin, column, row, width, height, |point| {
-                window.pixel_snap_point(point)
-            });
-            let far = window.pixel_snap_point(
-                origin
-                    + point(
-                        px((column + 1) as f32 * width),
-                        px((row + 1) as f32 * height),
-                    ),
+            let near = point(px(column as f32 * width), px(row as f32 * height));
+            let far = point(
+                px((column + 1) as f32 * width),
+                px((row + 1) as f32 * height),
             );
+            let (top_left, bottom_right) = grid_corners(window, origin, near, far);
+            // The next cell's near edge, computed independently, is this one's far edge.
+            assert_eq!(bottom_right, window.pixel_snap_point(origin + far));
             for separator in [
                 CellSeparator::RightTriangle,
                 CellSeparator::LeftTriangle,
                 CellSeparator::RightRound,
                 CellSeparator::LeftRound,
             ] {
-                let Ok(path) = separator.path(bounds, |value| window.pixel_snap(value)) else {
+                let Ok(path) = separator.path(top_left, bottom_right) else {
                     panic!("simple separator path must tessellate");
                 };
-                assert_eq!(path.bounds.right(), far.x);
-                assert_eq!(path.bounds.bottom(), far.y);
-                assert_eq!(path.bounds.origin, bounds.origin);
+                assert_eq!(path.bounds.origin, top_left);
+                assert_eq!(path.bounds.right(), bottom_right.x);
+                assert_eq!(path.bounds.bottom(), bottom_right.y);
             }
         }
     });
@@ -222,13 +220,15 @@ fn separator_caps_use_cell_geometry_without_shaping(cx: &mut TestAppContext) {
                         let paths = &painter.painted_separators;
                         assert_eq!(paths.len(), 4);
                         for (index, (bounds, color)) in paths.iter().enumerate() {
+                            // The last separator is wide: its skip cell belongs to it.
+                            let end = if index == 3 { 5 } else { index + 1 };
                             let expected = Bounds::from_corners(
                                 window.pixel_snap_point(point(
                                     px(17. + index as f32 * 22.75),
                                     px(23.),
                                 )),
                                 window.pixel_snap_point(point(
-                                    px(17. + (index + 1) as f32 * 22.75),
+                                    px(17. + end as f32 * 22.75),
                                     px(23. + 51.2),
                                 )),
                             );
@@ -245,6 +245,7 @@ fn separator_caps_use_cell_geometry_without_shaping(cx: &mut TestAppContext) {
                             assert_eq!(after.glyphs, before.glyphs);
                             assert_eq!(after.paint_errors, before.paint_errors);
                             assert_eq!(after.decorations - before.decorations, 5);
+                            assert_eq!(after.paths - before.paths, 4);
                         }
                     },
                 )

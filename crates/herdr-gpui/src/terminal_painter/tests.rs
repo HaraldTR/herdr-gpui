@@ -5,6 +5,7 @@ mod cells;
 mod composition;
 mod diagnostics;
 mod glyph_cache;
+mod grid_edges;
 // Paint counts are recorded only with the integration-test feature.
 #[cfg(feature = "integration-test")]
 mod layers;
