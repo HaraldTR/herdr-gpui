@@ -2,7 +2,7 @@
 //! checkout, and the bounded subprocess policy they all run under. Output is
 //! size-capped and every call has a deadline, so no step can hang the worker.
 
-use super::{Input, Origin, Result, parse_graphql};
+use super::{Input, Origin, Result, parse_graphql, parse_numbered};
 use crate::Error;
 #[cfg(unix)]
 use std::os::{fd::OwnedFd, unix::net::UnixStream};
@@ -16,25 +16,45 @@ use std::{
 
 pub(super) const OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 pub(super) const TIMEOUT: Duration = Duration::from_secs(15);
-const QUERY: &str = r#"query($owner: String!, $repo: String!, $branch: String!, $limit: Int!) {
+/// Every field a lookup reads, shared by both queries as a GraphQL fragment.
+macro_rules! fields {
+    () => {
+        r#"
+fragment PullRequestFields on PullRequest {
+  id number url title state isDraft headRefName headRefOid baseRefName additions deletions
+  changedFiles updatedAt mergeStateStatus reviewDecision isCrossRepository
+  headRepositoryOwner { login } headRepository { name }
+  commits(last: 1) { nodes { commit { statusCheckRollup {
+    contexts(first: 100) {
+      pageInfo { hasNextPage }
+      nodes { __typename ... on CheckRun { name status conclusion } ... on StatusContext { context state } }
+    }
+  } } } }
+}"#
+    };
+}
+const QUERY: &str = concat!(
+    r#"query($owner: String!, $repo: String!, $branch: String!, $limit: Int!) {
   repository(owner: $owner, name: $repo) {
     mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed
     pullRequests(first: $limit, headRefName: $branch, orderBy: {field: UPDATED_AT, direction: DESC}) {
       pageInfo { hasNextPage }
-      nodes {
-        id number url title state isDraft headRefName headRefOid baseRefName additions deletions
-        changedFiles updatedAt mergeStateStatus reviewDecision headRepositoryOwner { login }
-        headRepository { name }
-        commits(last: 1) { nodes { commit { statusCheckRollup {
-          contexts(first: 100) {
-            pageInfo { hasNextPage }
-            nodes { __typename ... on CheckRun { name status conclusion } ... on StatusContext { context state } }
-          }
-        } } } }
-      }
+      nodes { ...PullRequestFields }
     }
   }
-}"#;
+}"#,
+    fields!()
+);
+/// A fork's pull request, by the number its local `pr/<number>` branch names.
+const NUMBER_QUERY: &str = concat!(
+    r#"query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed
+    pullRequest(number: $number) { ...PullRequestFields }
+  }
+}"#,
+    fields!()
+);
 
 /// How long a remote repository's origin is trusted before SSH reads it again.
 const ORIGIN_TTL: Duration = Duration::from_secs(10 * 60);
@@ -142,12 +162,28 @@ pub(super) fn fetch_with_backoff(
             (repository, head)
         }
     };
-    let branch = head
-        .as_ref()
-        .map_or(input.branch.as_str(), |head| head.branch.as_str());
     let timeout = deadline
         .checked_duration_since(Instant::now())
         .ok_or(Error::PrTimeout)?;
+    // A fork checkout has no upstream and a local name its PR never uses, so
+    // it is found by number instead (see `repo_items::fork_branch`).
+    if head.is_none()
+        && let Some(number) = crate::repo_items::fork_branch_number(&input.branch)
+    {
+        let response = crate::github::graphql(
+            "pull_request",
+            token,
+            NUMBER_QUERY,
+            serde_json::json!({"owner":owner,"repo":repo,"number":number}),
+            timeout,
+            cancelled,
+            cooldown,
+        )?;
+        return parse_numbered(response, &owner, &repo, number);
+    }
+    let branch = head
+        .as_ref()
+        .map_or(input.branch.as_str(), |head| head.branch.as_str());
     let response = crate::github::graphql(
         "pull_request",
         token,
