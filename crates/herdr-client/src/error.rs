@@ -81,7 +81,7 @@ pub enum Error {
         "Herdr refused session deletion ({0}); the session may be running, inaccessible, or unsupported by the installed CLI"
     )]
     SessionDeleteFailed(std::process::ExitStatus),
-    #[error("SSH has no local socket path")]
+    #[error("remote endpoints have no local socket path")]
     NoLocalSocket,
     #[error("invalid SSH target (options, controls, and passwords are forbidden)")]
     InvalidSshTarget,
@@ -147,6 +147,24 @@ pub enum Error {
     SshClosed,
     #[error("SSH startup output exceeds limit")]
     SshOutputLimit,
+    #[error("invalid WSL distribution name")]
+    InvalidWslDistro,
+    #[error("WSL distributions are only available on Windows")]
+    WslUnsupported,
+    #[error("WSL did not answer in time; the distribution may be stopped or waiting for setup")]
+    WslTimeout,
+    #[error("WSL bridge closed; check that the distribution starts and Herdr is installed in it")]
+    WslClosed,
+    #[error("wsl.exe failed ({0})")]
+    WslCommand(std::process::ExitStatus),
+    #[error("invalid WSL device list schema")]
+    WslCatalogSchema(#[source] serde_json::Error),
+    #[error("unsupported WSL device list version, size, or entries")]
+    WslCatalog,
+    #[error("this WSL distribution is already a device")]
+    WslHostExists,
+    #[error("this WSL distribution is not a saved device")]
+    WslHostMissing,
     #[error("remote Git directory must be an absolute path")]
     InvalidGitDir,
     #[error("remote command failed ({0})")]
@@ -228,10 +246,10 @@ pub enum Error {
     SelectionVersion,
     #[error("selected endpoint is absent or disabled")]
     SelectionUnavailable,
-    #[error("invalid selection path")]
-    SelectionPath,
-    #[error("selection path is not a regular file")]
-    SelectionDestinationNotFile,
+    #[error("invalid storage path")]
+    StoragePath,
+    #[error("storage destination is not a regular file")]
+    StorageDestinationNotFile,
     #[error("endpoint catalog is not a regular file")]
     CatalogNotFile,
     #[error("endpoint catalog exceeds storage limit")]
@@ -295,20 +313,24 @@ impl Error {
             Self::InvalidSession
             | Self::DefaultSession
             | Self::NoLocalSocket
-            | Self::InvalidSshTarget => io::ErrorKind::InvalidInput,
-            Self::SshUnsupported | Self::ClipboardImageUnsupported => io::ErrorKind::Unsupported,
+            | Self::InvalidSshTarget
+            | Self::InvalidWslDistro => io::ErrorKind::InvalidInput,
+            Self::SshUnsupported | Self::WslUnsupported | Self::ClipboardImageUnsupported => {
+                io::ErrorKind::Unsupported
+            }
             Self::ClipboardImageCancelled => io::ErrorKind::Interrupted,
             Self::ClipboardImageWriteTimeout | Self::ClipboardImagePreparationTimeout => {
                 io::ErrorKind::TimedOut
             }
             Self::Cancelled | Self::SshCancelled => io::ErrorKind::Interrupted,
             Self::EventReceiverDropped | Self::Disconnected => io::ErrorKind::BrokenPipe,
-            Self::SocketClosed | Self::SshClosed => io::ErrorKind::UnexpectedEof,
+            Self::SocketClosed | Self::SshClosed | Self::WslClosed => io::ErrorKind::UnexpectedEof,
             Self::ForwardSpawn(error)
             | Self::ForwardLocalPort(error)
             | Self::ForwardControl(error) => error.kind(),
             Self::HealthTimeout
             | Self::SshTimeout
+            | Self::WslTimeout
             | Self::SessionDeleteTimeout
             | Self::ForwardTimeout => io::ErrorKind::TimedOut,
             Self::Full | Self::ClipboardImageBusy => io::ErrorKind::WouldBlock,

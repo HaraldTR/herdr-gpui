@@ -40,6 +40,9 @@ pub(crate) struct MenuState {
     /// Written by the menu's layout, read when presenting pages.
     pub(crate) cover: std::rc::Rc<std::cell::Cell<Cover>>,
     pub(super) device_setup: Option<super::devices::Setup>,
+    pub(super) wsl_setup: Option<super::devices::WslSetup>,
+    /// The saved distribution the removal confirmation names.
+    pub(super) wsl_remove: Option<String>,
     pub(super) session_edit: Option<super::sessions::Edit>,
     pub(super) devices_scroll: ScrollHandle,
     /// The sessions list scrolls its own way; the two popups never share one.
@@ -220,6 +223,8 @@ impl MenuState {
             page: None,
             cover: Default::default(),
             device_setup: None,
+            wsl_setup: None,
+            wsl_remove: None,
             session_edit: None,
             devices_scroll: ScrollHandle::new(),
             sessions_scroll: ScrollHandle::new(),
@@ -271,6 +276,8 @@ impl MenuState {
     pub fn reset(&mut self) {
         self.cover.set(Cover::Unknown);
         self.device_setup = None;
+        self.wsl_setup = None;
+        self.wsl_remove = None;
         self.session_edit = None;
         self.devices_scroll.set_offset(Point::default());
         self.sessions_scroll.set_offset(Point::default());

@@ -142,6 +142,14 @@ impl HerdrWindow {
             window.prevent_default();
             return;
         }
+        if self.menu.page == Some(Page::AddWsl) {
+            self.add_wsl_key(event, window, cx);
+            return;
+        }
+        if self.menu.page == Some(Page::RemoveWsl) {
+            self.remove_wsl_key(event, window, cx);
+            return;
+        }
         if matches!(self.menu.page, Some(Page::Devices | Page::AddDevice)) {
             self.devices_key(event, window, cx);
             return;

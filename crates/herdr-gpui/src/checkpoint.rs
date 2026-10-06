@@ -50,6 +50,8 @@ pub(crate) fn host_for(target: &ConnectTarget, live: &crate::LiveState) -> Optio
     }
     match target {
         ConnectTarget::Ssh { target, .. } => Some(Host::Ssh(target.clone())),
+        // No script runs inside a distribution yet, so its checkouts are not snapshotted.
+        ConnectTarget::Wsl { .. } => None,
         ConnectTarget::Local | ConnectTarget::Session { .. } => {
             live.local_daemon_peer.then_some(Host::Local)
         }
@@ -157,6 +159,7 @@ fn run(checkout: &Checkout, body: &str) -> Result<String> {
     let host = match &checkout.host {
         Host::Local => ScriptHost::Local,
         Host::Ssh(target) => ScriptHost::Ssh(target),
+        Host::Wsl(_) => return Err(Error::WslHostUnsupported),
     };
     let mut output = Vec::new();
     run_script(

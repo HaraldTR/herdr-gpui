@@ -177,7 +177,8 @@ impl Origin {
     /// Without one, the target's own host part is the best guess.
     pub(crate) fn new(host: &Host, resolved: Option<&str>) -> Self {
         match host {
-            Host::Local => Self::Local,
+            // WSL forwards a distribution's localhost ports to this machine.
+            Host::Local | Host::Wsl(_) => Self::Local,
             Host::Ssh(target) => Self::Remote {
                 target: target.clone(),
                 name: resolved

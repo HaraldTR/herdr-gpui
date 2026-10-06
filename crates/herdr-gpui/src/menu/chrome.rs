@@ -281,6 +281,7 @@ impl HerdrWindow {
                 | Page::KillProcesses
                 | Page::Host
                 | Page::RemoveDevice
+                | Page::RemoveWsl
                 | Page::Git
                 | Page::GitCommit
                 | Page::PrReview
@@ -383,6 +384,7 @@ impl HerdrWindow {
                         | Page::KillProcesses
                         | Page::Host
                         | Page::RemoveDevice
+                        | Page::RemoveWsl
                 ),
                 |panel| {
                     panel
@@ -432,6 +434,7 @@ impl HerdrWindow {
                         | Page::AppUpdate
                         | Page::GitHub
                         | Page::AddDevice
+                        | Page::AddWsl
                         | Page::Usage(_)
                         | Page::RenameDevice
                         | Page::ForwardPort
@@ -475,7 +478,11 @@ impl HerdrWindow {
             .when(
                 matches!(
                     page,
-                    Page::AppUpdate | Page::AddDevice | Page::RenameDevice | Page::ForwardPort
+                    Page::AppUpdate
+                        | Page::AddDevice
+                        | Page::AddWsl
+                        | Page::RenameDevice
+                        | Page::ForwardPort
                 ),
                 |panel| panel.flex().flex_col().overflow_hidden().shadow_lg(),
             )
@@ -541,6 +548,10 @@ impl HerdrWindow {
             panel = panel.child(self.render_usage_panel(provider, cx));
         } else if page == Page::AddDevice {
             panel = panel.child(self.render_add_device(cx));
+        } else if page == Page::AddWsl {
+            panel = panel.child(self.render_add_wsl(cx));
+        } else if page == Page::RemoveWsl {
+            panel = panel.child(self.render_remove_wsl(cx));
         } else if page == Page::GitHub {
             panel = panel.child(self.render_github_auth(cx));
         } else if page == Page::Workspace {

@@ -230,12 +230,10 @@ impl HerdrWindow {
                         this.apply_shared_agent_sort();
                         this.reload_notification_config(cx);
                         // Queue directly: neither dialog nor integration response slots belong to us.
-                        let local = this.endpoints.iter().find(|endpoint| {
-                            !matches!(
-                                endpoint.connection.target,
-                                herdr_client::ConnectTarget::Ssh { .. }
-                            )
-                        });
+                        let local = this
+                            .endpoints
+                            .iter()
+                            .find(|endpoint| !endpoint.connection.target.is_remote());
                         this.settings.reload_status = Some(match local {
                             Some(endpoint) => match (
                                 endpoint.connection.handle.as_ref(),

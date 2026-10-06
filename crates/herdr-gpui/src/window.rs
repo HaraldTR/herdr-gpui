@@ -519,8 +519,7 @@ impl HerdrWindow {
                     &endpoint.live
                 };
                 endpoint.enabled
-                    && (live.status.is_connected()
-                        || !matches!(endpoint.connection.target, ConnectTarget::Ssh { .. }))
+                    && (live.status.is_connected() || !endpoint.connection.target.is_remote())
             })
             .map(|(_, endpoint)| crate::usage::Host::from(&endpoint.connection.target))
             .collect()
