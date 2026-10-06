@@ -102,11 +102,14 @@ fn reserved_and_keymap_keystrokes_never_reach_a_custom_command() {
         "conflicts",
         &["cmd+v", "cmd+a", "prefix+c", "prefix+ctrl+b", "u"],
     )];
+    // Labels read in GPUI's platform spelling (`super-v` on Linux).
+    let paste = keystroke("cmd-v").unparse();
+    let select_all = keystroke("cmd-a").unparse();
     assert_eq!(
         reference(&keymap, &commands),
         [vec![
-            entry("cmd-v", Reach::Shadowed),
-            entry("cmd-a", Reach::Shadowed),
+            entry(&paste, Reach::Shadowed),
+            entry(&select_all, Reach::Shadowed),
             entry("ctrl-b c", Reach::Shadowed),
             entry("ctrl-b ctrl-b", Reach::Shadowed),
             entry("u", Reach::NeedsModifier),
