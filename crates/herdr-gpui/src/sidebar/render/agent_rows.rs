@@ -49,6 +49,8 @@ impl HerdrWindow {
                 theme,
                 look,
                 width,
+                // Agents list under their own heading, not under a host.
+                nest: 0.,
                 host: (multi && endpoint.id != crate::endpoint::LOCAL)
                     .then_some(endpoint.label.as_str()),
             };

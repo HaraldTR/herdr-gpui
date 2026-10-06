@@ -172,11 +172,12 @@ impl RowLayout for Superset {
         let theme = cx.theme;
         let m = Metrics::new(cx);
         let slot_dot = dot(&lines, status, cx);
-        let indent = if tree == RowTree::None {
-            0.
-        } else {
-            cx.look.density.padding()
-        };
+        let indent = cx.nest
+            + if tree == RowTree::None {
+                0.
+            } else {
+                cx.look.density.padding()
+            };
         let pr = badge.as_ref().and_then(|badge| badge.pr.as_ref());
         let dirty = badge.as_ref().is_some_and(|badge| badge.dirty);
         let teleported = badge.as_ref().is_some_and(|badge| badge.teleported);
@@ -355,6 +356,7 @@ mod tests {
             theme: &theme,
             look: layout::for_mode(LayoutMode::Superset),
             width: 232.,
+            nest: 0.,
             host: None,
         };
         let working = AgentStatus::Working;

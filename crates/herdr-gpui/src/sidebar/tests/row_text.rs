@@ -161,6 +161,7 @@ fn cells_hand_their_state_and_data_to_the_layout() {
         theme: &theme,
         look: for_mode(Default::default()),
         width: 232.,
+        nest: 0.,
         host: None,
     };
     let recorder = Recorder::default();

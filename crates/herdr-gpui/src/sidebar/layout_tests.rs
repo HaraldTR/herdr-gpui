@@ -29,6 +29,8 @@ mod host_agents;
 #[cfg(test)]
 mod host_groups;
 #[cfg(test)]
+mod host_nesting;
+#[cfg(test)]
 mod layouts;
 #[cfg(test)]
 mod listening_ports;

@@ -100,6 +100,7 @@ impl HerdrWindow {
                 theme,
                 look,
                 width,
+                nest: if multi { look.nest_indent() } else { 0. },
                 host: (multi && endpoint_id != crate::endpoint::LOCAL)
                     .then_some(endpoint.label.as_str()),
             };
@@ -263,11 +264,12 @@ impl HerdrWindow {
                     .flatten()
                     .map(|listed| {
                         // Under the label column, clear of the status dot.
-                        let indent = if indented {
-                            layout.child_indent() + indicators.width(font) - STATUS_WIDTH
-                        } else {
-                            0.
-                        };
+                        let indent = row_cx.nest
+                            + if indented {
+                                layout.child_indent() + indicators.width(font) - STATUS_WIDTH
+                            } else {
+                                0.
+                            };
                         div()
                             .debug_selector(|| format!("ports-{endpoint_id}-{id}"))
                             .h(px(line_height(font)))

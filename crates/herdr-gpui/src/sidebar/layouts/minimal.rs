@@ -80,11 +80,12 @@ impl RowLayout for Minimal {
     fn workspace(&self, row: WorkspaceRow<'_>, state: RowState, cx: &RowContext<'_>) -> Div {
         let theme = cx.theme;
         let density = cx.look.density;
-        let indent = if row.tree == RowTree::None {
-            0.
-        } else {
-            density.child_indent()
-        };
+        let indent = cx.nest
+            + if row.tree == RowTree::None {
+                0.
+            } else {
+                density.child_indent()
+            };
         // Pull requests and uncommitted work stay off these rows, but a
         // teleported checkout is a copy left behind, so it keeps its mark.
         let teleported = row.badge.as_ref().is_some_and(|badge| badge.teleported);

@@ -333,11 +333,12 @@ pub(super) fn row(
     let muted = theme.muted;
     let status_width = indicators.width(font);
     let extra_status_width = status_width - STATUS_WIDTH;
-    let indent = if tree == RowTree::None {
-        0.
-    } else {
-        layout.child_indent() + extra_status_width
-    };
+    let indent = cx.nest
+        + if tree == RowTree::None {
+            0.
+        } else {
+            layout.child_indent() + extra_status_width
+        };
     let arrow_reserve = if reserve_arrow { ARROW_RESERVE } else { 0. };
     let arrow_absent = arrow.is_none();
     let status_gutter = if show_status { status_width + gap } else { 0. };
@@ -423,7 +424,7 @@ pub(super) fn row(
         // tied to its parent without box-drawing glyphs in the label.
         .when(tree != RowTree::None && look.style.tree_lines(), |row| {
             let (color, font) = (theme.muted, font.clone());
-            let gutter = look.tree_gutter() + extra_status_width;
+            let gutter = cx.nest + look.tree_gutter() + extra_status_width;
             row.child(
                 div()
                     .debug_selector(|| format!("tree-{key}"))
@@ -431,6 +432,7 @@ pub(super) fn row(
                     // Between the parent's label column and this row's own dot.
                     .left(px(gutter))
                     .w(px(padding + indent
+                        - cx.nest
                         - layout.tree_gutter()
                         - extra_status_width))
                     .top_0()

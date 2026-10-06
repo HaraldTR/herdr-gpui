@@ -313,6 +313,7 @@ mod tests {
             theme: &theme,
             look: layout::for_mode(LayoutMode::default()),
             width: 232.,
+            nest: 0.,
             host: None,
         };
         let here = TokenLook {

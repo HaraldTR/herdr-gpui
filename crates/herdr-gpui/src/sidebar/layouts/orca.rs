@@ -105,11 +105,12 @@ impl RowLayout for Orca {
         let line = line_height(font);
         let small = (font.size * 0.85).round();
         let glyph = glyph_at(font, small);
-        let indent = if tree == RowTree::None {
-            0.
-        } else {
-            cx.look.density.padding()
-        };
+        let indent = cx.nest
+            + if tree == RowTree::None {
+                0.
+            } else {
+                cx.look.density.padding()
+            };
         let width = inner(cx, indent);
         // Children are named by their branch already; repeating it is noise.
         let branch = branch.filter(|branch| *branch != label);

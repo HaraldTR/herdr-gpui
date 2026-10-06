@@ -271,6 +271,12 @@ impl SidebarLook {
         self.inset() + self.density.tree_gutter()
     }
 
+    /// How far rows step in under a host header, so a host reads as the
+    /// parent of its workspaces the way a repository does of its worktrees.
+    pub(super) fn nest_indent(&self) -> f32 {
+        self.density.child_indent()
+    }
+
     pub(super) fn header_label(&self, label: &'static str) -> String {
         match self.style.header_case() {
             HeaderCase::Lower => label.to_owned(),
