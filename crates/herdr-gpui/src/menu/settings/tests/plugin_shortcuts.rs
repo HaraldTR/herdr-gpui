@@ -229,3 +229,41 @@ fn plugin_shortcuts_follow_snapshot_replacement_removal_and_disconnect(
         "disconnected snapshots must not advertise runnable custom shortcuts"
     );
 }
+
+#[gpui::test]
+fn plugin_shortcut_rows_sharing_a_name_are_numbered(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+    let plugin = |id, description| {
+        command(
+            id,
+            Some(description),
+            ClientShellCommandAction::PluginAction,
+            &["ctrl+alt+a"],
+        )
+    };
+    install(
+        &view,
+        vec![
+            plugin("plugin.workspace", "New Workspace"),
+            plugin("plugin.one", "Audit"),
+            plugin("plugin.two", "Audit"),
+            plugin("plugin.solo", "Solo"),
+        ],
+        cx,
+    );
+    cx.update(|window, cx| view.update(cx, |view, cx| view.open_keybinds(window, cx)));
+    search(&view, "", cx);
+    for row in [
+        "New Workspace",
+        "New Workspace (2)",
+        "Audit",
+        "Audit (2)",
+        "Solo",
+    ] {
+        assert!(
+            cx.debug_bounds(format!("shortcut-{row}").leak()).is_some(),
+            "missing {row}"
+        );
+    }
+    assert!(cx.debug_bounds("shortcut-Audit (3)").is_none());
+}

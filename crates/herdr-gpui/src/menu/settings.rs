@@ -6,8 +6,14 @@ use super::{Page, accent};
 use crate::{
     HerdrWindow,
     config::{Config, FONT_SIZE_RANGE, FONT_SIZE_STEP, FontFace},
+    keymap::Reach,
 };
 use gpui::{prelude::*, *};
+use herdr_client::protocol::ClientShellCommand;
+use std::borrow::Cow;
+
+/// The semantic paste row, which no keymap command holds.
+const PASTE_LABEL: &str = "Paste into terminal";
 
 impl HerdrWindow {
     pub(crate) fn reload_notification_config(&mut self, cx: &mut Context<Self>) {
@@ -302,8 +308,8 @@ impl HerdrWindow {
             (
                 "APPLICATION",
                 vec![(
-                    vec![("cmd-v".to_owned(), true)],
-                    "Paste into terminal".to_owned(),
+                    vec![(Cow::Borrowed("cmd-v"), None)],
+                    Cow::Borrowed(PASTE_LABEL),
                 )],
             ),
             ("PLUGIN & CUSTOM COMMANDS", Vec::new()),
@@ -382,8 +388,10 @@ impl HerdrWindow {
                 Command::OpenNotificationTarget => 1,
             };
             groups[group].1.push((
-                keys.into_iter().map(|key| (key.to_owned(), true)).collect(),
-                info.label.to_owned(),
+                keys.into_iter()
+                    .map(|key| (Cow::Borrowed(key), None))
+                    .collect(),
+                Cow::Borrowed(info.label),
             ));
         }
         if let Some(snapshot) = self
@@ -392,17 +400,39 @@ impl HerdrWindow {
             .as_ref()
             .filter(|_| self.live.status.is_connected())
         {
-            groups[3].1.extend(snapshot.commands.iter().map(|command| {
-                let description = command
-                    .description
-                    .as_deref()
-                    .filter(|description| !description.trim().is_empty())
-                    .unwrap_or(&command.command_id);
-                (
-                    self.keymap().custom_reference_labels(command),
-                    description.to_owned(),
-                )
-            }));
+            let commands = &snapshot.commands;
+            let bindings = self.keymap().custom_bindings(commands);
+            groups[3]
+                .1
+                .extend(commands.iter().zip(bindings).enumerate().map(
+                    |(index, (command, bindings))| {
+                        let description = command_name(command);
+                        // A row's name keys its selectors and is all that tells
+                        // rows apart, so one already used by a built-in action
+                        // or an earlier command is numbered. Daemon command IDs
+                        // are generated per boot and mean nothing to a reader.
+                        let earlier = usize::from(
+                            description == PASTE_LABEL
+                                || COMMANDS.iter().any(|info| info.label == description),
+                        ) + commands[..index]
+                            .iter()
+                            .filter(|other| command_name(other) == description)
+                            .count();
+                        let description = match earlier {
+                            0 => description.to_owned(),
+                            earlier => format!("{description} ({})", earlier + 1),
+                        };
+                        (
+                            bindings
+                                .into_iter()
+                                .map(|binding| {
+                                    (Cow::Owned(binding.label), reach_note(binding.reach))
+                                })
+                                .collect(),
+                            Cow::Owned(description),
+                        )
+                    },
+                ));
         }
         let total: usize = groups.iter().map(|(_, shortcuts)| shortcuts.len()).sum();
         let mut count = 0;
@@ -454,7 +484,7 @@ impl HerdrWindow {
                                             .child("No shortcut assigned"),
                                     )
                                 })
-                                .children(keys.into_iter().map(|(keys, runnable)| {
+                                .children(keys.into_iter().map(|(keys, note)| {
                                     div()
                                         .flex()
                                         .flex_col()
@@ -474,12 +504,12 @@ impl HerdrWindow {
                                                     .child(key)
                                             }),
                                         ))
-                                        .when(!runnable, |binding| {
+                                        .when_some(note, |binding, note| {
                                             binding.child(
                                                 div()
                                                     .text_size(px(font.size * 0.85))
                                                     .text_color(rgb(theme.muted))
-                                                    .child("Unavailable in this build"),
+                                                    .child(note),
                                             )
                                         })
                                 })),
@@ -507,7 +537,7 @@ impl HerdrWindow {
             div()
                 .py(px(14.))
                 .text_color(rgb(theme.subtext()))
-                .child("Includes Herdr's [keys] prefix chords and the connected daemon's plugin and custom commands. Unavailable bindings cannot run through this build's keymap. Terminal applications keep their own shortcuts."),
+                .child("Includes Herdr's [keys] prefix chords and the connected daemon's plugin and custom commands. A binding that cannot run says why. Terminal applications keep their own shortcuts."),
         );
         div()
             .flex()
@@ -603,6 +633,28 @@ impl HerdrWindow {
 /// The keycaps of a shortcut, capitalized for display, a prefix chord's
 /// keystrokes in turn. `cmd--` splits into `cmd` and a `-` key rather than an
 /// empty cap, as does a chord's bare `-`.
+/// A custom command's row name: its description, or its ID without one.
+fn command_name(command: &ClientShellCommand) -> &str {
+    command
+        .description
+        .as_deref()
+        .filter(|description| !description.trim().is_empty())
+        .unwrap_or(&command.command_id)
+}
+
+/// Why a custom command's binding does not run, beneath its keycaps.
+fn reach_note(reach: Reach) -> Option<&'static str> {
+    match reach {
+        Reach::Runs => None,
+        Reach::Shadowed => Some("Used by a Herdr or GUI shortcut"),
+        Reach::Taken => Some("Used by an earlier command"),
+        Reach::NeedsModifier => Some("Needs a modifier key"),
+        Reach::NoPrefix => Some("No usable prefix key"),
+        Reach::OverLimit => Some("Beyond the 8-shortcut limit"),
+        Reach::Unsupported => Some("Not supported by this client"),
+    }
+}
+
 fn keycaps(shortcut: &str) -> impl Iterator<Item = String> + '_ {
     shortcut
         .split(' ')

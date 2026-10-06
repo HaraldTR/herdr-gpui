@@ -1,6 +1,7 @@
 use crate::{
     Error, HerdrWindow, NavigationTarget, OwnedNavigationTarget, Result,
     controls::{COMMANDS, Command},
+    keymap::Reach,
     menu::Page,
     search_input::{Changed, SearchInput},
 };
@@ -542,43 +543,54 @@ impl HerdrWindow {
             .as_ref()
             .filter(|_| self.live.status.is_connected())
         {
-            entries.extend(snapshot.commands.iter().map(|command| {
-                let bindings = self.keymap().custom_labels(command);
-                let host = &self.endpoints[self.selected_endpoint].label;
-                let workspace = palette
-                    .target
-                    .as_ref()
-                    .and_then(|target| target.workspace.as_deref())
-                    .and_then(|id| {
-                        snapshot
-                            .workspaces
-                            .iter()
-                            .find(|workspace| workspace.workspace_id == id)
-                    })
-                    .map(|workspace| workspace.label.as_str());
-                let context = [Some(host.as_str()), workspace]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>()
-                    .join("  ");
-                let detail = if bindings.is_empty() {
-                    context
-                } else {
-                    format!("{context}  {}", bindings.join(", "))
-                };
-                Entry::new(
-                    command
-                        .description
-                        .as_ref()
-                        .filter(|text| !text.trim().is_empty())
-                        .unwrap_or(&command.command_id)
-                        .clone(),
-                    detail,
-                    "Herdr command",
-                    Action::Configured(command.command_id.clone(), command.action),
-                    None,
-                )
-            }));
+            let bindings = self.keymap().custom_bindings(&snapshot.commands);
+            entries.extend(
+                snapshot
+                    .commands
+                    .iter()
+                    .zip(bindings)
+                    .map(|(command, bindings)| {
+                        let bindings: Vec<_> = bindings
+                            .into_iter()
+                            .filter(|binding| binding.reach == Reach::Runs)
+                            .map(|binding| binding.label)
+                            .collect();
+                        let host = &self.endpoints[self.selected_endpoint].label;
+                        let workspace = palette
+                            .target
+                            .as_ref()
+                            .and_then(|target| target.workspace.as_deref())
+                            .and_then(|id| {
+                                snapshot
+                                    .workspaces
+                                    .iter()
+                                    .find(|workspace| workspace.workspace_id == id)
+                            })
+                            .map(|workspace| workspace.label.as_str());
+                        let context = [Some(host.as_str()), workspace]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>()
+                            .join("  ");
+                        let detail = if bindings.is_empty() {
+                            context
+                        } else {
+                            format!("{context}  {}", bindings.join(", "))
+                        };
+                        Entry::new(
+                            command
+                                .description
+                                .as_ref()
+                                .filter(|text| !text.trim().is_empty())
+                                .unwrap_or(&command.command_id)
+                                .clone(),
+                            detail,
+                            "Herdr command",
+                            Action::Configured(command.command_id.clone(), command.action),
+                            None,
+                        )
+                    }),
+            );
         }
         entries.extend(palette.projects.projects.iter().map(|project| {
             Entry::new(
