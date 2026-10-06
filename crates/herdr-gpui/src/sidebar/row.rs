@@ -302,7 +302,7 @@ pub(super) fn row(
     let show_status = !configured || leading_icon.is_some() || removing;
     let status_text = status_text.filter(|_| !configured);
     let text_lines = if configured {
-        let badge_lines = badge.as_ref().map_or(0, |badge| badge.lines(layout));
+        let badge_lines = badge.as_ref().map_or(0, |badge| badge.lines(&layout));
         lines.len().max(badge_lines)
     } else {
         0
@@ -346,7 +346,7 @@ pub(super) fn row(
     // Narrow sidebars and large fonts can leave less room than a badge needs.
     // Clip its column within the row rather than painting over the terminal.
     let badge_width = badge.as_ref().map_or(0., |badge| {
-        badge.width(font, layout).min((available - gap).max(0.))
+        badge.width(font, &layout).min((available - gap).max(0.))
     });
     let pr_reserve = if badge.is_some() {
         badge_width + gap
@@ -422,7 +422,7 @@ pub(super) fn row(
         .map(|row| look.mark(row, key, state, theme))
         // Tree lines run in the indent the row already reserves, so a child is
         // tied to its parent without box-drawing glyphs in the label.
-        .when(tree != RowTree::None && look.style.tree_lines(), |row| {
+        .when(tree != RowTree::None && look.density.tree_lines, |row| {
             let (color, font) = (theme.muted, font.clone());
             let gutter = cx.nest + look.tree_gutter() + extra_status_width;
             row.child(
@@ -608,7 +608,7 @@ pub(super) fn row(
             row.child(div().w(px(ARROW_RESERVE - gap)).flex_none())
         })
         .when_some(badge, |row, badge| {
-            row.child(badge.element(key, badge_width, font, theme, layout))
+            row.child(badge.element(key, badge_width, font, theme, &layout))
         })
 }
 

@@ -2,7 +2,7 @@
 //! top of a scrolled list.
 
 use super::{
-    HOST_ARROW_WIDTH, HOST_GAP, STATUS_WIDTH,
+    HOST_ARROW_WIDTH, STATUS_WIDTH,
     cell::RowState,
     label_text,
     layout::SidebarLook,
@@ -31,9 +31,10 @@ impl HerdrWindow {
         let theme = &self.theme;
         let layout = look.density;
         let content_x = look.content_x();
+        let host_gap = layout.host_gap();
         // The label yields room to the arrow and to the trailing status dot.
         let host_label_width =
-            (look.content_width(width) - HOST_ARROW_WIDTH - 2. * HOST_GAP - STATUS_WIDTH).max(0.);
+            (look.content_width(width) - HOST_ARROW_WIDTH - 2. * host_gap - STATUS_WIDTH).max(0.);
         let prefix = if pinned { "sticky-" } else { "" };
         let endpoint_id = endpoint.id.clone();
         let collapse_id = endpoint_id.clone();
@@ -61,11 +62,11 @@ impl HerdrWindow {
         // label, not from the status.
         let label_width = (host_label_width
             - if removing {
-                STATUS_WIDTH + HOST_GAP
+                STATUS_WIDTH + host_gap
             } else {
                 0.
             }
-            - gauges.as_ref().map_or(0., |(width, _)| width + HOST_GAP))
+            - gauges.as_ref().map_or(0., |(width, _)| width + host_gap))
         .max(0.);
         let lines = 1. + if load_line.is_some() { 1. } else { 0. };
         div()
@@ -116,7 +117,7 @@ impl HerdrWindow {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(HOST_GAP))
+                    .gap(px(host_gap))
                     .child(
                         div()
                             .id(SharedString::from(format!(
@@ -193,7 +194,7 @@ impl HerdrWindow {
                         .h(px(line_height(font)))
                         .flex()
                         .items_center()
-                        .pl(px(HOST_ARROW_WIDTH + HOST_GAP))
+                        .pl(px(HOST_ARROW_WIDTH + host_gap))
                         .overflow_hidden()
                         .child(crate::system_load::line(
                             reading,
