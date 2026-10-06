@@ -181,6 +181,9 @@ pub(crate) struct HerdrWindow {
     /// SSH tunnels to remote ports that listen on their host's loopback only.
     pub(crate) tunnels: crate::listening_ports::Tunnels,
     pub(crate) install_warning_shown: bool,
+    /// Whether the selected endpoint's refused handshake was announced. Reset
+    /// once it has none, so a later refusal is announced again.
+    pub(crate) version_notice_shown: bool,
     pub(crate) collapsed_repos: std::collections::HashSet<String>,
     /// Expanded; collapsed leaves the rail or nothing, as Herdr's
     /// `ui.sidebar_collapsed_mode` chooses (see `sidebar_mode`).
@@ -451,6 +454,7 @@ impl HerdrWindow {
             self.install_warning_shown = true;
             self.show_install_modal(window, cx);
         }
+        self.announce_version_mismatch(window, cx);
         self.resize();
         self.refresh_palette(window, cx);
         self.report_focus();
@@ -746,6 +750,7 @@ impl HerdrWindow {
             listening_ports: Default::default(),
             tunnels: Default::default(),
             install_warning_shown: false,
+            version_notice_shown: false,
             collapsed_repos: Default::default(),
             sidebar_visible: true,
             sidebar_start_pending: true,

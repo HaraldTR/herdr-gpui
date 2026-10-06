@@ -105,16 +105,39 @@ pub enum Error {
     RequestTimeout,
     #[error("expected stable endpoint welcome")]
     ExpectedWelcome,
+    /// The daemon answered the endpoint hello with a pre-endpoint welcome.
+    #[error("this Herdr server predates the endpoint protocol; run `herdr update` and reconnect")]
+    LegacyDaemon,
+    /// A local daemon closed after the hello without any welcome, as every
+    /// release before the endpoint protocol does.
+    #[error(
+        "Herdr server closed the connection without answering; it is likely older than {}, which this app requires. Run `herdr update` and reconnect",
+        crate::compat::MIN_HERDR_VERSION
+    )]
+    ClosedBeforeWelcome,
+    #[error(
+        "Herdr server {server_version} speaks endpoint generation {generation}, this app speaks {ours}; {advice}",
+        ours = herdr_protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION,
+        advice = crate::compat::generation_advice(*.generation)
+    )]
+    EndpointGeneration {
+        generation: u32,
+        server_version: String,
+    },
     #[error("expected endpoint.welcome.v1")]
     WelcomeKind,
     #[error("{code}: {message}")]
     WelcomeRejected { code: String, message: String },
     #[error("incompatible endpoint generation/codecs")]
     IncompatibleCodecs,
-    #[error("endpoint lacks safe surface interest support")]
-    MissingSurfaceInterest,
-    #[error("SSH endpoint lacks health_check capability")]
-    MissingHealthCheck,
+    #[error(
+        "Herdr server {server_version} lacks safe surface interest support; run `herdr update` and reconnect"
+    )]
+    MissingSurfaceInterest { server_version: String },
+    #[error(
+        "Herdr server {server_version} on this SSH host lacks the health_check capability; run `herdr update` there and reconnect"
+    )]
+    MissingHealthCheck { server_version: String },
     #[error("endpoint boot changed or snapshot revision regressed; reconnect required")]
     SnapshotIdentity,
     #[error("surface before snapshot")]
@@ -145,6 +168,18 @@ pub enum Error {
     SshTimeout,
     #[error("SSH bridge closed; check host trust, authentication, and remote Herdr installation")]
     SshClosed,
+    /// Every Herdr installed on the SSH host or WSL distribution was skipped
+    /// as unable to serve this client. Fields describe the first one;
+    /// `version` is bounded text.
+    #[error(
+        "Herdr{} on this host cannot serve this app; {}",
+        crate::compat::version_note(.version.as_deref()),
+        crate::compat::generation_advice(.generation.unwrap_or(0))
+    )]
+    BridgeIncompatible {
+        generation: Option<u32>,
+        version: Option<String>,
+    },
     #[error("SSH startup output exceeds limit")]
     SshOutputLimit,
     #[error("invalid WSL distribution name")]
@@ -324,7 +359,9 @@ impl Error {
             }
             Self::Cancelled | Self::SshCancelled => io::ErrorKind::Interrupted,
             Self::EventReceiverDropped | Self::Disconnected => io::ErrorKind::BrokenPipe,
-            Self::SocketClosed | Self::SshClosed | Self::WslClosed => io::ErrorKind::UnexpectedEof,
+            Self::SocketClosed | Self::SshClosed | Self::WslClosed | Self::ClosedBeforeWelcome => {
+                io::ErrorKind::UnexpectedEof
+            }
             Self::ForwardSpawn(error)
             | Self::ForwardLocalPort(error)
             | Self::ForwardControl(error) => error.kind(),

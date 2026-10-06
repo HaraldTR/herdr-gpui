@@ -105,6 +105,7 @@ pub(crate) struct MenuState {
     pub(super) github_selected: Option<github::Action>,
     pub(super) github_scroll: ScrollHandle,
     pub(super) pr_connection: Option<std::sync::Weak<std::sync::Mutex<crate::state::LiveState>>>,
+    pub(crate) version_notice: Option<super::VersionNotice>,
 }
 
 pub(super) struct Deletion {
@@ -281,6 +282,7 @@ impl MenuState {
             github_selected: None,
             github_scroll: ScrollHandle::new(),
             pr_connection: None,
+            version_notice: None,
             tab: None,
             group: None,
             host: None,
@@ -321,6 +323,7 @@ impl MenuState {
         self.input = None;
         self.error = None;
         self.deletion = None;
+        self.version_notice = None;
         self.close_check = None;
         self.creation = None;
         self.suggested_name = None;
