@@ -344,3 +344,4 @@ fn native_theme_save_blocks_both_font_workflows(cx: &mut TestAppContext) {
 }
 
 mod system_theme;
+mod theme_reload;
