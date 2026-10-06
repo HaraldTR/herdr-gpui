@@ -5,6 +5,7 @@ pub(crate) use layouts::{apply_loaded_layout, layout_load_revision};
 #[cfg(all(feature = "integration-test", target_os = "macos"))]
 mod native;
 mod persistence;
+mod remote_history;
 #[cfg(test)]
 use persistence::SizeIo;
 use persistence::{Loaded, SaveCompletion};
@@ -138,6 +139,7 @@ fn open_with(
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(680.), px(560.))),
             titlebar: Some(crate::titlebar::options("Settings")),
+            app_owns_titlebar_drag: cfg!(target_os = "macos"),
             ..Default::default()
         },
         move |window, cx| {
@@ -182,6 +184,10 @@ struct SettingsWindow {
     status: Option<String>,
     focus: FocusHandle,
     body_scroll: ScrollHandle,
+    /// The section list's width, dragged by its right edge.
+    navigation_width: crate::panel_resize::PanelWidth,
+    /// The window's width at its last render, which caps the section list.
+    viewport_width: f32,
     loading: bool,
     saving: bool,
     quitting: bool,
@@ -201,6 +207,7 @@ struct SettingsWindow {
     layout_saving: bool,
     #[cfg(test)]
     layout_io: Option<layouts::LayoutIo>,
+    remote_history: remote_history::RemoteHistory,
     theme_loading: bool,
     theme_waiting: bool,
     theme_light: bool,
@@ -259,6 +266,8 @@ impl SettingsWindow {
             status: None,
             focus: cx.focus_handle(),
             body_scroll: ScrollHandle::new(),
+            navigation_width: crate::panel_resize::SETTINGS_NAVIGATION,
+            viewport_width: 0.,
             loading: false,
             saving: false,
             quitting: false,
@@ -278,6 +287,7 @@ impl SettingsWindow {
             layout_saving: false,
             #[cfg(test)]
             layout_io: None,
+            remote_history: Default::default(),
             theme_loading: false,
             theme_waiting: false,
             theme_light: false,
@@ -316,6 +326,9 @@ impl SettingsWindow {
         if self.section == Section::Integrations {
             cx.notify();
         }
+        if self.section == Section::General {
+            self.sync_remote_history(false, cx);
+        }
     }
 
     fn retarget_source(&mut self, source: WeakEntity<HerdrWindow>, cx: &mut Context<Self>) {
@@ -340,10 +353,14 @@ impl SettingsWindow {
         if self.section == Section::Integrations {
             owner.update(cx, |source, cx| source.load_integrations(cx));
         }
+        if self.section == Section::General {
+            self.sync_remote_history(false, cx);
+        }
         cx.notify();
     }
 
     fn apply_window_appearance(&mut self, cx: &mut Context<Self>) {
+        self.follow_system_appearance(cx);
         self.sync_appearance(cx);
         self.drive_theme_intent(cx);
         self.publish_appearance(cx);
@@ -495,13 +512,41 @@ impl SettingsWindow {
                 .source
                 .update(cx, |source, cx| source.load_integrations(cx));
         }
+        if section == Section::General {
+            self.sync_remote_history(false, cx);
+        }
         cx.notify();
     }
 
-    fn navigation(&self, cx: &mut Context<Self>) -> Div {
+    fn navigation(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        use crate::panel_resize::{PanelDrag, Side, handle};
         let theme = &self.theme;
         div()
-            .w(px(184.))
+            .id("settings-navigation")
+            .relative()
+            .w(px(self.navigation_width.width(self.viewport_width)))
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<PanelDrag>, _, cx| {
+                    if *event.drag(cx) == PanelDrag::SettingsNavigation
+                        && this.navigation_width.drag(
+                            Side::Left,
+                            event.bounds,
+                            event.event.position.x,
+                        )
+                    {
+                        cx.notify();
+                    }
+                }),
+            )
+            .child(handle(
+                "settings-navigation-resize",
+                Side::Left,
+                PanelDrag::SettingsNavigation,
+                cx.listener(|this, _, _, cx| {
+                    this.navigation_width.reset();
+                    cx.notify();
+                }),
+            ))
             .h_full()
             .flex_none()
             .flex()
@@ -579,10 +624,15 @@ impl Render for SettingsWindow {
             Section::Integrations => self.render_integration_controls(cx),
             _ => self.render_controls(window, cx),
         };
+        self.viewport_width = f32::from(window.viewport_size().width);
         let navigation = self.navigation(cx);
         let font_picker = self.render_control_font_picker(window, cx);
+        let this = cx.entity().downgrade();
+        let header = crate::titlebar::header(&self.theme, window, move |window, cx| {
+            let _ = this.update(cx, |view, cx| view.close(window, cx));
+        });
         let theme = &self.theme;
-        div()
+        let root = div()
             .key_context("SettingsWindow")
             .relative()
             .track_focus(&self.focus)
@@ -613,11 +663,7 @@ impl Render for SettingsWindow {
             .line_height(px(18.))
             .bg(rgb(theme.background))
             .text_color(rgb(theme.foreground))
-            .map(|root| {
-                #[cfg(target_os = "macos")]
-                let root = root.child(crate::titlebar::render(theme.surface, None));
-                root
-            })
+            .children(header)
             .child(
                 div().flex_1().min_h_0().flex().child(navigation).child(
                     div()
@@ -688,7 +734,9 @@ impl Render for SettingsWindow {
                             .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
                     ),
             )
-            .children(font_picker)
+            .children(font_picker);
+        let border = self.theme.active;
+        crate::titlebar::frame(window, border, root)
     }
 }
 

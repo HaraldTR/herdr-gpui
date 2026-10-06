@@ -2,7 +2,7 @@
 mod fonts;
 mod preferences;
 
-use super::{Section, SettingsWindow};
+use super::{Section, SettingsWindow, remote_history::HostState};
 use crate::{
     agent_skill::{AgentSkill, Choice},
     config::{Config, FONT_SIZE_RANGE, FontFace, LayoutMode, corners},
@@ -691,16 +691,44 @@ impl SettingsWindow {
                 cx,
             ))
             .child(self.preference_switch(
+                "settings-agent-checkpoints",
+                "Checkpoint agent turns",
+                self.config.agent_checkpoints,
+                crate::config::preferences::Preference::AgentCheckpoints(
+                    !self.config.agent_checkpoints,
+                ),
+                cx,
+            ))
+            .child(self.preference_switch(
+                "settings-listening-ports",
+                "Show listening ports",
+                self.config.show_listening_ports,
+                crate::config::preferences::Preference::ShowListeningPorts(
+                    !self.config.show_listening_ports,
+                ),
+                cx,
+            ))
+            .child(self.preference_switch(
                 "settings-confirm-close",
                 "Confirm tab close",
                 self.config.confirm_close_tab,
-                crate::config::preferences::Preference::ConfirmClose(
+                crate::config::preferences::Preference::ConfirmCloseTab(
                     !self.config.confirm_close_tab,
+                ),
+                cx,
+            ))
+            .child(self.preference_switch(
+                "settings-confirm-close-pane",
+                "Confirm pane close",
+                self.config.confirm_close_pane,
+                crate::config::preferences::Preference::ConfirmClosePane(
+                    !self.config.confirm_close_pane,
                 ),
                 cx,
             ));
         div().flex().flex_col().gap(px(24.)).child(general)
             .child(self.render_tab_bar_controls(cx))
+            .child(self.render_session_controls(cx))
             .child(self.render_skill_controls(cx))
             .child(self.clipboard_controls(cx))
             .child(self.control_card("Configuration")
@@ -767,6 +795,80 @@ impl SettingsWindow {
             } else {
                 "Shared with Herdr and read-only on this platform. With copy on select off, Ctrl-C copies the highlighted selection."
             }))
+    }
+
+    /// Herdr's opt-in pane history. The daemon owns the terminals, so it
+    /// alone can save their scrollback and seed it back into the restored
+    /// panes; these switches only edit each daemon's own setting.
+    fn render_session_controls(&self, cx: &mut Context<Self>) -> Div {
+        let ready = self.controls_shared_ready();
+        let enabled = self
+            .shared
+            .as_ref()
+            .is_some_and(|shared| shared.pane_history);
+        let mut card = self
+            .control_card("Session restore")
+            .child(
+                self.control_switch(
+                    "settings-pane-history",
+                    "Restore scrollback after Herdr restarts (experimental)",
+                    enabled,
+                    ready,
+                )
+                .when(ready, |button| {
+                    button.on_click(cx.listener(move |this, _, _, cx| {
+                        this.save_shared(Edit::PaneHistory(!enabled), cx);
+                    }))
+                }),
+            )
+            .child(self.control_note(
+                "Reopening this app always keeps scrollback while Herdr runs. With this on, Herdr also saves pane output to session-history.json and replays it when the daemon restarts, so that file holds terminal history.",
+            ))
+            .when(!cfg!(unix), |card| {
+                card.child(self.control_note("Shared with Herdr and read-only on this platform."))
+            });
+        let hosts = self.remote_history.hosts();
+        if hosts.is_empty() {
+            return card;
+        }
+        card = card.child(self.control_note(
+            "Each connected SSH host's Herdr keeps its own setting, saved in that host's config.",
+        ));
+        let open = !self.quitting && self.closing.is_none();
+        for (index, host) in hosts.iter().enumerate() {
+            let (checked, settled) = match &host.state {
+                HostState::Ready(history) => (history.enabled, true),
+                HostState::Saving(history) => (history.enabled, false),
+                HostState::Loading | HostState::Failed(_) => (false, false),
+            };
+            let ready = open && settled;
+            let target = host.target.clone();
+            card = card.child(
+                self.control_switch(
+                    format!("settings-pane-history-host-{index}"),
+                    host.label.clone(),
+                    checked,
+                    ready,
+                )
+                .when(ready, |button| {
+                    button.on_click(cx.listener(move |this, _, _, cx| {
+                        this.save_remote_history(&target, !checked, cx);
+                    }))
+                }),
+            );
+            let note = match &host.state {
+                HostState::Loading => Some("Reading host config...".to_owned()),
+                HostState::Saving(_) => Some("Saving host config...".to_owned()),
+                HostState::Failed(error) => {
+                    Some(format!("{error}. Reload configuration to try again."))
+                }
+                HostState::Ready(_) => None,
+            };
+            if let Some(note) = note {
+                card = card.child(self.control_note(note));
+            }
+        }
+        card
     }
 
     pub(super) fn render_sidebar_layout_controls(&self, cx: &mut Context<Self>) -> Div {

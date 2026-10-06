@@ -13,7 +13,6 @@ use crate::{
     state::ConnectionStatus,
     terminal::*,
     terminal_painter::{self, ImageTarget, PlacedImages},
-    worktree_banner,
 };
 use gpui::{prelude::*, *};
 use herdr_client::ConnectOptions;
@@ -57,6 +56,7 @@ impl HerdrWindow {
 impl Render for HerdrWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.restore_menu_focus(window, cx);
+        self.viewport_width = f32::from(window.viewport_size().width);
         let font = self.config.terminal.font();
         // Parked groups paint with the same face as the window's terminal.
         let parked_font = font.clone();
@@ -122,12 +122,17 @@ impl Render for HerdrWindow {
         );
         // Like the highlight, the link underline paints with the frame that
         // owns its cells, and only while that frame shows the content the
-        // daemon resolved it from.
+        // daemon resolved it from. Without one, the row-local reading under
+        // the pointer is underlined instead.
         let link_rows: Vec<_> = surface
             .as_deref()
             .zip(self.hovered_daemon_link())
             .filter(|(surface, link)| link.cell.current(surface))
             .map(|(_, link)| link.frame_rows().collect())
+            .or_else(|| {
+                let link = self.hovered_local_link()?;
+                Some(vec![(link.row, link.columns.clone())])
+            })
             .unwrap_or_default();
         // Search matches, mapped onto the frame on screen, tint below the
         // selection, which reads as chosen over them. A popup covers the
@@ -299,7 +304,8 @@ impl Render for HerdrWindow {
                     {
                         return;
                     }
-                    this.pressed_terminal_link = this.terminal_link_press(event.position);
+                    this.pressed_terminal_link =
+                        this.terminal_link_press(event.position, event.modifiers);
                     if this.menu.page.is_some() {
                         return;
                     }
@@ -556,7 +562,11 @@ impl Render for HerdrWindow {
             .then(|| self.active_group())
             .flatten();
         let mut terminal = Some(terminal);
-        let mut groups = Vec::with_capacity(slots.len());
+        let merged = slots
+            .first()
+            .is_some_and(|first| self.tabs_in_titlebar(first.id, cx));
+        let count = slots.len();
+        let mut groups = Vec::with_capacity(count);
         for (slot, shown) in slots.into_iter().zip(shown) {
             let gap = slot_gap(slot);
             let owns_keyboard = keyboard == Some(slot.id);
@@ -574,6 +584,15 @@ impl Render for HerdrWindow {
                     .unwrap_or_else(|| div().into_any_element()),
                 (Shown::Terminal, _) if self.shows_parked_terminal(slot.id, cx) => {
                     self.render_parked_terminal(slot, gap, parked_font.clone(), cell_height, cx)
+                }
+                // A review tab is drawn by the app, never a page.
+                (Shown::Page(_), Some(tab))
+                    if tab
+                        .location
+                        .as_ref()
+                        .is_some_and(|location| !location.is_page()) =>
+                {
+                    self.render_review_tab(slot, &tab, gap, cx)
                 }
                 (Shown::Page(_), Some(tab)) => {
                     self.render_browser(slot, &tab, gap, owns_keyboard, cx)
@@ -593,7 +612,8 @@ impl Render for HerdrWindow {
                 }
                 _ => self.render_stand_in(slot, &shown, gap, owns_keyboard, cx),
             };
-            groups.push(self.render_group(slot, body, window, cx));
+            let ends = merged.then(|| crate::titlebar::Ends::of(slot.index, count));
+            groups.push(self.render_group(slot, body, ends, window, cx));
         }
         let content = self.render_groups(groups, cx);
         // Not `||`: asking forgets group motion that has finished.
@@ -608,7 +628,7 @@ impl Render for HerdrWindow {
             || self.local_error.is_some()
             || self.live.error.is_some())
         .then(|| self.live.status_text(self.local_error.as_deref()));
-        div()
+        let root = div()
             .on_modifiers_changed(cx.listener(Self::double_shift_modifiers))
             .capture_any_mouse_down(cx.listener(|this, _, _, _| this.shift_taps.cancel()))
             .child({
@@ -683,19 +703,20 @@ impl Render for HerdrWindow {
             .text_color(rgb(self.theme.foreground))
             .text_font(&self.config.ui)
             .text_size(px(self.config.ui.size))
-            .child(self.render_titlebar(cx))
-            .children(worktree_banner::render(
-                env!("HERDR_BUILD_WORKTREE") == "1",
-                env!("HERDR_BUILD_BRANCH"),
-                env!("HERDR_BUILD_PR"),
-            ))
+            .when(!merged, |root| root.child(self.render_titlebar(window, cx)))
+            // Under the traffic lights a banner would hide them, so with no
+            // header it moves to the window's foot.
+            .when(!merged, |root| root.children(self.render_worktree_banner()))
             .child(
                 div()
                     .debug_selector(|| "window-body".into())
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .children(sidebar)
+                    .children(sidebar.map(|sidebar| match merged {
+                        true => self.sidebar_column(sidebar, window, cx).into_any_element(),
+                        false => sidebar.into_any_element(),
+                    }))
                     .child(
                         div()
                             .flex()
@@ -785,6 +806,7 @@ impl Render for HerdrWindow {
                                 div().debug_selector(|| "connection-message".into()).child(status)
                             )),
                     )
+                    .children(self.render_listening_ports(cx))
                     .children(self.render_system_load())
                     .when(crate::caffeine::SUPPORTED, |bar| {
                         let awake = crate::caffeine::active(cx);
@@ -950,10 +972,12 @@ impl Render for HerdrWindow {
                             ),
                     ),
             )
+            .when(merged, |root| root.children(self.render_worktree_banner()))
             .children(self.render_toasts(window, cx))
             .children(self.render_file_transfer(window, cx))
             .when(self.menu.page.is_some(), |root| {
                 root.child(self.render_menu(window, cx))
-            })
+            });
+        crate::titlebar::frame(window, self.theme.active, root)
     }
 }

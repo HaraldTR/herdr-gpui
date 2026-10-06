@@ -71,7 +71,7 @@ impl HerdrWindow {
                 .child(
                     div()
                         .p(px(8.))
-                        .text_color(rgb(theme.muted))
+                        .text_color(rgb(theme.subtext()))
                         .child("Nothing is installed or executed by this panel."),
                 );
         }

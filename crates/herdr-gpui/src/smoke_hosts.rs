@@ -320,7 +320,7 @@ pub(super) async fn sidebar_hosts(
                 entity.update(cx, |view, _| -> Result<()> {
                     view.config.sidebar.size = font_size;
                     view.config.theme = if font_size == 12. { "Default" } else { "Nord" }.into();
-                    view.theme = view.config.theme()?;
+                    view.theme = view.config.theme(false)?;
                     Ok(())
                 })?;
                 cx.default_global::<PaintedProbes>().0.clear();

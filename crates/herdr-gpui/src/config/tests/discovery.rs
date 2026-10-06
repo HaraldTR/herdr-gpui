@@ -59,7 +59,7 @@ fn discovers_sorted_names_and_loads_in_precedence_order() -> anyhow::Result<()> 
     );
     assert_eq!(
         config
-            .theme_with_directories(|| Ok(directories.clone()))?
+            .theme_with_directories(false, || Ok(directories.clone()))?
             .background,
         0x112233
     );
@@ -68,7 +68,7 @@ fn discovers_sorted_names_and_loads_in_precedence_order() -> anyhow::Result<()> 
         ..Config::default()
     };
     assert_eq!(
-        builtin.theme_with_directories(|| Ok(directories))?,
+        builtin.theme_with_directories(false, || Ok(directories))?,
         Theme::builtin("Nord").context("missing builtin")?
     );
     Ok(())
@@ -101,7 +101,7 @@ fn discovery_includes_explicit_selection_and_reports_errors() -> anyhow::Result<
         };
         assert!(
             config
-                .theme_with_directories(|| Err(Error::MissingHome))
+                .theme_with_directories(false, || Err(Error::MissingHome))
                 .is_ok()
         );
     }

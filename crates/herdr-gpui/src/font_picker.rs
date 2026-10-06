@@ -176,6 +176,7 @@ impl HerdrWindow {
             return;
         }
         let target = picker.target;
+        let light = crate::app::light_appearance(cx);
         let text_system = cx.text_system().clone();
         self.load_gui_config_with(
             move || {
@@ -184,11 +185,11 @@ impl HerdrWindow {
                     FontTarget::Face(face) => Config::save_font_family(face, family.as_deref())?,
                 }
                 let mut config = Config::load()?;
-                config.resolve_font_fallbacks(|| text_system.all_font_names());
+                config.resolve_fonts(|| text_system.all_font_names());
                 let theme = if config.theme == "Follow Herdr" {
                     Default::default()
                 } else {
-                    config.theme()?
+                    config.theme(light)?
                 };
                 Ok((config, theme))
             },

@@ -143,16 +143,17 @@ impl HerdrWindow {
         }
         // Enumerating installed families is slow, so it rides the same
         // background load as parsing rather than the UI thread.
+        let light = crate::app::light_appearance(cx);
         let text_system = cx.text_system().clone();
         self.load_gui_config_with(
             move || {
                 let mut config = Config::load()?;
-                config.resolve_font_fallbacks(|| text_system.all_font_names());
+                config.resolve_fonts(|| text_system.all_font_names());
                 // Follow Herdr is resolved from the latest prepared snapshot on completion.
                 let theme = if config.theme == "Follow Herdr" {
                     Default::default()
                 } else {
-                    config.theme()?
+                    config.theme(light)?
                 };
                 Ok((config, theme))
             },
@@ -170,6 +171,8 @@ impl HerdrWindow {
         }
         let theme_revision = crate::settings_window::theme_load_revision(cx);
         let layout_revision = crate::settings_window::layout_load_revision(cx);
+        // Loaders resolve the theme for the appearance when they start.
+        let light = crate::app::light_appearance(cx);
         let load = cx.background_executor().spawn(async move { load() });
         self.config_load = Some(cx.spawn(async move |this, cx| {
             let loaded = load.await;
@@ -212,6 +215,9 @@ impl HerdrWindow {
                             this.theme = theme;
                         }
                         this.apply_shared_theme(cx);
+                        if light != crate::app::light_appearance(cx) {
+                            this.apply_system_theme(cx);
+                        }
                         crate::settings_window::apply_loaded_theme(&mut this.config, &mut this.theme, theme_revision, cx);
                         cx.set_global(crate::app::InitialAppearance {
                             config: this.config.clone(),
@@ -451,7 +457,7 @@ impl HerdrWindow {
         body = body.child(
             div()
                 .py(px(14.))
-                .text_color(rgb(theme.muted))
+                .text_color(rgb(theme.subtext()))
                 .child("Includes the prefix chords from Herdr's [keys] in config.toml. Daemon actions with no GUI command, and terminal applications, keep their own shortcuts."),
         );
         div()

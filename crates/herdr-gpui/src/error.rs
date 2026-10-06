@@ -217,6 +217,14 @@ pub enum Error {
     GitPullRequestBase,
     #[error("Git worker stopped. Retry the operation.")]
     GitWorker,
+    #[error(
+        "No base branch to compare with: neither the pull request's base nor origin/HEAD, main, or master exists locally."
+    )]
+    ReviewNoBase,
+    #[error("A saved review tab names a checkout that is not a local absolute path.")]
+    InvalidReviewCheckout,
+    #[error("These changes are too large to review here, even leaving out the largest files.")]
+    ReviewTooLarge,
     #[error("Could not {operation}.")]
     GitProcess {
         operation: &'static str,
@@ -286,6 +294,28 @@ pub enum Error {
     GitHubNetwork(#[source] ureq::Error),
     #[error("GitHub query failed. Check token repository permissions and rate limits.")]
     GitHubQuery,
+    /// GitHub's own refusal of a requested change, cleaned and bounded.
+    #[error("GitHub refused the request: {0}")]
+    GitHubRejected(String),
+    #[error("A pull request action is already running.")]
+    PrActionBusy,
+    #[error(
+        "This pull request cannot be acted on here: it is not open, or its details are incomplete. Refresh and try again."
+    )]
+    PrActionTarget,
+    #[error("Enter a comment of at most 4096 characters.")]
+    PrCommentBody,
+    #[error("The branch changed since this dialog opened. Review the pull request again.")]
+    PrMergeChanged,
+    #[error("The repository does not allow this merge method.")]
+    PrMergeMethod,
+    #[error("Pull request worker stopped. Check the pull request on GitHub before retrying.")]
+    PrActionWorker,
+    #[error("Could not start the pull request worker.")]
+    PrActionProcess {
+        #[source]
+        source: io::Error,
+    },
     #[error("Invalid GitHub authorization header.")]
     GitHubHeader(#[source] ureq::http::header::InvalidHeaderValue),
     #[error("Invalid GitHub device authorization response.")]
@@ -370,6 +400,48 @@ pub enum Error {
     SystemLoadUnsupported(String),
     #[error("CPU and memory output was not understood.")]
     SystemLoadOutput,
+    #[error("No checkout of this branch was found on its host.")]
+    CheckpointCheckout,
+    #[error("This checkout has no commit yet, so it has no checkpoints.")]
+    CheckpointUnborn,
+    #[error("That checkpoint no longer exists.")]
+    CheckpointMissing,
+    #[error("That checkpoint was taken on another branch. Check that branch out to restore it.")]
+    CheckpointBranch,
+    #[error("A merge, rebase, cherry-pick, or revert is in progress. Finish or abort it first.")]
+    CheckpointBusy,
+    #[error("Checkpoint Git commands failed")]
+    CheckpointScript(#[source] herdr_client::Error),
+    #[error("Checkpoint output was not understood.")]
+    CheckpointOutput,
+    #[error("Could not start the checkpoint worker")]
+    CheckpointThread(#[source] io::Error),
+    #[error("The checkpoint worker stopped.")]
+    CheckpointWorker,
+    #[error("Enter a port number from 1 to 65535.")]
+    ForwardPort,
+    #[error("Port {0} is already forwarded from this host.")]
+    ForwardDuplicate(u16),
+    #[error("At most {0} ports can be forwarded at once.")]
+    ForwardLimit(usize),
+    #[error("Could not read listening ports on this host.")]
+    ListeningPorts(#[source] Box<Error>),
+    #[error("Neither ss nor lsof is installed on this host, so listening ports cannot be read.")]
+    ListeningPortsTool,
+    #[error("Listening ports cannot be read on this platform.")]
+    ListeningPortsUnsupported,
+    /// Probes that open a shell on the host (usage, load, ports, checkpoints)
+    /// have no route into a WSL distribution yet.
+    #[error("This is not available for WSL distributions yet.")]
+    WslHostUnsupported,
+    #[error("No free local port for an SSH tunnel.")]
+    TunnelPort(#[source] io::Error),
+    #[error("Could not start ssh for a tunnel.")]
+    TunnelStart(#[source] io::Error),
+    #[error("SSH ended before the tunnel opened ({0}).")]
+    TunnelExited(std::process::ExitStatus),
+    #[error("The SSH tunnel did not open in time.")]
+    TunnelTimeout,
     #[error("Could not ask Herdr which process the pane runs.")]
     ProcessesQuery(#[source] herdr_client::Error),
     #[error("Herdr's answer about the pane's process was not understood.")]
@@ -412,6 +484,8 @@ pub enum Error {
     WorktreeScriptsRemote(#[source] herdr_client::Error),
     #[error("The daemon did not identify this workspace's checkout")]
     WorktreeScriptsCheckout,
+    #[error("Worktree scripts cannot be read from a WSL distribution yet")]
+    WorktreeScriptsUnsupportedHost,
     #[error("Another worktree script is still starting")]
     WorktreeScriptsBusy,
     #[error("{0}")]
@@ -533,6 +607,8 @@ pub enum Error {
     InvalidSidebarGap,
     #[error("theme must be a name, absolute path, or ~/ path")]
     InvalidThemePath,
+    #[error("a theme that follows the system must name both sides: light:NAME,dark:NAME")]
+    InvalidThemePair,
     #[error("keybindings.{0} is not a command; see the keybindings list in config-gpui.toml")]
     UnknownKeybinding(String),
     #[error("keybindings.{command}: invalid keystroke {keystroke:?}")]

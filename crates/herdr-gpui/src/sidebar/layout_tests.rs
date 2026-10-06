@@ -29,6 +29,8 @@ mod host_groups;
 #[cfg(test)]
 mod layouts;
 #[cfg(test)]
+mod listening_ports;
+#[cfg(test)]
 mod palette;
 #[cfg(test)]
 mod preferences_panel;
@@ -409,6 +411,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         teleport: None,
         teleport_marks: crate::teleport::Marks::detached(),
         teleport_follow: None,
+        fan_out: None,
         selection: None,
         selection_follow: Default::default(),
         find: None,
@@ -431,8 +434,18 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         config_watch: None,
         config_load_revision: 0,
         git: Default::default(),
+        deliveries: Default::default(),
+        notes_width: crate::panel_resize::NOTES,
+        review_files_width: crate::panel_resize::REVIEW_FILES,
+        reviews: Default::default(),
+        viewport_width: 0.,
+        pr_actions: Default::default(),
         usage: Default::default(),
         system_load: Default::default(),
+        checkpoints: Default::default(),
+        port_forwards: Default::default(),
+        listening_ports: Default::default(),
+        tunnels: Default::default(),
         sidebar_visible: true,
         sidebar_start_pending: true,
         device_filter: None,

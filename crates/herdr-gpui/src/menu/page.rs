@@ -15,7 +15,13 @@ pub(crate) enum Page {
     /// A saved SSH device's context menu, from its sidebar host header.
     Host,
     RenameDevice,
+    /// Names a saved SSH device's port to forward to this computer.
+    ForwardPort,
     RemoveDevice,
+    /// Picking a WSL distribution to save as a device.
+    AddWsl,
+    /// Confirming a saved WSL distribution should be forgotten.
+    RemoveWsl,
     Keybinds,
     Themes,
     Fonts,
@@ -41,9 +47,18 @@ pub(crate) enum Page {
     /// Titlebar Git actions for the focused checkout, and its commit dialog.
     Git,
     GitCommit,
+    /// The open pull request's checks and review conversation.
+    PrReview,
+    PrComment,
+    /// Choosing a merge method, and confirming it.
+    PrMerge,
     Dialog(WorkspaceAction),
     /// Moving a linked worktree to another host.
     Teleport,
+    /// A checkout's agent checkpoints, and restoring one.
+    Checkpoints,
+    /// One prompt sent to several agents, and their comparison.
+    FanOut,
     /// Asks whether to trust a repository's worktree script before it runs.
     WorktreeScript,
 }
@@ -77,6 +92,9 @@ pub(crate) enum WorkspaceMenuAction {
     GoToTeleported,
     /// Forget that this checkout's work was teleported away.
     ClearTeleported,
+    Checkpoints,
+    /// Send one prompt to several agents, or reopen their comparison.
+    FanOut,
     /// Run one of the repository's worktree scripts in a new tab.
     Script(crate::worktree_scripts::ScriptKind),
 }
@@ -99,6 +117,8 @@ impl WorkspaceMenuAction {
             Self::Teleport | Self::GoToTeleported => "icons/teleport.svg",
             Self::TeleportBack => "icons/teleport-back.svg",
             Self::ClearTeleported => "icons/x.svg",
+            Self::Checkpoints => "icons/refresh.svg",
+            Self::FanOut => "icons/fan-out.svg",
             Self::Script(crate::worktree_scripts::ScriptKind::Setup) => "icons/refresh.svg",
             Self::Script(_) => "icons/play.svg",
             Self::PullRequest => return None,

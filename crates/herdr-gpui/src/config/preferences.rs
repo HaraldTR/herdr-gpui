@@ -4,8 +4,11 @@ use herdr_client::protocol::ToastHerdrPosition;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Preference {
-    ConfirmClose(bool),
+    ConfirmCloseTab(bool),
+    ConfirmClosePane(bool),
     ShowSystemLoad(bool),
+    AgentCheckpoints(bool),
+    ShowListeningPorts(bool),
     NotificationEnabled(Option<bool>),
     NotificationDelay(Option<u64>),
     NotificationPosition(Option<ToastHerdrPosition>),
@@ -29,8 +32,19 @@ impl Config {
             };
             let mut document = text.parse::<toml_edit::DocumentMut>()?;
             let (table, key, value) = match edit {
-                Preference::ConfirmClose(value) => (None, "confirm_close_tab", Some(value.into())),
+                Preference::ConfirmCloseTab(value) => {
+                    (None, "confirm_close_tab", Some(value.into()))
+                }
+                Preference::ConfirmClosePane(value) => {
+                    (None, "confirm_close_pane", Some(value.into()))
+                }
                 Preference::ShowSystemLoad(value) => (None, "show_system_load", Some(value.into())),
+                Preference::AgentCheckpoints(value) => {
+                    (None, "agent_checkpoints", Some(value.into()))
+                }
+                Preference::ShowListeningPorts(value) => {
+                    (None, "show_listening_ports", Some(value.into()))
+                }
                 Preference::NotificationEnabled(value) => {
                     (Some("notifications"), "enabled", value.map(Into::into))
                 }
@@ -131,8 +145,11 @@ mod tests {
             "# personal\nfuture = 'keep'\nlayout = 'orca' # mode\n[notifications]\nfuture = 42\nenabled = false # enabled\n",
         )?;
         for edit in [
-            Preference::ConfirmClose(false),
+            Preference::ConfirmCloseTab(false),
+            Preference::ConfirmClosePane(false),
             Preference::ShowSystemLoad(false),
+            Preference::AgentCheckpoints(false),
+            Preference::ShowListeningPorts(false),
             Preference::NotificationEnabled(Some(true)),
             Preference::NotificationDelay(Some(3600)),
             Preference::NotificationPosition(Some(ToastHerdrPosition::TopLeft)),
@@ -150,7 +167,10 @@ mod tests {
         assert_eq!(table["future"].as_str(), Some("keep"));
         assert_eq!(table["notifications"]["future"].as_integer(), Some(42));
         assert_eq!(table["confirm_close_tab"].as_bool(), Some(false));
+        assert_eq!(table["confirm_close_pane"].as_bool(), Some(false));
         assert_eq!(table["show_system_load"].as_bool(), Some(false));
+        assert_eq!(table["agent_checkpoints"].as_bool(), Some(false));
+        assert_eq!(table["show_listening_ports"].as_bool(), Some(false));
         assert_eq!(table["layout"]["mode"].as_str(), Some("orca"));
         assert_eq!(table["layout"]["sidebar_gap"].as_float(), Some(7.5));
         assert_eq!(

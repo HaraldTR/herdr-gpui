@@ -10,6 +10,7 @@ mod config_diagnostic;
 mod copy_mode;
 mod double_shift;
 mod file_drop;
+mod file_links;
 mod find;
 mod flash;
 pub(crate) use flash::Flash;
@@ -154,9 +155,31 @@ pub(crate) struct HerdrWindow {
     pub(crate) teleport_marks: crate::teleport::Marks,
     /// The workspace a finished teleport keeps steering to until focused.
     pub(crate) teleport_follow: Option<crate::teleport::Follow>,
+    /// A prompt fanned out to several agents; once launched it outlives its
+    /// dialog so the lanes can be compared later.
+    pub(crate) fan_out: Option<crate::fan_out::FanOut>,
     pub(crate) git: git::Git,
+    /// Notes waiting for their agents to be ready for them.
+    pub(crate) deliveries: crate::agent_notes::Deliveries,
+    /// The notes panel beside a review or an annotated page; both share it.
+    pub(crate) notes_width: crate::panel_resize::PanelWidth,
+    /// The review's list of changed files.
+    pub(crate) review_files_width: crate::panel_resize::PanelWidth,
+    /// Each review tab's state, by its tab.
+    pub(crate) reviews: std::collections::HashMap<crate::browser::TabId, crate::review::Review>,
+    /// The window's width at its last render, which caps side panels.
+    pub(crate) viewport_width: f32,
+    /// Comment, merge, and review reads for the focused branch's open PR.
+    pub(crate) pr_actions: crate::pr_actions::Actions,
     pub(crate) usage: crate::usage::Usage,
     pub(crate) system_load: crate::system_load::SystemLoad,
+    /// Snapshots of checkouts taken at agent turns, and the dialog listing them.
+    pub(crate) checkpoints: crate::checkpoint::Checkpoints,
+    /// Remote ports forwarded to this machine; they end with the window.
+    pub(crate) port_forwards: crate::port_forward::PortForwards,
+    pub(crate) listening_ports: crate::listening_ports::ListeningPorts,
+    /// SSH tunnels to remote ports that listen on their host's loopback only.
+    pub(crate) tunnels: crate::listening_ports::Tunnels,
     pub(crate) install_warning_shown: bool,
     pub(crate) collapsed_repos: std::collections::HashSet<String>,
     /// Expanded; collapsed leaves the rail or nothing, as Herdr's
@@ -293,6 +316,12 @@ impl HerdrWindow {
         if !self.sidebar_split_modified {
             self.sidebar_split = chrome.sidebar_split;
         }
+        if self.notes_width.chosen().is_none() {
+            self.notes_width.restore(chrome.notes_width);
+        }
+        if self.review_files_width.chosen().is_none() {
+            self.review_files_width.restore(chrome.review_files_width);
+        }
         if !self.agent_sort_modified
             && let Some(sort) = chrome.agent_sort
         {
@@ -380,6 +409,7 @@ impl HerdrWindow {
         self.poll_file_transfer(cx);
         self.update_workspace_dialog(window, cx);
         self.poll_teleport(window, cx);
+        self.poll_fan_out(window, cx);
         self.poll_device_setup(window, cx);
         self.poll_worktree_script(window, cx);
         self.poll_worktree_source(cx);
@@ -410,6 +440,11 @@ impl HerdrWindow {
             cx.notify();
         }
         if self.update_system_load() {
+            cx.notify();
+        }
+        self.update_checkpoints(cx);
+        self.update_port_forwards(cx);
+        if self.update_listening_ports() {
             cx.notify();
         }
         if self.live.missing_installation && !self.install_warning_shown {
@@ -449,16 +484,37 @@ impl HerdrWindow {
         changed
     }
 
-    /// CPU and memory are sampled for every enabled host: this machine
-    /// always, a remote host while it is connected, so a dropped host is not
-    /// dialled every few seconds.
+    /// CPU and memory are sampled for every enabled host.
     fn update_system_load(&mut self) -> bool {
-        let hosts = self
-            .config
-            .show_system_load
-            .then_some(self.endpoints.iter().enumerate())
-            .into_iter()
-            .flatten()
+        if !self.config.show_system_load {
+            return self.system_load.poll(Vec::new());
+        }
+        let hosts = self.watched_hosts();
+        self.system_load.poll(hosts)
+    }
+
+    /// Listening ports are scanned on the same hosts as CPU and memory.
+    fn update_listening_ports(&mut self) -> bool {
+        if !self.config.show_listening_ports {
+            self.tunnels = Default::default();
+            return self.listening_ports.poll(Vec::new());
+        }
+        let hosts = self.watched_hosts();
+        let changed = self.listening_ports.poll(hosts);
+        // A tunnel lives as long as its remote port is listed.
+        let ports = &self.listening_ports;
+        self.tunnels
+            .retain(|key| ports.listening(&crate::usage::Host::Ssh(key.target.clone()), key.port));
+        changed
+    }
+
+    /// The machines background monitors watch: this one always, a remote
+    /// host while it is connected, so a dropped host is not dialled every
+    /// few seconds.
+    fn watched_hosts(&self) -> Vec<crate::usage::Host> {
+        self.endpoints
+            .iter()
+            .enumerate()
             .filter(|(index, endpoint)| {
                 let live = if *index == self.selected_endpoint {
                     &self.live
@@ -466,11 +522,81 @@ impl HerdrWindow {
                     &endpoint.live
                 };
                 endpoint.enabled
-                    && (live.status.is_connected()
-                        || !matches!(endpoint.connection.target, ConnectTarget::Ssh { .. }))
+                    && (live.status.is_connected() || !endpoint.connection.target.is_remote())
             })
-            .map(|(_, endpoint)| crate::usage::Host::from(&endpoint.connection.target));
-        self.system_load.poll(hosts)
+            .map(|(_, endpoint)| crate::usage::Host::from(&endpoint.connection.target))
+            .collect()
+    }
+
+    /// Agent turns are watched on every enabled, connected host this client
+    /// may run Git on, and finished restores are reported wherever the user is.
+    fn update_checkpoints(&mut self, cx: &mut Context<Self>) {
+        self.close_stale_checkpoints();
+        let enabled = self.config.agent_checkpoints;
+        let mut watched = Vec::new();
+        for (index, endpoint) in self.endpoints.iter().enumerate() {
+            let live = if index == self.selected_endpoint {
+                &self.live
+            } else {
+                &endpoint.live
+            };
+            let (true, true, Some(host), Some(snapshot)) = (
+                enabled,
+                endpoint.enabled && live.status.is_connected(),
+                crate::checkpoint::host_for(&endpoint.connection.target, live),
+                live.snapshot.as_ref(),
+            ) else {
+                continue;
+            };
+            self.checkpoints.observe(&endpoint.id, &host, snapshot);
+            watched.push(endpoint.id.as_str());
+        }
+        self.checkpoints
+            .retain_endpoints(|endpoint| watched.contains(&endpoint));
+        let (changed, restored) = self.checkpoints.poll();
+        for restored in restored {
+            let flash = match restored.result {
+                Ok(()) => Flash::success(format!(
+                    "Restored a checkpoint of {}",
+                    restored.checkout.branch
+                )),
+                Err(error) => Flash::warning(format!(
+                    "Checkpoint not restored: {}",
+                    crate::checkpoint::describe(&error)
+                )),
+            };
+            self.show_flash(flash, cx);
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// Forwards outlive a dropped connection, since SSH may still reach the
+    /// host, but end once their host is removed or disabled. A report the
+    /// user did not just ask for is flashed.
+    pub(crate) fn update_port_forwards(&mut self, cx: &mut Context<Self>) {
+        let endpoints = &self.endpoints;
+        let mut changed = self.port_forwards.retain_hosts(|target| {
+            endpoints.iter().any(|endpoint| {
+                endpoint.enabled
+                    && endpoint
+                        .saved_ssh()
+                        .is_some_and(|(saved, _)| saved == target)
+            })
+        });
+        let notices = self.port_forwards.poll();
+        if let Some(notice) = notices.last() {
+            let flash = match notice {
+                crate::port_forward::Notice::Listening { .. } => Flash::success(notice.text()),
+                crate::port_forward::Notice::Ended { .. } => Flash::warning(notice.text()),
+            };
+            self.show_flash(flash, cx);
+            changed = true;
+        }
+        if changed {
+            cx.notify();
+        }
     }
 
     /// The machine the selected endpoint runs on.
@@ -605,9 +731,20 @@ impl HerdrWindow {
             teleport: None,
             teleport_marks: crate::teleport::Marks::start(),
             teleport_follow: None,
+            fan_out: None,
             git: git::Git::default(),
+            deliveries: Default::default(),
+            notes_width: crate::panel_resize::NOTES,
+            review_files_width: crate::panel_resize::REVIEW_FILES,
+            reviews: Default::default(),
+            viewport_width: 0.,
+            pr_actions: Default::default(),
             usage: Default::default(),
             system_load: Default::default(),
+            checkpoints: Default::default(),
+            port_forwards: Default::default(),
+            listening_ports: Default::default(),
+            tunnels: Default::default(),
             install_warning_shown: false,
             collapsed_repos: Default::default(),
             sidebar_visible: true,
@@ -662,9 +799,17 @@ impl HerdrWindow {
             }),
             _appearance: cx.observe_window_appearance(window, |this, _, cx| {
                 this.apply_shared_theme(cx);
+                this.apply_system_theme(cx);
                 cx.notify();
             }),
         };
+        // Quitting need not drop this window, so its SSH children are killed
+        // here rather than left forwarding after the app is gone.
+        cx.on_app_quit(|this, _| {
+            this.port_forwards.stop_all();
+            async {}
+        })
+        .detach();
         #[cfg(feature = "integration-test")]
         if sidebar_test {
             this._poll = Task::ready(());

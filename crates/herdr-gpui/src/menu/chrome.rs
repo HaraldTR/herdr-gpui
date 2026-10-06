@@ -281,8 +281,12 @@ impl HerdrWindow {
                 | Page::KillProcesses
                 | Page::Host
                 | Page::RemoveDevice
+                | Page::RemoveWsl
                 | Page::Git
                 | Page::GitCommit
+                | Page::PrReview
+                | Page::PrComment
+                | Page::PrMerge
         );
         let mut panel = div()
             .id("menu-panel")
@@ -343,21 +347,31 @@ impl HerdrWindow {
                     .overflow_hidden()
                     .shadow_lg()
             })
-            .when(matches!(page, Page::Git | Page::GitCommit), |panel| {
-                panel
-                    .w((viewport.width - px(24.))
-                        .max(px(0.))
-                        .min(px(if page == Page::Git { 340. } else { 420. })))
-                    .max_h((viewport.height - px(24.)).max(px(0.)))
-                    .when(page == Page::Git, |panel| {
-                        let top = crate::titlebar::HEIGHT
-                            + crate::worktree_banner::reserved(env!("HERDR_BUILD_WORKTREE") == "1")
-                            + 6.;
-                        panel
-                            .max_h((viewport.height - px(top + 12.)).max(px(0.)))
-                            .shadow_lg()
-                    })
-            })
+            .when(
+                matches!(
+                    page,
+                    Page::Git | Page::GitCommit | Page::PrReview | Page::PrComment | Page::PrMerge
+                ),
+                |panel| {
+                    panel
+                        .w((viewport.width - px(24.))
+                            .max(px(0.))
+                            .min(px(if page == Page::Git { 340. } else { 420. })))
+                        .max_h((viewport.height - px(24.)).max(px(0.)))
+                        .when(page == Page::Git, |panel| {
+                            let top = crate::titlebar::HEIGHT
+                                + crate::worktree_banner::reserved(
+                                    env!("HERDR_BUILD_WORKTREE") == "1",
+                                )
+                                + 6.;
+                            panel
+                                .max_h((viewport.height - px(top + 12.)).max(px(0.)))
+                                .shadow_lg()
+                        })
+                        // Its lists scroll inside; the panel never outgrows the window.
+                        .when(page == Page::PrReview, |panel| panel.overflow_hidden())
+                },
+            )
             .when(
                 matches!(
                     page,
@@ -370,11 +384,15 @@ impl HerdrWindow {
                         | Page::KillProcesses
                         | Page::Host
                         | Page::RemoveDevice
+                        | Page::RemoveWsl
                 ),
                 |panel| {
                     panel
                         .w((viewport.width - px(24.)).max(px(0.)).min(px(
-                            if matches!(page, Page::Tab | Page::Pane | Page::Host) {
+                            if page == Page::Host && self.host_menu_lists_forwards() {
+                                // Room for a forward's port, state, and actions.
+                                260.
+                            } else if matches!(page, Page::Tab | Page::Pane | Page::Host) {
                                 180.
                             } else if page == Page::PaneProcesses {
                                 // Name, command, pid, CPU and memory columns.
@@ -416,8 +434,10 @@ impl HerdrWindow {
                         | Page::AppUpdate
                         | Page::GitHub
                         | Page::AddDevice
+                        | Page::AddWsl
                         | Page::Usage(_)
                         | Page::RenameDevice
+                        | Page::ForwardPort
                 ),
                 |panel| {
                     // Dialogs draw their own full-bleed header and footer rules,
@@ -456,7 +476,14 @@ impl HerdrWindow {
                     .max_h((viewport.height - px(24.)).max(px(0.)))
             })
             .when(
-                matches!(page, Page::AppUpdate | Page::AddDevice | Page::RenameDevice),
+                matches!(
+                    page,
+                    Page::AppUpdate
+                        | Page::AddDevice
+                        | Page::AddWsl
+                        | Page::RenameDevice
+                        | Page::ForwardPort
+                ),
                 |panel| panel.flex().flex_col().overflow_hidden().shadow_lg(),
             )
             .when(page == Page::About, |panel| {
@@ -521,107 +548,41 @@ impl HerdrWindow {
             panel = panel.child(self.render_usage_panel(provider, cx));
         } else if page == Page::AddDevice {
             panel = panel.child(self.render_add_device(cx));
+        } else if page == Page::AddWsl {
+            panel = panel.child(self.render_add_wsl(cx));
+        } else if page == Page::RemoveWsl {
+            panel = panel.child(self.render_remove_wsl(cx));
         } else if page == Page::GitHub {
             panel = panel.child(self.render_github_auth(cx));
         } else if page == Page::Workspace {
-            if let Some(target) = &self.menu.target {
-                panel = panel.child(
-                    div()
-                        .debug_selector(|| "workspace-menu-header".into())
-                        .px(px(8.))
-                        .py(px(6.))
-                        .mb(px(4.))
-                        .border_b_1()
-                        .border_color(rgb(theme.active))
-                        .child(
-                            div()
-                                .debug_selector(|| "workspace-menu-name".into())
-                                .truncate()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(crate::sidebar::label_text(&target.label)),
-                        )
-                        .when_some(
-                            target
-                                .branch
-                                .as_deref()
-                                .filter(|branch| !branch.trim().is_empty()),
-                            |header, branch| {
-                                header.child(
-                                    div()
-                                        .debug_selector(|| "workspace-menu-branch".into())
-                                        .truncate()
-                                        .text_color(rgb(theme.muted))
-                                        .text_size(px(font.size * 0.9))
-                                        .child(crate::sidebar::label_text(branch)),
-                                )
-                            },
-                        ),
-                );
-            }
-            for (action, label) in self.workspace_items() {
-                panel = panel.child(
-                    div()
-                        .id(label)
-                        .debug_selector(move || format!("workspace-menu-{label}"))
-                        .min_h(px(font.line_height() + 12.))
-                        .px(px(8.))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .cursor_pointer()
-                        .rounded(px(crate::config::corners::CONTROL))
-                        .when(Some(action) == self.menu.workspace_selected, |row| {
-                            row.bg(rgb(theme.active))
-                        })
-                        .on_hover(cx.listener(move |this, hovered, _, cx| {
-                            if *hovered {
-                                this.menu.workspace_selected = Some(action);
-                            } else if this.menu.workspace_selected == Some(action) {
-                                this.menu.workspace_selected = None;
-                            }
-                            cx.notify();
-                        }))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .debug_selector(move || format!("workspace-menu-label-{label}"))
-                                .child(label),
-                        )
-                        .when_some(action.icon(), |row, icon| {
-                            row.child(super::action_icon(
-                                icon,
-                                format!("workspace-menu-icon-{label}"),
-                                rgb(if Some(action) == self.menu.workspace_selected {
-                                    theme.foreground
-                                } else {
-                                    theme.muted
-                                }),
-                                rgb(theme.foreground),
-                            ))
-                        })
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.activate_workspace_menu(action, window, cx);
-                        })),
-                );
-            }
-            if self.pr_profile().is_some() {
-                panel = panel.child(self.render_workspace_pr(
-                    (px(340.).min((viewport.width - px(24.)).max(px(0.))) - px(30.)).max(px(0.)),
-                    cx,
-                ));
-            }
+            // The PR card's text width: the panel's inset and border, and the
+            // card's own margin, border, and padding.
+            panel = panel.child(self.render_workspace_popover(
+                (px(340.).min((viewport.width - px(24.)).max(px(0.))) - px(36.)).max(px(0.)),
+                cx,
+            ));
         } else if let Page::Dialog(action) = page {
             panel = panel.child(self.render_workspace_dialog(action, cx));
         } else if page == Page::Teleport {
             panel = panel.child(self.render_teleport(cx));
+        } else if page == Page::Checkpoints {
+            panel = panel.child(self.render_checkpoints(cx));
+        } else if page == Page::FanOut {
+            panel = panel.child(self.render_fan_out(cx));
         } else if page == Page::Git {
             panel = panel.child(self.render_git_menu(cx));
         } else if page == Page::GitCommit {
             panel = panel.child(self.render_git_commit(cx));
-        } else if matches!(page, Page::Host | Page::RenameDevice | Page::RemoveDevice) {
+        } else if page == Page::PrReview {
+            panel = panel.child(self.render_pr_review(cx));
+        } else if page == Page::PrComment {
+            panel = panel.child(self.render_pr_comment(cx));
+        } else if page == Page::PrMerge {
+            panel = panel.child(self.render_pr_merge(cx));
+        } else if matches!(
+            page,
+            Page::Host | Page::RenameDevice | Page::ForwardPort | Page::RemoveDevice
+        ) {
             panel = panel.child(self.render_host_menu(cx));
         } else if matches!(page, Page::Tab | Page::RenameTab) {
             panel = panel.child(self.render_tab_menu(cx));

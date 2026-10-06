@@ -591,7 +591,11 @@ impl HerdrWindow {
                 body.p(px(8.))
                     .gap(px(12.))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("Rename pane"))
-                    .child(div().child("Leave blank to clear the custom label."))
+                    .child(
+                        div()
+                            .text_color(rgb(self.theme.subtext()))
+                            .child("Leave blank to clear the custom label."),
+                    )
                     .when_some(pane.input.clone(), |body, input| {
                         if pane.pending.is_some() {
                             body.child(div().child(input.read(cx).text().to_owned()))

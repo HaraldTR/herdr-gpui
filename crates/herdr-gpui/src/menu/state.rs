@@ -40,6 +40,9 @@ pub(crate) struct MenuState {
     /// Written by the menu's layout, read when presenting pages.
     pub(crate) cover: std::rc::Rc<std::cell::Cell<Cover>>,
     pub(super) device_setup: Option<super::devices::Setup>,
+    pub(super) wsl_setup: Option<super::devices::WslSetup>,
+    /// The saved distribution the removal confirmation names.
+    pub(super) wsl_remove: Option<String>,
     pub(super) session_edit: Option<super::sessions::Edit>,
     pub(super) devices_scroll: ScrollHandle,
     /// The sessions list scrolls its own way; the two popups never share one.
@@ -54,6 +57,10 @@ pub(crate) struct MenuState {
     pub(super) selected: Option<usize>,
     pub(super) workspace_selected: Option<WorkspaceMenuAction>,
     pub(super) git_selected: Option<git::Row>,
+    /// The merge dialog's method, and the pull request (with its head) it
+    /// was opened for: a branch that moved since must be reviewed again.
+    pub(super) merge_method: Option<crate::pull_request::MergeMethod>,
+    pub(super) merge_target: Option<crate::pr_actions::Target>,
     pub(super) target: Option<WorkspaceTarget>,
     pub input: Option<DialogInput>,
     pub(super) error: Option<String>,
@@ -232,6 +239,8 @@ impl MenuState {
             page: None,
             cover: Default::default(),
             device_setup: None,
+            wsl_setup: None,
+            wsl_remove: None,
             session_edit: None,
             devices_scroll: ScrollHandle::new(),
             sessions_scroll: ScrollHandle::new(),
@@ -243,6 +252,8 @@ impl MenuState {
             selected: None,
             workspace_selected: None,
             git_selected: None,
+            merge_method: None,
+            merge_target: None,
             target: None,
             input: None,
             error: None,
@@ -281,6 +292,8 @@ impl MenuState {
     pub fn reset(&mut self) {
         self.cover.set(Cover::Unknown);
         self.device_setup = None;
+        self.wsl_setup = None;
+        self.wsl_remove = None;
         self.session_edit = None;
         self.devices_scroll.set_offset(Point::default());
         self.sessions_scroll.set_offset(Point::default());
@@ -302,6 +315,8 @@ impl MenuState {
         self.selected = None;
         self.workspace_selected = None;
         self.git_selected = None;
+        self.merge_method = None;
+        self.merge_target = None;
         self.target = None;
         self.input = None;
         self.error = None;

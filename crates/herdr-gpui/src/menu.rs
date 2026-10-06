@@ -3,13 +3,16 @@
 //! popup while one is open, and every modal action is fenced by the connection
 //! it was started under.
 
+mod checkpoints;
 mod chrome;
 mod colors;
 mod devices;
+mod fan_out;
 mod git;
 mod github;
 mod page;
 mod pr;
+mod pr_actions;
 mod sessions;
 mod settings;
 mod state;

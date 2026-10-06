@@ -95,6 +95,7 @@ fn a_device_on_another_session_is_still_matched_by_its_saved_entry(cx: &mut gpui
                     session: "default".into(),
                     enabled: true,
                 }],
+                Vec::new(),
                 cx,
             );
             // What choosing another session from the list does to the target.

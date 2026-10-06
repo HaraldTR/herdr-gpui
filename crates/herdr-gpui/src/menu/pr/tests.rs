@@ -82,7 +82,7 @@ fn cached_menu_open_is_immediate_and_does_not_touch_deletion_response(
 
 #[gpui::test]
 fn compact_pr_is_the_only_metadata_action(cx: &mut gpui::TestAppContext) {
-    use super::super::{Page, WorkspaceAction, WorkspaceMenuAction};
+    use super::super::{Page, WorkspaceMenuAction};
     use gpui::{point, px, size};
     let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
     cx.update(|window, cx| {
@@ -103,7 +103,7 @@ fn compact_pr_is_the_only_metadata_action(cx: &mut gpui::TestAppContext) {
             view.menu.pr.value = Some(crate::pull_request::fixture().unwrap());
             assert_eq!(
                 view.menu.workspace_selected,
-                Some(WorkspaceMenuAction::Dialog(WorkspaceAction::Rename))
+                view.workspace_items().first().map(|(action, _)| *action)
             );
             cx.notify();
         })
@@ -155,7 +155,10 @@ fn compact_pr_is_the_only_metadata_action(cx: &mut gpui::TestAppContext) {
         window.draw(cx).clear(cx);
     });
     let title = cx.debug_bounds("workspace-pr-title").unwrap().center();
-    let rename = cx.debug_bounds("workspace-menu-Rename").unwrap().center();
+    // Debug selectors are static; leaking one test label is fine.
+    let first: &'static str = cx
+        .update(|_, cx| format!("workspace-menu-{}", view.read(cx).workspace_items()[0].1).leak());
+    let first = cx.debug_bounds(first).unwrap().center();
     cx.simulate_mouse_move(title, None, Default::default());
     cx.update(|_, cx| {
         assert_eq!(
@@ -163,14 +166,16 @@ fn compact_pr_is_the_only_metadata_action(cx: &mut gpui::TestAppContext) {
             Some(WorkspaceMenuAction::PullRequest)
         )
     });
+    // Past the PR card, the arrows wrap to the first tile.
     cx.simulate_keystrokes("down");
     cx.update(|_, cx| {
+        let view = view.read(cx);
         assert_eq!(
-            view.read(cx).menu.workspace_selected,
-            Some(WorkspaceMenuAction::Dialog(WorkspaceAction::Rename))
+            view.menu.workspace_selected,
+            view.workspace_items().first().map(|(action, _)| *action)
         )
     });
-    cx.simulate_mouse_move(rename, None, Default::default());
+    cx.simulate_mouse_move(first, None, Default::default());
     cx.simulate_keystrokes("up enter");
     let expected = cx.update(|_, cx| view.read(cx).menu.pr.value.as_ref().unwrap().url.clone());
     assert_eq!(cx.opened_url(), Some(expected.clone()));
@@ -195,7 +200,8 @@ fn compact_pr_is_the_only_metadata_action(cx: &mut gpui::TestAppContext) {
         window.draw(cx).clear(cx);
     });
     // GPUI retains removed debug selectors; measure the remaining action panel.
-    // Six action rows and the target header: no PR section or stale metadata.
+    // Six actions, in the tile grid and the rows below it, and the target
+    // header: no PR section or stale metadata.
     let rows = cx.update(|_, cx| view.read(cx).workspace_menu_actions().len());
     assert_eq!(rows, 6);
     let panel = cx.debug_bounds("menu-panel").unwrap().size.height;
@@ -205,7 +211,8 @@ fn compact_pr_is_the_only_metadata_action(cx: &mut gpui::TestAppContext) {
         .size
         .height
         + px(4.);
-    assert!(panel - header < px(35. * rows as f32), "{panel:?}");
+    let tiles = cx.debug_bounds("workspace-menu-tiles").unwrap().size.height;
+    assert!(panel - header - tiles < px(35. * rows as f32), "{panel:?}");
 }
 
 /// Explicitly selected running daemon only: no start, focus, resize, input,

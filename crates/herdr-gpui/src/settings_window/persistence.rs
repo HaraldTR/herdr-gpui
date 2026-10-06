@@ -1,6 +1,6 @@
 //! Loading and saving preferences off the UI thread, then reconciling the result,
 //! including the config watcher and the saves that finish when the app quits.
-use super::{SettingsWindow, layouts, themes};
+use super::{Section, SettingsWindow, layouts, themes};
 use crate::{
     config::{Config, FontFace, Theme},
     herdr_settings::{self, Edit},
@@ -147,14 +147,14 @@ impl SettingsWindow {
         let text_system = cx.text_system().clone();
         move || {
             let mut config = Config::load()?;
-            config.resolve_font_fallbacks(|| text_system.all_font_names());
+            config.resolve_fonts(|| text_system.all_font_names());
             let (shared, error, theme) = match herdr_settings::Settings::load() {
                 Ok(shared) => {
                     config.apply_shared_notifications(&shared);
                     let theme = if config.theme == "Follow Herdr" {
                         shared.theme(light)?.with_contrast(config.contrast)
                     } else {
-                        config.theme()?
+                        config.theme(light)?
                     };
                     (Some(shared), None, theme)
                 }
@@ -162,7 +162,7 @@ impl SettingsWindow {
                 Err(error) => (
                     None,
                     Some(format!("Load shared settings: {error}")),
-                    config.theme()?,
+                    config.theme(light)?,
                 ),
             };
             Ok(Loaded {
@@ -212,6 +212,9 @@ impl SettingsWindow {
     }
 
     pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
+        if self.section == Section::General {
+            self.sync_remote_history(true, cx);
+        }
         self.reload_with(Self::loader(cx), cx);
     }
 
@@ -360,13 +363,12 @@ impl SettingsWindow {
                     // Direct loads here can overwrite its active picker preview.
                     if shared && saved.is_ok() {
                         // Use the existing connection, without stealing its response lane.
-                        if let Some(endpoint) = source.endpoints.iter().find(|endpoint| {
-                            !matches!(
-                                endpoint.connection.target,
-                                herdr_client::ConnectTarget::Ssh { .. }
-                            )
-                        }) && let (Some(handle), Some(snapshot)) =
-                            (&endpoint.connection.handle, &endpoint.live.snapshot)
+                        if let Some(endpoint) = source
+                            .endpoints
+                            .iter()
+                            .find(|endpoint| !endpoint.connection.target.is_remote())
+                            && let (Some(handle), Some(snapshot)) =
+                                (&endpoint.connection.handle, &endpoint.live.snapshot)
                             && endpoint.live.status.is_connected()
                         {
                             let status = match handle.request(

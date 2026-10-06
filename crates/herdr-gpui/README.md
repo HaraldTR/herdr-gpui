@@ -205,6 +205,27 @@ edits only the local catalog: the host's own Herdr keeps running. When the
 device has its own GitHub sign-in, the confirmation also offers to delete it,
 since its account panel goes away with the device. Local has no such menu.
 
+**Forward port…** in the same menu forwards one of the host's ports, such as a
+dev server an agent started there, to this computer. Each forward has its own
+`ssh -N` master on a private control socket, which is then asked to listen with
+`ssh -O forward -L 127.0.0.1:<local>:localhost:<remote>`. That request succeeds
+only once this forward's own SSH holds the port, so a port another local
+process took first is never shown as forwarded. The local port keeps the remote
+number when it can, privileged ports move up by 10000 (80 becomes 10080), and a
+refused port falls back once to one the system picks. The menu lists the host's
+forwards as connecting, listening (with **Open**, which shows
+`http://127.0.0.1:<local>/` in a browser tab; the address rather than
+`localhost`, since SSH listens on IPv4 loopback only), or ended with the
+reason, and a flash reports each change. Nothing reconnects: a forward ends
+when you stop it, when its host is disabled or removed, when the window closes,
+or when the app quits, and stays ended until you forward the port again. A
+dropped Herdr connection leaves it running. The master uses the bridge's
+noninteractive SSH policy but never a master of yours, which would keep the
+forward after it is stopped, so hosts that authenticate only through a master
+cannot forward. It still applies `LocalForward`/`RemoteForward` entries from
+your SSH config, as `ssh -N` would. Forwarding needs a Unix client, like every
+saved SSH device.
+
 The label is optional: an empty one names the device after its SSH target as
 typed, such as `user@host` or an address. Once the device is saved, the dialog
 closes by itself.
@@ -245,6 +266,24 @@ downloads or runs an installer. After installing, choose Terminal > Reconnect.
 **QA > Show herdr non-detected modal** previews the warning without restarting,
 disconnecting, or changing daemon detection. Closing the GUI leaves the daemon
 and its terminals running.
+
+Reopening the GUI keeps each pane's scrollback, which the daemon holds. Herdr
+replays scrollback after the daemon itself restarts only when its opt-in
+`[experimental] pane_history = true` is set. **Settings > General > Session
+restore** toggles that shared setting and asks the daemon to reload it. Herdr
+then saves pane output to `session-history.json` next to `session.json`, so
+treat that file like terminal history. The GUI never writes terminal output to
+disk itself.
+
+Each connected SSH host's daemon reads its own config, so the same card lists
+one switch per host. A switch reads that host's
+`${HERDR_CONFIG_PATH:-${XDG_CONFIG_HOME:-~/.config}/herdr/config.toml}`, as
+the SSH login environment resolves it, over the noninteractive connection
+policy. It writes only `[experimental] pane_history`, keeping comments and
+other keys. The edit is renamed into place only if the file still matches
+what was read; otherwise it reports a conflict and asks for a reload. It then
+asks that host's daemons to reload. Symlinked configs and files over 64 KiB
+are refused, and a file the GUI creates is private (`0600`).
 
 ## Configuration
 
@@ -323,7 +362,7 @@ Accepted saves survive closing Settings. Family and size edits preserve configur
 fallbacks and unrelated settings in `config-gpui.local.toml`. General retains
 browser-skill installation/removal and configuration paths.
 
-General provides switches for **Show usage**, **Confirm tab close**, and the
+General provides switches for **Show usage**, **Confirm tab close**, **Confirm pane close**, and the
 clipboard copied notification, plus all six clipboard positions. Notifications
 provides a native in-app switch, a bounded delay stepper (0-3600 seconds), and
 four corner choices. Each notification and clipboard field has a **Follow shared**
@@ -432,9 +471,11 @@ written to disk, so a reload or a restart returns to the configured size.
 A tab asks before closing only while one of its agents is working or blocked
 on a prompt; tabs whose agents are idle or done, or that have none, close at
 once. Set top-level `confirm_close_tab = false` to never ask for tabs
-(including their running processes), and `show_agents = false` to hide the Agents
-section and give Spaces the full sidebar height. Both default to `true`. Pane
-closures still ask for confirmation. Saved edits apply automatically. The
+(including their running processes), `confirm_close_pane = false` to close
+panes without asking, and `show_agents = false` to hide the Agents
+section and give Spaces the full sidebar height. All three default to `true`.
+The pane dialog's **Do not ask again** checkbox (click it or press Space) saves
+`confirm_close_pane = false` to `config-gpui.local.toml` once the close is sent. Saved edits apply automatically. The
 **Show agents** control in **Settings > Appearance > Sidebar layout** saves
 `show_agents` immediately, independently of the layout draft saved on close.
 
@@ -465,6 +506,32 @@ every two seconds over its own SSH shell, kept open while the host is connected
 systems, and remote hosts from a Windows client, show it as unavailable. Set top-level `show_system_load = false`,
 or turn off **Show CPU and memory** in Settings, to hide it and stop sampling.
 
+Workspaces that run a server show the TCP ports it listens on, as `:3000`
+chips on a line under the workspace's sidebar row and, for the focused
+workspace, in the status bar. Clicking one opens the page in a browser tab of
+that workspace (`http://localhost:<port>` on this machine). A port belongs to
+a workspace when its process inherited the `HERDR_WORKSPACE_ID` Herdr sets in
+every pane, so system services and servers started outside Herdr never show,
+and its `HERDR_SOCKET_PATH` names the same daemon, so two sessions on one
+machine never claim each other's servers.
+Every five seconds each host runs `ss -ltnp` (Linux) or `lsof -iTCP
+-sTCP:LISTEN` (macOS) in its own shell, this machine's locally and a connected
+remote host's over SSH, listing only your own processes. A remote server opens
+at the SSH host's name when it listens on every address, the `HostName` your
+SSH configuration gives an alias (`ssh -G`) when it has one. One listening only
+on the remote loopback opens through an SSH tunnel started on the first click:
+`ssh -N -L` from a free port on this machine's loopback, with the same
+noninteractive options as the remote connection. The page opens only once SSH
+itself reports the forward bound, never because something answers on the
+port. Tunnels do not share a `ControlMaster` connection, so they need
+noninteractive authentication (keys or an agent). The tunnel stays up while
+the port is listed, is reused by later clicks, and closes when the port
+stops listening, the host disconnects, scanning is turned off, or the window
+closes; a page reopened after a dropped tunnel keeps its address while that
+local port is free. Windows clients
+do not scan this machine. Set top-level `show_listening_ports = false`, or
+turn off **Show listening ports** in Settings, to hide them and stop scanning.
+
 `[notifications]` in `config-gpui.local.toml` overrides shared toast preferences
 for GUI-local in-app delivery, independently per key. `enabled = true` shows
 in-app toasts even when shared delivery is `system`; `enabled = false` leaves
@@ -489,7 +556,8 @@ already waiting in a connection inbox from the disabled period are discarded too
 Failed reloads preserve current settings. QA
 previews remain available regardless of delivery settings.
 
-The sidebar button at the left of the titlebar hides or shows the sidebar.
+The sidebar button at the left of the titlebar (the sidebar's top row, or the
+leftmost tab strip while the sidebar is collapsed) hides or shows the sidebar.
 It stays available when the sidebar is hidden; the existing View menu command and shortcut still work.
 In **Settings > General**, toggle **Show usage** to turn the bottom quota display on or off.
 The choice is saved to `config-gpui.local.toml` and follows the existing `[usage] show` setting.
@@ -783,6 +851,21 @@ audio deduplication. Native playback and device-switch/unplug behavior require m
 
 ## Title Bar
 
+With Herdr's tab bar at the top (`ui.tab_bar_position = "top"`, the default),
+the tab row is the title bar, as in Chrome or Conductor, and the window draws
+no separate header. Strips along the top grow to the header's 34px. The
+sidebar column starts with a row holding the traffic-light clearance and the
+sidebar toggle; with the sidebar collapsed to its rail or hidden, the leftmost
+group's strip leads with whatever clearance the column leaves and the toggle.
+The rightmost group's strip ends with the header's status text, Git button,
+account, and window controls. Every strip keeps at least 40px of empty room
+after its tabs that moves the window, so the window stays movable however many
+tabs a strip holds; tabs beyond the strip's width scroll as before. A bottom
+tab bar, or a lone tab hidden by `hide_tab_bar_when_single_tab`, brings back
+the full-width header described below, and so does a window with no strips.
+The worktree banner moves to the window's foot in this layout so it never sits
+under the traffic lights.
+
 macOS keeps `Some(TitlebarOptions)` and the native Herdr window title/traffic lights,
 with transparent chrome and lights positioned at (9, 9) logical pixels. A full-width
 34px header blends `theme.surface` roughly 10% toward white, subtly lifting dark
@@ -793,7 +876,21 @@ the theme foreground. This profile control opens native GitHub sign-in and shows
 the authenticated user's avatar when connected. It consumes clicks so
 double-clicking it does not invoke the title-bar action.
 The header and clearance remain in fullscreen so the body layout stays stable.
-Windows/Linux keep the existing native frame and do not render this header.
+On Windows and Linux the main window shows the same header below the native
+frame, with an 8px lead in place of the traffic-light clearance; Settings,
+Logs, and the mockup board rely on the native frame alone.
+
+Some Linux compositors, GNOME's Wayland session among them, draw no frame for
+other applications, and GPUI falls back to client-side decorations there.
+Every window then draws its own: pressing the header starts a compositor move
+(a double-click maximizes or restores instead), a right-click opens the compositor's window menu when it offers one, and the
+header ends in minimize, maximize/restore, and close buttons, each shown only
+when the compositor supports it, with close always present. Secondary windows
+show the header in this mode too. Close runs the window's own close path, so
+Settings still finishes pending preferences first. A 10px transparent band
+around the window carries a shadow and the resize handles; edges the
+compositor tiles lose both, so a maximized window fills the screen. X11 and
+compositors with server-side decorations keep their native frame.
 
 Linked-worktree builds add a full-width, 22px amber banner below
 the macOS header (above the body on Linux), with the compile-time branch or short
@@ -808,12 +905,12 @@ Build identity and icon selection are described in the
 [release notes](../../scripts/release/README.md#build-identity).
 
 The reference is Zed's `crates/platform_title_bar/src/platform_title_bar.rs` and
-window options in `crates/zed/src/zed.rs`, not a build dependency. Double-click calls
-`Window::titlebar_double_click()` to honor the OS preference. We leave `is_movable`
-unchanged and rely on native AppKit dragging, with no custom drag handlers or platform
-patches. That choice predates GPUI 0.3.6: 0.2.2 had no macOS `start_window_move`
-implementation and ignored `WindowControlArea::Drag`, while 0.3.6 implements
-`start_window_move`.
+window options in `crates/zed/src/zed.rs`, not a build dependency. On macOS every
+window sets `app_owns_titlebar_drag`, so AppKit never moves the window from under a
+tab or delays titlebar clicks; pressing the header, the sidebar's top row, or a
+strip's empty room calls `Window::start_window_move`, and a double-click calls
+`Window::titlebar_double_click()` to honor the OS preference. `is_movable` stays
+unchanged, so the Window menu's tiling items stay enabled.
 
 Headless tests check the actual root header/center/account-slot bounds at wide,
 minimum, and narrow sizes, including mock fullscreen entry/exit, and that the
@@ -822,7 +919,11 @@ icon produces a nonempty mask. These do not verify AppKit behavior. Native QA re
 required for dragging across the header, traffic-light alignment and actions,
 double-click preferences (zoom/minimize/do nothing), fullscreen transitions and
 auto-hidden controls, theme changes, and modal/focus/IME behavior. Windows/Linux
-native-frame appearance also remains unverified by these macOS tests.
+native-frame appearance also remains unverified by these macOS tests. Headless
+tests check the client-decorated frame (inset, handles kept out of the content,
+tiled edges, and button order and support) with forced decorations. Native QA
+on GNOME Wayland remains required for dragging, resizing, the window menu,
+maximize/restore, and the shadow.
 
 ## Terminal Selection And Copy
 
@@ -975,7 +1076,8 @@ the checkout. `HERDR_WORKTREE_PATH` names that checkout and
 as an environment variable, and the line typed into the tab's shell is
 fixed, so the file's contents never pass through your interactive shell.
 Scripts need `sh` on the daemon's host: a remote host's checkout is read and
-run there, not on this machine.
+run there, not on this machine. WSL distributions are not supported yet: Run
+script says so, and creating or deleting a worktree there runs no script.
 
 **Trust.** The file is repository content, so nothing in it runs until you
 trust it. The first time a script would run, a dialog shows every script in
@@ -1195,7 +1297,19 @@ never left the half-cell it pressed in.
 
 Plain URL detection is limited to one row within one pane; links that wrap or
 reach the right edge need explicit terminal hyperlink metadata. Other URI schemes
-and local file paths are not activated.
+are not activated.
+
+Cmd-click (Ctrl-click elsewhere) a file path a pane prints, such as
+`src/main.rs:12:5`, `./build/out`, `~/notes.md`, or a `file://` hyperlink, to
+open it with the system's default application. Holding the modifier underlines
+the path under the pointer. Relative paths resolve against the pane's working
+directory, and a path opens only if it exists; the line and column are not
+passed on. Terminal output is untrusted, so a click never launches anything:
+only a plain folder or a non-executable document (text, source, Markdown, JSON,
+images, PDF, and similar) opens itself, judged by where symlinks lead. An
+application, script, or unknown file type opens the folder that holds it, and a
+network path opens nothing. A bare name needs a location (`main.rs:3`) to count as a path, and
+paths are not detected in panes on SSH hosts, whose files live on that host.
 
 Set `open_links_in = "browser-tab"` to open links in a [browser tab](#browser-tabs)
 instead. Alt-click (Option-click on macOS) opens a link in the other target.
@@ -1324,6 +1438,81 @@ them to the agent that opened it, so it can change the page.
   do notes for a pane this window does not show.
 - Tabs you open yourself have no agent to send to; **Copy** is offered
   instead.
+
+### Reviewing An Agent's Changes
+
+**Review changes...** in the title bar's Git popup opens a review tab on the
+focused local checkout's changes, with untracked text files as wholly added,
+and lets you send review notes to the agent that made them, like inline
+comments on a pull request.
+
+- The review is a tab like a browser tab: it sits in the group in use, can be
+  moved to a group of its own beside the terminal, take the whole window, or
+  close, and it is restored with the other tabs. Opening the review again
+  brings back the checkout's tab and reads its changes afresh. Its notes go
+  to the pane of the agent that was focused when it opened.
+- The icons at either end of its header show or hide the list of changed
+  files and the notes. A review narrower than 1,000 px starts with both
+  hidden so the diff has the room; once toggled, the choice holds. Writing a
+  note always shows the notes, and the notes icon counts the queued ones.
+  Shown in a narrow group, each panel keeps to 30% of the review.
+
+- **Uncommitted** shows what is not committed yet (`git diff HEAD`).
+  **Branch** shows everything the branch's pull request will hold: the
+  working tree against where the branch left its base, so its commits and
+  uncommitted work together. The base is the pull request's base branch when
+  GitHub reported one, else `origin/HEAD`, then `main` or `master`, whichever
+  exists locally; nothing is fetched. The choice is remembered.
+- The two icons in the header draw the diff **unified**, removed lines above
+  the ones that replaced them, or **side by side**, the old version on the
+  left and the new on the right, each run of removed lines paired with the
+  added lines that follow it. Either side's line can take a note, notes and
+  their numbers carry over when switching, and the choice is remembered.
+  Side by side, drag the line between the halves to give either more room
+  (each keeps at least a fifth); a double-click on it evens them again.
+- A list of the changed files sits left of the diff, as on a pull request:
+  grouped under their folders, each with how it changed (A, M, D, R),
+  its added and removed lines, and how many notes are queued on it.
+  Clicking one brings it to the top of the diff, in either layout, and the
+  file at the top of the diff is marked. The list resizes by its right edge
+  and its width is remembered.
+- Code is coloured by its language, chosen by file extension from the
+  grammars bundled with [syntect](https://github.com/trishume/syntect).
+  Removed lines are read in the old file's order and added lines in the new
+  file's, each hunk afresh. Colouring runs in the background after the plain
+  diff shows, and the colours come from the theme's palette, so they follow
+  theme changes.
+- A scrollbar along the diff's right edge shows how much of it is in view
+  and where; drag its thumb to move through a long change.
+- Large changes stay reviewable. Line counts come first
+  (`git diff --numstat`), so a file with more than 5,000 changed lines, one
+  larger than 1 MiB on disk, or any file past 15,000 changed lines in total
+  is left out of the diff and listed as "Large change not shown" with its
+  counts; its file header still takes a note. Marking notes is a lookup per
+  note, not a pass over the diff.
+- The notes panel resizes by dragging its left edge, with the sidebar's
+  cursor and hover tint, and a double-click on the edge restores its
+  default. Settings' section list resizes the same way by its right edge.
+  The review and an annotated page share the width, which is remembered
+  with the sidebar's.
+
+- Click a line, added, removed or unchanged, or a file name, write what should
+  change, and press Enter or **Add note**. Escape drops the note being
+  written. Noted lines carry the note's number, and unsent notes stay while
+  the tab is open.
+- Notes go to the agent in the focused pane, or else to the first agent Herdr
+  reports in the focused workspace; the header names it. **Send to agent**
+  turns them into one prompt: the checkout, then for each note the
+  `path:line`, the quoted line, and your note. Line numbers are the working
+  tree's in both views; a removed line names the revision it is numbered in
+  (`HEAD`, or the base and commit), so notes from either view stay exact and
+  stay queued when you switch. It reaches the agent the same one way as page notes above,
+  including `browser feedback`. Without an agent, **Copy** is offered.
+- Git runs in the background, never on the UI thread, with explicit `a/`/`b/`
+  prefixes and no external diff tools or text conversion. Diff text is
+  cleaned of control characters and bounded (20,000 rows, 400 characters a
+  row, 64 untracked files up to 256 KiB each; links and binaries are not
+  read). Only the local daemon's checkouts can be reviewed.
 
 ### Local Pages
 
@@ -1623,8 +1812,9 @@ Windows setup) nothing is saved and the window says so.
   checks/reviews or an unknown merge status, and orange for a blocked/behind branch
   without a more specific check/review status. Drafts remain gray, merged PRs
   purple, and closed PRs red.
-- The header shows the selected daemon's status segments, including usage
-  percentages supplied by plugins, to the left of the Git and account controls.
+- The header, or the rightmost tab strip when tabs form the title bar, shows the
+  selected daemon's status segments, including usage percentages supplied by
+  plugins, to the left of the Git and account controls.
   Long text truncates to keep those controls reachable; status clears on disconnect.
 - The top-right titlebar profile control starts native GitHub device sign-in on
   a signed-out click, shows the authenticated user's avatar, and offers Sign out
@@ -1767,8 +1957,10 @@ Windows setup) nothing is saved and the window says so.
   daemons that advertise the method.
 - Cmd-W closes the focused pane and Cmd-Shift-W closes the focused tab only after
   a confirmation dialog (a tab asks only while an agent in it is working or
-  blocked, and never with `confirm_close_tab = false`). **Cancel is selected by default**: Enter alone cancels;
-  Tab then Enter selects and confirms Close. Closing can terminate running
+  blocked, and never with `confirm_close_tab = false`; a pane never asks with
+  `confirm_close_pane = false`). **Cancel is selected by default**: Enter alone cancels;
+  Tab then Enter selects and confirms Close. In the pane dialog, Space toggles
+  **Do not ask again**. Closing can terminate running
   processes, unlike quitting the GUI, which only detaches.
 - Double-tap Shift or press Cmd-Shift-P to open the unified **Command Palette**:
   workspaces on connected hosts, agents and terminal panes, native GUI actions,
@@ -1982,8 +2174,11 @@ GPUI native action/menu/keybinding patterns.
 
 ## Deliberate Limitations
 
-- macOS defaults to Menlo and the system font; Linux defaults to DejaVu Sans Mono
-  and DejaVu Sans. No bundled Nerd Font.
+- macOS defaults to Menlo and the system font; Windows defaults to Cascadia Mono
+  (Consolas when missing) and the system font; Linux defaults to DejaVu Sans Mono
+  and DejaVu Sans, or, when DejaVu is not installed, the first installed common
+  monospace and sans family (JetBrains Mono, Noto, Liberation, Ubuntu, any other
+  `Mono` family). No bundled Nerd Font.
   Private-use icons may be missing. Fonts and palettes are configured locally,
   not synchronized from the host terminal's theme.
 - No draggable scrollback UI, split dragging,
@@ -2021,6 +2216,29 @@ named pipe has no receive timeout; send timeouts cannot be enforced at all
 there. Configuration and state
 follow upstream's Windows layout: `%APPDATA%\herdr` and `%LOCALAPPDATA%\herdr`,
 still overridden by `XDG_CONFIG_HOME` / `XDG_STATE_HOME` when they are set.
+
+### WSL distributions
+
+A Herdr daemon inside a WSL distribution is reachable as a device. Choose
+**Add Device…** in the device picker: on Windows it lists the installed
+distributions (`wsl.exe --list --quiet`, without Docker Desktop's own) and,
+for the one you pick, checks Herdr inside it and saves it once a compatible
+copy answers. A stopped server is started on the first connection, as for an
+SSH host. Install Herdr inside the distribution first; this app never installs
+or upgrades it there. Each connection runs Herdr's `remote-client-bridge`
+through `wsl.exe --exec`, so terminals, the sidebar, and the session list work
+as they do for an SSH host. Right-click a distribution's sidebar header to
+remove it, which only forgets it here.
+
+Saved distributions are kept in `gpui-wsl.json` beside upstream's endpoint
+catalog (`%LOCALAPPDATA%\herdr\client`), never in the catalog itself, whose
+strict schema cannot name one. The device you last chose, a distribution
+included, is selected again at startup.
+
+What still runs a shell on the host is not wired into a distribution yet and
+says so: plan usage, CPU and memory, listening ports, agent checkpoints,
+teleport, file transfers, and port forwards. WSL already forwards a
+distribution's `localhost` ports to Windows.
 
 These features are unavailable on Windows and say so rather than failing quietly:
 

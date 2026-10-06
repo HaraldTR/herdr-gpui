@@ -2,6 +2,8 @@ use super::{ACTIONS, Action, HostMenu};
 use crate::{config::KeybindingSource, menu::Page, sidebar::layout_tests::fixture_window};
 use gpui::{Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px, size};
 
+mod forwards;
+
 // Endpoint IDs carry the `ssh:` prefix; the profile ID is the rest.
 const HOST: &str = "ssh:0123456789abcdef0123456789abcdef";
 const HOST_HEADER: &str = "host-ssh:0123456789abcdef0123456789abcdef";
@@ -127,6 +129,7 @@ fn the_menu_names_the_saved_session_after_a_session_pick(cx: &mut TestAppContext
                 session: "default".into(),
                 enabled: true,
             }],
+            Vec::new(),
             cx,
         );
         // What choosing another session from the list does to the target.

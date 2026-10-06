@@ -96,3 +96,15 @@ fn remote_output_marks_presence() {
         Some(b"[scripts]\n".to_vec())
     );
 }
+
+#[test]
+fn a_wsl_distribution_is_refused_rather_than_read_from_this_machine() {
+    let target = ConnectTarget::Wsl {
+        distro: "Ubuntu".into(),
+        session: "default".into(),
+    };
+    assert!(matches!(
+        read(&target, "/home/me/app", &AtomicBool::new(false)),
+        Err(crate::Error::WorktreeScriptsUnsupportedHost)
+    ));
+}

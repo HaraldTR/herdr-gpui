@@ -66,7 +66,9 @@ impl Daemon {
         match target {
             ConnectTarget::Local => Some(Self::Default),
             ConnectTarget::Session { name, .. } => Some(Self::Session(name.clone())),
-            ConnectTarget::Ssh { .. } | ConnectTarget::Socket(_) => None,
+            ConnectTarget::Ssh { .. } | ConnectTarget::Wsl { .. } | ConnectTarget::Socket(_) => {
+                None
+            }
         }
     }
 
@@ -304,7 +306,8 @@ fn sight(
 fn refresh(system: &mut System) {
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
-        ProcessRefreshKind::new()
+        true,
+        ProcessRefreshKind::nothing()
             .with_cpu()
             .with_memory()
             .with_cmd(UpdateKind::OnlyIfNotSet),

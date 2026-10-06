@@ -1,5 +1,6 @@
-//! The sidebar host header's context menu. Only saved SSH devices have one:
-//! Local is always present, and an explicit socket is not in the catalog.
+//! The sidebar host header's context menu. Saved SSH devices have this one;
+//! a WSL distribution's only offers its removal (see `wsl`). Local is always
+//! present, and an explicit socket is not in the catalog.
 use super::setup;
 use crate::{
     HerdrWindow,
@@ -15,12 +16,15 @@ enum Action {
     Rename,
     /// Toggles `[devices.<id>] keybindings` between local and server.
     ServerKeybindings,
+    /// Forwards one of the host's listening ports to this computer.
+    ForwardPort,
     Remove,
 }
 
-const ACTIONS: [(Action, &str); 3] = [
+const ACTIONS: [(Action, &str); 4] = [
     (Action::Rename, "Rename…"),
     (Action::ServerKeybindings, "Use server keybindings"),
+    (Action::ForwardPort, "Forward port…"),
     (Action::Remove, "Remove device…"),
 ];
 
@@ -36,7 +40,7 @@ pub(crate) struct HostMenu {
     /// Also delete the device's own GitHub sign-in. Offered only when it has
     /// one, since its account panel disappears with the device.
     forget_github: bool,
-    /// The new name while renaming.
+    /// The new name while renaming, or the port to forward.
     input: Option<Entity<SearchInput>>,
     renaming: bool,
     error: Option<String>,
@@ -50,9 +54,15 @@ impl HerdrWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if id.starts_with(crate::endpoint::WSL_PREFIX) {
+            if self.device_setup_unavailable().is_none() {
+                self.open_remove_wsl(id, anchor, window, cx);
+            }
+            return;
+        }
         // The CLI edits the default catalog, the one device setup also uses.
         // A device already being removed has nothing left to offer.
-        if self.device_setup_unavailable().is_some() || self.menu.removing_devices.contains(id) {
+        if self.ssh_setup_unavailable().is_some() || self.menu.removing_devices.contains(id) {
             return;
         }
         let Some(endpoint) = self.endpoints.iter().find(|endpoint| endpoint.id == id) else {
@@ -116,6 +126,19 @@ impl HerdrWindow {
                 self.menu.page = Some(Page::RenameDevice);
             }
             Action::ServerKeybindings => self.toggle_server_keybindings(cx),
+            Action::ForwardPort => {
+                let input = cx.new(SearchInput::new);
+                input.update(cx, |input, cx| {
+                    input.set_appearance(self.config.ui.clone(), self.theme.clone(), cx);
+                    input.set_placeholder("3000", cx);
+                    window.focus(&input.focus, cx);
+                });
+                if let Some(host) = &mut self.menu.host {
+                    host.input = Some(input);
+                    host.error = None;
+                }
+                self.menu.page = Some(Page::ForwardPort);
+            }
             Action::Remove => self.menu.page = Some(Page::RemoveDevice),
         }
         cx.notify();
@@ -282,9 +305,9 @@ impl HerdrWindow {
             return;
         };
         let key = event.keystroke.key.as_str();
-        // The name field owns typing and composition; only its submit and
-        // cancel keys belong to the menu.
-        if self.menu.page == Some(Page::RenameDevice)
+        // The name and port fields own typing and composition; only their
+        // submit and cancel keys belong to the menu.
+        if matches!(self.menu.page, Some(Page::RenameDevice | Page::ForwardPort))
             && !host.renaming
             && (host
                 .input
@@ -300,6 +323,9 @@ impl HerdrWindow {
             "escape" => self.dismiss_menu(window, cx),
             "enter" if self.menu.page == Some(Page::RenameDevice) => {
                 self.submit_rename_device(window, cx)
+            }
+            "enter" if self.menu.page == Some(Page::ForwardPort) => {
+                self.submit_forward_port(window, cx)
             }
             "enter" if self.menu.page == Some(Page::RemoveDevice) => {
                 self.confirm_remove_device(window, cx)
@@ -409,10 +435,13 @@ impl HerdrWindow {
                     );
                 }
             }
-            return body;
+            return body.child(self.render_forwards(host, cx));
         }
         if self.menu.page == Some(Page::RenameDevice) {
             return self.render_rename_device(host, cx);
+        }
+        if self.menu.page == Some(Page::ForwardPort) {
+            return self.render_forward_port(host, cx);
         }
         let github = self.host_has_github(&host.id);
         body = body
@@ -424,10 +453,10 @@ impl HerdrWindow {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("Remove device"),
             )
-            .child(format!(
+            .child(div().text_color(rgb(theme.subtext())).child(format!(
                 "Remove {} ({} · {}) from this computer? Herdr keeps running on that host.",
                 host.label, host.target, host.session
-            ))
+            )))
             .when(github, |body| {
                 body.child(
                     div()
@@ -573,6 +602,8 @@ impl HerdrWindow {
             .child(footer)
     }
 }
+
+mod forwards;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

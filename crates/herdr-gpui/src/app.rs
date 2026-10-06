@@ -26,8 +26,8 @@ pub(crate) struct InitialAppearance {
 impl Global for InitialAppearance {}
 
 impl InitialAppearance {
-    fn load(load: impl FnOnce() -> crate::Result<Config>) -> Self {
-        match load().and_then(|config| Ok((config.theme()?, config))) {
+    fn load(load: impl FnOnce() -> crate::Result<Config>, light: bool) -> Self {
+        match load().and_then(|config| Ok((config.theme(light)?, config))) {
             Ok((theme, config)) => Self {
                 config,
                 theme,
@@ -37,6 +37,45 @@ impl InitialAppearance {
                 error: Some(format!("Load GUI config: {error}")),
                 ..Self::default()
             },
+        }
+    }
+}
+
+/// Whether the system appearance is light, which picks the side of a
+/// `light:…,dark:…` theme and Herdr's light palette.
+pub(crate) fn light_appearance(cx: &App) -> bool {
+    matches!(
+        cx.window_appearance(),
+        WindowAppearance::Light | WindowAppearance::VibrantLight
+    )
+}
+
+/// Startup reads settings before the event loop, when the system appearance
+/// is not yet known, so a theme that follows it has both sides resolved and
+/// the first frame picks one without any disk work on the UI thread.
+struct StartupAppearance {
+    dark: InitialAppearance,
+    light: Option<Theme>,
+}
+
+impl StartupAppearance {
+    fn load(load: impl FnOnce() -> crate::Result<Config>) -> Self {
+        let dark = InitialAppearance::load(load, false);
+        let light = (dark.error.is_none()
+            && crate::config::ThemeName::follows_system(&dark.config.theme))
+        .then(|| dark.config.theme(true))
+        .and_then(|theme| {
+            theme
+                .inspect_err(|error| tracing::warn!(%error, "Could not load the light theme"))
+                .ok()
+        });
+        Self { dark, light }
+    }
+
+    fn select(self, light: bool) -> InitialAppearance {
+        match self.light {
+            Some(theme) if light => InitialAppearance { theme, ..self.dark },
+            _ => self.dark,
         }
     }
 }
@@ -65,6 +104,7 @@ pub(crate) fn open_window(
             display_id,
             window_min_size: Some(size(px(640.), px(400.))),
             titlebar: Some(titlebar::options(WINDOW_TITLE)),
+            app_owns_titlebar_drag: cfg!(target_os = "macos"),
             app_id: Some(crate::constants::APP_ID.into()),
             ..Default::default()
         },
@@ -179,14 +219,17 @@ pub(crate) fn run() -> std::process::ExitCode {
     // discovery run after opening; CLI and fixtures skip personal settings.
     let appearance = if mode == LaunchMode::Normal {
         let started = std::time::Instant::now();
-        let appearance = InitialAppearance::load(Config::load_startup);
+        let appearance = StartupAppearance::load(Config::load_startup);
         tracing::debug!(
             elapsed_us = started.elapsed().as_micros() as u64,
             "Startup appearance loaded"
         );
         appearance
     } else {
-        InitialAppearance::default()
+        StartupAppearance {
+            dark: InitialAppearance::default(),
+            light: None,
+        }
     };
     let failed = startup_failed.clone();
     let window_state = (mode == LaunchMode::Normal).then(crate::window_state::WindowState::load);
@@ -230,7 +273,7 @@ pub(crate) fn run() -> std::process::ExitCode {
                 crate::control::install(cx);
                 crate::window::system_notifications::install(cx);
             }
-            cx.set_global(appearance);
+            cx.set_global(appearance.select(light_appearance(cx)));
             app_icon::install();
             #[cfg(target_os = "macos")]
             crate::app_badge::install(cx);
@@ -311,7 +354,7 @@ pub(crate) fn run() -> std::process::ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, InitialAppearance, Theme};
+    use super::{Config, InitialAppearance, StartupAppearance, Theme};
     #[cfg(feature = "integration-test")]
     use super::{ConnectTarget, HerdrWindow};
     use crate::config::LayoutMode;
@@ -320,14 +363,17 @@ mod tests {
 
     #[test]
     fn startup_appearance_loads_a_coherent_pair_and_reports_errors() {
-        let appearance = InitialAppearance::load(|| {
-            let mut config = Config {
-                theme: "Nord".into(),
-                ..Default::default()
-            };
-            config.layout.mode = LayoutMode::from(crate::config::Density::Compact);
-            Ok(config)
-        });
+        let appearance = InitialAppearance::load(
+            || {
+                let mut config = Config {
+                    theme: "Nord".into(),
+                    ..Default::default()
+                };
+                config.layout.mode = LayoutMode::from(crate::config::Density::Compact);
+                Ok(config)
+            },
+            false,
+        );
         assert_eq!(
             appearance.config.layout.mode,
             LayoutMode::from(crate::config::Density::Compact)
@@ -335,13 +381,16 @@ mod tests {
         assert_eq!(Some(appearance.theme), Theme::builtin("Nord"));
         assert!(appearance.error.is_none());
         for appearance in [
-            InitialAppearance::load(|| Err(crate::Error::MissingHome)),
-            InitialAppearance::load(|| {
-                Ok(Config {
-                    theme: "../invalid".into(),
-                    ..Default::default()
-                })
-            }),
+            InitialAppearance::load(|| Err(crate::Error::MissingHome), false),
+            InitialAppearance::load(
+                || {
+                    Ok(Config {
+                        theme: "../invalid".into(),
+                        ..Default::default()
+                    })
+                },
+                false,
+            ),
         ] {
             assert_eq!(
                 appearance.config.layout.mode,
@@ -350,6 +399,31 @@ mod tests {
             assert_eq!(appearance.theme, Theme::default());
             assert!(appearance.error.is_some());
         }
+    }
+
+    #[test]
+    fn startup_resolves_both_sides_so_the_first_frame_needs_no_disk_read() {
+        let load = || {
+            StartupAppearance::load(|| {
+                Ok(Config {
+                    theme: "light:Catppuccin Latte,dark:Nord".into(),
+                    ..Default::default()
+                })
+            })
+        };
+        assert_eq!(
+            Some(load().select(true).theme),
+            Theme::builtin("Catppuccin Latte")
+        );
+        assert_eq!(Some(load().select(false).theme), Theme::builtin("Nord"));
+        let single = StartupAppearance::load(|| {
+            Ok(Config {
+                theme: "Nord".into(),
+                ..Default::default()
+            })
+        });
+        assert!(single.light.is_none());
+        assert_eq!(Some(single.select(true).theme), Theme::builtin("Nord"));
     }
 
     #[cfg(feature = "integration-test")]
@@ -363,12 +437,15 @@ mod tests {
             })
         {
             let (view, cx) = cx.add_window_view(|window, cx| {
-                let mut appearance = InitialAppearance::load(|| {
-                    Ok(Config {
-                        theme: "Nord".into(),
-                        ..Default::default()
-                    })
-                });
+                let mut appearance = InitialAppearance::load(
+                    || {
+                        Ok(Config {
+                            theme: "Nord".into(),
+                            ..Default::default()
+                        })
+                    },
+                    false,
+                );
                 appearance.config.layout.mode = mode;
                 cx.set_global(appearance);
                 HerdrWindow::new(

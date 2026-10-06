@@ -96,16 +96,17 @@ impl HerdrWindow {
             self.write_preference(save, cx);
             return;
         }
+        let light = crate::app::light_appearance(cx);
         let text_system = cx.text_system().clone();
         self.load_gui_config_with(
             move || {
                 save()?;
                 let mut config = Config::load()?;
-                config.resolve_font_fallbacks(|| text_system.all_font_names());
+                config.resolve_fonts(|| text_system.all_font_names());
                 let theme = if config.theme == "Follow Herdr" {
                     Default::default()
                 } else {
-                    config.theme()?
+                    config.theme(light)?
                 };
                 Ok((config, theme))
             },
@@ -262,6 +263,25 @@ impl HerdrWindow {
             )
             .child(
                 toggle(
+                    "preferences-show-listening-ports",
+                    "Show listening ports",
+                    self.config.show_listening_ports,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    let show = !this.config.show_listening_ports;
+                    this.save_preference(
+                        move || {
+                            Config::save_preference(
+                                crate::config::preferences::Preference::ShowListeningPorts(show),
+                            )
+                        },
+                        cx,
+                    );
+                })),
+            )
+            .child(
+                toggle(
                     "preferences-high-contrast",
                     "High contrast",
                     self.config.contrast == Contrast::High,
@@ -279,6 +299,11 @@ impl HerdrWindow {
                 "preferences-confirm-close-tab",
                 "Confirm tab close",
                 self.config.confirm_close_tab.to_string(),
+            ))
+            .child(row(
+                "preferences-confirm-close-pane",
+                "Confirm pane close",
+                self.config.confirm_close_pane.to_string(),
             ))
             .child(row(
                 "preferences-layout",
@@ -609,6 +634,10 @@ pub struct Chrome {
     /// The sort the user picked with the panel toggle, like upstream's
     /// `agent_panel_sort` preference. `None` follows the daemon's config.
     pub agent_sort: Option<AgentSort>,
+    /// The notes panel's width, once dragged; `None` is its default.
+    pub notes_width: Option<f32>,
+    /// The review's file list's width, once dragged.
+    pub review_files_width: Option<f32>,
 }
 
 pub struct Preferences {
@@ -763,10 +792,23 @@ fn read_chrome(path: &Path) -> crate::Result<Chrome> {
         .and_then(serde_json::Value::as_f64)
         .map(|split| split as f32)
         .filter(|split| split.is_finite() && (0.1..=0.9).contains(split));
+    // A damaged panel width is forgotten rather than failing the whole file.
+    let notes_width = object
+        .get("notes_width_px")
+        .and_then(serde_json::Value::as_f64)
+        .map(|width| width as f32)
+        .filter(|width| width.is_finite() && *width > 0.0);
+    let review_files_width = object
+        .get("review_files_width_px")
+        .and_then(serde_json::Value::as_f64)
+        .map(|width| width as f32)
+        .filter(|width| width.is_finite() && *width > 0.0);
     Ok(Chrome {
         sidebar_width,
         sidebar_split,
         agent_sort,
+        notes_width,
+        review_files_width,
     })
 }
 
@@ -802,6 +844,10 @@ fn write_chrome(path: &Path, chrome: Chrome) -> crate::Result<()> {
                     split.is_finite() && (0.1..=0.9).contains(split)
                 }),
                 "agent_sort_manual": chrome.agent_sort.map(|sort| sort.to_string()),
+                "notes_width_px": chrome.notes_width.filter(|width| width.is_finite() && *width > 0.0),
+                "review_files_width_px": chrome
+                    .review_files_width
+                    .filter(|width| width.is_finite() && *width > 0.0),
             }),
         )?;
         file.write_all(b"\n")?;

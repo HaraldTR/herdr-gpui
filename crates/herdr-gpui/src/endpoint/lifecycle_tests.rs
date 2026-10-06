@@ -7,7 +7,7 @@ use gpui::{
     MouseUpEvent, point, px, size,
 };
 use herdr_client::{
-    ClientEvent, Method,
+    ClientEvent, Method, SavedHost,
     protocol::{endpoint::*, *},
 };
 use std::{
@@ -16,6 +16,7 @@ use std::{
     sync::atomic::AtomicU64,
 };
 
+mod close_pane;
 mod endpoint_switch;
 mod focus_fences;
 mod image_paste;

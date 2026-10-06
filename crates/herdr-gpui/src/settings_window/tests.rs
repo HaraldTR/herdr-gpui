@@ -8,6 +8,7 @@ use std::sync::{
 
 mod layout_drafts;
 mod load_save;
+mod navigation_resize;
 mod quit_saves;
 mod theme_drafts;
 mod theme_sources;
@@ -46,7 +47,7 @@ fn recording_themes(writes: Arc<Mutex<Vec<String>>>, fail: bool) -> themes::Them
         load: Arc::new(move || {
             let mut loaded = fixture();
             loaded.config.theme = disk.lock().unwrap().clone();
-            loaded.theme = loaded.config.theme()?;
+            loaded.theme = loaded.config.theme(false)?;
             Ok(loaded)
         }),
     }

@@ -46,6 +46,28 @@ enum Arity {
 }
 
 impl AgentKind {
+    /// Every kind, in declaration order.
+    pub(crate) const ALL: [Self; 18] = [
+        Self::Claude,
+        Self::Codex,
+        Self::Opencode,
+        Self::Pi,
+        Self::Omp,
+        Self::Copilot,
+        Self::Devin,
+        Self::Droid,
+        Self::Kimi,
+        Self::Mastracode,
+        Self::Hermes,
+        Self::Qodercli,
+        Self::Qwen,
+        Self::Kilo,
+        Self::Cursor,
+        Self::Antigravity,
+        Self::Grok,
+        Self::Letta,
+    ];
+
     /// The kind for the agent name Herdr reports.
     pub(crate) fn parse(name: &str) -> Option<Self> {
         Some(match name {

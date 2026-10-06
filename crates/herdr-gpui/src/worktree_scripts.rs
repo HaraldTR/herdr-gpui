@@ -232,6 +232,12 @@ impl HerdrWindow {
         let (kind, requested) = (job.launch.kind, job.launch.requested);
         let config = match result {
             Ok(config) => config.filter(|config| config.scripts.get(kind).is_some()),
+            // A setup nobody asked for stays quiet where no file can be read,
+            // or every worktree on that host would report it.
+            Err(crate::Error::WorktreeScriptsUnsupportedHost) if !requested => {
+                self.worktree_script = None;
+                return;
+            }
             Err(error) => return self.fail_worktree_script(error, cx),
         };
         let Some(config) = config else {

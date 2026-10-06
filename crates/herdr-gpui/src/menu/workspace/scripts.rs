@@ -89,7 +89,11 @@ impl HerdrWindow {
                 .child(text)
         };
         Some(match &deletion.archive {
-            ArchiveCheck::Unread => return None,
+            // Every deletion there would say so; asking is where it is reported.
+            ArchiveCheck::Unread
+            | ArchiveCheck::Failed(crate::Error::WorktreeScriptsUnsupportedHost) => {
+                return None;
+            }
             ArchiveCheck::Reading => note("Checking for an archive script...".into()),
             ArchiveCheck::Failed(error) => {
                 note(format!("The archive script cannot run: {error}")).text_color(danger(theme))

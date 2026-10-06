@@ -105,9 +105,17 @@ impl HerdrWindow {
             self.teleport_key(event, window, cx);
             return;
         }
+        if self.menu.page == Some(Page::Checkpoints) {
+            self.checkpoints_key(event, window, cx);
+            return;
+        }
+        if self.menu.page == Some(Page::FanOut) {
+            self.fan_out_key(event, window, cx);
+            return;
+        }
         if matches!(
             self.menu.page,
-            Some(Page::Host | Page::RenameDevice | Page::RemoveDevice)
+            Some(Page::Host | Page::RenameDevice | Page::ForwardPort | Page::RemoveDevice)
         ) {
             self.host_menu_key(event, window, cx);
             return;
@@ -132,6 +140,14 @@ impl HerdrWindow {
         {
             cx.stop_propagation();
             window.prevent_default();
+            return;
+        }
+        if self.menu.page == Some(Page::AddWsl) {
+            self.add_wsl_key(event, window, cx);
+            return;
+        }
+        if self.menu.page == Some(Page::RemoveWsl) {
+            self.remove_wsl_key(event, window, cx);
             return;
         }
         if matches!(self.menu.page, Some(Page::Devices | Page::AddDevice)) {
@@ -219,18 +235,26 @@ impl HerdrWindow {
                 self.submit_workspace_dialog(window, cx)
             }
             "enter" if self.menu.page == Some(Page::GitCommit) => self.submit_git_commit(cx),
-            "up" | "down" if self.menu.page == Some(Page::Workspace) => {
+            "enter" if self.menu.page == Some(Page::PrComment) => self.submit_pr_comment(cx),
+            "enter" if self.menu.page == Some(Page::PrMerge) => self.submit_pr_merge(cx),
+            "up" | "down" if self.menu.page == Some(Page::PrMerge) => {
+                self.cycle_merge_method(event.keystroke.key == "down", cx)
+            }
+            // The tiles read row by row, so left and right walk the same
+            // order as up and down.
+            "up" | "down" | "left" | "right" if self.menu.page == Some(Page::Workspace) => {
                 let actions = self.workspace_menu_actions();
                 let selected = self
                     .menu
                     .workspace_selected
                     .and_then(|selected| actions.iter().position(|action| *action == selected));
+                let back = matches!(event.keystroke.key.as_str(), "up" | "left");
                 if !actions.is_empty() {
-                    let index = match (selected, event.keystroke.key.as_str()) {
-                        (None, "up") => actions.len() - 1,
-                        (None, _) => 0,
-                        (Some(index), "up") => (index + actions.len() - 1) % actions.len(),
-                        (Some(index), _) => (index + 1) % actions.len(),
+                    let index = match (selected, back) {
+                        (None, true) => actions.len() - 1,
+                        (None, false) => 0,
+                        (Some(index), true) => (index + actions.len() - 1) % actions.len(),
+                        (Some(index), false) => (index + 1) % actions.len(),
                     };
                     self.menu.workspace_selected = Some(actions[index]);
                 }

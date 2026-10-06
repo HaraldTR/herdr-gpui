@@ -19,6 +19,8 @@
 # Built-ins: Default, Nord, Dracula, Catppuccin Mocha, Catppuccin Latte.
 # Also accepts a Ghostty theme name, an absolute path, or a ~/ path.
 # Set "Follow Herdr" in config-gpui.local.toml to follow the local Herdr theme.
+# To follow the system light/dark appearance, name a theme for each side, as
+# Ghostty does: theme = "light:Catppuccin Latte,dark:Catppuccin Mocha"
 theme = "Default"
 # How far the app's own colors (status dots, pull request badges, diff counts,
 # warnings, dim labels) stand off the sidebar and menus. "standard" moves a
@@ -28,14 +30,28 @@ theme = "Default"
 contrast = "standard"
 
 # Ask before closing a tab (closing terminates its terminal processes).
-# Pane close confirmation is independent and remains enabled.
 confirm_close_tab = true
+# Ask before closing a pane, independently of tabs. The dialog's "Do not ask
+# again" checkbox sets this to false in config-gpui.local.toml.
+confirm_close_pane = true
 # Show the Agents section below Spaces in the sidebar.
 show_agents = true
 # Show CPU and memory: the selected host's in the status bar, and each host's
 # on its sidebar row. Connected remote hosts are read over SSH every couple of
 # seconds; false stops all sampling. Also under Settings > General.
 show_system_load = true
+# Checkpoint a worktree each time one of its agents starts or finishes a turn,
+# locally or over SSH, so its files can be rolled back from the workspace
+# menu's Checkpoints. Snapshots include untracked (not ignored) files, live in
+# hidden refs/herdr-gpui/checkpoints/ refs, and the newest 50 per branch are
+# kept. Taking one never changes the index or files. Also under
+# Settings > General.
+agent_checkpoints = true
+# Show the TCP ports each workspace's servers listen on, under its sidebar row
+# and in the status bar; click one to open it in a browser tab. Hosts are
+# scanned every five seconds with ss or lsof, a remote one over SSH; false
+# stops all scanning. Also under Settings > General.
+show_listening_ports = true
 # macOS only: whether Option-letter reaches a pane as an Alt shortcut (Alt-P
 # for Option-P) or types the character the keyboard layout puts there. "auto"
 # sends Alt on the U.S. and ABC layouts and types elsewhere, so layouts that
@@ -167,25 +183,32 @@ project_roots = []
 # Preferences offers a searchable picker for all four families together or each row.
 # Platform default removes the local family override; fallback cascades remain active.
 [sidebar]
-# Default: "Menlo" on macOS, "DejaVu Sans Mono" on Linux.
+# Default: "Menlo" on macOS, "Cascadia Mono" on Windows (Consolas when
+# missing), "DejaVu Sans Mono" on Linux (or an installed monospace family such
+# as JetBrains Mono when DejaVu is missing).
 # family = "DejaVu Sans Mono"
 size = 12
 # fallback = ["Symbols Nerd Font Mono"]
 
 [tabs]
-# Default: "Menlo" on macOS, "DejaVu Sans Mono" on Linux.
+# Default: "Menlo" on macOS, "Cascadia Mono" on Windows (Consolas when
+# missing), "DejaVu Sans Mono" on Linux (or an installed monospace family such
+# as JetBrains Mono when DejaVu is missing).
 # family = "DejaVu Sans Mono"
 size = 12
 # fallback = ["Symbols Nerd Font Mono"]
 
 [terminal]
-# Default: "Menlo" on macOS, "DejaVu Sans Mono" on Linux.
+# Default: "Menlo" on macOS, "Cascadia Mono" on Windows (Consolas when
+# missing), "DejaVu Sans Mono" on Linux (or an installed monospace family such
+# as JetBrains Mono when DejaVu is missing).
 # family = "DejaVu Sans Mono"
 size = 14
 # fallback = ["Symbols Nerd Font Mono"]
 
 [ui]
-# Default: ".SystemUIFont" on macOS, "DejaVu Sans" on Linux.
+# Default: ".SystemUIFont" on macOS and Windows, "DejaVu Sans" on Linux (or an installed
+# sans family such as Noto Sans when DejaVu is missing).
 # family = "DejaVu Sans"
 size = 12
 # fallback = ["Symbols Nerd Font Mono"]

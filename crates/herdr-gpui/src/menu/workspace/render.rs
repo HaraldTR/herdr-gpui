@@ -87,19 +87,19 @@ impl HerdrWindow {
         body = match action {
             WorkspaceAction::OpenWorktree => body,
             WorkspaceAction::Rename => {
-                body.child(div().text_color(rgb(theme.muted)).child("Edit the workspace label."))
+                body.child(div().text_color(rgb(theme.subtext())).child("Edit the workspace label."))
             }
             WorkspaceAction::NewTab => body.child(
                 div()
-                    .text_color(rgb(theme.muted))
+                    .text_color(rgb(theme.subtext()))
                     .child("Name the tab, or leave the suggestion for Herdr to number it."),
             ),
             WorkspaceAction::NewWorkspace => body.child(
                 div()
-                    .text_color(rgb(theme.muted))
+                    .text_color(rgb(theme.subtext()))
                     .child("Name the workspace, or leave the suggestion for Herdr to name it."),
             ),
-            WorkspaceAction::Close => body.child(div().text_color(rgb(theme.muted)).child(format!(
+            WorkspaceAction::Close => body.child(div().text_color(rgb(theme.subtext())).child(format!(
                 "Closes {} workspace(s) and terminates their running terminals. Checkout files and branches are not deleted.",
                 target.close_members.len()
             ))),
@@ -163,7 +163,7 @@ impl HerdrWindow {
                                 .to_owned(),
                         ),
                 )
-                .child(div().text_color(rgb(theme.muted)).child(if force {
+                .child(div().text_color(rgb(theme.subtext())).child(if force {
                     "Modified and untracked files, including submodule contents, are discarded. The branch is not deleted. The Herdr workspace will close."
                 } else {
                     "The branch is not deleted. The Herdr workspace will close."
@@ -208,7 +208,7 @@ impl HerdrWindow {
             body = body.child(
                 div()
                     .debug_selector(|| "dialog-waiting".into())
-                    .text_color(rgb(theme.muted))
+                    .text_color(rgb(theme.subtext()))
                     .child("Waiting for the daemon. Dismissing does not cancel it."),
             );
         }

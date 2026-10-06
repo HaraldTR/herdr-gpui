@@ -2,6 +2,7 @@ use super::*;
 use anyhow::Context as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod default_fonts;
 mod discovery;
 mod fonts;
 mod github;
@@ -10,6 +11,7 @@ mod loading;
 mod notification_settings;
 mod preferences;
 mod sidebar_settings;
+mod system_themes;
 mod themes;
 
 struct TempDirectory(PathBuf);

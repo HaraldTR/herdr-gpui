@@ -38,6 +38,7 @@ use std::{
     path::{Path, PathBuf},
 };
 pub use theme::Theme;
+pub(crate) use theme::ThemeName;
 pub(crate) use theme::mix;
 
 const DEFAULT_CONFIG: &str = include_str!("../config-gpui.example.toml");
@@ -60,9 +61,15 @@ pub(crate) mod corners {
 pub struct Config {
     pub theme: String,
     pub confirm_close_tab: bool,
+    pub confirm_close_pane: bool,
     pub show_agents: bool,
     /// CPU and memory of the selected host in the status bar.
     pub show_system_load: bool,
+    /// Snapshot a checkout's files each time one of its agents starts or
+    /// finishes a turn, so they can be rolled back.
+    pub agent_checkpoints: bool,
+    /// Ports each workspace listens on, in the sidebar and the status bar.
+    pub show_listening_ports: bool,
     /// How far the app's own marks and labels stand off its chrome.
     pub contrast: Contrast,
     pub usage: crate::usage::UsageConfig,
@@ -250,11 +257,11 @@ const MAX_DAEMON_CONFIG_BYTES: u64 = 1 << 20;
 
 impl Default for Config {
     fn default() -> Self {
-        let (monospace, ui) = if cfg!(target_os = "linux") {
-            ("DejaVu Sans Mono", "DejaVu Sans")
-        } else {
-            ("Menlo", ".SystemUIFont")
-        };
+        let fonts::DefaultFonts {
+            monospace,
+            sans: ui,
+            ..
+        } = fonts::PLATFORM_FONTS;
         let font = |family: &str, size| FontConfig {
             family: family.into(),
             size,
@@ -264,8 +271,11 @@ impl Default for Config {
             theme: "Default".into(),
             github: GitHubConfig::default(),
             confirm_close_tab: true,
+            confirm_close_pane: true,
             show_agents: true,
             show_system_load: true,
+            agent_checkpoints: true,
+            show_listening_ports: true,
             contrast: Contrast::default(),
             usage: crate::usage::UsageConfig::default(),
             option_as_alt: OptionAsAlt::default(),
@@ -299,8 +309,11 @@ impl Default for Config {
 struct Settings {
     theme: Option<String>,
     confirm_close_tab: Option<bool>,
+    confirm_close_pane: Option<bool>,
     show_agents: Option<bool>,
     show_system_load: Option<bool>,
+    agent_checkpoints: Option<bool>,
+    show_listening_ports: Option<bool>,
     contrast: Contrast,
     usage: crate::usage::UsageConfig,
     option_as_alt: OptionAsAlt,
@@ -603,11 +616,15 @@ impl Config {
             if theme.trim().is_empty() {
                 return Err(Error::EmptyTheme);
             }
+            ThemeName::parse(&theme)?;
             config.theme = theme;
         }
         config.confirm_close_tab = settings.confirm_close_tab.unwrap_or(true);
+        config.confirm_close_pane = settings.confirm_close_pane.unwrap_or(true);
         config.show_agents = settings.show_agents.unwrap_or(true);
         config.show_system_load = settings.show_system_load.unwrap_or(true);
+        config.agent_checkpoints = settings.agent_checkpoints.unwrap_or(true);
+        config.show_listening_ports = settings.show_listening_ports.unwrap_or(true);
         config.contrast = settings.contrast;
         config.usage = settings.usage;
         config.option_as_alt = settings.option_as_alt;

@@ -195,7 +195,7 @@ impl HerdrWindow {
         };
         let mut body = div().id("device-setup-body").debug_selector(|| "device-setup-body".into())
             .min_h_0().overflow_y_scroll().p(px(16.)).flex().flex_col().gap(px(12.))
-            .child(div().flex_none().text_color(rgb(theme.muted))
+            .child(div().flex_none().text_color(rgb(theme.subtext()))
                 .child("Herdr checks the host over SSH and saves the device. If Herdr is missing or SSH needs your input, setup continues in a local workspace."));
         for (label, field) in [
             "SSH target",
