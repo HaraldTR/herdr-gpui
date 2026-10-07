@@ -66,14 +66,31 @@ fn native_notifications() {
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "requires active Wayland desktop; input shutdown fixtures, no daemon"]
-fn native_input_shutdown() {
+fn native_input_shutdown_terminal() {
+    native_input_shutdown("terminal");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires active Wayland desktop; input shutdown fixtures, no daemon"]
+fn native_input_shutdown_dialog() {
+    native_input_shutdown("dialog");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires active Wayland desktop; input shutdown fixtures, no daemon"]
+fn native_input_shutdown_search() {
+    native_input_shutdown("search");
+}
+
+#[cfg(target_os = "linux")]
+fn native_input_shutdown(field: &'static str) {
     assert!(
         std::env::var_os("WAYLAND_DISPLAY").is_some(),
         "Wayland required"
     );
-    for field in ["terminal", "dialog", "search"] {
-        native_fixture(Fixture::InputShutdown(field));
-    }
+    native_fixture(Fixture::InputShutdown(field));
 }
 
 enum Fixture {
