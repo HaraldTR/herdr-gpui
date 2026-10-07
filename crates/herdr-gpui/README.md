@@ -1683,6 +1683,12 @@ Windows setup) nothing is saved and the window says so.
   end on one-line rows, Compact included. Minimal rows leave them off. They
   appear only while the daemon's `[ui.sidebar.spaces]` rows name `git_status`,
   as its defaults do, because the daemon computes them only then.
+- With several hosts listed, the Spaces list groups workspaces under a row per
+  host, and the row of the host whose workspaces are at the top of the
+  scrolled list stays pinned there, so you can always see which machine they
+  are on, until the next host's row pushes it out. The pinned copy works like
+  the row itself: click to select the host, use the arrow to collapse it, or
+  right-click for its menu.
 - Agents panel header ends with its sort, `grouped` or `priority`, which a
   click flips; an active agent view names itself there instead. Client-local
   and persisted beside the sidebar width, as in the terminal client. With

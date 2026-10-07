@@ -49,6 +49,8 @@ mod split_pane;
 #[cfg(test)]
 mod status_bar;
 #[cfg(test)]
+mod sticky_hosts;
+#[cfg(test)]
 mod text_width;
 #[cfg(test)]
 mod update_panel;
@@ -524,6 +526,7 @@ pub(crate) fn fixture_window(window: &mut Window, cx: &mut Context<HerdrWindow>)
         input_probe: crate::smoke::InputProbe::default(),
         sidebar_scroll: Default::default(),
         sidebar_revealed: Default::default(),
+        sidebar_pin_reveal: Default::default(),
         _poll: Task::ready(()),
         _activation: cx.observe_window_activation(window, |_, _, _| {}),
         _appearance: cx.observe_window_appearance(window, |this, _, cx| {

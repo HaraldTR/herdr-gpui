@@ -3,6 +3,7 @@
 
 mod agents;
 mod cell;
+mod host_row;
 mod hover;
 mod layout;
 mod layouts;
@@ -13,6 +14,7 @@ mod rail;
 mod render;
 mod reorder;
 mod row;
+mod sticky;
 mod tokens;
 mod view;
 mod workspaces;

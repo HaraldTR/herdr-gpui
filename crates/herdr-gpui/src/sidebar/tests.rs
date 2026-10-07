@@ -23,3 +23,4 @@ mod agent_order;
 mod hierarchy;
 mod row_text;
 mod statuses;
+mod sticky_hosts;
