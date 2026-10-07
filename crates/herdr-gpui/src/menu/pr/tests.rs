@@ -1,13 +1,15 @@
 #![allow(clippy::unwrap_used)]
-use super::repository_input;
+use crate::pull_request::{Origin, repository_input};
 use herdr_client::protocol::ClientShellWorktree;
 
 #[test]
 fn metadata_priority_alternates_with_round_robin_and_skips_ineligible_workspaces() {
     let mut snapshot = crate::sidebar::layout_tests::snapshot(6);
     snapshot.focused_workspace_id = Some("w5".into());
+    // A saved device requires daemon metadata, so only metadata decides here.
+    let origin = Origin::Ssh("device".into());
     let branches = |snapshot: &super::ClientShellSnapshot, open, cursor| {
-        super::workspace_pr_inputs(snapshot, open, cursor)
+        super::workspace_pr_inputs(snapshot, &origin, open, cursor)
             .map(|input| input.branch)
             .collect::<Vec<_>>()
     };
@@ -296,11 +298,7 @@ fn live_local_pr_lookup() {
         .as_ref()
         .expect("existing GitHub sign-in unavailable");
     let mut lookup = crate::pull_request::Lookup::default();
-    lookup.request(
-        input,
-        crate::pull_request::Origin::Local,
-        profile.token.clone(),
-    );
+    lookup.request(input, Origin::Local, profile.token.clone());
     let deadline = Instant::now() + Duration::from_secs(20);
     while lookup.loading && Instant::now() < deadline {
         lookup.poll();
@@ -335,7 +333,7 @@ fn snapshot_metadata_is_the_lookup_key_and_leaves_checkout_to_git() {
     // No daemon request supplies a path; the worker resolves it from the
     // repository's own worktree registry.
     assert!(input.checkout.is_none());
-    assert_eq!(input.repo_key, repo_key);
+    assert_eq!(input.repo_key, Some(repo_key));
     assert_eq!(input.branch, "feature");
     assert!(matches!(
         repository_input(None, Some("feature")),

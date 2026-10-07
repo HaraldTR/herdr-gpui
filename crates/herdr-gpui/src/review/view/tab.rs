@@ -19,7 +19,11 @@ impl HerdrWindow {
     /// Opens the focused checkout's review tab in the group in use, or
     /// brings back the one already open, and reads its changes again.
     pub(crate) fn open_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(input) = self.git.tracked().cloned() else {
+        let Some(checkout) = self
+            .git
+            .tracked()
+            .and_then(|input| ReviewCheckout::try_from(input).ok())
+        else {
             self.show_flash(Flash::warning("No local checkout to review"), cx);
             return;
         };
@@ -38,7 +42,6 @@ impl HerdrWindow {
             return;
         };
         let scope = crate::browser::scope(&self.endpoints[self.selected_endpoint]);
-        let checkout = ReviewCheckout::from(&input);
         let agent = self.live.snapshot.as_deref().and_then(pick_agent);
         let existing = cx.try_global::<Store>().and_then(|store| {
             store

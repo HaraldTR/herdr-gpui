@@ -6,7 +6,7 @@ use gpui::{Entity, TestAppContext, VisualTestContext, point, px, size};
 fn input() -> crate::pull_request::Input {
     crate::pull_request::Input {
         checkout: None,
-        repo_key: REPO_KEY.into(),
+        repo_key: Some(REPO_KEY.into()),
         branch: "develop".into(),
     }
 }

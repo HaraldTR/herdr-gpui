@@ -192,6 +192,8 @@ pub enum Error {
     PrEncoding(#[source] std::str::Utf8Error),
     #[error("No repository metadata.")]
     PrMetadata,
+    #[error("Workspace directory is not in a Git repository.")]
+    PrWorkspaceRepository,
     #[error("Could not {operation} the agent context note for the new checkout.")]
     AgentContext {
         operation: &'static str,
