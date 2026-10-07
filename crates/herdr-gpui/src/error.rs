@@ -292,7 +292,7 @@ pub enum Error {
     PrCancelled,
     #[error("PR lookup timed out (15 seconds).")]
     PrTimeout,
-    #[error("GitHub network request failed or timed out.")]
+    #[error("GitHub network request failed or timed out ({0}).")]
     GitHubNetwork(#[source] ureq::Error),
     #[error("GitHub query failed. Check token repository permissions and rate limits.")]
     GitHubQuery,
@@ -794,6 +794,19 @@ pub enum ThemeParseError {
 mod tests {
     use super::*;
     use std::error::Error as _;
+
+    #[test]
+    fn github_network_message_names_the_transport_failure() {
+        let error = Error::GitHubNetwork(ureq::Error::Io(io::Error::other(
+            "invalid peer certificate: UnknownIssuer",
+        )));
+        let message = error.to_string();
+        assert!(message.starts_with("GitHub network request failed or timed out"));
+        assert!(
+            message.contains("invalid peer certificate: UnknownIssuer"),
+            "{message}"
+        );
+    }
 
     #[test]
     fn updater_wrapper_preserves_source_chain() {
