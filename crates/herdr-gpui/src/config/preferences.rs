@@ -242,4 +242,25 @@ mod tests {
         }
         Ok(())
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn preference_save_writes_through_a_symlinked_file() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let dotfiles = directory.path().join("dotfiles");
+        fs::create_dir(&dotfiles)?;
+        let tracked = dotfiles.join("local.toml");
+        fs::write(&tracked, "# tracked\n")?;
+        let link = directory.path().join("local.toml");
+        std::os::unix::fs::symlink(&tracked, &link)?;
+
+        Config::save_preference_path(Preference::ShowSystemLoad(false), &link)?;
+
+        assert!(fs::symlink_metadata(&link)?.file_type().is_symlink());
+        let text = fs::read_to_string(&tracked)?;
+        assert!(text.contains("# tracked"));
+        let table: toml::Table = toml::from_str(&text)?;
+        assert_eq!(table["show_system_load"].as_bool(), Some(false));
+        Ok(())
+    }
 }
