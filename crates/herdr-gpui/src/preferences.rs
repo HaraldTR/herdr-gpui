@@ -96,16 +96,17 @@ impl HerdrWindow {
             self.write_preference(save, cx);
             return;
         }
+        let light = crate::app::light_appearance(cx);
         let text_system = cx.text_system().clone();
         self.load_gui_config_with(
             move || {
                 save()?;
                 let mut config = Config::load()?;
-                config.resolve_font_fallbacks(|| text_system.all_font_names());
+                config.resolve_fonts(|| text_system.all_font_names());
                 let theme = if config.theme == "Follow Herdr" {
                     Default::default()
                 } else {
-                    config.theme()?
+                    config.theme(light)?
                 };
                 Ok((config, theme))
             },
@@ -262,6 +263,25 @@ impl HerdrWindow {
             )
             .child(
                 toggle(
+                    "preferences-show-listening-ports",
+                    "Show listening ports",
+                    self.config.show_listening_ports,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    let show = !this.config.show_listening_ports;
+                    this.save_preference(
+                        move || {
+                            Config::save_preference(
+                                crate::config::preferences::Preference::ShowListeningPorts(show),
+                            )
+                        },
+                        cx,
+                    );
+                })),
+            )
+            .child(
+                toggle(
                     "preferences-high-contrast",
                     "High contrast",
                     self.config.contrast == Contrast::High,
@@ -279,6 +299,11 @@ impl HerdrWindow {
                 "preferences-confirm-close-tab",
                 "Confirm tab close",
                 self.config.confirm_close_tab.to_string(),
+            ))
+            .child(row(
+                "preferences-confirm-close-pane",
+                "Confirm pane close",
+                self.config.confirm_close_pane.to_string(),
             ))
             .child(row(
                 "preferences-layout",
@@ -609,6 +634,10 @@ pub struct Chrome {
     /// The sort the user picked with the panel toggle, like upstream's
     /// `agent_panel_sort` preference. `None` follows the daemon's config.
     pub agent_sort: Option<AgentSort>,
+    /// The notes panel's width, once dragged; `None` is its default.
+    pub notes_width: Option<f32>,
+    /// The review's file list's width, once dragged.
+    pub review_files_width: Option<f32>,
 }
 
 pub struct Preferences {
@@ -763,10 +792,23 @@ fn read_chrome(path: &Path) -> crate::Result<Chrome> {
         .and_then(serde_json::Value::as_f64)
         .map(|split| split as f32)
         .filter(|split| split.is_finite() && (0.1..=0.9).contains(split));
+    // A damaged panel width is forgotten rather than failing the whole file.
+    let notes_width = object
+        .get("notes_width_px")
+        .and_then(serde_json::Value::as_f64)
+        .map(|width| width as f32)
+        .filter(|width| width.is_finite() && *width > 0.0);
+    let review_files_width = object
+        .get("review_files_width_px")
+        .and_then(serde_json::Value::as_f64)
+        .map(|width| width as f32)
+        .filter(|width| width.is_finite() && *width > 0.0);
     Ok(Chrome {
         sidebar_width,
         sidebar_split,
         agent_sort,
+        notes_width,
+        review_files_width,
     })
 }
 
@@ -802,6 +844,10 @@ fn write_chrome(path: &Path, chrome: Chrome) -> crate::Result<()> {
                     split.is_finite() && (0.1..=0.9).contains(split)
                 }),
                 "agent_sort_manual": chrome.agent_sort.map(|sort| sort.to_string()),
+                "notes_width_px": chrome.notes_width.filter(|width| width.is_finite() && *width > 0.0),
+                "review_files_width_px": chrome
+                    .review_files_width
+                    .filter(|width| width.is_finite() && *width > 0.0),
             }),
         )?;
         file.write_all(b"\n")?;
@@ -818,332 +864,7 @@ fn write_chrome(path: &Path, chrome: Chrome) -> crate::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
-    use super::*;
-    use std::time::{Duration, Instant};
-
-    #[core::prelude::v1::test]
-    fn font_size_input_accepts_only_whole_values_in_range() {
-        for (input, expected) in [
-            ("8", Some(8.)),
-            ("48", Some(48.)),
-            (" 24 ", Some(24.)),
-            ("7", None),
-            ("49", None),
-            ("14.5", None),
-            ("-8", None),
-            ("+12", None),
-            ("12px", None),
-            ("", None),
-            ("999999", None),
-        ] {
-            assert_eq!(parse_font_size(input), expected, "{input:?}");
-        }
-    }
-
-    struct TestDirectory(PathBuf);
-
-    impl TestDirectory {
-        fn new() -> Self {
-            loop {
-                let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-                let path = env::temp_dir().join(format!(
-                    "herdr-preferences-test-{}-{sequence}",
-                    std::process::id()
-                ));
-                match fs::create_dir(&path) {
-                    Ok(()) => return Self(path),
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => panic!("Cannot create test directory: {error}"),
-                }
-            }
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            fs::remove_dir_all(&self.0).unwrap();
-        }
-    }
-
-    fn await_loaded(preferences: &mut Preferences) -> Chrome {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(chrome) = preferences.loaded() {
-                assert_eq!(preferences.loaded(), None);
-                return chrome;
-            }
-            assert!(Instant::now() < deadline, "preferences load timed out");
-            thread::sleep(Duration::from_millis(1));
-        }
-    }
-
-    #[core::prelude::v1::test]
-    fn roundtrip_and_reset_drain_after_drop() {
-        let directory = TestDirectory::new();
-        let path = endpoint_path(&directory.0, Path::new("/tmp/test.sock"));
-        let mut preferences = Preferences::start(Ok(path.clone()));
-        assert_eq!(await_loaded(&mut preferences), Chrome::default());
-        for width in 1..=100 {
-            preferences.save(Chrome {
-                sidebar_width: Some(width as f32),
-                sidebar_split: Some(0.4),
-                agent_sort: Some(AgentSort::Priority),
-            });
-        }
-        let worker = preferences.worker.take().unwrap();
-        drop(preferences);
-        // Only the test waits for persistence before reading or removing files.
-        worker.join().unwrap();
-        let mut preferences = Preferences::start(Ok(path.clone()));
-        assert_eq!(
-            await_loaded(&mut preferences),
-            Chrome {
-                sidebar_width: Some(100.0),
-                sidebar_split: Some(0.4),
-                agent_sort: Some(AgentSort::Priority),
-            }
-        );
-        preferences.save(Chrome::default());
-        let worker = preferences.worker.take().unwrap();
-        drop(preferences);
-        worker.join().unwrap();
-        assert_eq!(read_chrome(&path).unwrap(), Chrome::default());
-        let mut preferences = Preferences::start(Ok(path));
-        assert_eq!(await_loaded(&mut preferences), Chrome::default());
-    }
-
-    #[core::prelude::v1::test]
-    fn only_a_toggled_sort_is_stored_and_older_files_migrate() {
-        let directory = TestDirectory::new();
-        let path = endpoint_path(&directory.0, Path::new("/tmp/sort.sock"));
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let chrome = |agent_sort| Chrome {
-            sidebar_width: Some(240.0),
-            sidebar_split: None,
-            agent_sort,
-        };
-        for (json, expected) in [
-            // A file from before the sort existed follows the daemon.
-            (r#"{"sidebar_width_px": 240.0}"#, None),
-            // Earlier builds wrote their default whether or not it was chosen,
-            // so only a stored "priority" is known to be a toggle.
-            (
-                r#"{"sidebar_width_px": 240.0, "agent_sort": "grouped"}"#,
-                None,
-            ),
-            (
-                r#"{"sidebar_width_px": 240.0, "agent_sort": "priority"}"#,
-                Some(AgentSort::Priority),
-            ),
-            (
-                r#"{"sidebar_width_px": 240.0, "agent_sort": "sideways"}"#,
-                None,
-            ),
-            (
-                r#"{"sidebar_width_px": 240.0, "agent_sort_manual": null}"#,
-                None,
-            ),
-            (
-                r#"{"sidebar_width_px": 240.0, "agent_sort_manual": "grouped"}"#,
-                Some(AgentSort::Grouped),
-            ),
-            (
-                r#"{"sidebar_width_px": 240.0, "agent_sort_manual": "spaces"}"#,
-                None,
-            ),
-            (
-                r#"{"sidebar_width_px": 240.0, "agent_sort_manual": 1}"#,
-                None,
-            ),
-        ] {
-            fs::write(&path, json).unwrap();
-            assert_eq!(read_chrome(&path).unwrap(), chrome(expected), "{json}");
-        }
-        for agent_sort in [None, Some(AgentSort::Grouped), Some(AgentSort::Priority)] {
-            write_chrome(&path, chrome(agent_sort)).unwrap();
-            let stored: serde_json::Value =
-                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-            // The legacy key is no longer written, so it cannot pin a default.
-            assert!(stored.get("agent_sort").is_none(), "{stored}");
-            assert_eq!(read_chrome(&path).unwrap(), chrome(agent_sort));
-        }
-    }
-
-    #[core::prelude::v1::test]
-    fn drop_does_not_wait_for_blocked_worker_and_queued_saves_still_drain() {
-        let (saves, requests) = mpsc::channel();
-        let (ready_tx, ready) = mpsc::channel();
-        let (release, blocked) = mpsc::channel();
-        let (drained_tx, drained) = mpsc::channel();
-        let worker = thread::spawn(move || {
-            ready_tx.send(()).unwrap();
-            blocked.recv().unwrap();
-            drained_tx
-                .send(requests.into_iter().collect::<Vec<_>>())
-                .unwrap();
-        });
-        let preferences = Preferences {
-            saves: Some(saves),
-            loaded: None,
-            worker: Some(worker),
-        };
-        let queued = [
-            Chrome {
-                sidebar_width: Some(160.),
-                sidebar_split: None,
-                agent_sort: Some(AgentSort::Grouped),
-            },
-            Chrome {
-                sidebar_width: Some(400.),
-                sidebar_split: Some(0.6),
-                agent_sort: Some(AgentSort::Priority),
-            },
-            Chrome::default(),
-        ];
-        for chrome in queued {
-            preferences.save(chrome);
-        }
-        ready.recv_timeout(Duration::from_secs(5)).unwrap();
-        let (dropped_tx, dropped) = mpsc::channel();
-        let dropper = thread::spawn(move || {
-            drop(preferences);
-            dropped_tx.send(()).unwrap();
-        });
-        let result = dropped.recv_timeout(Duration::from_secs(5));
-        // Release even on failure so a regressed join does not strand the threads.
-        release.send(()).unwrap();
-        let saved = drained.recv_timeout(Duration::from_secs(5)).unwrap();
-        dropper.join().unwrap();
-        assert!(result.is_ok(), "drop waited for the blocked worker");
-        assert_eq!(saved, queued);
-    }
-
-    #[core::prelude::v1::test]
-    fn malformed_and_invalid_widths_fall_back_to_default() {
-        let directory = TestDirectory::new();
-        let path = directory.0.join("preferences.json");
-        for contents in [
-            "not json",
-            "[]",
-            "null",
-            r#"{"sidebar_width_px":0}"#,
-            r#"{"sidebar_width_px":-1}"#,
-            r#"{"sidebar_width_px":"200"}"#,
-            r#"{"sidebar_width_px":true}"#,
-            r#"{"sidebar_width_px":1e100}"#,
-            r#"{"sidebar_width_px":1e-100}"#,
-            r#"{"sidebar_width_px":NaN}"#,
-        ] {
-            fs::write(&path, contents).unwrap();
-            assert!(read_chrome(&path).is_err(), "accepted {contents}");
-            let mut preferences = Preferences::start(Ok(path.clone()));
-            assert_eq!(await_loaded(&mut preferences), Chrome::default());
-        }
-        for contents in ["{}", r#"{"sidebar_width_px":null}"#] {
-            fs::write(&path, contents).unwrap();
-            assert_eq!(read_chrome(&path).unwrap(), Chrome::default());
-        }
-        for width in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -1.0] {
-            assert!(
-                write_chrome(
-                    &path,
-                    Chrome {
-                        sidebar_width: Some(width),
-                        sidebar_split: None,
-                        agent_sort: None,
-                    }
-                )
-                .is_err()
-            );
-        }
-        let chrome = Chrome {
-            sidebar_width: Some(237.5),
-            sidebar_split: None,
-            agent_sort: None,
-        };
-        write_chrome(&path, chrome).unwrap();
-        assert_eq!(read_chrome(&path).unwrap(), chrome);
-        assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
-    }
-
-    #[core::prelude::v1::test]
-    fn invalid_sidebar_splits_preserve_other_preferences() {
-        let directory = TestDirectory::new();
-        let path = directory.0.join("preferences.json");
-        let expected = Chrome {
-            sidebar_width: Some(240.0),
-            sidebar_split: None,
-            agent_sort: Some(AgentSort::Priority),
-        };
-        for split in [
-            "null", "0", "-1", "0.099", "0.901", "1e100", "1e-100", "\"0.5\"", "true", "[]", "{}",
-        ] {
-            fs::write(
-                &path,
-                format!(
-                    r#"{{"sidebar_width_px":240,"agent_sort":"priority","sidebar_split":{split}}}"#
-                ),
-            )
-            .unwrap();
-            assert_eq!(read_chrome(&path).unwrap(), expected, "{split}");
-        }
-        for split in [
-            f32::NAN,
-            f32::INFINITY,
-            f32::NEG_INFINITY,
-            0.0,
-            0.099,
-            0.901,
-        ] {
-            write_chrome(
-                &path,
-                Chrome {
-                    sidebar_split: Some(split),
-                    ..expected
-                },
-            )
-            .unwrap();
-            assert_eq!(read_chrome(&path).unwrap(), expected, "{split}");
-        }
-    }
-
-    #[core::prelude::v1::test]
-    fn sidebar_split_roundtrips_including_boundaries_and_reset() {
-        let directory = TestDirectory::new();
-        let path = directory.0.join("preferences.json");
-        for sidebar_split in [Some(0.1), Some(0.4), Some(0.9), None] {
-            let chrome = Chrome {
-                sidebar_width: Some(240.0),
-                sidebar_split,
-                agent_sort: Some(AgentSort::Priority),
-            };
-            write_chrome(&path, chrome).unwrap();
-            let stored: serde_json::Value =
-                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-            assert_eq!(stored["sidebar_split"], serde_json::json!(sidebar_split));
-            assert_eq!(read_chrome(&path).unwrap(), chrome);
-        }
-    }
-
-    #[core::prelude::v1::test]
-    fn endpoint_paths_use_stable_fnv1a() {
-        let root = Path::new("/state/herdr/gpui");
-        assert_eq!(
-            endpoint_path(root, Path::new("hello")),
-            Path::new("/state/herdr/gpui/local-a430d84680aabd0b.json")
-        );
-        assert_eq!(
-            endpoint_path(root, Path::new("")),
-            Path::new("/state/herdr/gpui/local-cbf29ce484222325.json")
-        );
-        assert_ne!(
-            endpoint_path(root, Path::new("/a.sock")),
-            endpoint_path(root, Path::new("/b.sock"))
-        );
-    }
-}
+mod tests;
 
 // A sibling of `tests`: its glob import shadows `#[test]` with GPUI's macro.
 #[cfg(test)]

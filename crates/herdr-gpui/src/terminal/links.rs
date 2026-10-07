@@ -1,7 +1,11 @@
-//! Resolve user-selected web links within the painted pane or popup only.
-use super::{HIDDEN, InputTarget, popup_origin, wheel_target};
+//! Resolve user-selected links within the painted pane or popup only: web
+//! addresses, and the local file paths a pane prints, which open only on a
+//! link-modifier click on the machine that runs the pane.
+use super::{HIDDEN, InputTarget, popup_origin, selection::shown, wheel_target};
 use herdr_client::protocol::{FrameData, PaneSurfaceFrame};
 use std::ops::Range;
+
+mod path;
 
 pub(super) const MAX_ROW_BYTES: usize = 32768;
 
@@ -11,6 +15,45 @@ fn web_url(value: &str) -> Option<String> {
         .map(String::from)
 }
 
+/// The local path a `file://` hyperlink names. A file on another host is not
+/// this machine's to open, so only an empty host or `localhost` qualifies:
+/// Windows would otherwise read any other host as a network share.
+fn file_url_path(value: &str) -> Option<String> {
+    let url = url::Url::parse(value)
+        .ok()
+        .filter(|url| url.scheme() == "file")?;
+    if url.host_str().is_some_and(|host| host != "localhost") {
+        return None;
+    }
+    url.to_file_path().ok()?.into_os_string().into_string().ok()
+}
+
+/// What a row-local link points at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RowTarget {
+    /// A web address that passed `WebUrl` validation.
+    Web(String),
+    /// A local path as the pane printed it, with `~/` and relative paths left
+    /// for the click to resolve, or the absolute path of a `file://` link.
+    Path(String),
+}
+
+/// A link read from one row, and the frame columns it covers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RowLink {
+    pub(crate) target: RowTarget,
+    pub(crate) row: u16,
+    pub(crate) columns: Range<u16>,
+}
+
+/// A row-local link in a pane, which a popup never is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PaneLink {
+    pub(crate) pane_id: String,
+    pub(crate) link: RowLink,
+}
+
+/// The web address under a point, in a pane or a popup.
 pub(crate) fn link_at(
     surface: &PaneSurfaceFrame,
     x: f32,
@@ -18,9 +61,37 @@ pub(crate) fn link_at(
     cell_width: f32,
     cell_height: f32,
 ) -> Option<String> {
+    match located(surface, x, y, cell_width, cell_height)?.1.target {
+        RowTarget::Web(url) => Some(url),
+        RowTarget::Path(_) => None,
+    }
+}
+
+/// The link of either kind under a point in a pane, in surface frame cells.
+pub(crate) fn pane_link_at(
+    surface: &PaneSurfaceFrame,
+    x: f32,
+    y: f32,
+    cell_width: f32,
+    cell_height: f32,
+) -> Option<PaneLink> {
+    let (pane_id, link) = located(surface, x, y, cell_width, cell_height)?;
+    Some(PaneLink {
+        pane_id: pane_id?,
+        link,
+    })
+}
+
+fn located(
+    surface: &PaneSurfaceFrame,
+    x: f32,
+    y: f32,
+    cell_width: f32,
+    cell_height: f32,
+) -> Option<(Option<String>, RowLink)> {
     // Share popup isolation, pane bounds, and invalid-geometry handling with input.
     let target = wheel_target(surface, x, y, cell_width, cell_height)?;
-    let (frame, x, y, start, end) = match target.target {
+    let (frame, x, y, start, end, pane_id) = match target.target {
         InputTarget::Popup(_) => {
             let popup = surface.popup.as_ref()?;
             let origin = popup_origin(&surface.frame, &popup.frame, cell_width, cell_height);
@@ -30,6 +101,7 @@ pub(crate) fn link_at(
                 y - f32::from(origin.y),
                 0,
                 popup.frame.width,
+                None,
             )
         }
         InputTarget::Pane(id) => {
@@ -40,19 +112,21 @@ pub(crate) fn link_at(
                 y,
                 pane.inner_rect.x,
                 pane.inner_rect.x.saturating_add(pane.inner_rect.width),
+                Some(id),
             )
         }
     };
-    frame_link(
+    let link = frame_link(
         frame,
         (x / cell_width).floor() as u16,
         (y / cell_height).floor() as u16,
         start,
         end,
-    )
+    )?;
+    Some((pane_id, link))
 }
 
-fn frame_link(frame: &FrameData, column: u16, row: u16, start: u16, end: u16) -> Option<String> {
+fn frame_link(frame: &FrameData, column: u16, row: u16, start: u16, end: u16) -> Option<RowLink> {
     if column < start || column >= end || end > frame.width || row >= frame.height {
         return None;
     }
@@ -69,37 +143,90 @@ fn frame_link(frame: &FrameData, column: u16, row: u16, start: u16, end: u16) ->
     if cell.modifier & HIDDEN != 0 {
         return None;
     }
+    // Cell indexes fit the row, whose width is a `u16`.
+    let columns = |cells: Range<usize>| start + cells.start as u16..start + cells.end as u16;
     // An explicit link is authoritative, even if its destination is disallowed.
     if let Some(index) = cells[selected].hyperlink.or(cell.hyperlink) {
-        return web_url(frame.hyperlinks.get(index as usize)?);
+        let destination = frame.hyperlinks.get(index as usize)?;
+        let target = match web_url(destination) {
+            Some(url) => RowTarget::Web(url),
+            None => RowTarget::Path(file_url_path(destination)?),
+        };
+        let on_link = |i: &usize| cells[*i].skip || cells[*i].hyperlink == Some(index);
+        let first = (0..=source)
+            .rev()
+            .take_while(on_link)
+            .last()
+            .unwrap_or(source);
+        let last = (selected..cells.len())
+            .take_while(on_link)
+            .last()
+            .unwrap_or(selected);
+        return Some(RowLink {
+            target,
+            row,
+            columns: columns(first..last + 1),
+        });
     }
+    // Byte offsets into the row's text, so a link maps back to its cells.
     let mut text = String::new();
-    let mut hit = 0;
-    for (index, cell) in cells.iter().enumerate() {
-        if index == source {
-            hit = text.len();
-        }
+    let mut starts = Vec::with_capacity(cells.len());
+    for cell in cells {
+        starts.push(text.len());
         if cell.skip {
             continue;
         }
-        let symbol = if cell.modifier & HIDDEN != 0 || cell.symbol.is_empty() {
-            " "
-        } else {
-            &cell.symbol
-        };
+        let symbol = shown(cell);
         if text.len() + symbol.len() > MAX_ROW_BYTES {
             return None;
         }
         text.push_str(symbol);
     }
-    // Plain URLs are row-local: the surface doesn't distinguish soft wraps from
-    // separate lines, so joining rows could silently change the destination.
-    // A daemon offering `pane.link.resolve` reads wraps from its own terminal
-    // state instead; see `crate::links`.
-    match plain_url(&text, hit)? {
-        (_, true) => None,
-        (range, false) => web_url(&text[range]),
-    }
+    let hit = starts[source];
+    // Plain links are row-local: the surface doesn't distinguish soft wraps
+    // from separate lines, so joining rows could silently change the
+    // destination. A daemon offering `pane.link.resolve` reads wrapped URLs
+    // from its own terminal state instead; see `crate::links`.
+    let (range, target) = match plain_url(&text, hit) {
+        Some((_, true)) => return None,
+        Some((range, false)) => {
+            let url = web_url(&text[range.clone()])?;
+            (range, RowTarget::Web(url))
+        }
+        None => match path::plain_path(&text, hit)? {
+            (_, _, true) => return None,
+            // A path starting the row may be the tail of whatever filled the
+            // row above, such as a wrapped URL.
+            (range, _, false) if range.start == 0 && row_full(frame, row, end) => return None,
+            (range, path, false) => (range, RowTarget::Path(path.to_owned())),
+        },
+    };
+    let first = (0..cells.len()).find(|&i| !cells[i].skip && starts[i] >= range.start)?;
+    let last = (0..cells.len())
+        .rev()
+        .find(|&i| !cells[i].skip && starts[i] < range.end)?;
+    // A wide character's continuation cells belong to the link too.
+    let end = (last + 1..cells.len())
+        .find(|&i| !cells[i].skip)
+        .unwrap_or(cells.len());
+    Some(RowLink {
+        target,
+        row,
+        columns: columns(first..end),
+    })
+}
+
+/// Whether the row above `row` prints up to the pane's right edge, `end`,
+/// where its text may wrap onto `row`.
+fn row_full(frame: &FrameData, row: u16, end: u16) -> bool {
+    let Some(above) = row.checked_sub(1) else {
+        return false;
+    };
+    let index = usize::from(above) * usize::from(frame.width) + usize::from(end) - 1;
+    frame
+        .cells
+        .get(index)
+        .is_some_and(|cell| cell.skip || shown(cell) != " ")
 }
 
 /// The byte range of the plain web URL in one row's `text` that covers the
@@ -147,283 +274,4 @@ pub(super) fn plain_url(text: &str, hit: usize) -> Option<(Range<usize>, bool)> 
 }
 
 #[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
-    use super::*;
-    use herdr_client::protocol::*;
-    use std::sync::Arc;
-
-    fn frame(text: &str, width: u16, height: u16) -> FrameData {
-        let mut symbols = text.chars();
-        FrameData {
-            width,
-            height,
-            cells: (0..usize::from(width) * usize::from(height))
-                .map(|_| CellData {
-                    symbol: symbols.next().unwrap_or(' ').to_string(),
-                    fg: 0,
-                    bg: 0,
-                    modifier: 0,
-                    skip: false,
-                    hyperlink: None,
-                })
-                .collect(),
-            cursor: None,
-            hyperlinks: vec![],
-            graphics: vec![],
-        }
-    }
-
-    fn surface(text: &str) -> PaneSurfaceFrame {
-        let rect = SurfaceRect {
-            x: 0,
-            y: 0,
-            width: 80,
-            height: 4,
-        };
-        PaneSurfaceFrame {
-            boot_id: "boot".into(),
-            projection_revision: 1,
-            surface_revision: 1,
-            frame: frame(text, 80, 4),
-            splits: vec![],
-            popup: None,
-            graphics: Default::default(),
-            panes: vec![PaneSurfacePane {
-                pane_id: "pane".into(),
-                content_revision: 1,
-                rect,
-                inner_rect: rect,
-                scrollbar_rect: None,
-                scroll: None,
-                focused: true,
-                mouse_reporting: false,
-                sgr_pixel_mouse: false,
-                alternate_screen_active: false,
-                pixel_width: 800,
-                pixel_height: 80,
-            }],
-        }
-    }
-
-    #[test]
-    fn explicit_links_validate_destination_and_support_wide_cells() {
-        let mut s = surface("界 ");
-        s.frame.hyperlinks = vec!["https://example.com/docs?q=one#two".into()];
-        s.frame.cells[0].hyperlink = Some(0);
-        s.frame.cells[1].skip = true;
-        for x in [1., 11.] {
-            assert_eq!(
-                link_at(&s, x, 1., 10., 20.).as_deref(),
-                Some("https://example.com/docs?q=one#two")
-            );
-        }
-        for invalid in [
-            "file:///tmp/a",
-            "javascript:alert(1)",
-            "data:text/html,test",
-            "mailto:a@example.com",
-            "https://",
-            "https://example.com/\nnext",
-            "https://example.com/a b",
-        ] {
-            s.frame.hyperlinks[0] = invalid.into();
-            assert!(link_at(&s, 1., 1., 10., 20.).is_none(), "{invalid}");
-        }
-        s.frame.hyperlinks[0] = "https://example.com".into();
-        s.frame.cells[0].modifier = HIDDEN;
-        assert!(link_at(&s, 1., 1., 10., 20.).is_none());
-        assert!(web_url(&format!("https://example.com/{}", "a".repeat(8192))).is_none());
-    }
-
-    #[test]
-    fn plain_urls_trim_prose_preserve_balanced_paths_and_keep_hit_ranges() {
-        for (text, expected) in [
-            (
-                "See (https://example.com/docs). next",
-                "https://example.com/docs",
-            ),
-            ("https://example.com/a_(b)", "https://example.com/a_(b)"),
-            (
-                "https://example.com/?q=yes#section",
-                "https://example.com/?q=yes#section",
-            ),
-            ("http://localhost:3000/path", "http://localhost:3000/path"),
-        ] {
-            let s = surface(text);
-            let start = text.find("http").unwrap();
-            assert_eq!(
-                link_at(&s, start as f32 * 10. + 1., 1., 10., 20.).as_deref(),
-                Some(expected)
-            );
-            assert!(link_at(&s, 791., 1., 10., 20.).is_none());
-        }
-        let s = surface("https://one.test https://two.test");
-        assert_eq!(
-            link_at(&s, 181., 1., 10., 20.).as_deref(),
-            Some("https://two.test/")
-        );
-        let mut s = surface("https://example.com");
-        s.frame.cells[0].hyperlink = Some(0);
-        s.frame.hyperlinks = vec!["file:///tmp/no".into()];
-        assert!(link_at(&s, 1., 1., 10., 20.).is_none());
-        s.frame.cells[0].hyperlink = Some(99);
-        assert!(link_at(&s, 1., 1., 10., 20.).is_none());
-    }
-
-    #[test]
-    fn geometry_is_bounded_and_popup_blocks_underlying_links() {
-        let mut s = surface("https://example.com");
-        for (x, y, w, h) in [
-            (-1., 1., 10., 20.),
-            (800., 1., 10., 20.),
-            (1., 80., 10., 20.),
-            (f32::NAN, 1., 10., 20.),
-            (1., 1., 0., 20.),
-        ] {
-            assert!(link_at(&s, x, y, w, h).is_none());
-        }
-        s.panes[0].inner_rect.x = 20;
-        s.panes[0].inner_rect.width = 60;
-        assert!(link_at(&s, 1., 1., 10., 20.).is_none());
-        s.popup = Some(Box::new(ClientShellPopupSurface {
-            terminal_id: "popup".into(),
-            title: String::new(),
-            width: None,
-            height: None,
-            frame: frame("https://popup.test", 20, 2),
-            mouse_reporting: false,
-            sgr_pixel_mouse: false,
-            pixel_width: 200,
-            pixel_height: 40,
-        }));
-        assert!(link_at(&s, 1., 1., 10., 20.).is_none());
-        assert_eq!(
-            link_at(&s, 301., 21., 10., 20.).as_deref(),
-            Some("https://popup.test/")
-        );
-        s.popup.as_mut().unwrap().frame.cells[0].symbol = "a".repeat(MAX_ROW_BYTES + 1);
-        assert!(link_at(&s, 301., 21., 10., 20.).is_none());
-    }
-
-    #[test]
-    fn plain_links_do_not_cross_panes_or_guess_wrapped_destinations() {
-        let mut s = surface("https://example.com");
-        s.panes[0].inner_rect.width = 12;
-        assert!(link_at(&s, 1., 1., 10., 20.).is_none());
-        let wrapped = frame("https://example.com/long", 12, 2);
-        assert!(frame_link(&wrapped, 0, 0, 0, 12).is_none());
-        for punctuation in ['.', ',', ';', ':', '!', '?', ')', ']', '}'] {
-            let text = format!("https://example{punctuation}com/path");
-            let wrapped = frame(&text, 16, 2);
-            assert!(frame_link(&wrapped, 0, 0, 0, 16).is_none(), "{text}");
-            let mut s = surface(&text);
-            s.panes[0].inner_rect.width = 16;
-            assert!(link_at(&s, 1., 1., 10., 20.).is_none(), "{text}");
-        }
-        let unicode = frame("界 https://example.com ", 40, 1);
-        assert_eq!(
-            frame_link(&unicode, 3, 0, 0, 40).as_deref(),
-            Some("https://example.com/")
-        );
-    }
-
-    #[gpui::test]
-    fn link_modifier_click_bypasses_mouse_reporting_only_on_links(cx: &mut gpui::TestAppContext) {
-        use gpui::{Modifiers, point, px};
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            let mut view = crate::sidebar::layout_tests::fixture_window(window, cx);
-            let mut s = surface("https://example.com/app plain");
-            s.panes[0].mouse_reporting = true;
-            let snapshot = view.live.snapshot.as_ref().unwrap();
-            s.boot_id = snapshot.boot_id.clone();
-            s.projection_revision = snapshot.revision;
-            view.live.surface = Some(Arc::new(s));
-            view
-        });
-        cx.update(|window, cx| {
-            window.refresh();
-            window.draw(cx).clear(cx);
-        });
-        let origin = view.read_with(cx, |view, _| view.bounds.origin);
-        let link = origin + point(px(1.), px(1.));
-        let plain = origin + point(px(251.), px(1.));
-        cx.simulate_click(link, Modifiers::default());
-        assert!(cx.opened_url().is_none());
-        view.read_with(cx, |view, _| {
-            assert!(!view.terminal_link_hovered(link, Modifiers::default()));
-            assert!(view.terminal_link_hovered(link, Modifiers::secondary_key()));
-            assert!(!view.terminal_link_hovered(plain, Modifiers::secondary_key()));
-            assert!(!view.link_modifier_held(plain, Modifiers::secondary_key()));
-        });
-        cx.simulate_click(link, Modifiers::secondary_key());
-        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com/app"));
-    }
-
-    #[gpui::test]
-    fn click_dispatch_opens_browser_and_respects_menu_and_revision(cx: &mut gpui::TestAppContext) {
-        use gpui::{point, px};
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            let mut view = crate::sidebar::layout_tests::fixture_window(window, cx);
-            let mut s = surface("https://example.com/click");
-            let snapshot = view.live.snapshot.as_ref().unwrap();
-            s.boot_id = snapshot.boot_id.clone();
-            s.projection_revision = snapshot.revision;
-            view.live.surface = Some(Arc::new(s));
-            view
-        });
-        cx.update(|window, cx| {
-            window.refresh();
-            window.draw(cx).clear(cx);
-        });
-        let position = view.read_with(cx, |view, _| view.bounds.origin + point(px(1.), px(1.)));
-        cx.update(|window, cx| {
-            view.update(cx, |view, cx| {
-                let mut event = gpui::MouseClickEvent::default();
-                event.down.position = position;
-                event.up.position = position + point(px(20.), px(0.));
-                event.down.click_count = 1;
-                view.pressed_terminal_link = Some(crate::window::PressedLink {
-                    url: Some("https://example.com/click".into()),
-                    cell: None,
-                    position,
-                });
-                view.open_terminal_link(&gpui::ClickEvent::Mouse(event.clone()), window, cx);
-                event.up.position = position;
-                view.pressed_terminal_link = Some(crate::window::PressedLink {
-                    url: Some("https://different.example/".into()),
-                    cell: None,
-                    position,
-                });
-                view.open_terminal_link(&gpui::ClickEvent::Mouse(event), window, cx);
-            })
-        });
-        assert!(cx.opened_url().is_none());
-        for away in [
-            position + point(px(20.), px(0.)),
-            position + point(px(0.), px(20.)),
-            position - point(px(20.), px(20.)),
-        ] {
-            cx.simulate_mouse_down(position, gpui::MouseButton::Left, Default::default());
-            cx.simulate_mouse_move(away, gpui::MouseButton::Left, Default::default());
-            cx.simulate_mouse_move(position, gpui::MouseButton::Left, Default::default());
-            cx.simulate_mouse_up(position, gpui::MouseButton::Left, Default::default());
-            assert!(cx.opened_url().is_none());
-            view.read_with(cx, |view, _| assert!(view.pressed_terminal_link.is_none()));
-        }
-        cx.simulate_click(position, Default::default());
-        assert_eq!(
-            cx.opened_url().as_deref(),
-            Some("https://example.com/click")
-        );
-        view.update(cx, |view, _| {
-            assert!(view.pending_navigation.is_none());
-            assert!(view.pressed_terminal_link.is_none());
-            view.menu.page = Some(crate::menu::Page::Menu);
-            assert!(view.terminal_link_at(position).is_none());
-            view.menu.page = None;
-            Arc::make_mut(view.live.surface.as_mut().unwrap()).projection_revision += 1;
-            assert!(view.terminal_link_at(position).is_none());
-        });
-    }
-}
+mod tests;

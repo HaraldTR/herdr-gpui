@@ -19,10 +19,14 @@ pub(crate) enum Origin {
     Ssh(String),
 }
 
+/// The repository and branch a lookup reads. `repo_key` is the daemon's Git
+/// common directory; it is `None` only for a local workspace the daemon has
+/// attached no worktree metadata to, where `checkout` is then the workspace
+/// directory and the worker asks Git which repository it belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Input {
     pub checkout: Option<String>,
-    pub repo_key: String,
+    pub repo_key: Option<String>,
     pub branch: String,
 }
 
@@ -48,6 +52,56 @@ pub(crate) struct PullRequest {
     #[serde(default)]
     pub(super) status_check_rollup: Option<Vec<Check>>,
     pub(super) head_repository_owner: Owner,
+    /// GitHub's opaque node ID, the subject of comment and merge mutations.
+    /// Empty when absent or malformed, which leaves those actions unavailable.
+    #[serde(default)]
+    pub id: String,
+    /// The head commit the shown checks belong to. A merge names it, so
+    /// GitHub refuses one if the branch moved after the user looked.
+    #[serde(default)]
+    pub head_ref_oid: String,
+    /// The merge methods the repository allows, in GitHub's own order.
+    #[serde(skip)]
+    pub merge_methods: Vec<MergeMethod>,
+}
+
+/// How a pull request is merged: GitHub's `PullRequestMergeMethod`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+impl MergeMethod {
+    pub(crate) const ALL: [Self; 3] = [Self::Merge, Self::Squash, Self::Rebase];
+
+    /// The enum value the `mergePullRequest` mutation takes.
+    pub(crate) fn graphql(self) -> &'static str {
+        match self {
+            Self::Merge => "MERGE",
+            Self::Squash => "SQUASH",
+            Self::Rebase => "REBASE",
+        }
+    }
+
+    /// The repository setting that allows this method.
+    pub(super) fn setting(self) -> &'static str {
+        match self {
+            Self::Merge => "mergeCommitAllowed",
+            Self::Squash => "squashMergeAllowed",
+            Self::Rebase => "rebaseMergeAllowed",
+        }
+    }
+
+    /// The confirming button's label, as GitHub words it.
+    pub(crate) fn action(self) -> &'static str {
+        match self {
+            Self::Merge => "Create a merge commit",
+            Self::Squash => "Squash and merge",
+            Self::Rebase => "Rebase and merge",
+        }
+    }
 }
 
 /// GitHub's `PullRequestState`. A value this client does not know is not a
@@ -168,6 +222,9 @@ pub(super) struct Owner {
 pub(super) struct Check {
     #[serde(rename = "__typename")]
     kind: CheckKind,
+    /// A check run's `name` or a status context's `context`; cleaned on parse.
+    #[serde(default, alias = "context")]
+    pub(super) name: String,
     #[serde(default)]
     state: Outcome,
     #[serde(default)]
@@ -225,7 +282,7 @@ impl From<Option<String>> for CheckStatus {
 /// the summary reads in, and indexes the tally in `checks`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(from = "Option<String>")]
-pub(super) enum Outcome {
+pub(crate) enum Outcome {
     Passed,
     Failed,
     #[default]
@@ -314,6 +371,14 @@ impl PullRequest {
         }
     }
 
+    /// Each reported check by name, in GitHub's order, for the checks list.
+    pub fn check_list(&self) -> impl Iterator<Item = (&str, Outcome)> {
+        self.status_check_rollup
+            .iter()
+            .flatten()
+            .map(|check| (check.name.as_str(), check.outcome()))
+    }
+
     pub fn checks(&self) -> String {
         let mut counts = [0usize; Outcome::ALL.len()];
         for check in self.status_check_rollup.iter().flatten() {
@@ -329,6 +394,15 @@ impl PullRequest {
             .map(|(count, label)| format!("{count} {label}"))
             .collect::<Vec<_>>()
             .join(" / ")
+    }
+
+    /// The outcome the checks add up to: any failure, else anything still
+    /// running, else passed. `None` when nothing but skipped checks reported.
+    pub fn checks_outcome(&self) -> Option<Outcome> {
+        let outcomes = || self.check_list().map(|(_, outcome)| outcome);
+        [Outcome::Failed, Outcome::Pending, Outcome::Passed]
+            .into_iter()
+            .find(|wanted| outcomes().any(|outcome| outcome == *wanted))
     }
 
     pub fn merge_status(&self) -> &'static str {
@@ -349,19 +423,49 @@ pub(crate) fn repository_input(
     let key = worktree
         .map(|tree| tree.key.as_str())
         .ok_or(Error::PrMetadata)?;
-    let branch = branch
-        .filter(|branch| {
-            !branch.is_empty() && branch.len() <= 1024 && !branch.chars().any(char::is_control)
-        })
-        .ok_or(Error::PrBranch)?;
+    let branch = valid_branch(branch)?;
     if !Path::new(key).is_absolute() {
         return Err(Error::PrAbsolutePath);
     }
     Ok(Input {
         checkout: None,
-        repo_key: key.into(),
+        repo_key: Some(key.into()),
         branch: branch.into(),
     })
+}
+
+/// A workspace's lookup key. Daemon worktree metadata wins; the daemon only
+/// attaches it once a worktree was made through Herdr, so a local workspace
+/// that merely sits in a repository falls back to its directory. Its
+/// repository is resolved by Git on the worker, and the checkout is still
+/// verified against the branch before anything is read. Remote devices keep
+/// requiring metadata: their directories are not this machine's.
+pub(crate) fn workspace_input(
+    workspace: &herdr_client::protocol::ClientShellWorkspace,
+    origin: &Origin,
+) -> crate::Result<Input> {
+    let worktree = workspace.worktree.as_ref();
+    let branch = workspace.branch.as_deref();
+    if worktree.is_some() || *origin != Origin::Local || workspace.new_workspace_cwd.is_empty() {
+        return repository_input(worktree, branch);
+    }
+    let branch = valid_branch(branch)?;
+    if !Path::new(&workspace.new_workspace_cwd).is_absolute() {
+        return Err(Error::PrAbsolutePath);
+    }
+    Ok(Input {
+        checkout: Some(workspace.new_workspace_cwd.clone()),
+        repo_key: None,
+        branch: branch.into(),
+    })
+}
+
+fn valid_branch(branch: Option<&str>) -> crate::Result<&str> {
+    branch
+        .filter(|branch| {
+            !branch.is_empty() && branch.len() <= 1024 && !branch.chars().any(char::is_control)
+        })
+        .ok_or(Error::PrBranch)
 }
 
 pub(crate) fn clean(text: &str) -> String {
@@ -386,10 +490,16 @@ pub(crate) fn fixture() -> crate::Result<PullRequest> {
         "additions": 1730, "deletions": 31, "changedFiles": 16,
         "updatedAt": "2026-09-20T12:00:00Z", "mergeStateStatus": "BLOCKED", "reviewDecision": "REVIEW_REQUIRED",
         "headRepositoryOwner": {"login": "example"},
+        "id": "PR_kwDOfixture8", "headRefOid": "0123456789abcdef0123456789abcdef01234567",
         "statusCheckRollup": [
-            {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
-            {"__typename": "StatusContext", "state": "FAILURE"},
-            {"__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": null}
+            {"__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"__typename": "StatusContext", "context": "ci/lint", "state": "FAILURE"},
+            {"__typename": "CheckRun", "name": "build", "status": "IN_PROGRESS", "conclusion": null}
         ]
-    }]).to_string(), "example", "project", "feature")?.ok_or(Error::PrRepository)
+    }]).to_string(), "example", "project", "feature")?
+    .map(|mut pr| {
+        pr.merge_methods = MergeMethod::ALL.to_vec();
+        pr
+    })
+    .ok_or(Error::PrRepository)
 }

@@ -1,5 +1,12 @@
 //! Native chrome and GitHub account access.
+mod decorations;
 mod status;
+mod tabs;
+
+pub(crate) use tabs::{Ends, strip_height};
+
+use decorations::controls;
+pub(crate) use decorations::frame;
 
 use crate::{HerdrWindow, fonts::StyledFont, menu::Page};
 use gpui::{prelude::*, *};
@@ -196,116 +203,131 @@ impl HerdrWindow {
         )
     }
 
-    pub(super) fn render_titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let image = self.pr_profile().and_then(|p| p.avatar.clone());
+    pub(super) fn render_titlebar(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         // The toggle leads the bar so it stays put whether or not the sidebar
         // below it is showing, and can always bring the sidebar back.
-        render(
-            self.theme.surface,
-            Some(
+        render(self.theme.surface, Some(self.sidebar_toggle(cx)), window)
+            .child(
                 div()
-                    .id("toggle-sidebar")
-                    .debug_selector(|| "toggle-sidebar".into())
-                    .flex_none()
-                    .self_center()
-                    .mr(px(4.))
-                    .size(px(28.))
+                    .debug_selector(|| "titlebar-center".into())
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .when(self.config.usage.topbar, |center| {
+                        center.child(status::render(&self.live, &self.config.ui, &self.theme))
+                    }),
+            )
+            .child(self.titlebar_end(window, cx))
+    }
+
+    fn sidebar_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("toggle-sidebar")
+            .debug_selector(|| "toggle-sidebar".into())
+            .flex_none()
+            .self_center()
+            .mr(px(4.))
+            .size(px(28.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(crate::config::corners::CONTROL))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(self.theme.active)))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, window, cx| {
+                cx.stop_propagation();
+                this.command(crate::controls::Command::ToggleSidebar, window, cx);
+            }))
+            .child(sidebar_glyph(self.sidebar_visible, &self.theme))
+            .into_any_element()
+    }
+
+    /// What ends the bar: git actions, the account, and the window controls
+    /// a client-decorated window draws.
+    fn titlebar_end(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let image = self.pr_profile().and_then(|p| p.avatar.clone());
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .children(self.render_git_button(cx))
+            .child(
+                div()
+                    .debug_selector(|| "titlebar-account-slot".into())
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(crate::config::corners::CONTROL))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(self.theme.active)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.command(crate::controls::Command::ToggleSidebar, window, cx);
-                    }))
-                    .child(sidebar_glyph(self.sidebar_visible, &self.theme))
-                    .into_any_element(),
-            ),
-        )
-        .child(
-            div()
-                .debug_selector(|| "titlebar-center".into())
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .when(self.config.usage.topbar, |center| {
-                    center.child(status::render(&self.live, &self.config.ui, &self.theme))
-                }),
-        )
-        .children(self.render_git_button(cx))
-        .child(
-            div()
-                .debug_selector(|| "titlebar-account-slot".into())
-                .flex()
-                .items_center()
-                .justify_center()
-                .flex_none()
-                .w(px(40.))
-                .h_full()
-                .child(
-                    div()
-                        .id("titlebar-avatar")
-                        .group("titlebar-account")
-                        .debug_selector(|| "titlebar-avatar".into())
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .size(px(28.))
-                        .rounded_full()
-                        .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.open_profile(true, window, cx);
-                        }))
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(|this, _, window, cx| {
+                    .flex_none()
+                    .w(px(40.))
+                    .h_full()
+                    .child(
+                        div()
+                            .id("titlebar-avatar")
+                            .group("titlebar-account")
+                            .debug_selector(|| "titlebar-avatar".into())
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(28.))
+                            .rounded_full()
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, window, cx| {
                                 cx.stop_propagation();
-                                this.open_profile(false, window, cx);
-                            }),
-                        )
-                        .child(
-                            div()
-                                .debug_selector(|| "titlebar-avatar-circle".into())
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .size(px(AVATAR))
-                                .rounded_full()
-                                .group_hover("titlebar-account", |s| {
-                                    s.shadow(vec![BoxShadow {
-                                        color: rgba((self.theme.foreground << 8) | 0x38).into(),
-                                        offset: point(px(0.), px(0.)),
-                                        blur_radius: px(5.),
-                                        spread_radius: px(1.),
-                                        inset: false,
-                                    }])
-                                })
-                                .map(|circle| match image {
-                                    Some(image) => {
-                                        circle.child(img(image).size(px(AVATAR)).rounded_full())
-                                    }
-                                    None => circle.child(
-                                        svg()
-                                            .path("icons/github.svg")
-                                            .size(px(AVATAR))
-                                            .text_color(rgb(self.theme.foreground)),
-                                    ),
+                                this.open_profile(true, window, cx);
+                            }))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(|this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.open_profile(false, window, cx);
                                 }),
-                        ),
-                ),
-        )
+                            )
+                            .child(
+                                div()
+                                    .debug_selector(|| "titlebar-avatar-circle".into())
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .size(px(AVATAR))
+                                    .rounded_full()
+                                    .group_hover("titlebar-account", |s| {
+                                        s.shadow(vec![BoxShadow {
+                                            color: rgba((self.theme.foreground << 8) | 0x38).into(),
+                                            offset: point(px(0.), px(0.)),
+                                            blur_radius: px(5.),
+                                            spread_radius: px(1.),
+                                            inset: false,
+                                        }])
+                                    })
+                                    .map(|circle| match image {
+                                        Some(image) => {
+                                            circle.child(img(image).size(px(AVATAR)).rounded_full())
+                                        }
+                                        None => circle.child(
+                                            svg()
+                                                .path("icons/github.svg")
+                                                .size(px(AVATAR))
+                                                .text_color(rgb(self.theme.foreground)),
+                                        ),
+                                    }),
+                            ),
+                    ),
+            )
+            .children(controls(window, &self.theme, |window, _| {
+                window.remove_window();
+            }))
     }
 }
 
 /// `leading` sits right after the traffic lights, ahead of the draggable center.
-pub(super) fn render(surface: u32, leading: Option<AnyElement>) -> Stateful<Div> {
-    // AppKit owns dragging; GPUI's macOS backend cannot start a custom move.
-    div()
+pub(super) fn render(surface: u32, leading: Option<AnyElement>, window: &Window) -> Stateful<Div> {
+    let bar = div()
         .id("titlebar")
         .debug_selector(|| "titlebar".into())
         .flex()
@@ -313,14 +335,60 @@ pub(super) fn render(surface: u32, leading: Option<AnyElement>) -> Stateful<Div>
         .w_full()
         .h(px(HEIGHT))
         .bg(rgb(surface).blend(rgba(0xffffff1a)))
-        .child(div().flex_none().w(px(80.)).h_full())
-        .children(leading)
-        .on_click(|event, window, _| {
-            if event.click_count() == 2 {
-                window.titlebar_double_click();
-            }
-        })
+        .child(div().flex_none().w(px(LEADING)).h_full())
+        .children(leading);
+    movable(bar, window)
 }
+
+/// Makes `area` do a title bar's job: pressing it moves the window, and a
+/// double-click acts as the platform's does. Its controls stop their own
+/// presses so they never start a move.
+///
+/// macOS windows own titlebar dragging (`app_owns_titlebar_drag`), so AppKit
+/// never moves the window from under a tab, and a client-decorated window has
+/// nothing else to move it. A server-drawn frame moves the window from its own
+/// title bar, so there `area` is left alone.
+pub(crate) fn movable<E: InteractiveElement>(area: E, window: &Window) -> E {
+    let client = decorations::client(window);
+    if !cfg!(target_os = "macos") && !client {
+        return area;
+    }
+    // The move starts on the press: pointer motion during a press is claimed
+    // by window-level drag handlers (selection, splits) before it bubbles up.
+    let supported = window.window_controls();
+    let area = area.on_mouse_down(MouseButton::Left, move |event, window, _| {
+        match event.click_count {
+            2 if !client => window.titlebar_double_click(),
+            2 if supported.maximize => window.zoom_window(),
+            _ => window.start_window_move(),
+        }
+    });
+    if client && supported.window_menu {
+        area.on_mouse_down(MouseButton::Right, |event, window, _| {
+            window.show_window_menu(event.position);
+        })
+    } else {
+        area
+    }
+}
+
+/// The bar a secondary window shows: macOS always draws one under its
+/// transparent titlebar, and a client-decorated window needs one to be moved
+/// and closed at all. Elsewhere the platform frame already provides both.
+pub(crate) fn header(
+    theme: &crate::config::Theme,
+    window: &Window,
+    close: impl Fn(&mut Window, &mut App) + 'static,
+) -> Option<Stateful<Div>> {
+    (cfg!(target_os = "macos") || decorations::client(window)).then(|| {
+        let buttons = controls(window, theme, close);
+        render(theme.surface, None, window).children(buttons)
+    })
+}
+
+/// Room before the first control: macOS keeps it clear for the traffic
+/// lights, which every other platform draws elsewhere or not at all.
+const LEADING: f32 = if cfg!(target_os = "macos") { 80. } else { 8. };
 
 pub(super) fn options(title: &str) -> TitlebarOptions {
     TitlebarOptions {
@@ -353,11 +421,28 @@ pub(crate) fn sidebar_glyph(expanded: bool, theme: &crate::config::Theme) -> Div
 mod tests {
     #![allow(clippy::unwrap_used)]
     use crate::menu::Page;
-    use gpui::{Bounds, Modifiers, MouseButton, MouseDownEvent, TestAppContext, point, px, size};
+    use gpui::{
+        Bounds, Context, Modifiers, MouseButton, MouseDownEvent, TestAppContext, Window, point, px,
+        size,
+    };
+
+    /// The fixture window with Herdr's tab bar at the bottom, so it keeps the
+    /// full-width header these tests measure.
+    pub(crate) fn header_window(
+        window: &mut Window,
+        cx: &mut Context<crate::HerdrWindow>,
+    ) -> crate::HerdrWindow {
+        let mut view = crate::sidebar::layout_tests::fixture_window(window, cx);
+        view.settings.shared = Some(
+            crate::herdr_settings::Settings::parse_text("[ui]\ntab_bar_position = 'bottom'")
+                .unwrap(),
+        );
+        view
+    }
 
     #[gpui::test]
     fn sidebar_button_collapses_and_reopens_without_moving(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let (view, cx) = cx.add_window_view(header_window);
         for width in [1200., 360.] {
             cx.simulate_resize(size(px(width), px(600.)));
             for visible in [true, false] {
@@ -368,7 +453,7 @@ mod tests {
                 assert_eq!(view.read_with(cx, |view, _| view.sidebar_visible), visible);
                 assert_eq!(cx.debug_bounds("sidebar").is_some(), visible);
                 let button = cx.debug_bounds("toggle-sidebar").unwrap();
-                assert_eq!(button.origin.x, px(80.));
+                assert_eq!(button.origin.x, px(super::LEADING));
                 assert_eq!(button.size, size(px(28.), px(28.)));
                 cx.simulate_click(button.center(), Modifiers::default());
             }
@@ -380,7 +465,7 @@ mod tests {
     fn account_icon_keeps_the_same_bounds_when_signed_out_failed_or_connected(
         cx: &mut TestAppContext,
     ) {
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let (view, cx) = cx.add_window_view(header_window);
         for width in [1200., 360.] {
             cx.simulate_resize(size(px(width), px(400.)));
             for state in 0..4 {
@@ -430,7 +515,7 @@ mod tests {
 
     #[gpui::test]
     fn profile_slot_bounds_and_context_menu_do_not_start_auth(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let (view, cx) = cx.add_window_view(header_window);
         for (width, height) in [(1200., 780.), (640., 400.), (360., 400.)] {
             cx.simulate_resize(size(px(width), px(height)));
             cx.run_until_parked();
@@ -483,290 +568,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod git_button_tests {
-    #![allow(clippy::unwrap_used)]
-    use crate::{
-        git::{Git, Status},
-        menu::Page,
-        pull_request::Input,
-        sidebar::layout_tests::REPO_KEY,
-    };
-    use gpui::{Modifiers, MouseButton, MouseDownEvent, TestAppContext, px, size};
-
-    #[gpui::test]
-    fn git_button_sits_left_of_the_account_slot_and_opens_its_menu(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
-        let draw = |cx: &mut gpui::VisualTestContext| {
-            cx.update(|window, cx| {
-                window.refresh();
-                let _ = window.draw(cx);
-            });
-        };
-        cx.simulate_resize(size(px(1200.), px(600.)));
-        cx.run_until_parked();
-        draw(cx);
-        assert!(
-            cx.debug_bounds("titlebar-git").is_none(),
-            "no tracked checkout, no Git control"
-        );
-        cx.update(|_, cx| {
-            view.update(cx, |view, cx| {
-                view.git = Git::fixture(
-                    Input {
-                        checkout: None,
-                        repo_key: REPO_KEY.into(),
-                        branch: "develop".into(),
-                    },
-                    Status {
-                        additions: 239,
-                        deletions: 250,
-                        untracked: 2,
-                    },
-                );
-                cx.notify();
-            })
-        });
-        for width in [1200., 640., 360.] {
-            cx.simulate_resize(size(px(width), px(600.)));
-            cx.run_until_parked();
-            draw(cx);
-            let button = cx.debug_bounds("titlebar-git").unwrap();
-            let avatar = cx.debug_bounds("titlebar-avatar").unwrap();
-            let titlebar = cx.debug_bounds("titlebar").unwrap();
-            assert!(
-                cx.debug_bounds("titlebar-git-slot").unwrap().left()
-                    >= cx.debug_bounds("toggle-sidebar").unwrap().right(),
-                "width {width}"
-            );
-            assert!(button.right() <= avatar.left(), "width {width}");
-            assert!(button.left() >= titlebar.left());
-            assert!(button.top() >= titlebar.top() && button.bottom() <= titlebar.bottom());
-            for part in [
-                "titlebar-git-additions",
-                "titlebar-git-deletions",
-                "titlebar-git-dirty",
-            ] {
-                let bounds = cx.debug_bounds(part).unwrap();
-                assert!(bounds.right() <= button.left(), "{part} at width {width}");
-            }
-            cx.simulate_event(MouseDownEvent {
-                button: MouseButton::Left,
-                position: button.center(),
-                modifiers: Modifiers::default(),
-                click_count: 1,
-                first_mouse: false,
-            });
-            cx.update(|_, cx| assert_eq!(view.read(cx).menu.page, Some(Page::Git)));
-            draw(cx);
-            for row in [
-                "git-menu-Commit...",
-                "git-menu-Push",
-                "git-menu-Create pull request",
-            ] {
-                assert!(cx.debug_bounds(row).is_some(), "{row} at width {width}");
-            }
-            assert!(cx.debug_bounds("git-menu-summary").is_some());
-            cx.update(|window, cx| {
-                view.update(cx, |view, cx| {
-                    view.dismiss_menu(window, cx);
-                    cx.notify();
-                })
-            });
-        }
-    }
-
-    #[gpui::test]
-    fn uncommitted_changes_hide_zero_counts(cx: &mut TestAppContext) {
-        for (additions, deletions, untracked) in [(0, 0, 1), (12, 0, 0), (0, 3, 0), (433, 28, 1)] {
-            let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
-            cx.simulate_resize(size(px(360.), px(600.)));
-            cx.update(|_, cx| {
-                view.update(cx, |view, cx| {
-                    view.git = Git::fixture(
-                        Input {
-                            checkout: None,
-                            repo_key: REPO_KEY.into(),
-                            branch: "develop".into(),
-                        },
-                        Status {
-                            additions,
-                            deletions,
-                            untracked,
-                        },
-                    );
-                    cx.notify();
-                });
-            });
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                window.refresh();
-                let _ = window.draw(cx);
-            });
-            assert_eq!(
-                cx.debug_bounds("titlebar-git-additions").is_some(),
-                additions > 0
-            );
-            assert_eq!(
-                cx.debug_bounds("titlebar-git-deletions").is_some(),
-                deletions > 0
-            );
-            let dirty = cx.debug_bounds("titlebar-git-dirty").unwrap();
-            assert_eq!(dirty.size, size(px(18.), px(18.)));
-            let button = cx.debug_bounds("titlebar-git").unwrap();
-            assert!(dirty.right() <= button.left());
-            assert!(button.left() >= cx.debug_bounds("titlebar").unwrap().left());
-            assert!(button.right() <= cx.debug_bounds("titlebar-avatar").unwrap().left());
-        }
-    }
-
-    #[gpui::test]
-    fn a_clean_checkout_shows_no_counts(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
-        cx.simulate_resize(size(px(900.), px(600.)));
-        cx.update(|_, cx| {
-            view.update(cx, |view, cx| {
-                view.git = Git::fixture(
-                    Input {
-                        checkout: None,
-                        repo_key: REPO_KEY.into(),
-                        branch: "develop".into(),
-                    },
-                    Status::default(),
-                );
-                cx.notify();
-            })
-        });
-        cx.update(|window, cx| {
-            window.refresh();
-            let _ = window.draw(cx);
-        });
-        assert!(cx.debug_bounds("titlebar-git").is_some());
-        assert!(cx.debug_bounds("titlebar-git-additions").is_none());
-        assert!(cx.debug_bounds("titlebar-git-dirty").is_none());
-        assert!(
-            cx.debug_bounds("titlebar-git-pr").is_none(),
-            "no cached pull request, no badge"
-        );
-    }
-
-    #[gpui::test]
-    fn a_cached_pull_request_replaces_the_uncommitted_counts(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
-        let input = Input {
-            checkout: None,
-            repo_key: REPO_KEY.into(),
-            branch: "develop".into(),
-        };
-        cx.simulate_resize(size(px(900.), px(600.)));
-        cx.update(|_, cx| {
-            view.update(cx, |view, cx| {
-                view.git = Git::fixture(
-                    input.clone(),
-                    Status {
-                        additions: 12,
-                        deletions: 3,
-                        untracked: 0,
-                    },
-                );
-                view.menu.github = crate::github::Auth::connected_fixture();
-                view.menu.pr_cache.seed(
-                    input,
-                    crate::pull_request::fixture().unwrap(),
-                    std::time::Instant::now(),
-                );
-                cx.notify();
-            })
-        });
-        cx.update(|window, cx| {
-            window.refresh();
-            let _ = window.draw(cx);
-        });
-        let button = cx.debug_bounds("titlebar-git").unwrap();
-        let number = cx.debug_bounds("titlebar-git-pr").unwrap();
-        let churn = cx.debug_bounds("titlebar-git-pr-lines").unwrap();
-        let dirty = cx.debug_bounds("titlebar-git-dirty").unwrap();
-        assert_eq!(dirty.size, size(px(18.), px(18.)));
-        // One set of counts only: the pull request's, then a dot for the work
-        // still sitting in the checkout. Two "+N -M" pairs never sit together.
-        assert!(
-            cx.debug_bounds("titlebar-git-additions").is_none(),
-            "uncommitted counts give way to the pull request's"
-        );
-        assert!(number.right() <= churn.left());
-        assert!(churn.right() <= dirty.left());
-        assert!(dirty.right() <= button.left());
-        assert!(button.right() <= cx.debug_bounds("titlebar-avatar").unwrap().left());
-        // Additions and deletions are separate spans so each keeps its own
-        // color, as the sidebar badge paints them.
-        let additions = cx.debug_bounds("titlebar-git-pr-additions").unwrap();
-        let deletions = cx.debug_bounds("titlebar-git-pr-deletions").unwrap();
-        assert!(churn.left() <= additions.left() && additions.right() <= deletions.left());
-        assert!(deletions.right() <= churn.right());
-        for width in [900., 360.] {
-            cx.simulate_resize(size(px(width), px(600.)));
-            cx.update(|window, cx| {
-                window.refresh();
-                let _ = window.draw(cx);
-            });
-            let number = cx.debug_bounds("titlebar-git-pr").unwrap();
-            let churn = cx.debug_bounds("titlebar-git-pr-lines").unwrap();
-            let button = cx.debug_bounds("titlebar-git").unwrap();
-            assert!(number.left() >= px(80.));
-            assert!(number.right() <= churn.left());
-            assert!(churn.right() <= button.left());
-            for selector in [
-                "titlebar-git-pr",
-                "titlebar-git-pr-additions",
-                "titlebar-git-pr-deletions",
-                "titlebar-git-pr-link",
-            ] {
-                cx.update(|_, cx| cx.open_url("https://example.com"));
-                let target = cx.debug_bounds(selector).unwrap();
-                cx.simulate_click(target.center(), Modifiers::default());
-                assert_eq!(
-                    cx.opened_url(),
-                    Some(crate::pull_request::fixture().unwrap().url),
-                    "{selector} should open the PR"
-                );
-                cx.update(|_, cx| assert_eq!(view.read(cx).menu.page, None));
-            }
-            cx.simulate_click(button.center(), Modifiers::default());
-            cx.update(|_, cx| assert_eq!(view.read(cx).menu.page, Some(Page::Git)));
-            cx.update(|window, cx| {
-                view.update(cx, |view, cx| view.dismiss_menu(window, cx));
-            });
-        }
-    }
-
-    #[gpui::test]
-    fn a_clean_checkout_with_a_pull_request_shows_no_dot(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
-        let input = Input {
-            checkout: None,
-            repo_key: REPO_KEY.into(),
-            branch: "develop".into(),
-        };
-        cx.simulate_resize(size(px(900.), px(600.)));
-        cx.update(|_, cx| {
-            view.update(cx, |view, cx| {
-                view.git = Git::fixture(input.clone(), Status::default());
-                view.menu.github = crate::github::Auth::connected_fixture();
-                view.menu.pr_cache.seed(
-                    input,
-                    crate::pull_request::fixture().unwrap(),
-                    std::time::Instant::now(),
-                );
-                cx.notify();
-            })
-        });
-        cx.update(|window, cx| {
-            window.refresh();
-            let _ = window.draw(cx);
-        });
-        assert!(cx.debug_bounds("titlebar-git-pr-lines").is_some());
-        assert!(cx.debug_bounds("titlebar-git-dirty").is_none());
-    }
-}
+mod git_button_tests;
 
 #[cfg(all(test, target_os = "macos"))]
 #[allow(clippy::unwrap_used)]
@@ -775,7 +577,7 @@ mod native_chrome_tests {
 
     #[gpui::test]
     fn header_bounds_above_body_in_windowed_and_fullscreen(cx: &mut TestAppContext) {
-        let (_, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
+        let (_, cx) = cx.add_window_view(super::tests::header_window);
         for fullscreen in [false, true, false] {
             cx.update(|window, _| {
                 if window.is_fullscreen() != fullscreen {

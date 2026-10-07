@@ -192,6 +192,8 @@ pub enum Error {
     PrEncoding(#[source] std::str::Utf8Error),
     #[error("No repository metadata.")]
     PrMetadata,
+    #[error("Workspace directory is not in a Git repository.")]
+    PrWorkspaceRepository,
     #[error("Could not {operation} the agent context note for the new checkout.")]
     AgentContext {
         operation: &'static str,
@@ -217,6 +219,14 @@ pub enum Error {
     GitPullRequestBase,
     #[error("Git worker stopped. Retry the operation.")]
     GitWorker,
+    #[error(
+        "No base branch to compare with: neither the pull request's base nor origin/HEAD, main, or master exists locally."
+    )]
+    ReviewNoBase,
+    #[error("A saved review tab names a checkout that is not a local absolute path.")]
+    InvalidReviewCheckout,
+    #[error("These changes are too large to review here, even leaving out the largest files.")]
+    ReviewTooLarge,
     #[error("Could not {operation}.")]
     GitProcess {
         operation: &'static str,
@@ -282,10 +292,32 @@ pub enum Error {
     PrCancelled,
     #[error("PR lookup timed out (15 seconds).")]
     PrTimeout,
-    #[error("GitHub network request failed or timed out.")]
+    #[error("GitHub network request failed or timed out ({0}).")]
     GitHubNetwork(#[source] ureq::Error),
     #[error("GitHub query failed. Check token repository permissions and rate limits.")]
     GitHubQuery,
+    /// GitHub's own refusal of a requested change, cleaned and bounded.
+    #[error("GitHub refused the request: {0}")]
+    GitHubRejected(String),
+    #[error("A pull request action is already running.")]
+    PrActionBusy,
+    #[error(
+        "This pull request cannot be acted on here: it is not open, or its details are incomplete. Refresh and try again."
+    )]
+    PrActionTarget,
+    #[error("Enter a comment of at most 4096 characters.")]
+    PrCommentBody,
+    #[error("The branch changed since this dialog opened. Review the pull request again.")]
+    PrMergeChanged,
+    #[error("The repository does not allow this merge method.")]
+    PrMergeMethod,
+    #[error("Pull request worker stopped. Check the pull request on GitHub before retrying.")]
+    PrActionWorker,
+    #[error("Could not start the pull request worker.")]
+    PrActionProcess {
+        #[source]
+        source: io::Error,
+    },
     #[error("Invalid GitHub authorization header.")]
     GitHubHeader(#[source] ureq::http::header::InvalidHeaderValue),
     #[error("Invalid GitHub device authorization response.")]
@@ -336,6 +368,10 @@ pub enum Error {
     UsageNotSignedIn,
     #[error("This account has no plan with usage limits to show.")]
     UsageNoPlan,
+    #[error("Reading this sign-in needs Keychain access, which macOS asks for.")]
+    UsageKeychainAccess,
+    #[error("Keychain access was denied, so this sign-in cannot be read.")]
+    UsageKeychainDenied,
     #[error("Usage request mixes this machine's settings with the remote host's sign-in.")]
     UsageMixedSecrets,
     #[error("Usage command failed: {0}.")]
@@ -366,6 +402,64 @@ pub enum Error {
     SystemLoadUnsupported(String),
     #[error("CPU and memory output was not understood.")]
     SystemLoadOutput,
+    #[error("No checkout of this branch was found on its host.")]
+    CheckpointCheckout,
+    #[error("This checkout has no commit yet, so it has no checkpoints.")]
+    CheckpointUnborn,
+    #[error("That checkpoint no longer exists.")]
+    CheckpointMissing,
+    #[error("That checkpoint was taken on another branch. Check that branch out to restore it.")]
+    CheckpointBranch,
+    #[error("A merge, rebase, cherry-pick, or revert is in progress. Finish or abort it first.")]
+    CheckpointBusy,
+    #[error("Checkpoint Git commands failed")]
+    CheckpointScript(#[source] herdr_client::Error),
+    #[error("Checkpoint output was not understood.")]
+    CheckpointOutput,
+    #[error("Could not start the checkpoint worker")]
+    CheckpointThread(#[source] io::Error),
+    #[error("The checkpoint worker stopped.")]
+    CheckpointWorker,
+    #[error("Enter a port number from 1 to 65535.")]
+    ForwardPort,
+    #[error("Port {0} is already forwarded from this host.")]
+    ForwardDuplicate(u16),
+    #[error("At most {0} ports can be forwarded at once.")]
+    ForwardLimit(usize),
+    #[error("Could not read listening ports on this host.")]
+    ListeningPorts(#[source] Box<Error>),
+    #[error("Neither ss nor lsof is installed on this host, so listening ports cannot be read.")]
+    ListeningPortsTool,
+    #[error("Listening ports cannot be read on this platform.")]
+    ListeningPortsUnsupported,
+    /// Probes that open a shell on the host (usage, load, ports, checkpoints)
+    /// have no route into a WSL distribution yet.
+    #[error("This is not available for WSL distributions yet.")]
+    WslHostUnsupported,
+    #[error("No free local port for an SSH tunnel.")]
+    TunnelPort(#[source] io::Error),
+    #[error("Could not start ssh for a tunnel.")]
+    TunnelStart(#[source] io::Error),
+    #[error("SSH ended before the tunnel opened ({0}).")]
+    TunnelExited(std::process::ExitStatus),
+    #[error("The SSH tunnel did not open in time.")]
+    TunnelTimeout,
+    #[error("Could not ask Herdr which process the pane runs.")]
+    ProcessesQuery(#[source] herdr_client::Error),
+    #[error("Herdr's answer about the pane's process was not understood.")]
+    ProcessesAnswer(#[source] serde_json::Error),
+    #[error("Herdr did not name a process for this pane.")]
+    ProcessesNoRoot,
+    #[error("The pane's process has exited.")]
+    ProcessesRootExited,
+    #[error("The herdr executable's path is not valid UTF-8.")]
+    ProcessesExecutable,
+    #[error("Still ending the last processes. Try again in a moment.")]
+    ProcessesBusy,
+    #[error("The process list stopped updating. Reopen it to try again.")]
+    ProcessesStopped,
+    #[error("Could not start watching the pane's processes.")]
+    ProcessesWorker(#[source] io::Error),
     #[error("{0}")]
     Update(#[from] UpdateError),
     #[error("{0}")]
@@ -378,6 +472,30 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     Client(#[from] herdr_client::Error),
+    #[error(".herdr/worktree.toml exceeds {limit} bytes")]
+    WorktreeScriptsSize { limit: u64 },
+    #[error(".herdr/worktree.toml is not valid UTF-8")]
+    WorktreeScriptsEncoding(#[source] std::str::Utf8Error),
+    #[error(".herdr/worktree.toml: {0}")]
+    WorktreeScriptsParse(#[source] toml::de::Error),
+    #[error(".herdr/worktree.toml scripts must not contain NUL bytes")]
+    WorktreeScriptsNul,
+    #[error("Could not read .herdr/worktree.toml: {0}")]
+    WorktreeScriptsRead(#[source] io::Error),
+    #[error("Could not read .herdr/worktree.toml on the host: {0}")]
+    WorktreeScriptsRemote(#[source] herdr_client::Error),
+    #[error("The daemon did not identify this workspace's checkout")]
+    WorktreeScriptsCheckout,
+    #[error("Worktree scripts cannot be read from a WSL distribution yet")]
+    WorktreeScriptsUnsupportedHost,
+    #[error("Another worktree script is still starting")]
+    WorktreeScriptsBusy,
+    #[error("{0}")]
+    WorktreeScriptsRequest(#[source] std::sync::Arc<Error>),
+    #[error("Unexpected daemon response while opening the script's tab")]
+    WorktreeScriptsResponse,
+    #[error("This workspace is not a Git checkout Herdr knows yet")]
+    WorktreeScriptsNotGit,
     #[error("neither XDG_STATE_HOME nor HOME is set")]
     MissingStateRoot,
     #[error("{} exceeds {limit} bytes", path.display())]
@@ -483,6 +601,8 @@ pub enum Error {
     EmptyFontFamily(&'static str),
     #[error("{0}.size must be finite and between 8 and 48 logical pixels")]
     InvalidFontSize(&'static str),
+    #[error("{0}.line_height must be a finite number between 1 and 2 times the font size")]
+    InvalidLineHeight(&'static str),
     #[error("{0}.fallback families must not be empty")]
     EmptyFontFallback(&'static str),
     #[error("{0}.fallback must list at most 8 families")]
@@ -491,6 +611,8 @@ pub enum Error {
     InvalidSidebarGap,
     #[error("theme must be a name, absolute path, or ~/ path")]
     InvalidThemePath,
+    #[error("a theme that follows the system must name both sides: light:NAME,dark:NAME")]
+    InvalidThemePair,
     #[error("keybindings.{0} is not a command; see the keybindings list in config-gpui.toml")]
     UnknownKeybinding(String),
     #[error("keybindings.{command}: invalid keystroke {keystroke:?}")]
@@ -514,6 +636,27 @@ pub enum Error {
         keystroke: String,
         first: &'static str,
         second: &'static str,
+    },
+    #[error("pane_keys: invalid keystroke {keystroke:?}")]
+    InvalidPaneKey {
+        keystroke: String,
+        #[source]
+        source: gpui::InvalidKeystrokeError,
+    },
+    #[error(
+        "pane_keys: {0:?} needs a cmd, ctrl, alt, or fn modifier so typing still reaches the terminal"
+    )]
+    PaneKeyWithoutModifier(String),
+    #[error("pane_keys.{from:?}: a pane cannot receive {to:?}")]
+    UnsendablePaneKey { from: String, to: String },
+    #[error("pane_keys: {0:?} is listed twice")]
+    DuplicatePaneKey(String),
+    #[error("pane_keys must list at most {0} keystrokes")]
+    TooManyPaneKeys(usize),
+    #[error("pane_keys: {keystroke:?} is also bound to keybindings.{command}")]
+    PaneKeyBound {
+        keystroke: String,
+        command: &'static str,
     },
     #[error("the host did not publish its keybindings")]
     ServerKeybindingsMissing,
@@ -651,6 +794,19 @@ pub enum ThemeParseError {
 mod tests {
     use super::*;
     use std::error::Error as _;
+
+    #[test]
+    fn github_network_message_names_the_transport_failure() {
+        let error = Error::GitHubNetwork(ureq::Error::Io(io::Error::other(
+            "invalid peer certificate: UnknownIssuer",
+        )));
+        let message = error.to_string();
+        assert!(message.starts_with("GitHub network request failed or timed out"));
+        assert!(
+            message.contains("invalid peer certificate: UnknownIssuer"),
+            "{message}"
+        );
+    }
 
     #[test]
     fn updater_wrapper_preserves_source_chain() {

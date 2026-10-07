@@ -30,7 +30,11 @@ Closing or detaching the GUI must leave the daemon and its terminals running.
 - Keep dependency direction from UI to client to protocol. Protocol/client code must not depend on GPUI.
 - Keep session transitions separate from socket scheduling, and connection ownership separate from window rendering.
 - Reuse `ConnectionBridge`, domain targets, geometry helpers, and the test sandbox rather than duplicating their policies.
-- Split modules by responsibility, not arbitrary line counts. Prefer wiring and exports in entry points as code grows; do not perform unrelated file reshuffles.
+- **File size limit: 1,000 lines.** No Rust, Python, shell, or Swift file may exceed it,
+  tests included; `just check-file-size` enforces it in `just ci` and CI's checks job.
+  There is no allowlist: when a change would cross the limit, split the file by
+  responsibility in the same change rather than adding an exception.
+- Split modules by responsibility; the line limit is a ceiling, not a reason for arbitrary cuts. Prefer wiring and exports in entry points as code grows; do not perform unrelated file reshuffles.
 - Keep APIs narrow. Use private items by default and `pub(super)` or `pub(crate)` only where needed; do not expose every field merely to ease extraction.
 - Define shared types once in the lowest appropriate layer and re-export them. Do not create mirror enums or convert between them through strings.
 - Do not add a crate, runtime, service container, or speculative transport abstraction without a concrete need. Sibling checkouts are references, not build dependencies.
@@ -144,6 +148,11 @@ just ci
 - Documentation-only changes need command/path/link review and `git diff --check`; do not claim a code test run that did not happen.
 - Add deterministic tests for invariants: ordering, cancellation, fragmentation, revision fencing, error paths, geometry, and cleanup. Prefer explicit coordination and bounded waits over timing guesses.
 - Test pure session/CLI/geometry logic without a socket or window where possible. Exercise public behavior with mock peers and headless GPUI tests where integration matters.
+- Keep test bodies out of production files, which only declare `#[cfg(test)] mod tests;`.
+  Put tests for a new feature in a new topic file under the module's `tests/` directory
+  (for example `keymap/tests/pane_keys.rs`, starting with `use super::*;`) rather than
+  inserting them into an existing large test module, and keep shared fixtures in the
+  parent `tests.rs`. Parallel PRs then edit different files instead of conflicting.
 - Fix flaky tests rather than hiding them with retries or new ignores. Existing live/native tests are ignored because they require explicit external resources.
 - For visual changes, verify the actual native UI when a desktop is available, including narrow layouts, long labels, focus, popup/IME behavior, and clipping. Headless layout tests do not prove native glyph or OS input correctness.
 - Measure interactive performance in release mode (`just run`), not debug mode. Preserve bounded glyph caching and deterministic paint budgets; native timing budgets are machine-dependent.
@@ -176,5 +185,15 @@ just test-perf
   guidance from the agent harness; add such lines only when the user asks for
   them in the current request.
 - Before creating a PR, review every included commit and the full diff from its base. Include a summary, exact validation commands/results, and remaining manual/native QA.
+- Include screenshots in any PR that changes something visible: before and
+  after images of the real native window, showing the changed area. Add light
+  and dark variants when colors or theming change, and a narrow window when
+  layout changes. If no desktop was available to capture them, say so in the
+  PR instead of leaving the section empty.
+- Give every PR description a QA checklist. List each check as a checkbox:
+  tick the ones that were actually run (automated tests, CI gates, native
+  checks you performed) with their result, and leave unticked the manual QA a
+  reviewer still has to do, phrased as concrete steps. Never tick a box for a
+  check that did not run.
 - Keep user-facing docs and public API examples synchronized with behavior changes. Do not copy another repository's release, issue-tracker, or mandatory-push workflow into this one.
 - Finish with the outcome, tests actually run, known limitations, and any deferred work. Never claim unrun checks passed.

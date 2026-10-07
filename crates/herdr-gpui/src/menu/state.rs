@@ -40,6 +40,9 @@ pub(crate) struct MenuState {
     /// Written by the menu's layout, read when presenting pages.
     pub(crate) cover: std::rc::Rc<std::cell::Cell<Cover>>,
     pub(super) device_setup: Option<super::devices::Setup>,
+    pub(super) wsl_setup: Option<super::devices::WslSetup>,
+    /// The saved distribution the removal confirmation names.
+    pub(super) wsl_remove: Option<String>,
     pub(super) session_edit: Option<super::sessions::Edit>,
     pub(super) devices_scroll: ScrollHandle,
     /// The sessions list scrolls its own way; the two popups never share one.
@@ -54,6 +57,10 @@ pub(crate) struct MenuState {
     pub(super) selected: Option<usize>,
     pub(super) workspace_selected: Option<WorkspaceMenuAction>,
     pub(super) git_selected: Option<git::Row>,
+    /// The merge dialog's method, and the pull request (with its head) it
+    /// was opened for: a branch that moved since must be reviewed again.
+    pub(super) merge_method: Option<crate::pull_request::MergeMethod>,
+    pub(super) merge_target: Option<crate::pr_actions::Target>,
     pub(super) target: Option<WorkspaceTarget>,
     pub input: Option<DialogInput>,
     pub(super) error: Option<String>,
@@ -98,19 +105,35 @@ pub(crate) struct MenuState {
     pub(super) github_selected: Option<github::Action>,
     pub(super) github_scroll: ScrollHandle,
     pub(super) pr_connection: Option<std::sync::Weak<std::sync::Mutex<crate::state::LiveState>>>,
+    pub(crate) version_notice: Option<super::VersionNotice>,
 }
 
 pub(super) struct Deletion {
     pub(super) pending: Option<String>,
     pub(super) path: Option<String>,
+    /// The repository's main checkout, for the archive script's environment.
+    pub(super) root: Option<String>,
     pub(super) force: bool,
+    /// Whether the checkout has an archive script to run first.
+    pub(super) archive: crate::worktree_scripts::ArchiveCheck,
 }
 
 impl Deletion {
+    pub(super) fn new(pending: Option<String>, force: bool) -> Self {
+        Self {
+            pending,
+            path: None,
+            root: None,
+            force,
+            archive: crate::worktree_scripts::ArchiveCheck::Unread,
+        }
+    }
+
     /// Confirming is a single keypress, so the dialog may only submit once the
-    /// daemon has named the checkout and its lookup is no longer in flight.
+    /// daemon has named the checkout, its lookup is no longer in flight, and
+    /// the checkout is known to have an archive script or not.
     pub(super) fn ready(&self) -> bool {
-        self.pending.is_none() && self.path.is_some()
+        self.pending.is_none() && self.path.is_some() && self.archive.settled()
     }
 }
 
@@ -200,6 +223,7 @@ impl MenuState {
                 .and_then(|entry| entry["path"].as_str())
                 .filter(|path| !path.is_empty())
                 .map(str::to_owned);
+            deletion.root = crate::worktree_scripts::main_checkout(result);
             if deletion.path.is_none() {
                 self.error = Some("Daemon did not identify a unique linked checkout. Dismiss and reopen the menu.".into());
             }
@@ -216,6 +240,8 @@ impl MenuState {
             page: None,
             cover: Default::default(),
             device_setup: None,
+            wsl_setup: None,
+            wsl_remove: None,
             session_edit: None,
             devices_scroll: ScrollHandle::new(),
             sessions_scroll: ScrollHandle::new(),
@@ -227,6 +253,8 @@ impl MenuState {
             selected: None,
             workspace_selected: None,
             git_selected: None,
+            merge_method: None,
+            merge_target: None,
             target: None,
             input: None,
             error: None,
@@ -254,6 +282,7 @@ impl MenuState {
             github_selected: None,
             github_scroll: ScrollHandle::new(),
             pr_connection: None,
+            version_notice: None,
             tab: None,
             group: None,
             host: None,
@@ -265,6 +294,8 @@ impl MenuState {
     pub fn reset(&mut self) {
         self.cover.set(Cover::Unknown);
         self.device_setup = None;
+        self.wsl_setup = None;
+        self.wsl_remove = None;
         self.session_edit = None;
         self.devices_scroll.set_offset(Point::default());
         self.sessions_scroll.set_offset(Point::default());
@@ -286,10 +317,13 @@ impl MenuState {
         self.selected = None;
         self.workspace_selected = None;
         self.git_selected = None;
+        self.merge_method = None;
+        self.merge_target = None;
         self.target = None;
         self.input = None;
         self.error = None;
         self.deletion = None;
+        self.version_notice = None;
         self.close_check = None;
         self.creation = None;
         self.suggested_name = None;

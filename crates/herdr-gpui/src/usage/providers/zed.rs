@@ -12,7 +12,9 @@
 //!
 //! The editor token is a keychain *internet* password whose server is the
 //! credentials URL and whose account is the Zed user id, as Zed stores it;
-//! the generic-password layout CodexBar falls back to is tried next.
+//! the generic-password layout CodexBar falls back to is tried next. The
+//! item belongs to Zed, so reading it makes macOS ask; it is only read when
+//! Zed is listed in `show_providers` and the user pressed Allow in its panel.
 //!
 //! Not ported: the Linux editor sign-in lives in the Secret Service, which
 //! the probe cannot read.
@@ -119,8 +121,8 @@ fn credentials(probe: &mut Probe, class: Class, service: &str) -> Option<(String
         .filter(|output| output.success)?;
     let user = account(&listing.stdout)?;
     let token = match class {
-        Class::Internet => probe.keychain_internet(service, Some(user.as_str())),
-        Class::Generic => probe.keychain(service, Some(user.as_str())),
+        Class::Internet => probe.foreign_keychain_internet(service, Some(user.as_str())),
+        Class::Generic => probe.foreign_keychain(service, Some(user.as_str())),
     }?;
     Some((user, token))
 }

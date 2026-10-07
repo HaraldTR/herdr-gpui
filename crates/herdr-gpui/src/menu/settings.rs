@@ -6,8 +6,14 @@ use super::{Page, accent};
 use crate::{
     HerdrWindow,
     config::{Config, FONT_SIZE_RANGE, FONT_SIZE_STEP, FontFace},
+    keymap::Reach,
 };
 use gpui::{prelude::*, *};
+use herdr_client::protocol::ClientShellCommand;
+use std::borrow::Cow;
+
+/// The semantic paste row, which no keymap command holds.
+const PASTE_LABEL: &str = "Paste into terminal";
 
 impl HerdrWindow {
     pub(crate) fn reload_notification_config(&mut self, cx: &mut Context<Self>) {
@@ -30,24 +36,40 @@ impl HerdrWindow {
 
     /// Reloads when the GUI overrides change, or the daemon's config whose
     /// `[keys]`, clipboard toast, and `[ui.sidebar]` rows the GUI also honors.
+    /// Reads the theme again when a theme file changes in place.
     pub(crate) fn watch_gui_config(&mut self, cx: &mut Context<Self>) {
         let Ok(path) = Config::local_path() else {
             return;
         };
         let daemon = crate::config::daemon_config_path(|key| std::env::var_os(key));
         let executor = cx.background_executor().clone();
+        let mut theme = self.config.theme.clone();
         self.config_watch = Some(cx.spawn(async move |this, cx| {
             let mut watch = crate::config::watch::Watch::default();
+            let mut theme_watch = crate::config::watch::ThemeWatch::default();
             let mut pending = None;
             loop {
                 let (path, daemon) = (path.clone(), daemon.clone());
-                let sample = executor
+                let (sample, theme_sample, sampled) = executor
                     .spawn(async move {
-                        use crate::config::watch::fingerprint;
-                        [fingerprint(&path), fingerprint(&daemon)]
+                        use crate::config::watch::{fingerprint, fingerprint_all};
+                        let theme_sample = fingerprint_all(Config::theme_files(&theme));
+                        (
+                            [fingerprint(&path), fingerprint(&daemon)],
+                            theme_sample,
+                            theme,
+                        )
                     })
                     .await;
+                theme = sampled;
                 let updated = this.update(cx, |this, cx| {
+                    if theme_watch.observe(&theme, theme_sample, &this.config.theme)
+                        && this.config_load.is_none()
+                        && this.reload_theme(cx)
+                    {
+                        theme_watch.accept(theme_sample);
+                    }
+                    theme.clone_from(&this.config.theme);
                     if let Some((sample, revision)) = pending
                         && this.config_load_revision != revision
                     {
@@ -143,16 +165,17 @@ impl HerdrWindow {
         }
         // Enumerating installed families is slow, so it rides the same
         // background load as parsing rather than the UI thread.
+        let light = crate::app::light_appearance(cx);
         let text_system = cx.text_system().clone();
         self.load_gui_config_with(
             move || {
                 let mut config = Config::load()?;
-                config.resolve_font_fallbacks(|| text_system.all_font_names());
+                config.resolve_fonts(|| text_system.all_font_names());
                 // Follow Herdr is resolved from the latest prepared snapshot on completion.
                 let theme = if config.theme == "Follow Herdr" {
                     Default::default()
                 } else {
-                    config.theme()?
+                    config.theme(light)?
                 };
                 Ok((config, theme))
             },
@@ -170,6 +193,8 @@ impl HerdrWindow {
         }
         let theme_revision = crate::settings_window::theme_load_revision(cx);
         let layout_revision = crate::settings_window::layout_load_revision(cx);
+        // Loaders resolve the theme for the appearance when they start.
+        let light = crate::app::light_appearance(cx);
         let load = cx.background_executor().spawn(async move { load() });
         self.config_load = Some(cx.spawn(async move |this, cx| {
             let loaded = load.await;
@@ -212,6 +237,9 @@ impl HerdrWindow {
                             this.theme = theme;
                         }
                         this.apply_shared_theme(cx);
+                        if light != crate::app::light_appearance(cx) {
+                            this.apply_system_theme(cx);
+                        }
                         crate::settings_window::apply_loaded_theme(&mut this.config, &mut this.theme, theme_revision, cx);
                         cx.set_global(crate::app::InitialAppearance {
                             config: this.config.clone(),
@@ -293,7 +321,14 @@ impl HerdrWindow {
         let mut groups = [
             ("WORKSPACES & PANES", Vec::new()),
             ("NAVIGATION", Vec::new()),
-            ("APPLICATION", vec![(vec!["cmd-v"], "Paste into terminal")]),
+            (
+                "APPLICATION",
+                vec![(
+                    vec![(Cow::Borrowed("cmd-v"), None)],
+                    Cow::Borrowed(PASTE_LABEL),
+                )],
+            ),
+            ("PLUGIN & CUSTOM COMMANDS", Vec::new()),
         ];
         for info in COMMANDS {
             let mut keys: Vec<&str> = self.keymap().shortcuts(info.command).collect();
@@ -368,7 +403,52 @@ impl HerdrWindow {
                 | Command::ReloadConfig => 2,
                 Command::OpenNotificationTarget => 1,
             };
-            groups[group].1.push((keys, info.label));
+            groups[group].1.push((
+                keys.into_iter()
+                    .map(|key| (Cow::Borrowed(key), None))
+                    .collect(),
+                Cow::Borrowed(info.label),
+            ));
+        }
+        if let Some(snapshot) = self
+            .live
+            .snapshot
+            .as_ref()
+            .filter(|_| self.live.status.is_connected())
+        {
+            let commands = &snapshot.commands;
+            let bindings = self.keymap().custom_bindings(commands);
+            groups[3]
+                .1
+                .extend(commands.iter().zip(bindings).enumerate().map(
+                    |(index, (command, bindings))| {
+                        let description = command_name(command);
+                        // A row's name keys its selectors and is all that tells
+                        // rows apart, so one already used by a built-in action
+                        // or an earlier command is numbered. Daemon command IDs
+                        // are generated per boot and mean nothing to a reader.
+                        let earlier = usize::from(
+                            description == PASTE_LABEL
+                                || COMMANDS.iter().any(|info| info.label == description),
+                        ) + commands[..index]
+                            .iter()
+                            .filter(|other| command_name(other) == description)
+                            .count();
+                        let description = match earlier {
+                            0 => description.to_owned(),
+                            earlier => format!("{description} ({})", earlier + 1),
+                        };
+                        (
+                            bindings
+                                .into_iter()
+                                .map(|binding| {
+                                    (Cow::Owned(binding.label), reach_note(binding.reach))
+                                })
+                                .collect(),
+                            Cow::Owned(description),
+                        )
+                    },
+                ));
         }
         let total: usize = groups.iter().map(|(_, shortcuts)| shortcuts.len()).sum();
         let mut count = 0;
@@ -376,8 +456,10 @@ impl HerdrWindow {
             let shortcuts: Vec<_> = shortcuts
                 .into_iter()
                 .filter(|(keys, description)| {
-                    keys.iter()
-                        .any(|keys| shortcut_matches(query, keys, description, section))
+                    shortcut_matches(query, "", description, section)
+                        || keys
+                            .iter()
+                            .any(|(keys, _)| shortcut_matches(query, keys, description, section))
                 })
                 .collect();
             if shortcuts.is_empty() {
@@ -411,22 +493,41 @@ impl HerdrWindow {
                                 .flex()
                                 .flex_wrap()
                                 .gap(px(10.))
-                                .children(keys.into_iter().map(|keys| {
-                                    div().flex().flex_wrap().gap(px(4.)).children(
-                                        keycaps(keys).map(|key| {
-                                            div()
-                                                .flex_none()
-                                                .px(px(6.))
-                                                .py(px(2.))
-                                                .rounded(px(crate::config::corners::SMALL))
-                                                .border_1()
-                                                .border_color(rgb(theme.active))
-                                                .bg(rgb(theme.background))
-                                                .text_size(px(font.size * 0.9))
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .child(key)
-                                        }),
+                                .when(keys.is_empty(), |column| {
+                                    column.child(
+                                        div()
+                                            .text_color(rgb(theme.muted))
+                                            .child("No shortcut assigned"),
                                     )
+                                })
+                                .children(keys.into_iter().map(|(keys, note)| {
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(3.))
+                                        .child(div().flex().flex_wrap().gap(px(4.)).children(
+                                            keycaps(&keys).map(|key| {
+                                                div()
+                                                    .flex_none()
+                                                    .px(px(6.))
+                                                    .py(px(2.))
+                                                    .rounded(px(crate::config::corners::SMALL))
+                                                    .border_1()
+                                                    .border_color(rgb(theme.active))
+                                                    .bg(rgb(theme.background))
+                                                    .text_size(px(font.size * 0.9))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .child(key)
+                                            }),
+                                        ))
+                                        .when_some(note, |binding, note| {
+                                            binding.child(
+                                                div()
+                                                    .text_size(px(font.size * 0.85))
+                                                    .text_color(rgb(theme.muted))
+                                                    .child(note),
+                                            )
+                                        })
                                 })),
                         )
                         .child(
@@ -451,8 +552,8 @@ impl HerdrWindow {
         body = body.child(
             div()
                 .py(px(14.))
-                .text_color(rgb(theme.muted))
-                .child("Includes the prefix chords from Herdr's [keys] in config.toml. Daemon actions with no GUI command, and terminal applications, keep their own shortcuts."),
+                .text_color(rgb(theme.subtext()))
+                .child("Includes Herdr's [keys] prefix chords and the connected daemon's plugin and custom commands. A binding that cannot run says why. Terminal applications keep their own shortcuts."),
         );
         div()
             .flex()
@@ -548,6 +649,28 @@ impl HerdrWindow {
 /// The keycaps of a shortcut, capitalized for display, a prefix chord's
 /// keystrokes in turn. `cmd--` splits into `cmd` and a `-` key rather than an
 /// empty cap, as does a chord's bare `-`.
+/// A custom command's row name: its description, or its ID without one.
+fn command_name(command: &ClientShellCommand) -> &str {
+    command
+        .description
+        .as_deref()
+        .filter(|description| !description.trim().is_empty())
+        .unwrap_or(&command.command_id)
+}
+
+/// Why a custom command's binding does not run, beneath its keycaps.
+fn reach_note(reach: Reach) -> Option<&'static str> {
+    match reach {
+        Reach::Runs => None,
+        Reach::Shadowed => Some("Used by a Herdr or GUI shortcut"),
+        Reach::Taken => Some("Used by an earlier command"),
+        Reach::NeedsModifier => Some("Needs a modifier key"),
+        Reach::NoPrefix => Some("No usable prefix key"),
+        Reach::OverLimit => Some("Beyond the 8-shortcut limit"),
+        Reach::Unsupported => Some("Not supported by this client"),
+    }
+}
+
 fn keycaps(shortcut: &str) -> impl Iterator<Item = String> + '_ {
     shortcut
         .split(' ')
@@ -582,447 +705,16 @@ fn shortcut_matches(query: &str, keys: &str, description: &str, section: &str) -
         .is_some_and(|token| matches!(token, "cmd" | "ctrl" | "alt" | "shift"))
     {
         // A key combination should match keycaps, not letters in an action's name.
+        let keys = keys.to_lowercase();
         return query
             .split_whitespace()
-            .all(|token| keys.split(['-', ' ']).any(|key| key == token));
+            .all(|token| keys.split(['-', '+', ' ']).any(|key| key == token));
     }
     let text = format!("{keys} {description} {section}")
         .to_lowercase()
-        .replace('-', " ");
+        .replace(['-', '+'], " ");
     query.split_whitespace().all(|token| text.contains(token))
 }
 
 #[cfg(test)]
-mod tests {
-    #[gpui::test]
-    #[allow(clippy::unwrap_used)]
-    fn enabling_does_not_replay_undrained_disabled_ingress(cx: &mut gpui::TestAppContext) {
-        use crate::{config::Config, notifications::tests::notification, state::ConnectionStatus};
-        use herdr_client::{
-            ClientEvent,
-            protocol::{SemanticNotificationKind, ServerMessage},
-        };
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
-        let inbox = view.update(cx, |view, _| {
-            // This fixture has no transport; polling must not start one.
-            view.endpoints[0].enabled = false;
-            view.endpoints[0].connection.inbox.clone()
-        });
-        let mut wire = notification("disabled ingress");
-        wire.kind = SemanticNotificationKind::Custom;
-        for _ in 0..2 {
-            view.update(cx, |view, cx| {
-                view.load_gui_config_with(|| Ok((Config::default(), Default::default())), cx)
-            });
-            cx.run_until_parked();
-            {
-                let mut state = inbox.lock().unwrap();
-                state.status = ConnectionStatus::Connected;
-                state.apply(ClientEvent::Message(ServerMessage::SemanticNotification(
-                    wire.clone(),
-                )));
-            }
-            // Enabling cannot drain this inbox; the arrival fence must survive until later polling.
-            let held = inbox.lock().unwrap();
-            view.update(cx, |view, cx| {
-                view.load_gui_config_with(
-                    || {
-                        let mut config = Config::default();
-                        config.notifications.enabled = true;
-                        config.notifications.delay_seconds = 0;
-                        Ok((config, Default::default()))
-                    },
-                    cx,
-                )
-            });
-            cx.run_until_parked();
-            assert_eq!(held.notifications.len(), 1);
-            view.read_with(cx, |view, _| assert!(view.config.notifications.enabled));
-            drop(held);
-            view.update(cx, |view, cx| {
-                view.poll_endpoints(cx);
-                assert!(view.endpoints[0].toasts.entries.is_empty());
-            });
-            let mut fresh = wire.clone();
-            fresh.title = "enabled ingress".into();
-            inbox
-                .lock()
-                .unwrap()
-                .apply(ClientEvent::Message(ServerMessage::SemanticNotification(
-                    fresh,
-                )));
-            view.update(cx, |view, cx| {
-                view.poll_endpoints(cx);
-                assert_eq!(view.endpoints[0].toasts.entries.len(), 1);
-                assert_eq!(
-                    view.endpoints[0].toasts.entries[0].1.title,
-                    "enabled ingress"
-                );
-                assert!(view.endpoints[0].toasts.entries[0].1.visible);
-            });
-        }
-    }
-
-    #[gpui::test]
-    fn enabling_system_delivery_does_not_post_the_backlog(cx: &mut gpui::TestAppContext) {
-        use crate::{
-            config::{Config, NotificationDelivery},
-            notifications::{Notice, take_system, tests::notification},
-        };
-        use std::time::Instant;
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
-        view.update(cx, |view, _| {
-            assert_eq!(
-                view.config.notifications.delivery(),
-                NotificationDelivery::Off
-            );
-            let mut wire = notification("while off");
-            wire.kind = herdr_client::protocol::SemanticNotificationKind::Custom;
-            view.endpoints[0]
-                .toasts
-                .receive([Notice::new(wire, Instant::now())]);
-        });
-        view.update(cx, |view, cx| {
-            view.load_gui_config_with(
-                || {
-                    let mut config = Config::default();
-                    config.notifications.system = true;
-                    config.notifications.delay_seconds = 0;
-                    let theme = config.theme()?;
-                    Ok((config, theme))
-                },
-                cx,
-            )
-        });
-        cx.run_until_parked();
-        view.update(cx, |view, _| {
-            assert_eq!(
-                view.config.notifications.delivery(),
-                NotificationDelivery::System
-            );
-            assert!(view.endpoints[0].toasts.enabled_since.is_some());
-            view.tick_toasts(false, Instant::now());
-            assert!(take_system(&mut view.endpoints, view.config.notifications).is_empty());
-            assert!(view.endpoints[0].toasts.entries.is_empty());
-        });
-    }
-
-    #[gpui::test]
-    #[allow(clippy::unwrap_used)]
-    fn notification_reload_retimes_pending_clears_disabled_and_keeps_failed_settings(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        use crate::{
-            config::{Config, NotificationConfig},
-            notifications::{Notice, tests::notification},
-        };
-        use std::time::Instant;
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
-        view.update(cx, |view, _| {
-            view.config.terminal.size = 24.;
-            view.config.notifications = NotificationConfig {
-                enabled: true,
-                delay_seconds: 3600,
-                ..Default::default()
-            };
-            view.endpoints[0]
-                .toasts
-                .receive([Notice::new(notification("pending"), Instant::now())]);
-            view.tick_toasts(false, Instant::now());
-            assert!(!view.endpoints[0].toasts.entries[0].1.visible);
-        });
-        view.update(cx, |view, cx| {
-            view.load_gui_config_with(
-                || {
-                    let mut config = Config::default();
-                    config.notifications.enabled = true;
-                    config.notifications.delay_seconds = 0;
-                    config.notifications.position =
-                        herdr_client::protocol::ToastHerdrPosition::TopRight;
-                    config.terminal.size = 18.;
-                    config.layout.sidebar_gap = 16.;
-                    config.layout.mode =
-                        crate::config::LayoutMode::from(crate::config::Density::Compact);
-                    let theme = config.theme()?;
-                    Ok((config, theme))
-                },
-                cx,
-            )
-        });
-        cx.run_until_parked();
-        view.update(cx, |view, cx| {
-            assert!(view.endpoints[0].toasts.entries[0].1.visible);
-            assert_eq!(view.config.notifications.delay_seconds, 0);
-            assert_eq!(view.config.terminal.size, 18.);
-            assert_eq!(view.configured_terminal_size, 18.);
-            assert_eq!(view.config.layout.sidebar_gap, 16.);
-            assert_eq!(
-                view.config.layout.mode,
-                crate::config::LayoutMode::from(crate::config::Density::Compact)
-            );
-            view.set_terminal_font_size(20., cx);
-            view.load_gui_config_with(|| Err(crate::Error::MissingHome), cx);
-        });
-        cx.run_until_parked();
-        view.update(cx, |view, cx| {
-            assert!(view.config.notifications.enabled);
-            assert!(view.endpoints[0].toasts.entries[0].1.visible);
-            assert_eq!(view.config.terminal.size, 20.);
-            assert_eq!(view.configured_terminal_size, 18.);
-            assert_eq!(view.config.layout.sidebar_gap, 16.);
-            assert_eq!(
-                view.config.layout.mode,
-                crate::config::LayoutMode::from(crate::config::Density::Compact)
-            );
-            view.load_gui_config_with(|| Ok((Config::default(), Default::default())), cx);
-        });
-        cx.run_until_parked();
-        view.read_with(cx, |view, _| {
-            assert!(!view.config.notifications.enabled);
-            assert!(view.endpoints[0].toasts.entries.is_empty());
-            assert_eq!(view.config.terminal.size, Config::default().terminal.size);
-            assert_eq!(view.configured_terminal_size, view.config.terminal.size);
-            assert_eq!(view.config.layout, Config::default().layout);
-        });
-    }
-
-    #[gpui::test]
-    fn config_reload_toggles_tab_flags_and_preserves_them_on_failure(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
-        for (confirm_close_tab, show_agents) in
-            [(false, true), (true, false), (false, false), (true, true)]
-        {
-            view.update(cx, |view, cx| {
-                view.load_gui_config_with(
-                    move || {
-                        let config = crate::config::Config {
-                            confirm_close_tab,
-                            show_agents,
-                            ..Default::default()
-                        };
-                        let theme = config.theme()?;
-                        Ok((config, theme))
-                    },
-                    cx,
-                );
-            });
-            cx.run_until_parked();
-            view.read_with(cx, |view, _| {
-                assert_eq!(
-                    (view.config.confirm_close_tab, view.config.show_agents),
-                    (confirm_close_tab, show_agents)
-                );
-                assert!(view.config_load.is_none());
-                assert!(view.local_error.is_none());
-            });
-            for error in [crate::Error::MissingHome, crate::Error::EmptyTheme] {
-                view.update(cx, |view, cx| {
-                    view.load_gui_config_with(move || Err(error), cx);
-                });
-                cx.run_until_parked();
-                view.read_with(cx, |view, _| {
-                    assert_eq!(
-                        (view.config.confirm_close_tab, view.config.show_agents),
-                        (confirm_close_tab, show_agents)
-                    );
-                    assert!(view.config_load.is_none());
-                    assert!(view.local_error.is_some());
-                });
-            }
-        }
-    }
-
-    #[gpui::test]
-    fn failed_config_load_still_restores_the_saved_github_sign_in(cx: &mut gpui::TestAppContext) {
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
-        view.update(cx, |view, cx| {
-            view.avatars = Some(crate::avatars::Avatars::new());
-            view.load_gui_config_with(|| Err(crate::Error::MissingHome), cx);
-        });
-        cx.run_until_parked();
-        view.read_with(cx, |view, _| {
-            assert!(view.local_error.is_some());
-            // The restore is queued under the settings already in effect; the
-            // next poll reads the saved credential off the UI thread.
-            assert!(view.menu.github.loading_profile());
-            assert_eq!(
-                view.menu.github.store(),
-                crate::github::Store::select(&view.config)
-            );
-        });
-    }
-
-    #[gpui::test]
-    #[allow(clippy::unwrap_used)]
-    fn config_load_is_coherent_bounded_and_cancellable(cx: &mut gpui::TestAppContext) {
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
-        view.update(cx, |view, cx| {
-            view.load_gui_config_with(
-                || {
-                    let config = crate::config::Config {
-                        theme: "Nord".into(),
-                        ..Default::default()
-                    };
-                    let theme = config.theme()?;
-                    Ok((config, theme))
-                },
-                cx,
-            );
-            view.load_gui_config_with(|| panic!("only one config load at a time"), cx);
-            assert_eq!(view.config.theme, "Default");
-        });
-        cx.run_until_parked();
-        view.update(cx, |view, cx| {
-            assert_eq!(view.config.theme, "Nord");
-            assert_eq!(view.theme, view.config.theme().unwrap());
-            assert!(view.config_load.is_none());
-            assert_eq!(view.config_load_revision, 1);
-            view.load_gui_config_with(|| Err(crate::Error::EmptyTheme), cx);
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            view.update(cx, |view, cx| {
-                assert_eq!(view.config.theme, "Nord");
-                assert_eq!(view.theme, view.config.theme().unwrap());
-                assert_eq!(view.config_load_revision, 2);
-                assert!(
-                    view.local_error
-                        .as_deref()
-                        .unwrap()
-                        .contains("theme must not be empty")
-                );
-                view.load_gui_config_with(|| Ok((Default::default(), Default::default())), cx);
-                view.open_theme_picker(window, cx);
-                assert!(view.config_load.is_none());
-            });
-        });
-        cx.run_until_parked();
-        view.update(cx, |view, _| {
-            assert_eq!(view.config.theme, "Nord");
-            assert_eq!(
-                view.config_load_revision, 2,
-                "cancelled loads are not acknowledged"
-            );
-        });
-    }
-
-    #[test]
-    fn shortcut_search_matches_labels_keys_and_sections() {
-        for query in ["", "pane close", "CMD+W", "cmd-w", "workspaces"] {
-            assert!(super::shortcut_matches(
-                query,
-                "cmd-w",
-                "Close Pane",
-                "WORKSPACES & PANES"
-            ));
-        }
-        assert!(!super::shortcut_matches(
-            "zoom",
-            "cmd-w",
-            "Close Pane",
-            "WORKSPACES & PANES"
-        ));
-        assert!(super::shortcut_matches(
-            "cmd shift p",
-            "cmd-shift-p",
-            "Command Palette",
-            "APPLICATION"
-        ));
-        assert!(!super::shortcut_matches(
-            "cmd+p",
-            "cmd-d",
-            "Split Right",
-            "WORKSPACES & PANES"
-        ));
-    }
-
-    #[test]
-    fn keycaps_split_modifiers_from_the_key() {
-        let caps = |keystroke| super::keycaps(keystroke).collect::<Vec<_>>();
-        assert_eq!(caps("cmd-shift-t"), ["Cmd", "Shift", "T"]);
-        assert_eq!(caps("cmd--"), ["Cmd", "-"]);
-        assert_eq!(caps("cmd-+"), ["Cmd", "+"]);
-        assert_eq!(caps("f5"), ["F5"]);
-        assert_eq!(caps("ctrl-b c"), ["Ctrl", "B", "C"]);
-        assert_eq!(caps("ctrl-b -"), ["Ctrl", "B", "-"]);
-        assert_eq!(caps("ctrl-b shift-tab"), ["Ctrl", "B", "Shift", "Tab"]);
-    }
-
-    /// A saved `[keybindings]` change must reach the live keymap, the palette,
-    /// and the keybindings page without restarting, and keep the console keys.
-    #[gpui::test]
-    #[allow(clippy::unwrap_used)]
-    fn config_reload_rebinds_the_keymap(cx: &mut gpui::TestAppContext) {
-        use crate::{
-            Command, RunCommand,
-            config::Config,
-            keymap::{Binding, Keymap},
-        };
-        use gpui::Keystroke;
-
-        let (view, cx) = cx.add_window_view(crate::sidebar::layout_tests::fixture_window);
-        cx.update(|_, cx| crate::bind_keys(cx));
-        let runs = |keystroke: &str, command: Command, cx: &mut gpui::VisualTestContext| {
-            cx.update(|_, cx| {
-                cx.key_bindings()
-                    .borrow()
-                    .all_bindings_for_input(&[Keystroke::parse(keystroke).unwrap()])
-                    .iter()
-                    .any(|binding| binding.action().partial_eq(&RunCommand { command }))
-            })
-        };
-        assert!(runs("cmd-t", Command::Tab, cx));
-        assert!(!runs("cmd-n", Command::Tab, cx));
-        assert!(runs("cmd-shift-n", Command::Workspace, cx));
-
-        view.update(cx, |view, cx| {
-            view.load_gui_config_with(
-                || {
-                    let overrides = [
-                        ("new_workspace", Binding::One("cmd-t".into())),
-                        ("toggle_sidebar", Binding::Many(Vec::new())),
-                    ]
-                    .into_iter()
-                    .map(|(name, binding)| (name.to_owned(), binding))
-                    .collect();
-                    let config = Config {
-                        keybindings: Keymap::with_overrides(
-                            &overrides,
-                            &crate::keymap::DaemonKeys::default(),
-                        )?,
-                        ..Config::default()
-                    };
-                    Ok((config, Default::default()))
-                },
-                cx,
-            )
-        });
-        cx.run_until_parked();
-        assert!(runs("cmd-t", Command::Workspace, cx));
-        assert!(!runs("cmd-t", Command::Tab, cx));
-        assert!(!runs("cmd-shift-n", Command::Workspace, cx));
-        assert!(!runs("cmd-b", Command::ToggleSidebar, cx));
-        cx.update(|_, cx| {
-            let keymap = cx.key_bindings();
-            let keymap = keymap.borrow();
-            let console = keymap.all_bindings_for_input(&[Keystroke::parse("cmd-l").unwrap()]);
-            assert_eq!(console.len(), 1);
-        });
-        view.read_with(cx, |view, _| {
-            assert_eq!(view.config.keybindings.primary(Command::Workspace), "cmd-t");
-            // Only Herdr's default chord is left once cmd-t moves away.
-            assert_eq!(view.config.keybindings.primary(Command::Tab), "ctrl-b c");
-        });
-
-        view.update(cx, |view, cx| {
-            view.load_gui_config_with(|| Ok((Config::default(), Default::default())), cx)
-        });
-        cx.run_until_parked();
-        assert!(runs("cmd-t", Command::Tab, cx));
-        view.read_with(cx, |view, _| {
-            assert_eq!(view.config.keybindings, Keymap::default())
-        });
-    }
-}
+mod tests;

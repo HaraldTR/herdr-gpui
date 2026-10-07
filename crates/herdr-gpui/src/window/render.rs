@@ -13,7 +13,6 @@ use crate::{
     state::ConnectionStatus,
     terminal::*,
     terminal_painter::{self, ImageTarget, PlacedImages},
-    worktree_banner,
 };
 use gpui::{prelude::*, *};
 use herdr_client::ConnectOptions;
@@ -57,6 +56,7 @@ impl HerdrWindow {
 impl Render for HerdrWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.restore_menu_focus(window, cx);
+        self.viewport_width = f32::from(window.viewport_size().width);
         let font = self.config.terminal.font();
         // Parked groups paint with the same face as the window's terminal.
         let parked_font = font.clone();
@@ -89,19 +89,55 @@ impl Render for HerdrWindow {
         let painter = self.painter.clone();
         // The highlight is grid coordinates, so it paints with the frame that
         // owns the cells rather than being recomputed from the pointer here.
-        let selection = self.selection.clone();
+        let selection_rows = |owned: bool| -> Vec<_> {
+            surface
+                .as_deref()
+                .zip(self.selection.as_ref().filter(|_| owned))
+                .into_iter()
+                .flat_map(|(surface, selection)| selection.rows(surface, cell_width, cell_height))
+                .map(|(row, columns)| terminal_painter::Highlight {
+                    row,
+                    columns,
+                    tint: terminal_painter::Tint::Selection,
+                })
+                .collect()
+        };
+        // The highlight belongs to the frame that owns the cells, so only one
+        // of the panes and the popup paints it.
+        let popup_highlights = surface
+            .as_deref()
+            .and_then(|surface| surface.popup.as_ref())
+            .map(|popup| {
+                selection_rows(
+                    self.selection
+                        .as_ref()
+                        .is_some_and(|selection| selection.in_popup(&popup.terminal_id)),
+                )
+            })
+            .unwrap_or_default();
+        let pane_selection = selection_rows(
+            self.selection
+                .as_ref()
+                .is_some_and(|selection| selection.in_panes()),
+        );
         // Like the highlight, the link underline paints with the frame that
         // owns its cells, and only while that frame shows the content the
-        // daemon resolved it from.
+        // daemon resolved it from. Without one, the row-local reading under
+        // the pointer is underlined instead.
         let link_rows: Vec<_> = surface
             .as_deref()
             .zip(self.hovered_daemon_link())
             .filter(|(surface, link)| link.cell.current(surface))
             .map(|(_, link)| link.frame_rows().collect())
+            .or_else(|| {
+                let link = self.hovered_local_link()?;
+                Some(vec![(link.row, link.columns.clone())])
+            })
             .unwrap_or_default();
-        // Search matches, mapped onto the frame on screen. A popup covers the
+        // Search matches, mapped onto the frame on screen, tint below the
+        // selection, which reads as chosen over them. A popup covers the
         // panes, so their matches stay under it.
-        let matches = surface
+        let mut highlights = surface
             .as_deref()
             .map(|surface| {
                 let mut highlights = self.find_highlights(surface);
@@ -109,6 +145,17 @@ impl Render for HerdrWindow {
                 highlights
             })
             .unwrap_or_default();
+        highlights.extend(pane_selection);
+        let look = super::regions::Look {
+            font: font.clone(),
+            font_size: self.config.terminal.size,
+            cell_width,
+            cell_height,
+            theme: self.theme.clone(),
+        };
+        let regions = self.terminal_regions(surface.as_ref(), &highlights, &look, cx);
+        // Without regions the canvas paints the whole grid, images included.
+        let whole = regions.is_empty();
         // The IME composition paints inline at the input cursor; a menu's
         // text field shows its own.
         // It anchors to the live surface, as the IME's candidate window does,
@@ -257,7 +304,8 @@ impl Render for HerdrWindow {
                     {
                         return;
                     }
-                    this.pressed_terminal_link = this.terminal_link_press(event.position);
+                    this.pressed_terminal_link =
+                        this.terminal_link_press(event.position, event.modifiers);
                     if this.menu.page.is_some() {
                         return;
                     }
@@ -287,182 +335,173 @@ impl Render for HerdrWindow {
                     }
                 }),
             )
+            // The cached regions paint the cells; the canvas above them takes
+            // input and paints what changes without them. Both fill this box,
+            // so every region shares the canvas's bounds.
             .child(
-                canvas(
-                    move |bounds, _, cx| {
-                        entity.update(cx, |this, _| {
-                            this.bounds = bounds;
-                            this.options = ConnectOptions {
-                                surface_size: viewport(
-                                    bounds.size.width.to_f64() as f32,
-                                    bounds.size.height.to_f64() as f32,
-                                    cell_width,
-                                    cell_height,
+                div().relative().size_full().children(regions).child(
+                    canvas(
+                        move |bounds, _, cx| {
+                            entity.update(cx, |this, _| {
+                                this.bounds = bounds;
+                                this.options = ConnectOptions {
+                                    surface_size: viewport(
+                                        bounds.size.width.to_f64() as f32,
+                                        bounds.size.height.to_f64() as f32,
+                                        cell_width,
+                                        cell_height,
+                                    ),
+                                    cell_width_px: cell_width.round().max(1.) as u32,
+                                    cell_height_px: cell_height.round().max(1.) as u32,
+                                };
+                                this.resize();
+                            });
+                        },
+                        move |bounds, _, window, cx| {
+                            // Capture movement outside the terminal too, before any
+                            // element can stop propagation of a drag-away event.
+                            let entity = paint_entity.clone();
+                            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                                if phase == DispatchPhase::Capture {
+                                    entity.update(cx, |this, cx| {
+                                        // Window-wide, so leaving the terminal
+                                        // drops the underline too.
+                                        this.hover_link(event.position, event.modifiers, cx);
+                                        if this.scrollbar_mouse_move(event, cx)
+                                            || this.split_mouse_move(event, cx)
+                                            || this.terminal_mouse_move(event, cx)
+                                        {
+                                            cx.stop_propagation();
+                                            return;
+                                        }
+                                        if this.pressed_terminal_link.as_ref().is_some_and(
+                                            |PressedLink { position, .. }| {
+                                                (event.position.x - position.x).abs() > px(4.)
+                                                    || (event.position.y - position.y).abs()
+                                                        > px(4.)
+                                            },
+                                        ) {
+                                            this.pressed_terminal_link = None;
+                                        }
+                                        // A drag that leaves the terminal keeps
+                                        // selecting, and hover work elsewhere stays
+                                        // out of the gesture.
+                                        if this.extend_selection(event.position, cx) {
+                                            cx.stop_propagation();
+                                        }
+                                    });
+                                }
+                            });
+                            let released = paint_entity.clone();
+                            window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                                if phase == DispatchPhase::Capture {
+                                    released.update(cx, |this, cx| {
+                                        // Global: the overlay occludes the opener, and release
+                                        // may also precede the overlay's first frame.
+                                        if matches!(
+                                            event.button,
+                                            MouseButton::Left | MouseButton::Right
+                                        ) {
+                                            this.menu.opening_right_click = false;
+                                        }
+                                        if this.scrollbar_mouse_up(event, cx)
+                                            || this.split_mouse_up(event, cx)
+                                            || this.terminal_mouse_up(event, cx)
+                                            || (event.button == MouseButton::Left
+                                                && !cx.has_active_drag()
+                                                && this.release_selection(cx))
+                                        {
+                                            cx.stop_propagation();
+                                        }
+                                    });
+                                }
+                            });
+                            window.handle_input(
+                                &focus,
+                                crate::input::TerminalInputHandler::new(
+                                    bounds,
+                                    paint_entity.clone(),
+                                    menu_open,
                                 ),
-                                cell_width_px: cell_width.round().max(1.) as u32,
-                                cell_height_px: cell_height.round().max(1.) as u32,
-                            };
-                            this.resize();
-                        });
-                    },
-                    move |bounds, _, window, cx| {
-                        // Capture movement outside the terminal too, before any
-                        // element can stop propagation of a drag-away event.
-                        let entity = paint_entity.clone();
-                        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                            if phase == DispatchPhase::Capture {
-                                entity.update(cx, |this, cx| {
-                                    // Window-wide, so leaving the terminal
-                                    // drops the underline too.
-                                    this.hover_link(event.position, event.modifiers, cx);
-                                    if this.scrollbar_mouse_move(event, cx)
-                                        || this.split_mouse_move(event, cx)
-                                        || this.terminal_mouse_move(event, cx)
-                                    {
-                                        cx.stop_propagation();
-                                        return;
-                                    }
-                                    if this.pressed_terminal_link.as_ref().is_some_and(
-                                        |PressedLink { position, .. }| {
-                                            (event.position.x - position.x).abs() > px(4.)
-                                                || (event.position.y - position.y).abs() > px(4.)
-                                        },
-                                    ) {
-                                        this.pressed_terminal_link = None;
-                                    }
-                                    // A drag that leaves the terminal keeps
-                                    // selecting, and hover work elsewhere stays
-                                    // out of the gesture.
-                                    if this.extend_selection(event.position, cx) {
-                                        cx.stop_propagation();
-                                    }
-                                });
-                            }
-                        });
-                        let released = paint_entity.clone();
-                        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                            if phase == DispatchPhase::Capture {
-                                released.update(cx, |this, cx| {
-                                    // Global: the overlay occludes the opener, and release
-                                    // may also precede the overlay's first frame.
-                                    if matches!(
-                                        event.button,
-                                        MouseButton::Left | MouseButton::Right
-                                    ) {
-                                        this.menu.opening_right_click = false;
-                                    }
-                                    if this.scrollbar_mouse_up(event, cx)
-                                        || this.split_mouse_up(event, cx)
-                                        || this.terminal_mouse_up(event, cx)
-                                        || (event.button == MouseButton::Left
-                                            && !cx.has_active_drag()
-                                            && this.release_selection(cx))
-                                    {
-                                        cx.stop_propagation();
-                                    }
-                                });
-                            }
-                        });
-                        window.handle_input(
-                            &focus,
-                            crate::input::TerminalInputHandler::new(
-                                bounds,
-                                paint_entity.clone(),
-                                menu_open,
-                            ),
-                            cx,
-                        );
-                        if let Some(surface) = &surface {
-                            // The highlight belongs to the frame that owns the
-                            // cells, so only one of the two paints it.
-                            let highlight = |owned: bool| -> Vec<_> {
-                                selection
-                                    .as_ref()
-                                    .filter(|_| owned)
-                                    .into_iter()
-                                    .flat_map(|selection| {
-                                        selection.rows(surface, cell_width, cell_height)
-                                    })
-                                    .map(|(row, columns)| terminal_painter::Highlight {
-                                        row,
-                                        columns,
-                                        tint: terminal_painter::Tint::Selection,
-                                    })
-                                    .collect()
-                            };
-                            // Matches tint below the selection, which reads
-                            // as chosen over them.
-                            let mut panes = matches;
-                            panes.extend(highlight(
-                                selection
-                                    .as_ref()
-                                    .is_some_and(|selection| selection.in_panes()),
-                            ));
-                            painter.borrow_mut().paint_frame(
-                                &surface.frame,
-                                bounds.origin,
-                                Some(bounds.size),
-                                cell_width,
-                                &font,
-                                &panes,
-                                &surface.panes,
-                                images.as_deref().map(|images| PlacedImages {
-                                    placements: &surface.graphics.placements,
-                                    images,
-                                    target: ImageTarget::Main,
-                                }),
-                                window,
                                 cx,
                             );
-                            painter.borrow().paint_link(
-                                &surface.frame,
-                                bounds.origin,
-                                cell_width,
-                                &link_rows,
-                                window,
-                            );
-                            if let Some(popup) = &surface.popup {
-                                let offset = popup_origin(
+                            if let Some(surface) = &surface {
+                                if whole {
+                                    painter.borrow_mut().paint_frame(
+                                        &surface.frame,
+                                        bounds.origin,
+                                        Some(bounds.size),
+                                        cell_width,
+                                        &font,
+                                        &highlights,
+                                        &surface.panes,
+                                        None,
+                                        images.as_deref().map(|images| PlacedImages {
+                                            placements: &surface.graphics.placements,
+                                            images,
+                                            target: ImageTarget::Main,
+                                        }),
+                                        window,
+                                        cx,
+                                    );
+                                } else {
+                                    // Regions place no images, so nothing
+                                    // else releases the ones that went away.
+                                    painter.borrow_mut().release_idle_images(window);
+                                }
+                                painter.borrow().paint_link(
                                     &surface.frame,
-                                    &popup.frame,
+                                    bounds.origin,
                                     cell_width,
-                                    cell_height,
-                                );
-                                let rows = highlight(selection.as_ref().is_some_and(|selection| {
-                                    selection.in_popup(&popup.terminal_id)
-                                }));
-                                painter.borrow_mut().paint_frame(
-                                    &popup.frame,
-                                    bounds.origin + offset,
-                                    None,
-                                    cell_width,
-                                    &font,
-                                    &rows,
-                                    &[],
-                                    images.as_deref().map(|images| PlacedImages {
-                                        placements: &surface.graphics.placements,
-                                        images,
-                                        target: ImageTarget::Popup(&popup.terminal_id),
-                                    }),
+                                    &link_rows,
                                     window,
-                                    cx,
+                                );
+                                if let Some(popup) = &surface.popup {
+                                    let offset = popup_origin(
+                                        &surface.frame,
+                                        &popup.frame,
+                                        cell_width,
+                                        cell_height,
+                                    );
+                                    painter.borrow_mut().paint_frame(
+                                        &popup.frame,
+                                        bounds.origin + offset,
+                                        None,
+                                        cell_width,
+                                        &font,
+                                        &popup_highlights,
+                                        &[],
+                                        None,
+                                        images.as_deref().map(|images| PlacedImages {
+                                            placements: &surface.graphics.placements,
+                                            images,
+                                            target: ImageTarget::Popup(&popup.terminal_id),
+                                        }),
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            }
+                            if let Some((marked, live)) = &marked {
+                                let live = live.as_deref();
+                                painter.borrow().paint_composition(
+                                    marked,
+                                    input_cursor_bounds(
+                                        live,
+                                        bounds.origin,
+                                        cell_width,
+                                        cell_height,
+                                    )
+                                    .origin,
+                                    input_area(live, bounds, cell_width, cell_height),
+                                    &font,
+                                    window,
                                 );
                             }
-                        }
-                        if let Some((marked, live)) = &marked {
-                            let live = live.as_deref();
-                            painter.borrow().paint_composition(
-                                marked,
-                                input_cursor_bounds(live, bounds.origin, cell_width, cell_height)
-                                    .origin,
-                                input_area(live, bounds, cell_width, cell_height),
-                                &font,
-                                window,
-                            );
-                        }
-                    },
-                )
-                .size_full(),
+                        },
+                    )
+                    .size_full(),
+                ),
             )
             .when_some(find_bar, |terminal, bar| terminal.child(bar))
             .when_some(copy_badge, |terminal, badge| terminal.child(badge))
@@ -523,7 +562,11 @@ impl Render for HerdrWindow {
             .then(|| self.active_group())
             .flatten();
         let mut terminal = Some(terminal);
-        let mut groups = Vec::with_capacity(slots.len());
+        let merged = slots
+            .first()
+            .is_some_and(|first| self.tabs_in_titlebar(first.id, cx));
+        let count = slots.len();
+        let mut groups = Vec::with_capacity(count);
         for (slot, shown) in slots.into_iter().zip(shown) {
             let gap = slot_gap(slot);
             let owns_keyboard = keyboard == Some(slot.id);
@@ -541,6 +584,15 @@ impl Render for HerdrWindow {
                     .unwrap_or_else(|| div().into_any_element()),
                 (Shown::Terminal, _) if self.shows_parked_terminal(slot.id, cx) => {
                     self.render_parked_terminal(slot, gap, parked_font.clone(), cell_height, cx)
+                }
+                // A review tab is drawn by the app, never a page.
+                (Shown::Page(_), Some(tab))
+                    if tab
+                        .location
+                        .as_ref()
+                        .is_some_and(|location| !location.is_page()) =>
+                {
+                    self.render_review_tab(slot, &tab, gap, cx)
                 }
                 (Shown::Page(_), Some(tab)) => {
                     self.render_browser(slot, &tab, gap, owns_keyboard, cx)
@@ -560,7 +612,8 @@ impl Render for HerdrWindow {
                 }
                 _ => self.render_stand_in(slot, &shown, gap, owns_keyboard, cx),
             };
-            groups.push(self.render_group(slot, body, window, cx));
+            let ends = merged.then(|| crate::titlebar::Ends::of(slot.index, count));
+            groups.push(self.render_group(slot, body, ends, window, cx));
         }
         let content = self.render_groups(groups, cx);
         // Not `||`: asking forgets group motion that has finished.
@@ -575,7 +628,7 @@ impl Render for HerdrWindow {
             || self.local_error.is_some()
             || self.live.error.is_some())
         .then(|| self.live.status_text(self.local_error.as_deref()));
-        div()
+        let root = div()
             .on_modifiers_changed(cx.listener(Self::double_shift_modifiers))
             .capture_any_mouse_down(cx.listener(|this, _, _, _| this.shift_taps.cancel()))
             .child({
@@ -650,19 +703,20 @@ impl Render for HerdrWindow {
             .text_color(rgb(self.theme.foreground))
             .text_font(&self.config.ui)
             .text_size(px(self.config.ui.size))
-            .child(self.render_titlebar(cx))
-            .children(worktree_banner::render(
-                env!("HERDR_BUILD_WORKTREE") == "1",
-                env!("HERDR_BUILD_BRANCH"),
-                env!("HERDR_BUILD_PR"),
-            ))
+            .when(!merged, |root| root.child(self.render_titlebar(window, cx)))
+            // Under the traffic lights a banner would hide them, so with no
+            // header it moves to the window's foot.
+            .when(!merged, |root| root.children(self.render_worktree_banner()))
             .child(
                 div()
                     .debug_selector(|| "window-body".into())
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .children(sidebar)
+                    .children(sidebar.map(|sidebar| match merged {
+                        true => self.sidebar_column(sidebar, window, cx).into_any_element(),
+                        false => sidebar.into_any_element(),
+                    }))
                     .child(
                         div()
                             .flex()
@@ -752,6 +806,7 @@ impl Render for HerdrWindow {
                                 div().debug_selector(|| "connection-message".into()).child(status)
                             )),
                     )
+                    .children(self.render_listening_ports(cx))
                     .children(self.render_system_load())
                     .when(crate::caffeine::SUPPORTED, |bar| {
                         let awake = crate::caffeine::active(cx);
@@ -917,10 +972,12 @@ impl Render for HerdrWindow {
                             ),
                     ),
             )
+            .when(merged, |root| root.children(self.render_worktree_banner()))
             .children(self.render_toasts(window, cx))
             .children(self.render_file_transfer(window, cx))
             .when(self.menu.page.is_some(), |root| {
                 root.child(self.render_menu(window, cx))
-            })
+            });
+        crate::titlebar::frame(window, self.theme.active, root)
     }
 }

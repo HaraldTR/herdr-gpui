@@ -10,20 +10,22 @@ use super::{cookies::CookieJar, model::Provider, service::Setting, settings::Pro
 use crate::{Error, Result};
 use secrecy::{ExposeSecret, SecretString};
 use std::{
-    io::{Read, Write},
-    process::{Child, ChildStdin, Command, Stdio},
+    io::Read,
+    process::{Command, Stdio},
     sync::mpsc,
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 use zeroize::Zeroizing;
+
+mod shell;
+
+pub(crate) use shell::Shell;
 
 /// Responses and files larger than this are refused rather than truncated.
 pub(super) const LIMIT: usize = 1024 * 1024;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const STEP_TIMEOUT: Duration = Duration::from_secs(20);
-#[cfg(unix)]
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// A credential, held where it was read.
 #[derive(Clone)]
@@ -261,9 +263,38 @@ pub(crate) struct Probe<'a> {
     provider: Provider,
     settings: Option<&'a ProviderSettings>,
     cookies: &'a mut CookieJar,
-    /// Whether the config asked for this provider, which is what allows
-    /// reading browser cookies for it.
-    requested: bool,
+    consent: Consent,
+    prompt: Prompt,
+}
+
+/// What a probe may do that the user would notice. Reading another app's
+/// Keychain item, or a browser's cookie key, makes macOS ask, so only a
+/// provider the config lists and the user allowed in its panel gets past
+/// [`Consent::Ask`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Consent {
+    /// Detected, not asked for: read only what needs no permission.
+    Quiet,
+    /// Listed but not allowed yet: anything that would ask is withheld and
+    /// reported, so the panel can offer to allow it. `browsers` is whether
+    /// browser cookies would be read once allowed.
+    Ask { browsers: bool },
+    /// Listed and allowed: may read another app's Keychain item.
+    Keychain,
+    /// Listed and allowed with browser cookies on: also reads the browsers'
+    /// cookies.
+    Browsers,
+}
+
+/// Why a read that would ask macOS did not happen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Prompt {
+    #[default]
+    None,
+    /// Not allowed yet.
+    Withheld,
+    /// Allowed, but the read failed on this machine, usually a denial.
+    Refused,
 }
 
 impl<'a> Probe<'a> {
@@ -272,14 +303,15 @@ impl<'a> Probe<'a> {
         provider: Provider,
         settings: Option<&'a ProviderSettings>,
         cookies: &'a mut CookieJar,
-        requested: bool,
+        consent: Consent,
     ) -> Self {
         Self {
             exec,
             provider,
             settings,
             cookies,
-            requested,
+            consent,
+            prompt: Prompt::None,
         }
     }
 
@@ -385,10 +417,56 @@ impl<'a> Probe<'a> {
         self.security("find-generic-password", service, account)
     }
 
-    /// A macOS keychain internet password, keyed by server, as some editors
-    /// store their sign-in.
-    pub fn keychain_internet(&mut self, server: &str, account: Option<&str>) -> Option<Secret> {
-        self.security("find-internet-password", server, account)
+    /// A macOS keychain internet password that another app owns, such as an
+    /// editor's sign-in. Reading it makes macOS ask the user, so it is only
+    /// read once the user allowed it, and a refusal on this machine is
+    /// remembered rather than asked again each refresh.
+    pub fn foreign_keychain_internet(
+        &mut self,
+        server: &str,
+        account: Option<&str>,
+    ) -> Option<Secret> {
+        self.foreign("find-internet-password", server, account)
+    }
+
+    /// Like [`Probe::foreign_keychain_internet`], for a generic password.
+    pub fn foreign_keychain(&mut self, service: &str, account: Option<&str>) -> Option<Secret> {
+        self.foreign("find-generic-password", service, account)
+    }
+
+    fn foreign(&mut self, kind: &str, service: &str, account: Option<&str>) -> Option<Secret> {
+        match self.consent {
+            Consent::Quiet => return None,
+            Consent::Ask { .. } => {
+                self.prompt = Prompt::Withheld;
+                return None;
+            }
+            Consent::Keychain | Consent::Browsers => {}
+        }
+        let local = matches!(self.exec, Exec::Local);
+        let item = [kind, service, account.unwrap_or_default()].join("\n");
+        if local && self.cookies.refused(self.provider, &item) {
+            self.prompt = Prompt::Refused;
+            return None;
+        }
+        let secret = self.security(kind, service, account);
+        // Over SSH macOS cannot show the dialog, so only a local miss is a
+        // refusal worth remembering.
+        if local && secret.is_none() {
+            self.cookies.refuse(self.provider, item);
+            self.prompt = Prompt::Refused;
+        }
+        secret
+    }
+
+    /// Why a provider that found no sign-in found none: a read that would
+    /// ask macOS was withheld or refused, or there simply is none.
+    pub(super) fn missing(&self) -> Error {
+        match self.prompt {
+            Prompt::Withheld => Error::UsageKeychainAccess,
+            Prompt::Refused => Error::UsageKeychainDenied,
+            Prompt::None => Error::UsageNotSignedIn,
+        }
     }
 
     fn security(&mut self, kind: &str, service: &str, account: Option<&str>) -> Option<Secret> {
@@ -502,12 +580,12 @@ impl<'a> Probe<'a> {
         if let Some(cookie) = self.setting("cookie") {
             return Some(cookie);
         }
-        if !self.requested {
+        if !self.browsers() {
             return None;
         }
-        self.cookies
-            .header(domains, names)
-            .map(|header| Secret::from(SecretString::from(header)))
+        let header = self.cookies.header(domains, names);
+        self.browsers_answered(header.is_some());
+        header.map(|header| Secret::from(SecretString::from(header)))
     }
 
     /// Like [`Probe::cookies`], but satisfied by whichever of `names` the
@@ -516,14 +594,35 @@ impl<'a> Probe<'a> {
         if let Some(cookie) = self.setting("cookie") {
             return Some(cookie);
         }
-        if !self.requested {
+        if !self.browsers() {
             return None;
         }
-        names.iter().find_map(|name| {
-            self.cookies
-                .header(domains, &[name])
-                .map(|header| Secret::from(SecretString::from(header)))
-        })
+        let header = names
+            .iter()
+            .find_map(|name| self.cookies.header(domains, &[name]));
+        self.browsers_answered(header.is_some());
+        header.map(|header| Secret::from(SecretString::from(header)))
+    }
+
+    /// Whether browser cookies may be read now, noting a read withheld until
+    /// the user allows it.
+    fn browsers(&mut self) -> bool {
+        match self.consent {
+            Consent::Browsers => true,
+            Consent::Ask { browsers: true } => {
+                self.prompt = Prompt::Withheld;
+                false
+            }
+            Consent::Quiet | Consent::Ask { browsers: false } | Consent::Keychain => false,
+        }
+    }
+
+    /// A browser read that found nothing because a browser's cookie key
+    /// could not be read was most likely denied.
+    fn browsers_answered(&mut self, found: bool) {
+        if !found && self.cookies.key_refused() {
+            self.prompt = Prompt::Refused;
+        }
     }
 
     /// One cookie's bare value, for services that want it as a bearer token
@@ -533,7 +632,11 @@ impl<'a> Probe<'a> {
         let header = match self.setting("cookie") {
             Some(Secret(Held::Here(header))) => Zeroizing::new(header.expose_secret().to_owned()),
             Some(Secret(Held::There(_))) => return None,
-            None if self.requested => Zeroizing::new(self.cookies.header(domains, &[name])?),
+            None if self.browsers() => {
+                let header = self.cookies.header(domains, &[name]);
+                self.browsers_answered(header.is_some());
+                Zeroizing::new(header?)
+            }
             None => return None,
         };
         cookie_in(&header, name).map(|value| Secret::from(SecretString::from(value)))
@@ -711,312 +814,6 @@ fn http_local(request: &Request) -> Result<Response> {
 /// `'text'`, safe as one POSIX shell word.
 pub(super) fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-/// Helpers defined once per remote session. `herdr_field` prints the string
-/// or number at a JSON path from stdin, preferring a real parser and falling
-/// back to matching the last key when the host has neither. Remote sessions
-/// need an `ssh` child, which only Unix clients start.
-#[cfg(unix)]
-const PRELUDE: &str = r#"PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-export PATH
-herdr_field() {
-    if command -v python3 >/dev/null 2>&1; then
-        python3 -c 'import json,sys
-v=json.load(sys.stdin)
-for k in sys.argv[1:]:
-    v=v[int(k)] if isinstance(v,list) else v[k]
-if isinstance(v,bool): v=str(v).lower()
-if v is None or isinstance(v,(dict,list)): sys.exit(1)
-sys.stdout.write(str(v))' "$@" 2>/dev/null
-    elif command -v jq >/dev/null 2>&1; then
-        herdr_path=
-        for herdr_key in "$@"; do
-            case "$herdr_key" in *[!0-9]*) herdr_path="$herdr_path[\"$herdr_key\"]";; *) herdr_path="$herdr_path[$herdr_key]";; esac
-        done
-        jq -j "$herdr_path // empty" 2>/dev/null
-    else
-        for herdr_last in "$@"; do :; done
-        sed -n "s/.*\"$herdr_last\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" | head -n 1 | tr -d '\n'
-    fi
-}
-"#;
-
-/// A `/bin/sh` on a remote host, fed one step at a time over SSH stdin. Each
-/// step ends with a marker carrying its exit status, so steps can be read
-/// back without closing the session.
-pub(crate) struct Shell {
-    child: Child,
-    stdin: ChildStdin,
-    output: mpsc::Receiver<std::io::Result<Vec<u8>>>,
-    buffer: Vec<u8>,
-    variables: usize,
-    marker: String,
-    macos: Option<bool>,
-    broken: bool,
-}
-
-impl Drop for Shell {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-impl Shell {
-    #[cfg(unix)]
-    pub fn connect(target: &str) -> Result<Self> {
-        let mut command = herdr_client::script_command(target, "exec /bin/sh -s")?;
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        Self::start(command)
-    }
-
-    #[cfg(windows)]
-    pub fn connect(_target: &str) -> Result<Self> {
-        Err(Error::UsageUnsupported)
-    }
-
-    /// Any `sh` reading steps from stdin; SSH in production, a local shell
-    /// in tests.
-    #[cfg(unix)]
-    pub fn start(mut command: Command) -> Result<Self> {
-        let process = |source| Error::UsageProcess {
-            operation: "start the remote usage shell",
-            source,
-        };
-        let mut child = command.spawn().map_err(process)?;
-        let (Some(stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(process(std::io::Error::other("no pipes")));
-        };
-        let (sender, output) = mpsc::sync_channel(64);
-        let reader = thread::Builder::new()
-            .name("herdr-usage-shell".into())
-            .spawn(move || {
-                let mut chunk = [0; 8192];
-                loop {
-                    match stdout.read(&mut chunk) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if sender.send(Ok(chunk[..n].to_vec())).is_err() {
-                                break;
-                            }
-                        }
-                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                        Err(error) => {
-                            let _ = sender.send(Err(error));
-                            break;
-                        }
-                    }
-                }
-            });
-        if let Err(source) = reader {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(process(source));
-        }
-        let mut shell = Self {
-            child,
-            stdin,
-            output,
-            buffer: Vec::new(),
-            variables: 0,
-            marker: format!("@@herdr-{}", uuid::Uuid::new_v4().simple()),
-            macos: None,
-            broken: false,
-        };
-        shell.write(PRELUDE)?;
-        let ready = shell.run("true", CONNECT_TIMEOUT)?;
-        if !ready.success {
-            return Err(Error::UsageUnreachable);
-        }
-        Ok(shell)
-    }
-
-    fn write(&mut self, text: &str) -> Result<()> {
-        self.stdin
-            .write_all(text.as_bytes())
-            .and_then(|()| self.stdin.flush())
-            .map_err(|_| {
-                self.broken = true;
-                Error::UsageUnreachable
-            })
-    }
-
-    fn macos(&mut self) -> bool {
-        if self.macos.is_none() {
-            self.macos = Some(
-                self.run("uname -s", STEP_TIMEOUT)
-                    .is_ok_and(|output| output.stdout.trim() == "Darwin"),
-            );
-        }
-        self.macos.unwrap_or(false)
-    }
-
-    /// Runs `step` and returns what it printed. A step that overruns breaks
-    /// the session, since its output could still arrive later.
-    pub fn run(&mut self, step: &str, timeout: Duration) -> Result<Output> {
-        if self.broken {
-            return Err(Error::UsageUnreachable);
-        }
-        let marker = self.marker.clone();
-        self.write(&format!(
-            "{{ {step}\n}} </dev/null; printf '\\n{marker} %s\\n' \"$?\"\n"
-        ))?;
-        let deadline = Instant::now() + timeout;
-        let end = format!("\n{marker} ");
-        loop {
-            if let Some(start) = find(&self.buffer, end.as_bytes()) {
-                let tail = start + end.len();
-                if let Some(newline) = self.buffer[tail..].iter().position(|b| *b == b'\n') {
-                    let status = String::from_utf8_lossy(&self.buffer[tail..tail + newline])
-                        .trim()
-                        .parse::<i32>()
-                        .unwrap_or(1);
-                    let stdout = String::from_utf8_lossy(&self.buffer[..start]).into_owned();
-                    self.buffer.drain(..tail + newline + 1);
-                    return Ok(Output {
-                        success: status == 0,
-                        stdout,
-                    });
-                }
-            }
-            if self.buffer.len() > LIMIT {
-                self.broken = true;
-                return Err(Error::UsageSize);
-            }
-            let left = deadline.saturating_duration_since(Instant::now());
-            match self.output.recv_timeout(left) {
-                Ok(Ok(chunk)) => self.buffer.extend_from_slice(&chunk),
-                Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    self.broken = true;
-                    return Err(Error::UsageUnreachable);
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    self.broken = true;
-                    return Err(Error::UsageTimeout);
-                }
-            }
-        }
-    }
-
-    /// Assigns what `producer` prints to a new variable and hands back a
-    /// reference to it; None when it printed nothing or failed.
-    fn capture(&mut self, producer: &str) -> Option<Secret> {
-        self.variables += 1;
-        let variable = format!("herdr_s{}", self.variables);
-        let output = self
-            .run(
-                &format!("{variable}=$({producer} 2>/dev/null) && [ -n \"${variable}\" ]"),
-                STEP_TIMEOUT,
-            )
-            .ok()?;
-        output.success.then(|| Secret(Held::There(variable)))
-    }
-
-    /// `curl -K` reads the request from a here-document, so secrets expand
-    /// inside the host's shell and never appear in an argument list. `flags`
-    /// go before the config and `pipe` after it on the same line, as a
-    /// here-document requires.
-    fn curl(request: &Request, flags: &str, pipe: &str) -> Option<String> {
-        if request.url.contains(['\n', '"']) {
-            return None;
-        }
-        let mut config = format!("url = \"{}\"\n", escape(&request.url));
-        if request.method == Method::Post {
-            config.push_str("request = \"POST\"\n");
-        }
-        for (name, parts) in &request.headers {
-            config.push_str(&format!(
-                "header = \"{}: {}\"\n",
-                escape(name),
-                splice(parts)?
-            ));
-        }
-        if let Some(body) = &request.body {
-            config.push_str(&format!("data-raw = \"{}\"\n", splice(body)?));
-        }
-        let limit = request.timeout.as_secs().max(1);
-        Some(format!(
-            "curl -sS --max-time {limit} {flags} -K /dev/fd/3 3<<@@herdr-curl {pipe}\n{config}@@herdr-curl\n"
-        ))
-    }
-
-    fn http(&mut self, request: &Request) -> Result<Response> {
-        let curl = Self::curl(request, "-w '\\n@@herdr-status %{http_code}'", "")
-            .ok_or(Error::UsageMixedSecrets)?;
-        let output = self.run(
-            &format!("command -v curl >/dev/null 2>&1 || exit 127\n{curl}"),
-            request.timeout + Duration::from_secs(5),
-        )?;
-        let Some((body, status)) = output.stdout.rsplit_once("\n@@herdr-status ") else {
-            return Err(if output.stdout.is_empty() && !output.success {
-                Error::UsageMissingCurl
-            } else {
-                Error::UsageConnect
-            });
-        };
-        Ok(Response {
-            status: status.trim().parse().unwrap_or(0),
-            body: body.to_owned(),
-        })
-    }
-
-    fn exchange(&mut self, request: &Request, path: &[&str]) -> Result<Secret> {
-        let keys = path
-            .iter()
-            .map(|key| quote(key))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let curl = Self::curl(request, "-f", &format!("| herdr_field {keys}"))
-            .ok_or(Error::UsageMixedSecrets)?;
-        self.variables += 1;
-        let variable = format!("herdr_s{}", self.variables);
-        let output = self.run(
-            &format!("{variable}=$({curl}) && [ -n \"${variable}\" ]"),
-            request.timeout + Duration::from_secs(5),
-        )?;
-        if output.success {
-            Ok(Secret(Held::There(variable)))
-        } else {
-            Err(Error::UsageRejected)
-        }
-    }
-}
-
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
-
-/// Text for a double-quoted curl config value, inside an unquoted
-/// here-document: curl's escapes first, then the shell's.
-fn escape(text: &str) -> String {
-    text.replace('\\', "\\\\\\\\")
-        .replace('"', "\\\\\"")
-        .replace('$', "\\$")
-        .replace('`', "\\`")
-        .replace('\n', "\\\\n")
-}
-
-fn splice(parts: &[Part]) -> Option<String> {
-    let mut text = String::new();
-    for part in parts {
-        match part {
-            Part::Text(value) => text.push_str(&escape(value)),
-            Part::Secret(Secret(Held::There(variable))) => {
-                text.push_str(&format!("${{{variable}}}"));
-            }
-            // This machine's secrets never go to the host.
-            Part::Secret(Secret(Held::Here(_))) => return None,
-        }
-    }
-    Some(text)
 }
 
 /// Runs `command` to completion with a deadline, keeping at most `LIMIT`

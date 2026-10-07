@@ -3,16 +3,16 @@
 //! caches only.
 
 use super::{
-    DEVICE_FOOTER_HEIGHT, HOST_ARROW_WIDTH, HOST_GAP, STATUS_WIDTH, SidebarDrag, agent_name,
-    agents::{Indicators, agent_place, state_label, status_text},
+    DEVICE_FOOTER_HEIGHT, HOST_ARROW_WIDTH, HOST_GAP, STATUS_WIDTH, SidebarDrag,
+    agents::Indicators,
     agents_sort,
-    cell::{AgentRow, Cell, Fold, RowContext, RowData, RowState, WorkspaceRow, layout_for},
+    cell::{Cell, Fold, RowContext, RowData, RowState, WorkspaceRow, layout_for},
     label_text,
     layout::{self, SidebarLook},
     line_height,
     reorder::{self, Plan},
     row::{RowIcon, RowLift, RowTree, removing_dot},
-    sidebar_width, sorted_agents,
+    sidebar_width,
     tokens::{self, SpaceContext},
     visible_workspace_entries,
     workspaces::{displayed_workspace_status, workspace_badge, workspace_label},
@@ -23,6 +23,8 @@ use crate::{
     fonts::StyledFont,
 };
 use gpui::{prelude::*, *};
+
+mod agent_rows;
 
 impl HerdrWindow {
     pub(crate) fn render_sidebar(
@@ -45,8 +47,6 @@ impl HerdrWindow {
             (look.content_width(width) - HOST_ARROW_WIDTH - 2. * HOST_GAP - STATUS_WIDTH).max(0.);
         let view = cx.entity().downgrade();
         let font = &self.config.sidebar;
-        let agents_custom = self.config.usage.inline
-            && self.config.sidebar_layout.agents != crate::config::AgentLayout::default();
         let spaces_custom = self.config.usage.inline
             && self.config.sidebar_layout.spaces != crate::config::SpaceLayout::default();
         let theme = &self.theme;
@@ -264,6 +264,7 @@ impl HerdrWindow {
                 host: (multi && endpoint_id != crate::endpoint::LOCAL)
                     .then_some(endpoint.label.as_str()),
             };
+            let daemon = crate::listening_ports::Daemon::from(&endpoint.connection.target);
             let live = if selected { &self.live } else { &endpoint.live };
             let Some(snapshot) = &live.snapshot else {
                 continue;
@@ -409,6 +410,45 @@ impl HerdrWindow {
                 } else {
                     0.
                 };
+                let removing_row = selected
+                    && self.live.status.is_connected()
+                    && self.removal.as_ref().is_some_and(|removal| {
+                        removal.pending_for(
+                            (self.selection_epoch, endpoint.generation),
+                            &snapshot.boot_id,
+                            &workspace.workspace_id,
+                        )
+                    });
+                let ports = (self.config.show_listening_ports && !removing_row)
+                    .then(|| self.listening_ports.get(&daemon, &workspace.workspace_id))
+                    .flatten()
+                    .map(|listed| {
+                        // Under the label column, clear of the status dot.
+                        let indent = if indented {
+                            layout.child_indent() + indicators.width(font) - STATUS_WIDTH
+                        } else {
+                            0.
+                        };
+                        div()
+                            .debug_selector(|| format!("ports-{endpoint_id}-{id}"))
+                            .h(px(line_height(font)))
+                            .flex_none()
+                            .w_full()
+                            .min_w_0()
+                            .pl(px(content_x
+                                + indent
+                                + indicators.width(font)
+                                + layout.gap()))
+                            .pr(px(content_x))
+                            .text_size(px((font.size * 0.85).round()))
+                            .child(crate::listening_ports::chips(
+                                listed,
+                                (&endpoint_id, &workspace.workspace_id),
+                                theme,
+                                (font.size * 0.85).round(),
+                                cx,
+                            ))
+                    });
                 let element = Cell::new(
                     rows,
                     RowData::Workspace(WorkspaceRow {
@@ -434,15 +474,7 @@ impl HerdrWindow {
                             (&self.teleport_marks, &endpoint.id),
                             theme,
                         ),
-                        removing: selected
-                            && self.live.status.is_connected()
-                            && self.removal.as_ref().is_some_and(|removal| {
-                                removal.pending_for(
-                                    (self.selection_epoch, endpoint.generation),
-                                    &snapshot.boot_id,
-                                    &workspace.workspace_id,
-                                )
-                            }),
+                        removing: removing_row,
                         status: shown_status,
                         lines,
                     }),
@@ -553,77 +585,43 @@ impl HerdrWindow {
                         }),
                     )
                 })
-                .when(gap > 0., |row| row.mt(px(gap)))
-                .when(shift != px(0.), |row| row.top(shift));
+                .when(carried, |row| row.cursor_grabbing());
+                // Ports ride under their row as one list item, so the drop
+                // preview still measures one height per workspace.
+                let element = match ports {
+                    None => element
+                        .when(gap > 0., |row| row.mt(px(gap)))
+                        .when(shift != px(0.), |row| row.top(shift))
+                        .into_any_element(),
+                    Some(ports) => div()
+                        .flex()
+                        .flex_col()
+                        .flex_none()
+                        .w_full()
+                        .relative()
+                        .when(gap > 0., |unit| unit.mt(px(gap)))
+                        .when(shift != px(0.), |unit| unit.top(shift))
+                        .child(element)
+                        .child(ports)
+                        .into_any_element(),
+                };
                 spaces = if carried {
                     // Painted last so it floats over the rows it passes, while
                     // its layout slot keeps the others' positions stable.
-                    spaces.child(deferred(element.cursor_grabbing()).with_priority(1))
+                    spaces.child(deferred(element).with_priority(1))
                 } else {
                     spaces.child(element)
                 };
             }
-            if !self.config.show_agents {
-                continue;
+            // Agent rows come after every host: the panel interleaves them.
+            // Only a host the panel lists can make the view a filtered one.
+            if self.config.show_agents && endpoint.enabled {
+                filtered |= snapshot.agent_view_label.is_some();
             }
-            filtered |= snapshot.agent_view_label.is_some();
-            for agent in sorted_agents(snapshot, self.agent_sort) {
-                let lines = if agents_custom {
-                    let Some(lines) = tokens::agent_rows(
-                        &self.config.sidebar_layout.agents,
-                        agent,
-                        snapshot,
-                        row_cx.host,
-                    ) else {
-                        continue;
-                    };
-                    lines
-                } else {
-                    Vec::new()
-                };
-                if selected && agent.focused {
-                    highlighted[1] = Some(agent_count);
-                }
-                let gap = if agents_custom && agent_count > 0 {
-                    f32::from(self.config.sidebar_layout.agents.row_gap) * line_height(font)
-                } else {
-                    0.
-                };
-                agent_count += 1;
-                let id = agent.pane_id.clone();
-                let navigate_endpoint = endpoint_id.clone();
-                agents = agents.child(
-                    Cell::new(
-                        rows,
-                        RowData::Agent(AgentRow {
-                            key: format!("agent-{id}"),
-                            name: agent_name(agent),
-                            icon: crate::icons::AgentIcon::from_identity(agent.agent.as_deref()),
-                            status: agent.agent_status,
-                            place: agent_place(agent, snapshot),
-                            status_text: self
-                                .config
-                                .sidebar_layout
-                                .agents
-                                .shows_status_text(agent.agent.as_deref())
-                                .then(|| state_label(agent, status_text(agent.agent_status))),
-                            lines,
-                        }),
-                        &row_cx,
-                    )
-                    .selected(selected && agent.focused)
-                    .row()
-                    .when(gap > 0., |row| row.mt(px(gap)))
-                    .id(SharedString::from(format!("agent-{endpoint_id}-{id}")))
-                    .when(multi, |row| {
-                        row.debug_selector(|| format!("agent-{endpoint_id}-{id}"))
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.navigate_endpoint(&navigate_endpoint, NavigationTarget::Pane(&id), cx);
-                        window.focus(&this.focus, cx);
-                    })),
-                );
-            }
+        }
+        if self.config.show_agents {
+            (agents, agent_count, highlighted[1]) =
+                self.append_agent_rows(agents, indicators, look, width, cx);
         }
         if sliding {
             window.request_animation_frame();
@@ -746,7 +744,7 @@ impl HerdrWindow {
                             .cursor(CursorStyle::ResizeUpDown)
                             .border_t_1()
                             .border_color(rgb(theme.active))
-                            .hover(|s| s.bg(rgba(0x78a9ff44)))
+                            .hover(|s| s.bg(rgba(crate::panel_resize::RESIZE_HOVER)))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -794,7 +792,7 @@ impl HerdrWindow {
                     .h_full()
                     .w(px(6.))
                     .cursor(CursorStyle::ResizeLeftRight)
-                    .hover(|s| s.bg(rgba(0x78a9ff44)))
+                    .hover(|s| s.bg(rgba(crate::panel_resize::RESIZE_HOVER)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {

@@ -4,6 +4,11 @@ mod layouts;
 pub(crate) use layouts::{apply_loaded_layout, layout_load_revision};
 #[cfg(all(feature = "integration-test", target_os = "macos"))]
 mod native;
+mod persistence;
+mod remote_history;
+#[cfg(test)]
+use persistence::SizeIo;
+use persistence::{Loaded, SaveCompletion};
 mod themes;
 #[cfg(all(feature = "integration-test", target_os = "macos"))]
 pub(crate) use native::verify_native;
@@ -13,9 +18,9 @@ pub(crate) use themes::{
 
 use crate::{
     HerdrWindow,
-    config::{Config, FontFace, Theme, corners, mix},
+    config::{Config, Theme, corners, mix},
     fonts::StyledFont,
-    herdr_settings::{self, Edit},
+    herdr_settings,
 };
 use gpui::{prelude::*, *};
 
@@ -134,6 +139,7 @@ fn open_with(
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(680.), px(560.))),
             titlebar: Some(crate::titlebar::options("Settings")),
+            app_owns_titlebar_drag: cfg!(target_os = "macos"),
             ..Default::default()
         },
         move |window, cx| {
@@ -178,6 +184,10 @@ struct SettingsWindow {
     status: Option<String>,
     focus: FocusHandle,
     body_scroll: ScrollHandle,
+    /// The section list's width, dragged by its right edge.
+    navigation_width: crate::panel_resize::PanelWidth,
+    /// The window's width at its last render, which caps the section list.
+    viewport_width: f32,
     loading: bool,
     saving: bool,
     quitting: bool,
@@ -189,6 +199,12 @@ struct SettingsWindow {
     _source: Option<Subscription>,
     _appearance: Option<Subscription>,
     _watch: Option<Task<()>>,
+    /// The config files as our last save left them, for the watcher to accept
+    /// so the save's own write does not trigger a second reload.
+    saved_sample: Option<persistence::Sample>,
+    /// Enumerating system fonts takes hundreds of milliseconds, so each
+    /// Settings window does it once rather than on every load.
+    installed_fonts: std::sync::Arc<std::sync::OnceLock<Vec<String>>>,
     load_revision: u64,
     theme_revision: u64,
     theme_intent: Option<themes::ThemeIntent>,
@@ -197,6 +213,7 @@ struct SettingsWindow {
     layout_saving: bool,
     #[cfg(test)]
     layout_io: Option<layouts::LayoutIo>,
+    remote_history: remote_history::RemoteHistory,
     theme_loading: bool,
     theme_waiting: bool,
     theme_light: bool,
@@ -206,26 +223,6 @@ struct SettingsWindow {
     _theme_guard: Subscription,
     #[cfg(test)]
     theme_io: Option<themes::ThemeIo>,
-}
-
-struct Loaded {
-    config: Config,
-    theme: Theme,
-    shared: Option<herdr_settings::Settings>,
-    error: Option<String>,
-}
-
-type SaveCompletion =
-    std::result::Result<Option<herdr_settings::Settings>, std::sync::Arc<crate::Error>>;
-
-#[cfg(test)]
-type SizeWriter = dyn Fn(Vec<(FontFace, f32)>) -> crate::Result<()> + Send + Sync;
-
-#[cfg(test)]
-#[derive(Clone)]
-struct SizeIo {
-    write: std::sync::Arc<SizeWriter>,
-    load: fn() -> crate::Result<Loaded>,
 }
 
 impl SettingsWindow {
@@ -275,6 +272,8 @@ impl SettingsWindow {
             status: None,
             focus: cx.focus_handle(),
             body_scroll: ScrollHandle::new(),
+            navigation_width: crate::panel_resize::SETTINGS_NAVIGATION,
+            viewport_width: 0.,
             loading: false,
             saving: false,
             quitting: false,
@@ -286,6 +285,8 @@ impl SettingsWindow {
             _source: subscription,
             _appearance: None,
             _watch: None,
+            saved_sample: None,
+            installed_fonts: Default::default(),
             load_revision: 0,
             theme_revision: 0,
             theme_intent: None,
@@ -294,6 +295,7 @@ impl SettingsWindow {
             layout_saving: false,
             #[cfg(test)]
             layout_io: None,
+            remote_history: Default::default(),
             theme_loading: false,
             theme_waiting: false,
             theme_light: false,
@@ -332,6 +334,9 @@ impl SettingsWindow {
         if self.section == Section::Integrations {
             cx.notify();
         }
+        if self.section == Section::General {
+            self.sync_remote_history(false, cx);
+        }
     }
 
     fn retarget_source(&mut self, source: WeakEntity<HerdrWindow>, cx: &mut Context<Self>) {
@@ -356,10 +361,14 @@ impl SettingsWindow {
         if self.section == Section::Integrations {
             owner.update(cx, |source, cx| source.load_integrations(cx));
         }
+        if self.section == Section::General {
+            self.sync_remote_history(false, cx);
+        }
         cx.notify();
     }
 
     fn apply_window_appearance(&mut self, cx: &mut Context<Self>) {
+        self.follow_system_appearance(cx);
         self.sync_appearance(cx);
         self.drive_theme_intent(cx);
         self.publish_appearance(cx);
@@ -428,47 +437,6 @@ impl SettingsWindow {
         }
     }
 
-    fn watch_config(&mut self, cx: &mut Context<Self>) {
-        let Ok(path) = Config::local_path() else {
-            return;
-        };
-        let daemon = crate::config::daemon_config_path(|key| std::env::var_os(key));
-        self._watch = Some(cx.spawn(async move |this, cx| {
-            let mut watch = crate::config::watch::Watch::default();
-            let mut pending = None;
-            loop {
-                let (path, daemon) = (path.clone(), daemon.clone());
-                let sample = cx
-                    .background_executor()
-                    .spawn(async move {
-                        use crate::config::watch::fingerprint;
-                        [fingerprint(&path), fingerprint(&daemon)]
-                    })
-                    .await;
-                if this
-                    .update(cx, |this, cx| {
-                        if let Some((sample, revision)) = pending
-                            && revision != this.load_revision
-                        {
-                            watch.accept(sample);
-                            pending = None;
-                        }
-                        if watch.observe(sample) && !this.busy() {
-                            pending = Some((sample, this.load_revision));
-                            this.reload(cx);
-                        }
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(250))
-                    .await;
-            }
-        }));
-    }
-
     pub(super) fn busy(&self) -> bool {
         self.loading || self.saving || self.quitting
     }
@@ -534,76 +502,6 @@ impl SettingsWindow {
             .or_else(|| self.new_window_target.clone())
     }
 
-    fn shutdown(&mut self, cx: &mut Context<Self>) -> Task<crate::Result<()>> {
-        #[cfg(test)]
-        if let Some(io) = self.size_io.clone() {
-            return self.shutdown_with(move |sizes| (io.write)(sizes), cx);
-        }
-        self.shutdown_with(|sizes| Config::save_font_sizes(&sizes), cx)
-    }
-
-    fn shutdown_with(
-        &mut self,
-        write: impl FnOnce(Vec<(FontFace, f32)>) -> crate::Result<()> + Send + 'static,
-        cx: &mut Context<Self>,
-    ) -> Task<crate::Result<()>> {
-        self.quitting = true;
-        self._watch = None;
-        let pending = self.take_pending_control_sizes();
-        let theme = self.take_shutdown_theme();
-        let layout = self
-            .layout_intent
-            .take()
-            .filter(|_| !self.layout_saving)
-            .map(|mode| self.layout_operation(mode));
-        let completion = self.save_completion.take();
-        let executor = cx.background_executor().clone();
-        cx.background_executor().spawn(async move {
-            let mut shared = None;
-            let mut preceding = Ok(());
-            if let Some(completion) = completion {
-                // Yield rather than occupying the executor thread needed by
-                // the preceding save, including single-threaded test workers.
-                loop {
-                    match completion.try_recv() {
-                        Ok(result) => {
-                            match result {
-                                Ok(snapshot) => shared = snapshot,
-                                Err(error) => preceding = Err(crate::Error::SettingsSave(error)),
-                            }
-                            break;
-                        }
-                        Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
-                        Err(std::sync::mpsc::TryRecvError::Empty) => {
-                            executor.timer(std::time::Duration::from_millis(10)).await;
-                        }
-                    }
-                }
-            }
-            let sizes = if pending.is_empty() {
-                Ok(())
-            } else {
-                write(pending)
-            };
-            let theme = theme.map_or(Ok(()), |theme| theme(shared));
-            let layout = layout.map_or(Ok(()), |write| write());
-            preceding.and(sizes).and(theme).and(layout)
-        })
-    }
-
-    pub(super) fn save_control_sizes(
-        &mut self,
-        sizes: Vec<(FontFace, f32)>,
-        cx: &mut Context<Self>,
-    ) {
-        #[cfg(test)]
-        if let Some(io) = self.size_io.clone() {
-            self.save_with(move || (io.write)(sizes), io.load, false, cx);
-            return;
-        }
-        self.save_native(move || Config::save_font_sizes(&sizes), cx);
-    }
-
     pub(super) fn select_section(
         &mut self,
         section: Section,
@@ -622,266 +520,41 @@ impl SettingsWindow {
                 .source
                 .update(cx, |source, cx| source.load_integrations(cx));
         }
-        cx.notify();
-    }
-
-    fn loader(cx: &App) -> impl FnOnce() -> crate::Result<Loaded> + Send + 'static {
-        let light = matches!(
-            cx.window_appearance(),
-            WindowAppearance::Light | WindowAppearance::VibrantLight
-        );
-        let text_system = cx.text_system().clone();
-        move || {
-            let mut config = Config::load()?;
-            config.resolve_font_fallbacks(|| text_system.all_font_names());
-            let (shared, error, theme) = match herdr_settings::Settings::load() {
-                Ok(shared) => {
-                    config.apply_shared_notifications(&shared);
-                    let theme = if config.theme == "Follow Herdr" {
-                        shared.theme(light)?.with_contrast(config.contrast)
-                    } else {
-                        config.theme()?
-                    };
-                    (Some(shared), None, theme)
-                }
-                Err(error) if config.theme == "Follow Herdr" => return Err(error),
-                Err(error) => (
-                    None,
-                    Some(format!("Load shared settings: {error}")),
-                    config.theme()?,
-                ),
-            };
-            Ok(Loaded {
-                config,
-                theme,
-                shared,
-                error,
-            })
-        }
-    }
-
-    fn apply_loaded(&mut self, loaded: crate::Result<Loaded>, cx: &mut Context<Self>) {
-        self.load_revision = self.load_revision.wrapping_add(1);
-        let valid = loaded.is_ok();
-        match loaded {
-            Ok(loaded) => {
-                let live = self
-                    .theme_intent
-                    .as_ref()
-                    .map(|_| (self.config.theme.clone(), self.theme.clone()));
-                self.config = loaded.config;
-                if let Some(mode) = self.layout_intent {
-                    self.config.layout.mode = mode;
-                }
-                self.theme = loaded.theme;
-                if let Some((name, theme)) = live {
-                    self.config.theme = name;
-                    self.theme = theme;
-                }
-                self.shared = loaded.shared;
-                self.error = loaded.error;
-            }
-            Err(error) => {
-                self.error = Some(format!(
-                    "Could not reload settings; keeping current preferences: {error}"
-                ))
-            }
-        }
-        // Appearance may have changed while the loader was running. Resolve
-        // Follow Herdr from the prepared snapshot against the current OS mode.
-        self.sync_appearance(cx);
-        self.drive_theme_intent(cx);
-        if valid {
-            self.publish_appearance(cx);
+        if section == Section::General {
+            self.sync_remote_history(false, cx);
         }
         cx.notify();
     }
 
-    pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
-        self.reload_with(Self::loader(cx), cx);
-    }
-
-    fn reload_with(
-        &mut self,
-        load: impl FnOnce() -> crate::Result<Loaded> + Send + 'static,
-        cx: &mut Context<Self>,
-    ) {
-        if self.busy() {
-            return;
-        }
-        self.loading = true;
-        self.error = None;
-        // Size intents can arrive while this read is running. Keep the model
-        // alive until reconciliation has transferred them to the save worker.
-        let retained = cx.entity();
-        let load = cx.background_executor().spawn(async move { load() });
-        cx.spawn(async move |_, cx| {
-            let loaded = load.await;
-            retained.update(cx, |this, cx| {
-                this.loading = false;
-                if this.quitting {
-                    return;
-                }
-                this.apply_loaded(loaded, cx);
-                this.finish_close(cx);
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    pub(super) fn save_native(
-        &mut self,
-        operation: impl FnOnce() -> crate::Result<()> + Send + 'static,
-        cx: &mut Context<Self>,
-    ) {
-        self.save_with(operation, Self::loader(cx), false, cx);
-    }
-
-    pub(super) fn save_shared(&mut self, edit: Edit, cx: &mut Context<Self>) {
-        let Some(shared) = self.shared.clone() else {
-            return;
-        };
-        self.save_with(
-            move || shared.save(edit).map(|_| ()),
-            Self::loader(cx),
-            true,
-            cx,
-        );
-    }
-
-    fn save_with(
-        &mut self,
-        operation: impl FnOnce() -> crate::Result<()> + Send + 'static,
-        load: impl FnOnce() -> crate::Result<Loaded> + Send + 'static,
-        shared: bool,
-        cx: &mut Context<Self>,
-    ) {
-        self.save_with_completion(operation, load, shared, |_| {}, cx);
-    }
-
-    fn save_with_completion(
-        &mut self,
-        operation: impl FnOnce() -> crate::Result<()> + Send + 'static,
-        load: impl FnOnce() -> crate::Result<Loaded> + Send + 'static,
-        shared: bool,
-        on_saved: impl FnOnce(&mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
-    ) {
-        if self.busy() {
-            return;
-        }
-        self.saving = true;
-        self.error = None;
-        self.status = Some("Saving...".into());
-        let retained = cx.entity();
-        let (finished, completion) = std::sync::mpsc::sync_channel(1);
-        self.save_completion = Some(completion);
-        let work = cx.background_executor().spawn(async move {
-            let saved = operation().map_err(std::sync::Arc::new);
-            // A persistence error can occur after replacement. Always reconcile.
-            let loaded = load();
-            // Only our successful, reconciled write may advance the queued
-            // shared edit's optimistic-concurrency snapshot during shutdown.
-            let shared = if saved.is_ok() {
-                loaded
-                    .as_ref()
-                    .ok()
-                    .and_then(|loaded| loaded.shared.clone())
-            } else {
-                None
-            };
-            let _ = finished.send(saved.clone().map(|()| shared));
-            (saved, loaded)
-        });
-        cx.spawn(async move |_, cx| {
-            let (saved, loaded) = work.await;
-            retained.update(cx, |this, cx| {
-                this.saving = false;
-                this.save_completion = None;
-                if saved.is_ok() {
-                    on_saved(cx);
-                }
-                if this.quitting {
-                    return;
-                }
-                let reloaded = loaded.is_ok();
-                let theme_save = std::mem::take(&mut this.theme_saving);
-                let layout_save = std::mem::take(&mut this.layout_saving);
-                if saved.is_err() {
-                    this.closing = None;
-                }
-                if theme_save && saved.is_ok() {
-                    this.theme_intent = None;
-                    themes::clear_theme_draft(cx);
-                }
-                if layout_save && saved.is_ok() {
-                    this.layout_intent = None;
-                    layouts::clear_layout_draft(cx);
-                }
-                this.apply_loaded(loaded, cx);
-                if theme_save && saved.is_ok() {
-                    this.broadcast_theme(cx);
-                }
-                if layout_save && saved.is_ok() {
-                    this.broadcast_layout(cx);
-                }
-                this.finish_close(cx);
-                if !this.saving {
-                    this.status = Some(
-                        match (saved.is_ok(), reloaded) {
-                            (true, true) => "Saved",
-                            (true, false) => "Saved; could not reload current preferences",
-                            (false, true) => "Save failed; reloaded current preferences",
-                            (false, false) => "Save failed; reload before editing again",
-                        }
-                        .into(),
-                    );
-                }
-                if let Err(error) = &saved {
-                    this.error = Some(format!("Save settings: {error}"));
-                }
-                let _ = this.source.update(cx, |source, _| {
-                    // The source's guarded file watcher owns applying changes.
-                    // Direct loads here can overwrite its active picker preview.
-                    if shared && saved.is_ok() {
-                        // Use the existing connection, without stealing its response lane.
-                        if let Some(endpoint) = source.endpoints.iter().find(|endpoint| {
-                            !matches!(
-                                endpoint.connection.target,
-                                herdr_client::ConnectTarget::Ssh { .. }
-                            )
-                        }) && let (Some(handle), Some(snapshot)) =
-                            (&endpoint.connection.handle, &endpoint.live.snapshot)
-                            && endpoint.live.status.is_connected()
-                        {
-                            let status = match handle.request(
-                                &snapshot.boot_id,
-                                herdr_client::Method::ServerReloadConfig,
-                                serde_json::json!({}),
-                            ) {
-                                Ok(_) => "Saved; daemon reload queued (not acknowledged)".into(),
-                                Err(error) => {
-                                    format!("Saved; daemon reload not queued: {error}")
-                                }
-                            };
-                            if !this.saving {
-                                this.status = Some(status);
-                            }
-                        }
-                    }
-                });
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn navigation(&self, cx: &mut Context<Self>) -> Div {
+    fn navigation(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        use crate::panel_resize::{PanelDrag, Side, handle};
         let theme = &self.theme;
         div()
-            .w(px(184.))
+            .id("settings-navigation")
+            .relative()
+            .w(px(self.navigation_width.width(self.viewport_width)))
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<PanelDrag>, _, cx| {
+                    if *event.drag(cx) == PanelDrag::SettingsNavigation
+                        && this.navigation_width.drag(
+                            Side::Left,
+                            event.bounds,
+                            event.event.position.x,
+                        )
+                    {
+                        cx.notify();
+                    }
+                }),
+            )
+            .child(handle(
+                "settings-navigation-resize",
+                Side::Left,
+                PanelDrag::SettingsNavigation,
+                cx.listener(|this, _, _, cx| {
+                    this.navigation_width.reset();
+                    cx.notify();
+                }),
+            ))
             .h_full()
             .flex_none()
             .flex()
@@ -959,10 +632,15 @@ impl Render for SettingsWindow {
             Section::Integrations => self.render_integration_controls(cx),
             _ => self.render_controls(window, cx),
         };
+        self.viewport_width = f32::from(window.viewport_size().width);
         let navigation = self.navigation(cx);
         let font_picker = self.render_control_font_picker(window, cx);
+        let this = cx.entity().downgrade();
+        let header = crate::titlebar::header(&self.theme, window, move |window, cx| {
+            let _ = this.update(cx, |view, cx| view.close(window, cx));
+        });
         let theme = &self.theme;
-        div()
+        let root = div()
             .key_context("SettingsWindow")
             .relative()
             .track_focus(&self.focus)
@@ -993,11 +671,7 @@ impl Render for SettingsWindow {
             .line_height(px(18.))
             .bg(rgb(theme.background))
             .text_color(rgb(theme.foreground))
-            .map(|root| {
-                #[cfg(target_os = "macos")]
-                let root = root.child(crate::titlebar::render(theme.surface, None));
-                root
-            })
+            .children(header)
             .child(
                 div().flex_1().min_h_0().flex().child(navigation).child(
                     div()
@@ -1060,7 +734,7 @@ impl Render for SettingsWindow {
                         ),
                     )
                     .child(
-                        self.control_choice("settings-footer-reload", "Reload", false, !self.busy())
+                        self.control_choice("settings-footer-reload", "Reload", false, true)
                             .debug_selector(|| "settings-footer-reload".into())
                             .flex_none()
                             .px(px(10.))
@@ -1068,7 +742,9 @@ impl Render for SettingsWindow {
                             .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
                     ),
             )
-            .children(font_picker)
+            .children(font_picker);
+        let border = self.theme.active;
+        crate::titlebar::frame(window, border, root)
     }
 }
 

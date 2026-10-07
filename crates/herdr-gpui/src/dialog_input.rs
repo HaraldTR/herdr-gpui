@@ -2,7 +2,7 @@ use gpui::{prelude::*, *};
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::HerdrWindow;
+use super::{HerdrWindow, input::ViewInputHandler};
 
 // Byte offsets internally; only the platform input boundary uses UTF-16.
 #[derive(Default)]
@@ -145,10 +145,12 @@ impl DialogInput {
             }
             "backspace" | "delete" => {
                 if self.selection.is_empty() {
-                    self.selection = if key.key == "backspace" {
-                        previous..cursor
-                    } else {
-                        cursor..next
+                    // Cmd deletes to the line's start or end, as macOS fields do.
+                    self.selection = match (key.key.as_str(), key.modifiers.platform) {
+                        ("backspace", true) => 0..cursor,
+                        ("backspace", false) => previous..cursor,
+                        (_, true) => cursor..self.text.len(),
+                        (_, false) => cursor..next,
                     };
                 }
                 self.replace(None, "", false, None);
@@ -227,7 +229,7 @@ impl HerdrWindow {
                         let focused = focus.is_focused(window);
                         window.handle_input(
                             &focus,
-                            ElementInputHandler::new(bounds, entity.clone()),
+                            ViewInputHandler::new(bounds, entity.clone()),
                             cx,
                         );
                         entity.update(cx, |this, cx| {
@@ -358,6 +360,23 @@ mod tests {
             assert_eq!(input.text, "e\u{301}X");
             input.replace(None, &"x".repeat(20000), false, None);
             assert_eq!(input.text.len(), 4100);
+        });
+    }
+
+    #[gpui::test]
+    fn cmd_backspace_and_cmd_delete_reach_the_line_ends(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut input = DialogInput::new("one two".into());
+            input.key(&Keystroke::parse("cmd-left").unwrap_or_default(), cx);
+            for _ in 0..3 {
+                input.key(&Keystroke::parse("right").unwrap_or_default(), cx);
+            }
+            input.key(&Keystroke::parse("cmd-delete").unwrap_or_default(), cx);
+            assert_eq!(input.text, "one");
+            input.key(&Keystroke::parse("left").unwrap_or_default(), cx);
+            input.key(&Keystroke::parse("cmd-backspace").unwrap_or_default(), cx);
+            assert_eq!(input.text, "e");
+            assert_eq!(input.selection, 0..0);
         });
     }
 }

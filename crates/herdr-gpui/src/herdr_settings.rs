@@ -15,13 +15,14 @@ mod persistence;
 #[cfg(windows)]
 #[path = "herdr_settings/persistence_windows.rs"]
 mod persistence;
+mod remote;
 #[cfg(test)]
-#[path = "herdr_settings/tests.rs"]
 mod tests;
 
 pub(crate) use crate::config::ClipboardToastPosition as ClipboardPosition;
 use herdr_client::protocol::AgentStatus;
 pub(crate) use herdr_client::protocol::ToastHerdrPosition as ToastPosition;
+pub(crate) use remote::RemotePaneHistory;
 use serde::Deserialize;
 use std::{env, path::PathBuf};
 use toml_edit::{DocumentMut, Item, Value};
@@ -79,6 +80,18 @@ pub(crate) enum Error {
     Theme(String),
     #[error("cannot edit non-table config field {0}")]
     Table(&'static str),
+    #[error("could not reach the host's Herdr config")]
+    Remote(#[source] herdr_client::Error),
+    #[error("the host's Herdr config changed; reload before saving")]
+    RemoteConflict,
+    #[error("the host's Herdr config is not a regular file; symlink targets are refused")]
+    RemoteUnsafePath,
+    #[error("the host's Herdr config exceeds the 64 KiB limit for remote edits")]
+    RemoteTooLarge,
+    #[error("the host's Herdr config is not UTF-8")]
+    RemoteUtf8(#[source] std::string::FromUtf8Error),
+    #[error("unexpected output reading the host's Herdr config")]
+    RemoteOutput,
     #[cfg(unix)]
     #[error("could not remove shared config temporary file: {cleanup}")]
     Cleanup {
@@ -177,6 +190,7 @@ pub(crate) enum Edit {
     CopyOnSelect(bool),
     TabBarPosition(TabBarPosition),
     HideSingleTabBar(bool),
+    PaneHistory(bool),
 }
 
 #[derive(Clone)]
@@ -199,6 +213,10 @@ pub(crate) struct Settings {
     pub sidebar_collapsed_mode: SidebarCollapsedMode,
     pub sidebar_start_collapsed: bool,
     pub name_prompts: NamePrompts,
+    /// Herdr's `experimental.pane_history`: the daemon saves pane scrollback
+    /// to `session-history.json` and replays it after a full restart. The
+    /// GUI never stores terminal output itself.
+    pub pane_history: bool,
     palettes: [palette::Palette; 2],
     original: persistence::Snapshot,
 }
@@ -226,6 +244,7 @@ impl std::fmt::Debug for Settings {
             .field("sidebar_collapsed_mode", &self.sidebar_collapsed_mode)
             .field("sidebar_start_collapsed", &self.sidebar_start_collapsed)
             .field("name_prompts", &self.name_prompts)
+            .field("pane_history", &self.pane_history)
             .finish_non_exhaustive()
     }
 }
@@ -237,6 +256,15 @@ struct Parsed {
     theme: palette::ThemeConfig,
     #[serde(deserialize_with = "crate::lenient::or_default")]
     ui: Ui,
+    #[serde(deserialize_with = "crate::lenient::or_default")]
+    experimental: Experimental,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct Experimental {
+    #[serde(deserialize_with = "crate::lenient::or_default")]
+    pane_history: bool,
 }
 
 #[derive(Default, Deserialize)]
@@ -408,6 +436,7 @@ impl Settings {
             sidebar_collapsed_mode: parsed.ui.sidebar_collapsed_mode,
             sidebar_start_collapsed: parsed.ui.sidebar_start_collapsed,
             name_prompts,
+            pane_history: parsed.experimental.pane_history,
             palettes,
             original,
         })
@@ -458,6 +487,11 @@ impl Settings {
                     &mut document,
                     &["ui", "hide_tab_bar_when_single_tab"],
                     hide.into(),
+                )?,
+                Edit::PaneHistory(enabled) => set(
+                    &mut document,
+                    &["experimental", "pane_history"],
+                    enabled.into(),
                 )?,
                 Edit::Toasts(delivery) => {
                     set(

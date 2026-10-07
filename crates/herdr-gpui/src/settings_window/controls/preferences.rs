@@ -48,15 +48,16 @@ impl SettingsWindow {
 
     pub(in crate::settings_window) fn control_switch(
         &self,
-        id: &'static str,
-        label: &'static str,
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
         checked: bool,
         enabled: bool,
     ) -> Stateful<Div> {
         let (track, thumb) = switch_colors(&self.theme, checked);
+        let id = id.into();
         div()
-            .id(id)
-            .debug_selector(move || id.into())
+            .id(ElementId::Name(id.clone()))
+            .debug_selector(move || id.to_string())
             .flex()
             .items_center()
             .justify_between()
@@ -64,7 +65,7 @@ impl SettingsWindow {
             .py(px(8.))
             .when(enabled, |row| row.cursor_pointer())
             .when(!enabled, |row| row.opacity(0.5))
-            .child(label)
+            .child(label.into())
             .child(
                 div()
                     .w(px(36.))
@@ -88,12 +89,8 @@ impl SettingsWindow {
         edit: Preference,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        self.control_switch(id, label, checked, !self.busy())
-            .when(!self.busy(), |row| {
-                row.on_click(cx.listener(move |this, _, _, cx| {
-                    this.save_preference(edit, cx);
-                }))
-            })
+        self.control_switch(id, label, checked, true)
+            .on_click(cx.listener(move |this, _, _, cx| this.save_preference(edit, cx)))
     }
 
     fn preference_choice(
@@ -104,12 +101,8 @@ impl SettingsWindow {
         edit: Preference,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        self.control_choice(id, label.into(), selected, !self.busy())
-            .when(!self.busy(), |row| {
-                row.on_click(cx.listener(move |this, _, _, cx| {
-                    this.save_preference(edit, cx);
-                }))
-            })
+        self.control_choice(id, label.into(), selected, true)
+            .on_click(cx.listener(move |this, _, _, cx| this.save_preference(edit, cx)))
     }
 
     pub(super) fn native_notification_controls(&self, cx: &mut Context<Self>) -> Div {
@@ -273,7 +266,12 @@ mod tests {
             (
                 Section::General,
                 "settings-confirm-close",
-                Preference::ConfirmClose(false),
+                Preference::ConfirmCloseTab(false),
+            ),
+            (
+                Section::General,
+                "settings-confirm-close-pane",
+                Preference::ConfirmClosePane(false),
             ),
             (
                 Section::General,

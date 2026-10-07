@@ -9,7 +9,7 @@ use super::{
     cell::RowState,
     label_text,
     layout::{self, SidebarLook},
-    line_height, sorted_agents, visible_workspace_entries,
+    line_height, visible_workspace_entries,
     workspaces::workspace_label,
 };
 use crate::{
@@ -281,72 +281,86 @@ impl HerdrWindow {
                     })),
                 );
             }
-            if !self.config.show_agents {
+        }
+        // Agents come after every host: the panel interleaves them.
+        let panel = if self.config.show_agents {
+            self.panel_agents()
+        } else {
+            Vec::new()
+        };
+        for (index, agent) in panel {
+            let Some(endpoint) = self.endpoints.get(index) else {
+                continue;
+            };
+            // A collapsed host folds its agents away with its workspaces.
+            if multi && endpoint.collapsed {
                 continue;
             }
-            for agent in sorted_agents(snapshot, self.agent_sort) {
-                let id = agent.pane_id.clone();
-                let key = format!("rail-agent-{endpoint_id}-{id}");
-                let navigate_endpoint = endpoint_id.clone();
-                let focused = selected && agent.focused;
-                let place = agent_place(agent, snapshot);
-                let place = place.map(|(workspace, tab)| match tab {
-                    Some(tab) => format!("{workspace} / {tab}"),
-                    None => workspace.to_owned(),
-                });
-                agents = agents.child(
-                    rail_row(
-                        &key,
-                        RowState {
-                            selected: focused,
-                            ..RowState::default()
-                        },
-                        font,
-                        look,
-                        theme,
-                    )
-                    .gap(px(MARK_GAP))
-                    // Herdr's rail prefixes each agent with its machine's
-                    // initial once more than one host shares the list.
-                    .when(multi, |row| {
-                        row.child(
-                            div()
-                                .flex_none()
-                                .text_color(rgb(theme.muted))
-                                .child(label_text(&initial)),
-                        )
-                    })
-                    .child(
-                        svg()
-                            .debug_selector(|| format!("rail-agent-icon-{id}"))
-                            .path(
-                                crate::icons::AgentIcon::from_identity(agent.agent.as_deref())
-                                    .path(),
-                            )
-                            .size(px(AGENT_ICON.min(font.size + 1.)))
+            let selected = index == self.selected_endpoint;
+            let live = if selected { &self.live } else { &endpoint.live };
+            let Some(snapshot) = live.snapshot.as_deref() else {
+                continue;
+            };
+            let endpoint_id = &endpoint.id;
+            let host = multi.then_some(endpoint.label.as_str());
+            let id = agent.pane_id.clone();
+            let key = format!("rail-agent-{endpoint_id}-{id}");
+            let navigate_endpoint = endpoint_id.clone();
+            let focused = selected && agent.focused;
+            let place = agent_place(agent, snapshot);
+            let place = place.map(|(workspace, tab)| match tab {
+                Some(tab) => format!("{workspace} / {tab}"),
+                None => workspace.to_owned(),
+            });
+            agents = agents.child(
+                rail_row(
+                    &key,
+                    RowState {
+                        selected: focused,
+                        ..RowState::default()
+                    },
+                    font,
+                    look,
+                    theme,
+                )
+                .gap(px(MARK_GAP))
+                // Herdr's rail prefixes each agent with its machine's
+                // initial once more than one host shares the list.
+                .when(multi, |row| {
+                    row.child(
+                        div()
                             .flex_none()
-                            .text_color(rgb(if focused {
-                                theme.foreground
-                            } else {
-                                theme.muted
-                            })),
+                            .text_color(rgb(theme.muted))
+                            .child(label_text(&host_initial(&endpoint.label))),
                     )
-                    .child(indicator(agent.agent_status, font, indicators))
-                    .id(SharedString::from(key.clone()))
-                    .debug_selector(|| key)
-                    .cursor_pointer()
-                    .tooltip(hint.with(describe(
-                        host,
-                        agent_name(agent),
-                        place.as_deref(),
-                        agent_status_word(agent).as_deref(),
-                    )))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.navigate_endpoint(&navigate_endpoint, NavigationTarget::Pane(&id), cx);
-                        window.focus(&this.focus, cx);
-                    })),
-                );
-            }
+                })
+                .child(
+                    svg()
+                        .debug_selector(|| format!("rail-agent-icon-{id}"))
+                        .path(crate::icons::AgentIcon::from_identity(agent.agent.as_deref()).path())
+                        .size(px(AGENT_ICON.min(font.size + 1.)))
+                        .flex_none()
+                        .text_color(rgb(if focused {
+                            theme.foreground
+                        } else {
+                            theme.muted
+                        })),
+                )
+                .child(indicator(agent.agent_status, font, indicators))
+                .id(SharedString::from(key.clone()))
+                .debug_selector(|| key)
+                .cursor_pointer()
+                .tooltip(hint.with(describe(
+                    host,
+                    agent_name(agent),
+                    place.as_deref(),
+                    agent_status_word(agent).as_deref(),
+                )))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.navigate_endpoint(&navigate_endpoint, NavigationTarget::Pane(&id), cx);
+                    window.focus(&this.focus, cx);
+                })),
+            );
         }
         div()
             .id("sidebar-rail")
@@ -366,14 +380,8 @@ impl HerdrWindow {
             .bg(rgb(theme.sidebar_background()))
             .border_r_1()
             .border_color(rgb(theme.active))
-            .child(
-                rail_button("rail-expand", font, look, theme)
-                    .tooltip(hint.with("Expand sidebar"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.command(Command::ToggleSidebar, window, cx);
-                    }))
-                    .child(crate::titlebar::sidebar_glyph(false, theme)),
-            )
+            // No expand control of its own: the title bar's sidebar toggle,
+            // in the header or leading the tab row, is always on screen.
             .child(
                 div()
                     .debug_selector(|| "rail-spaces-section".into())
@@ -541,267 +549,4 @@ impl Hint {
 }
 
 #[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
-
-    use super::*;
-    use crate::{
-        config::LayoutMode,
-        herdr_settings::Settings,
-        sidebar::layout_tests::{SidebarFixture, fixture_window, full_draw, snapshot},
-    };
-    use core::prelude::v1::test;
-    use gpui::{Modifiers, TestAppContext, VisualTestContext, size};
-    use herdr_client::ConnectTarget;
-    use std::sync::Arc;
-
-    fn rail_window(
-        cx: &mut TestAppContext,
-        hosts: usize,
-    ) -> (Entity<HerdrWindow>, &mut VisualTestContext) {
-        let (fixture, cx) = cx.add_window_view(move |window, cx| {
-            let view = cx.new(|cx| {
-                let mut view = fixture_window(window, cx);
-                view.live.snapshot = Some(Arc::new(snapshot(6)));
-                view.endpoints[0].live = view.live.clone();
-                for host in 1..hosts {
-                    let mut remote = crate::endpoint::Endpoint::new(
-                        format!("ssh:host{host}"),
-                        format!("build{host}"),
-                        ConnectTarget::Ssh {
-                            target: "unused".into(),
-                            session: "default".into(),
-                        },
-                        true,
-                    );
-                    remote.live.snapshot = Some(Arc::new(snapshot(2)));
-                    view.endpoints.push(remote);
-                }
-                view.sidebar_visible = false;
-                view
-            });
-            cx.observe(&view, |_, _, cx| cx.notify()).detach();
-            SidebarFixture(view)
-        });
-        let view = cx.update(|_, cx| fixture.read(cx).0.clone());
-        cx.simulate_resize(size(px(900.), px(600.)));
-        cx.run_until_parked();
-        cx.update(|window, cx| full_draw(window, cx).clear(cx));
-        (view, cx)
-    }
-
-    fn set_shared(view: &Entity<HerdrWindow>, text: &str, cx: &mut VisualTestContext) {
-        view.update(cx, |view, cx| {
-            view.settings.shared = Some(Settings::parse_text(text).unwrap());
-            cx.notify();
-        });
-        cx.update(|window, cx| full_draw(window, cx).clear(cx));
-    }
-
-    #[gpui::test]
-    fn collapsed_sidebar_is_a_rail_in_every_layout_that_navigates(cx: &mut TestAppContext) {
-        let (view, cx) = rail_window(cx, 1);
-        for mode in LayoutMode::ALL {
-            view.update(cx, |view, cx| {
-                view.config.layout.mode = mode;
-                view.pending_navigation = None;
-                cx.notify();
-            });
-            cx.update(|window, cx| full_draw(window, cx).clear(cx));
-            assert!(cx.debug_bounds("sidebar").is_none(), "{mode:?}");
-            let rail = cx.debug_bounds("sidebar-rail").unwrap();
-            assert_eq!(rail.size.width, px(RAIL_WIDTH), "{mode:?}");
-            let terminal = cx.debug_bounds("terminal").unwrap();
-            assert!(terminal.left() >= rail.right(), "{mode:?}");
-            // Every workspace, and every agent, keeps a mark inside the rail.
-            for selector in [
-                "rail-expand",
-                "rail-workspace-local-w0",
-                "rail-workspace-local-w5",
-                "rail-agent-local-p0",
-                "rail-agent-local-p1",
-                "rail-new-workspace",
-            ] {
-                let mark = cx.debug_bounds(selector).unwrap_or_else(|| {
-                    panic!("{mode:?}: missing {selector}");
-                });
-                assert!(
-                    mark.left() >= rail.left() && mark.right() <= rail.right(),
-                    "{mode:?} {selector}: {mark:?} outside {rail:?}"
-                );
-            }
-            // No host header for a single host.
-            assert!(cx.debug_bounds("rail-host-local").is_none());
-            let workspace = cx.debug_bounds("rail-workspace-local-w3").unwrap();
-            cx.simulate_click(workspace.center(), Modifiers::default());
-            view.read_with(cx, |view, _| {
-                assert_eq!(
-                    view.pending_navigation,
-                    Some(NavigationTarget::Workspace("w3".into())),
-                    "{mode:?}"
-                );
-            });
-            cx.update(|window, cx| full_draw(window, cx).clear(cx));
-            let agent = cx.debug_bounds("rail-agent-local-p1").unwrap();
-            cx.simulate_click(agent.center(), Modifiers::default());
-            view.read_with(cx, |view, _| {
-                assert_eq!(
-                    view.pending_navigation,
-                    Some(NavigationTarget::Pane("p1".into())),
-                    "{mode:?}"
-                );
-                assert!(!view.sidebar_visible);
-            });
-        }
-        // The rail's own control expands the sidebar again.
-        let expand = cx.debug_bounds("rail-expand").unwrap();
-        cx.simulate_click(expand.center(), Modifiers::default());
-        cx.update(|window, cx| full_draw(window, cx).clear(cx));
-        assert!(view.read_with(cx, |view, _| view.sidebar_visible));
-        assert!(cx.debug_bounds("sidebar").is_some());
-        assert!(cx.debug_bounds("sidebar-rail").is_none());
-    }
-
-    #[gpui::test]
-    fn rail_follows_shared_collapsed_mode(cx: &mut TestAppContext) {
-        let (view, cx) = rail_window(cx, 1);
-        let rail_right = cx.debug_bounds("sidebar-rail").unwrap().right();
-        set_shared(&view, "[ui]\nsidebar_collapsed_mode = 'hidden'\n", cx);
-        assert!(cx.debug_bounds("sidebar-rail").is_none());
-        assert!(cx.debug_bounds("sidebar").is_none());
-        // Hidden gives the rail's room and the sidebar gap back to the terminal.
-        let terminal = cx.debug_bounds("terminal").unwrap();
-        assert!(terminal.left() < rail_right);
-        set_shared(&view, "[ui]\nsidebar_collapsed_mode = 'compact'\n", cx);
-        assert!(cx.debug_bounds("sidebar-rail").is_some());
-        // Expanding ignores the collapsed mode.
-        view.update(cx, |view, cx| {
-            view.toggle_sidebar();
-            cx.notify();
-        });
-        cx.update(|window, cx| full_draw(window, cx).clear(cx));
-        assert!(cx.debug_bounds("sidebar").is_some());
-    }
-
-    #[gpui::test]
-    fn rail_shows_a_header_per_host_and_skips_collapsed_hosts(cx: &mut TestAppContext) {
-        let (view, cx) = rail_window(cx, 3);
-        let rail = cx.debug_bounds("sidebar-rail").unwrap();
-        for selector in [
-            "rail-host-local",
-            "rail-host-ssh:host1",
-            "rail-host-ssh:host2",
-            "rail-host-status-ssh:host1",
-            "rail-workspace-local-w0",
-            "rail-workspace-ssh:host1-w0",
-            "rail-workspace-ssh:host2-w1",
-            "rail-agent-ssh:host2-p0",
-        ] {
-            let mark = cx
-                .debug_bounds(selector)
-                .unwrap_or_else(|| panic!("missing {selector}"));
-            assert!(mark.right() <= rail.right(), "{selector}");
-        }
-        // Hosts list in order, each above its own workspaces.
-        let first = cx.debug_bounds("rail-host-ssh:host1").unwrap().top();
-        let second = cx.debug_bounds("rail-host-ssh:host2").unwrap().top();
-        let workspace = cx.debug_bounds("rail-workspace-ssh:host1-w1").unwrap();
-        assert!(first < workspace.top() && workspace.top() < second);
-        view.update(cx, |view, cx| {
-            view.endpoints[1].collapsed = true;
-            cx.notify();
-        });
-        cx.update(|window, cx| full_draw(window, cx).clear(cx));
-        assert!(cx.debug_bounds("rail-host-ssh:host1").is_some());
-        assert!(cx.debug_bounds("rail-workspace-ssh:host1-w0").is_none());
-        assert!(cx.debug_bounds("rail-agent-ssh:host1-p0").is_none());
-        assert!(cx.debug_bounds("rail-workspace-ssh:host2-w0").is_some());
-        // A host header selects its host, as the expanded header does, even
-        // while its rows are folded away.
-        let host = cx.debug_bounds("rail-host-ssh:host1").unwrap();
-        cx.simulate_click(host.center(), Modifiers::default());
-        view.read_with(cx, |view, _| {
-            assert_eq!(view.endpoints[view.selected_endpoint].id, "ssh:host1");
-        });
-    }
-
-    #[gpui::test]
-    fn narrow_windows_keep_the_terminal_reserve(cx: &mut TestAppContext) {
-        let (_, cx) = rail_window(cx, 2);
-        for (width, rail) in [(900., RAIL_WIDTH), (270., 30.), (200., 0.)] {
-            cx.simulate_resize(size(px(width), px(400.)));
-            cx.update(|window, cx| full_draw(window, cx).clear(cx));
-            assert_eq!(
-                cx.debug_bounds("sidebar-rail")
-                    .map_or(px(0.), |bounds| bounds.size.width),
-                px(rail),
-                "{width}"
-            );
-        }
-    }
-
-    #[gpui::test]
-    fn start_collapsed_applies_once_and_yields_to_an_earlier_toggle(cx: &mut TestAppContext) {
-        let (view, cx) = rail_window(cx, 1);
-        let collapsed = Settings::parse_text("[ui]\nsidebar_start_collapsed = true\n").unwrap();
-        view.update(cx, |view, _| {
-            // A fresh window stays expanded until the first shared load.
-            view.sidebar_visible = true;
-            view.sidebar_start_pending = true;
-            view.settings.shared = Some(Settings::parse_text("").unwrap());
-            view.apply_sidebar_start();
-            assert!(view.sidebar_visible);
-            // Only the first load counts; a later edit waits for a restart.
-            view.settings.shared = Some(collapsed.clone());
-            view.apply_sidebar_start();
-            assert!(view.sidebar_visible);
-
-            view.sidebar_start_pending = true;
-            view.apply_sidebar_start();
-            assert!(!view.sidebar_visible);
-            // Expanding afterwards sticks across reloads.
-            view.toggle_sidebar();
-            view.apply_sidebar_start();
-            assert!(view.sidebar_visible);
-
-            // Toggling before the settings arrive keeps the user's choice.
-            view.sidebar_start_pending = true;
-            view.toggle_sidebar();
-            view.toggle_sidebar();
-            view.apply_sidebar_start();
-            assert!(view.sidebar_visible);
-        });
-    }
-
-    #[test]
-    fn tooltips_name_host_place_and_status() {
-        assert_eq!(
-            describe(
-                Some("build"),
-                "review",
-                Some("herdr / tab 2"),
-                status_word(AgentStatus::Blocked)
-            ),
-            "build: review in herdr / tab 2 (blocked)"
-        );
-        assert_eq!(
-            describe(None, "herdr", None, status_word(AgentStatus::Unknown)),
-            "herdr"
-        );
-        let mut snapshot = snapshot(1);
-        let agent = &mut snapshot.agents[0];
-        assert_eq!(agent_status_word(agent).as_deref(), Some("working"));
-        agent.state_labels = vec![("working".into(), "deep in the mines".into())];
-        assert_eq!(
-            agent_status_word(agent).as_deref(),
-            Some("deep in the mines")
-        );
-        agent.agent_status = AgentStatus::Unknown;
-        assert_eq!(agent_status_word(agent), None);
-        agent.state_labels = vec![("unknown".into(), "resting".into())];
-        assert_eq!(agent_status_word(agent).as_deref(), Some("resting"));
-        assert_eq!(host_initial("  ssh box"), "S");
-        assert_eq!(host_initial(""), "?");
-        assert_eq!(host_initial("éclair"), "É");
-    }
-}
+mod tests;

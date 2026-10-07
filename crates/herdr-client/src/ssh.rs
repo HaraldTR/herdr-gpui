@@ -2,58 +2,55 @@
 //! No installers, daemon restarts, SSH config edits, or trust-on-first-use.
 //! The remote host is always POSIX; the local half needs a socket pair it can
 //! hand to the `ssh` child as its standard streams, which only Unix provides.
+//! The bridge and probe scripts, and the handshake that reads them, are shared
+//! with WSL distributions, which run the same scripts through `wsl.exe`.
 #[cfg(unix)]
 use crate::limits::POLL;
 use crate::{Error, Result, catalog::validate_target, session_socket, transport::Stream};
 #[cfg(unix)]
+use std::os::fd::OwnedFd;
 use std::{
     io::{self, Read, Write},
-    os::fd::OwnedFd,
+    path::Path,
     process::{Child, Command, Stdio},
-    sync::atomic::Ordering,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
-use std::{path::Path, sync::atomic::AtomicBool};
 
-#[cfg(unix)]
 const READY: &[u8] = b"herdr-remote-output-ready:1\n";
 
-#[cfg(unix)]
-pub(crate) struct SshChild(pub(super) Child);
-#[cfg(unix)]
-impl Drop for SshChild {
+/// A bridge, probe, or script child (`ssh`, or `wsl.exe` on Windows), killed
+/// and reaped on every exit path.
+pub(crate) struct ChildGuard(pub(crate) Child);
+impl Drop for ChildGuard {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
 }
 
-/// No bridge child is ever spawned on Windows, so this type has no values.
-#[cfg(windows)]
-pub(crate) enum SshChild {}
-
-#[cfg(unix)]
 pub(super) use crate::script::shell_quote as quote;
 
 // PATH first, excluding mise shims, followed by upstream's known install roots.
 // Keep paths in shell variables: discovered executable names are never eval'd.
-#[cfg(unix)]
 pub(super) const CANDIDATES: &str = r#"candidate=$(command -v herdr 2>/dev/null || :)
 case "$candidate" in /*/mise/shims/herdr) candidate=;; /*) ;; *) candidate=;; esac
 for path in "$candidate" "$HOME/.local/bin/herdr" /opt/homebrew/bin/herdr /usr/local/bin/herdr /home/linuxbrew/.linuxbrew/bin/herdr "$HOME/.nix-profile/bin/herdr" "/etc/profiles/per-user/$USER/bin/herdr" /nix/var/nix/profiles/default/bin/herdr /run/current-system/sw/bin/herdr; do"#;
 
-#[cfg(unix)]
 const PROBE_CANDIDATE: &str = "herdr-probe:candidate";
-#[cfg(unix)]
 const PROBE_DONE: &str = "herdr-probe:done";
-#[cfg(unix)]
-const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(unix)]
+pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const PROBE_OUTPUT_LIMIT: u64 = 64 * 1024;
 
 #[cfg(unix)]
 fn bridge_command(session: &str) -> String {
-    let script = format!(
+    format!("/bin/sh -c {}", quote(&bridge_script(session)))
+}
+
+/// The bridge as a script for `/bin/sh -c`: report each candidate's client
+/// status, then run whichever one the handshake accepts.
+pub(crate) fn bridge_script(session: &str) -> String {
+    format!(
         r#"{CANDIDATES}
     if [ -n "$path" ] && [ -x "$path" ]; then
         status=$("$path" status client --json </dev/null) || continue
@@ -68,8 +65,7 @@ fn bridge_command(session: &str) -> String {
 done
 exit 127"#,
         session = quote(session)
-    );
-    format!("/bin/sh -c {}", quote(&script))
+    )
 }
 
 /// What a remote host offers for a saved SSH device, learned without
@@ -93,7 +89,12 @@ pub enum HostProbe {
 /// the choice between them stays with the same rules the bridge applies.
 #[cfg(unix)]
 fn probe_command(session: &str) -> String {
-    let script = format!(
+    format!("/bin/sh -c {}", quote(&probe_script(session)))
+}
+
+/// The probe as a script for `/bin/sh -c`.
+pub(crate) fn probe_script(session: &str) -> String {
+    format!(
         r#"{CANDIDATES}
     if [ -n "$path" ] && [ -x "$path" ]; then
         status=$("$path" status client --json </dev/null) || continue
@@ -103,14 +104,12 @@ fn probe_command(session: &str) -> String {
 done
 printf '%s\n' '{PROBE_DONE}'"#,
         session = quote(session)
-    );
-    format!("/bin/sh -c {}", quote(&script))
+    )
 }
 
 /// `None` when the script never finished, so partial output is not mistaken
 /// for a host without Herdr.
-#[cfg(unix)]
-fn classify_probe(output: &[u8]) -> Option<HostProbe> {
+pub(crate) fn classify_probe(output: &[u8]) -> Option<HostProbe> {
     // Each block holds one candidate's client status, then its server status.
     let mut blocks: Vec<Vec<serde_json::Value>> = Vec::new();
     for line in output.split(|b| *b == b'\n') {
@@ -273,13 +272,12 @@ fn run_remote(
 
 /// Runs `command` with a deadline, keeping at most `PROBE_OUTPUT_LIMIT` bytes
 /// of stdout and discarding stderr.
-#[cfg(unix)]
-fn run(
+pub(crate) fn run(
     command: &mut Command,
     timeout: Duration,
     cancelled: impl Fn() -> bool,
 ) -> Result<(std::process::ExitStatus, Vec<u8>)> {
-    let mut child = SshChild(
+    let mut child = ChildGuard(
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -328,7 +326,7 @@ pub fn probe_host(target: &str, session: &str) -> Result<HostProbe> {
 pub fn remote_origin_url(
     target: &str,
     _git_dir: &str,
-    _timeout: std::time::Duration,
+    _timeout: Duration,
     _cancelled: impl Fn() -> bool,
 ) -> Result<Option<String>> {
     validate_target(target)?;
@@ -340,7 +338,7 @@ pub fn remote_config_value(
     target: &str,
     _git_dir: &str,
     _key: &str,
-    _timeout: std::time::Duration,
+    _timeout: Duration,
     _cancelled: impl Fn() -> bool,
 ) -> Result<Option<String>> {
     validate_target(target)?;
@@ -357,6 +355,15 @@ pub fn remote_config_value(
 /// it must not leave a persistent background process behind.
 #[cfg(unix)]
 pub(super) fn command(target: &str, remote_command: &str) -> Command {
+    let mut command = noninteractive();
+    command.args(["-o", "ClearAllForwardings=yes", "--", target]);
+    command.arg(remote_command);
+    command
+}
+
+/// `ssh` with the bridge's connection policy and nothing to connect yet.
+#[cfg(unix)]
+fn noninteractive() -> Command {
     let mut command = Command::new("ssh");
     command.args([
         "-T",
@@ -378,14 +385,56 @@ pub(super) fn command(target: &str, remote_command: &str) -> Command {
         "-o",
         "ForwardX11=no",
         "-o",
-        "ClearAllForwardings=yes",
-        "-o",
         "ControlMaster=no",
+    ]);
+    command
+}
+
+/// The line a [`forward_command`] child prints on stdout once its forward is
+/// bound.
+pub const FORWARD_READY: &str = "herdr-forward-ready";
+
+/// A noninteractive `ssh` child that runs no remote command and forwards
+/// `127.0.0.1:<local>` on this machine to `localhost:<remote>` on `target`,
+/// so a server listening only on the remote host's loopback can be opened
+/// here. Forwarding is this child's whole purpose, so unlike the bridge it
+/// keeps forwardings.
+///
+/// Readiness comes from SSH itself, never from connecting to the port, which
+/// another local process could have bound first: `ExitOnForwardFailure` ends
+/// the child when the bind fails, and OpenSSH runs `LocalCommand` only after
+/// its forwards are set up, so [`FORWARD_READY`] on stdout means this child
+/// holds the port. `ControlPath=none` keeps the forward in this child rather
+/// than in a shared master, so killing the child closes it; a host that needs
+/// an interactively authenticated master cannot be tunnelled. The caller owns
+/// the child: its streams, readiness, and reaping.
+#[cfg(unix)]
+pub fn forward_command(target: &str, local: u16, remote: u16) -> Result<Command> {
+    validate_target(target)?;
+    let mut command = noninteractive();
+    command.args([
+        "-N",
+        "-o",
+        "ControlPath=none",
+        "-o",
+        "PermitLocalCommand=yes",
+        "-o",
+        &format!("LocalCommand=echo {FORWARD_READY}"),
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-L",
+        &format!("127.0.0.1:{local}:localhost:{remote}"),
         "--",
         target,
     ]);
-    command.arg(remote_command);
-    command
+    Ok(command)
+}
+
+/// Windows rejects SSH endpoints, so it has no host to forward from.
+#[cfg(windows)]
+pub fn forward_command(target: &str, _local: u16, _remote: u16) -> Result<Command> {
+    validate_target(target)?;
+    Err(Error::SshUnsupported)
 }
 
 /// A one-shot, noninteractive `ssh` child that runs `script` under the remote
@@ -402,7 +451,7 @@ pub(crate) fn connect(
     target: &str,
     session: &str,
     stop: &AtomicBool,
-) -> Result<(Stream, SshChild)> {
+) -> Result<(Stream, ChildGuard)> {
     validate_target(target)?;
     session_socket(Path::new(""), session)?;
     let (mut stream, child_stream) = Stream::pair()?;
@@ -414,25 +463,51 @@ pub(crate) fn connect(
         .stdout(Stdio::from(OwnedFd::from(child_stream)))
         // Do not inherit a GUI terminal or collect unbounded/secret-bearing diagnostics.
         .stderr(Stdio::null());
-    let child = SshChild(command.spawn()?);
+    let child = ChildGuard(command.spawn()?);
+    handshake(&mut stream, stop)?;
+    Ok((stream, child))
+}
+
+/// Answer the bridge script: skip each incompatible candidate it reports and
+/// accept the first compatible one, which then becomes the client stream.
+/// When every candidate was skipped, the script exits and the first refusal
+/// says why, instead of the closed bridge every other failure also ends in.
+pub(crate) fn handshake(stream: &mut (impl Read + Write), stop: &AtomicBool) -> Result<()> {
     let started = Instant::now();
+    let mut refused = None;
     loop {
-        let status = await_ready(&mut stream, stop, started)?;
+        let status = match await_ready(stream, stop, started) {
+            Err(Error::SshClosed) => return Err(refused.unwrap_or(Error::SshClosed)),
+            result => result?,
+        };
         if let Some(idle_timeout) = compatible_status(&status) {
             stream.write_all(if idle_timeout {
                 b"accept-idle\n"
             } else {
                 b"accept\n"
             })?;
-            return Ok((stream, child));
+            return Ok(());
         }
+        refused = refused.or_else(|| incompatible_status(&status));
         stream.write_all(b"skip\n")?;
     }
 }
 
-/// Windows rejects SSH endpoints before spawning anything. Handing a socket to a
-/// child as its standard streams needs `OwnedFd`, and the anonymous pipes that
-/// replace it there cannot carry the read timeouts the session loop polls on.
+/// Why a candidate's `status client --json` was skipped, if it reported one.
+fn incompatible_status(output: &[u8]) -> Option<Error> {
+    let status = output
+        .split(|b| *b == b'\n')
+        .find_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())?;
+    Some(Error::BridgeIncompatible {
+        generation: status["endpoint_protocol_generation"]
+            .as_u64()
+            .and_then(|generation| u32::try_from(generation).ok()),
+        version: status["version"].as_str().and_then(crate::compat::label),
+    })
+}
+
+/// Windows rejects SSH endpoints before spawning anything: saved SSH hosts are
+/// not offered there yet (WSL distributions are, through `crate::wsl`).
 /// Validation still runs first so a malformed target reports the same error
 /// everywhere.
 #[cfg(windows)]
@@ -440,13 +515,12 @@ pub(crate) fn connect(
     target: &str,
     session: &str,
     _stop: &AtomicBool,
-) -> Result<(Stream, SshChild)> {
+) -> Result<(Stream, ChildGuard)> {
     validate_target(target)?;
     session_socket(Path::new(""), session)?;
     Err(Error::SshUnsupported)
 }
 
-#[cfg(unix)]
 fn compatible_status(output: &[u8]) -> Option<bool> {
     output
         .split(|b| *b == b'\n')
@@ -456,7 +530,6 @@ fn compatible_status(output: &[u8]) -> Option<bool> {
 
 /// Whether one `status client --json` object can serve as this client's
 /// bridge, and if so whether it supports the idle timeout.
-#[cfg(unix)]
 fn compatible(status: &serde_json::Value) -> Option<bool> {
     if status["endpoint_protocol_generation"].as_u64() != Some(1) {
         return None;
@@ -482,7 +555,6 @@ fn compatible(status: &serde_json::Value) -> Option<bool> {
 /// Read the bridge's banner until the ready line, returning what preceded it.
 /// Takes only `Read`: the SSH child's pipe is a `UnixStream`, but the limit,
 /// cancellation and timeout rules here are stream-independent and tested so.
-#[cfg(unix)]
 fn await_ready(
     stream: &mut (impl Read + ?Sized),
     stop: &AtomicBool,
@@ -532,384 +604,7 @@ fn await_ready(
 // The bridge is POSIX-only; its fixtures spawn real shells over a socket pair.
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used)] // Test fixtures only.
-mod tests {
-    use super::*;
-
-    #[test]
-    fn discovery_and_bridge_stdio_work_with_quoted_install_paths() {
-        let root =
-            std::env::temp_dir().join(format!("herdr-client-{}-quoted ' path", std::process::id()));
-        std::fs::create_dir(&root).unwrap();
-        let binary = root.join("herdr");
-        crate::test_executable::write(&binary, r#"#!/bin/sh
-if [ "$1" = status ]; then
-    printf '%s\n' '{"endpoint_protocol_generation":1,"endpoint_capabilities":["surface_interest","presentation_effects_fence","health_check"],"remote_bridge_idle_timeout":true}'
-    exit 0
-fi
-[ "$1" = --session ] && [ "$2" = agents ] && [ "$3" = remote-client-bridge ] && [ "$4" = --idle-timeout-v1 ] || exit 1
-IFS= read -r hello || exit 1
-printf '%s\n' "$hello"
-"#, 0o700).unwrap();
-        let (mut stream, child_stream) = Stream::pair().unwrap();
-        stream.set_read_timeout(Some(POLL)).unwrap();
-        let child = SshChild(
-            Command::new("/bin/sh")
-                .args(["-c", &bridge_command("agents")])
-                .env("PATH", &root)
-                .env("HOME", &root)
-                .stdin(Stdio::from(OwnedFd::from(
-                    child_stream.try_clone().unwrap(),
-                )))
-                .stdout(Stdio::from(OwnedFd::from(child_stream)))
-                .spawn()
-                .unwrap(),
-        );
-        let status = await_ready(&mut stream, &AtomicBool::new(false), Instant::now()).unwrap();
-        assert_eq!(compatible_status(&status), Some(true));
-        stream.write_all(b"accept-idle\nhello\n").unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(3)))
-            .unwrap();
-        let mut response = [0; 6];
-        stream.read_exact(&mut response).unwrap();
-        assert_eq!(&response, b"hello\n");
-        drop(child);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-    #[test]
-    fn probe_classifies_only_finished_output() {
-        let client = r#"{"endpoint_protocol_generation":1,"endpoint_capabilities":["surface_interest","presentation_effects_fence","health_check"]}"#;
-        let old = r#"{"endpoint_protocol_generation":0,"endpoint_capabilities":[]}"#;
-        let running = r#"{"running":true,"version":"1"}"#;
-        let stopped = r#"{"running":false}"#;
-        let probe = |blocks: &[(&str, &str)], done: bool| {
-            let mut output = String::from("motd banner\n");
-            for (client, server) in blocks {
-                output += &format!("{PROBE_CANDIDATE}\n{client}\n{server}\n");
-            }
-            if done {
-                output += PROBE_DONE;
-                output += "\n";
-            }
-            classify_probe(output.as_bytes())
-        };
-        assert_eq!(probe(&[], true), Some(HostProbe::Missing));
-        assert_eq!(probe(&[(old, running)], true), Some(HostProbe::Outdated));
-        assert_eq!(probe(&[(client, stopped)], true), Some(HostProbe::Stopped));
-        // A failed server status leaves an empty line, which is not running.
-        assert_eq!(probe(&[(client, "")], true), Some(HostProbe::Stopped));
-        // The first compatible copy decides, as it does for the bridge.
-        assert_eq!(
-            probe(&[(old, running), (client, running)], true),
-            Some(HostProbe::Running)
-        );
-        assert_eq!(probe(&[(client, running)], false), None);
-        // A running old server does not make a compatible copy look running.
-        assert_eq!(
-            probe(&[(old, running), (client, stopped)], true),
-            Some(HostProbe::Stopped)
-        );
-    }
-
-    #[test]
-    fn probe_script_reports_the_session_server_without_starting_it() {
-        let root = std::env::temp_dir().join(format!("herdr-probe-{}-a ' b", std::process::id()));
-        std::fs::create_dir(&root).unwrap();
-        let binary = root.join("herdr");
-        crate::test_executable::write(&binary, r#"#!/bin/sh
-case "$*" in
-    "status client --json") printf '%s\n' '{"endpoint_protocol_generation":1,"endpoint_capabilities":["surface_interest","presentation_effects_fence","health_check"]}';;
-    "--session work's status server --json") [ -e "$HOME/up" ] && printf '%s\n' '{"running":true}' || printf '%s\n' '{"running":false}';;
-    *) exit 1;;
-esac
-"#, 0o700).unwrap();
-        let run = || {
-            let output = Command::new("/bin/sh")
-                .args(["-c", &probe_command("work's")])
-                .env("PATH", &root)
-                .env("HOME", &root)
-                .output()
-                .unwrap();
-            classify_probe(&output.stdout)
-        };
-        assert_eq!(run(), Some(HostProbe::Stopped));
-        std::fs::write(root.join("up"), "").unwrap();
-        assert_eq!(run(), Some(HostProbe::Running));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn origin_command_reads_only_the_named_repository() {
-        let root =
-            std::env::temp_dir().join(format!("herdr-origin-{}-a ' $(b)", std::process::id()));
-        std::fs::create_dir(&root).unwrap();
-        let git = |args: &[&str]| {
-            assert!(
-                Command::new("git")
-                    .arg("-C")
-                    .arg(&root)
-                    .args(args)
-                    .output()
-                    .unwrap()
-                    .status
-                    .success()
-            );
-        };
-        git(&["init", "-q"]);
-        let git_dir = root.join(".git");
-        let run = || {
-            Command::new("/bin/sh")
-                .args([
-                    "-c",
-                    &config_command(git_dir.to_str().unwrap(), "remote.origin.url"),
-                ])
-                .output()
-                .unwrap()
-        };
-        // No origin: `git config --get` exits 1, which callers read as none.
-        assert_eq!(run().status.code(), Some(1));
-        git(&["remote", "add", "origin", "git@github.com:owner/repo.git"]);
-        let output = run();
-        assert!(output.status.success());
-        assert_eq!(output.stdout, b"git@github.com:owner/repo.git\n");
-        // Both the repository path and branch-derived key are shell quoted.
-        let key = "branch.pr/'$(false).merge";
-        git(&["config", key, "refs/heads/feat/inline-ime-preedit"]);
-        let output = Command::new("/bin/sh")
-            .args(["-c", &config_command(git_dir.to_str().unwrap(), key)])
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        assert_eq!(output.stdout, b"refs/heads/feat/inline-ime-preedit\n");
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn origin_lookup_rejects_relative_or_control_git_dirs_before_ssh() {
-        for dir in ["relative/.git", "/repo\n/.git", ""] {
-            assert!(matches!(
-                remote_origin_url("host", dir, Duration::from_secs(1), || false),
-                Err(Error::InvalidGitDir)
-            ));
-        }
-        assert!(matches!(
-            remote_origin_url(
-                "-oProxyCommand=x",
-                "/repo/.git",
-                Duration::from_secs(1),
-                || false
-            ),
-            Err(Error::InvalidSshTarget)
-        ));
-    }
-
-    #[test]
-    fn destinations_come_from_the_resolved_config_not_the_spelling() {
-        let parsed =
-            parse_destination(b"user penso\nhostname M5Max.Local\nport 2222\nhostkeyalias none\n")
-                .unwrap();
-        assert_eq!(
-            parsed,
-            Destination {
-                user: "penso".into(),
-                host: "m5max.local".into(),
-                port: 2222
-            }
-        );
-        // `hostkeyalias` must not satisfy the `hostname` key.
-        assert_eq!(parse_destination(b"user a\nhostnamex b\nport 22\n"), None);
-        assert_eq!(parse_destination(b"user a\nhostname b\nport x\n"), None);
-        // Spellings of one host agree through the real `ssh -G`.
-        let a = resolve_destination("penso@example.invalid").unwrap();
-        let b = resolve_destination("ssh://penso@EXAMPLE.invalid:22").unwrap();
-        assert_eq!(a, b);
-        assert!(matches!(
-            resolve_destination("-oProxyCommand=x"),
-            Err(Error::InvalidSshTarget)
-        ));
-    }
-
-    #[test]
-    fn probe_rejects_bad_targets_before_spawning_ssh() {
-        assert!(matches!(
-            probe_host("-oProxyCommand=x", "default"),
-            Err(Error::InvalidSshTarget)
-        ));
-        assert!(matches!(
-            probe_host("host", "../escape"),
-            Err(Error::InvalidSession)
-        ));
-    }
-
-    #[test]
-    fn command_is_noninteractive_and_target_is_one_argument() {
-        let command = command("user@host;not-a-command", "agents");
-        let args: Vec<_> = command.get_args().map(|a| a.to_str().unwrap()).collect();
-        for option in [
-            "BatchMode=yes",
-            "StrictHostKeyChecking=yes",
-            "ControlMaster=no",
-        ] {
-            assert!(args.contains(&option));
-        }
-        // The user's SSH config decides agent forwarding and which master to share.
-        assert!(
-            !args
-                .iter()
-                .any(|arg| arg.starts_with("ForwardAgent=") || arg.starts_with("ControlPath="))
-        );
-        assert_eq!(args[args.len() - 3], "--");
-        assert_eq!(args[args.len() - 2], "user@host;not-a-command");
-        assert_eq!(quote("a'b"), "'a'\\''b'");
-        for bad in [
-            "",
-            "-oProxyCommand=bad",
-            "host\ncommand",
-            "user:secret@host",
-        ] {
-            assert!(validate_target(bad).is_err());
-        }
-    }
-    #[test]
-    fn script_runs_under_remote_sh_and_rejects_option_targets() {
-        let command = script_command("user@host", "echo 'hi'").unwrap();
-        let args: Vec<_> = command.get_args().map(|a| a.to_str().unwrap()).collect();
-        assert_eq!(args[args.len() - 3], "--");
-        assert_eq!(args[args.len() - 2], "user@host");
-        assert_eq!(args[args.len() - 1], "/bin/sh -c 'echo '\\''hi'\\'''");
-        assert!(matches!(
-            script_command("-oProxyCommand=bad", "true"),
-            Err(Error::InvalidSshTarget)
-        ));
-    }
-    #[test]
-    fn marker_consumes_banners_not_protocol_bytes() {
-        let (mut stream, mut remote) = Stream::pair().unwrap();
-        remote
-            .write_all(b"banner\n\nherdr-remote-output-ready:1\nWIRE")
-            .unwrap();
-        await_ready(&mut stream, &AtomicBool::new(false), Instant::now()).unwrap();
-        let mut bytes = [0; 4];
-        stream.read_exact(&mut bytes).unwrap();
-        assert_eq!(&bytes, b"WIRE");
-        assert!(await_ready(&mut stream, &AtomicBool::new(true), Instant::now()).is_err());
-    }
-    #[test]
-    fn child_guard_reaps_on_drop() {
-        let child = Command::new("sleep").arg("60").spawn().unwrap();
-        let id = child.id();
-        drop(SshChild(child));
-        assert!(
-            !Command::new("kill")
-                .args(["-0", &id.to_string()])
-                .stderr(Stdio::null())
-                .status()
-                .unwrap()
-                .success()
-        );
-    }
-    #[test]
-    fn discovery_checks_binary_capabilities_before_starting_bridge() {
-        let mut status = serde_json::json!({"endpoint_protocol_generation":1,"endpoint_capabilities":["surface_interest","presentation_effects_fence","health_check"],"remote_bridge_idle_timeout":true});
-        assert_eq!(compatible_status(status.to_string().as_bytes()), Some(true));
-        status["endpoint_capabilities"] = serde_json::json!(["surface_interest", "health_check"]);
-        assert_eq!(compatible_status(status.to_string().as_bytes()), None);
-        assert_eq!(compatible_status(b"banner\n{\"wrapper\":true}\n"), None);
-    }
-
-    /// Yields each scripted result once, so a retryable error and a short read
-    /// are exercised without a socket or a timing guess.
-    struct ScriptedReader(std::collections::VecDeque<io::Result<Vec<u8>>>);
-
-    impl Read for ScriptedReader {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            match self.0.pop_front() {
-                Some(Ok(bytes)) => {
-                    let len = bytes.len().min(buf.len());
-                    buf[..len].copy_from_slice(&bytes[..len]);
-                    Ok(len)
-                }
-                Some(Err(error)) => Err(error),
-                None => Ok(0),
-            }
-        }
-    }
-
-    fn scripted(chunks: Vec<io::Result<Vec<u8>>>) -> ScriptedReader {
-        ScriptedReader(chunks.into())
-    }
-
-    fn bytes(text: &[u8]) -> Vec<io::Result<Vec<u8>>> {
-        text.iter().map(|byte| Ok(vec![*byte])).collect()
-    }
-
-    #[test]
-    fn ready_line_ends_the_banner_and_returns_what_preceded_it() {
-        let mut stream = scripted(
-            bytes(b"one\ntwo\n")
-                .into_iter()
-                .chain(bytes(READY))
-                .collect(),
-        );
-        let output = await_ready(&mut stream, &AtomicBool::new(false), Instant::now()).unwrap();
-        assert_eq!(output, b"one\ntwo\n");
-    }
-
-    #[test]
-    fn banner_output_is_bounded_and_a_closed_stream_is_reported() {
-        let mut flood = scripted(bytes(&b"x".repeat(16385)));
-        assert!(matches!(
-            await_ready(&mut flood, &AtomicBool::new(false), Instant::now()),
-            Err(Error::SshOutputLimit)
-        ));
-        // An exhausted script reads zero bytes, as a closed pipe does.
-        let mut closed = scripted(bytes(b"partial\n"));
-        assert!(matches!(
-            await_ready(&mut closed, &AtomicBool::new(false), Instant::now()),
-            Err(Error::SshClosed)
-        ));
-    }
-
-    #[test]
-    fn cancellation_and_deadline_are_checked_before_reading() {
-        let stop = AtomicBool::new(true);
-        let mut never_read = scripted(vec![Err(io::Error::other("must not be read"))]);
-        assert!(matches!(
-            await_ready(&mut never_read, &stop, Instant::now()),
-            Err(Error::SshCancelled)
-        ));
-        let expired = Instant::now() - Duration::from_secs(16);
-        let mut also_never_read = scripted(vec![Err(io::Error::other("must not be read"))]);
-        assert!(matches!(
-            await_ready(&mut also_never_read, &AtomicBool::new(false), expired),
-            Err(Error::SshTimeout)
-        ));
-    }
-
-    #[test]
-    fn retryable_read_errors_do_not_end_the_banner() {
-        let mut stream = scripted(
-            [
-                io::ErrorKind::WouldBlock,
-                io::ErrorKind::TimedOut,
-                io::ErrorKind::Interrupted,
-            ]
-            .into_iter()
-            .map(|kind| Err(io::Error::from(kind)))
-            .chain(bytes(READY))
-            .collect(),
-        );
-        assert_eq!(
-            await_ready(&mut stream, &AtomicBool::new(false), Instant::now()).unwrap(),
-            Vec::<u8>::new()
-        );
-        let mut fatal = scripted(vec![Err(io::Error::other("broken pipe"))]);
-        assert!(matches!(
-            await_ready(&mut fatal, &AtomicBool::new(false), Instant::now()),
-            Err(Error::Io(_))
-        ));
-    }
-}
+mod tests;
 
 // Windows never spawns the bridge, but a rejected SSH endpoint must still be
 // rejected for the same reasons and in the same order as on POSIX.
