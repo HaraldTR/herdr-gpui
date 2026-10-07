@@ -312,17 +312,11 @@ impl HerdrWindow {
                                     cx.stop_propagation();
                                 })
                                 // Split, a tab closes in its group alone, as
-                                // an editor's does; only the last group's
-                                // close reaches Herdr, through its
-                                // confirmation.
+                                // an editor's does.
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
-                                    if this.is_split() {
-                                        let pick = Pick::Herdr(close_id.clone());
-                                        this.close_in_group(slot.id, vec![pick], window, cx);
-                                    } else {
-                                        this.open_tab_close(&close_id, window, cx);
-                                    }
+                                    let pick = Pick::Herdr(close_id.clone());
+                                    this.close_strip_tab(slot.id, pick, window, cx);
                                 })),
                         )
                         .on_mouse_down(
@@ -496,6 +490,25 @@ impl HerdrWindow {
             })
     }
 
+    /// Closes a strip's tab as its close button does: split, in its group
+    /// alone; otherwise a page at once and a Herdr tab through its
+    /// confirmation.
+    pub(crate) fn close_strip_tab(
+        &mut self,
+        group: GroupId,
+        pick: Pick,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_split() {
+            return self.close_in_group(group, vec![pick], window, cx);
+        }
+        match pick {
+            Pick::Herdr(tab) => self.open_tab_close(&tab, window, cx),
+            Pick::Page(id) => self.close_browser_tab(id, window, cx),
+        }
+    }
+
     /// A tab as the strip places it: armed to lift for reordering, slid
     /// aside for a drop in preview, or carried over the strip, grown so it
     /// reads as held.
@@ -516,6 +529,7 @@ impl HerdrWindow {
             .and_then(|drag| drag.carried.as_ref())
             .and_then(|(carried, grown)| (*carried == pick).then_some(*grown));
         let press = pick.clone();
+        let close = pick.clone();
         let tab = tab
             .on_mouse_down(
                 MouseButton::Left,
@@ -523,6 +537,14 @@ impl HerdrWindow {
                     if event.click_count == 1 {
                         this.press_tab(slot.id, &press, event.position, cx);
                     }
+                }),
+            )
+            // Middle-click closes, as a browser's tabs do.
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.close_strip_tab(slot.id, close.clone(), window, cx);
                 }),
             )
             .when(shift != 0., |tab| tab.relative().left(px(shift)));
