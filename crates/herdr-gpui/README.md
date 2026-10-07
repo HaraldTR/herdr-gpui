@@ -1685,7 +1685,12 @@ Windows setup) nothing is saved and the window says so.
   as its defaults do, because the daemon computes them only then.
 - Agents panel header ends with its sort, `grouped` or `priority`, which a
   click flips; an active agent view names itself there instead. Client-local
-  and persisted beside the sidebar width, as in the terminal client.
+  and persisted beside the sidebar width, as in the terminal client. With
+  several hosts listed, `grouped` lists each host's agents in turn, while
+  `priority` orders them all together as the terminal client does: a
+  disconnected host's after connected ones, then attention, then the most
+  recent change on any host. While any host shows an agent view, each host
+  keeps its own order.
 - Resizable sidebar with width persisted per local daemon socket, shared across
   host groups. Drag the divider between Spaces and Agents up or down to resize
   their sections; double-click it to restore an even split. The split is saved

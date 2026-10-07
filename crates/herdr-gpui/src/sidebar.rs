@@ -44,7 +44,7 @@ pub(crate) use metrics::LABEL_WIDTH;
 
 pub(crate) use view::cached as cached_view;
 
-use agents::{agents_sort, sorted_agents};
+use agents::agents_sort;
 use metrics::*;
 use row::{RowBadge, first_text};
 use workspaces::visible_workspace_entries;
