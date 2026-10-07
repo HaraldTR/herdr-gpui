@@ -147,11 +147,13 @@ impl SettingsWindow {
         }
         self.controls.initialized = true;
         let text_system = cx.text_system().clone();
+        let installed = self.installed_fonts.clone();
         let discovery = cx.background_executor().spawn(async move {
-            let mut names: Vec<_> = text_system
-                .all_font_names()
-                .into_iter()
+            let mut names: Vec<_> = installed
+                .get_or_init(|| text_system.all_font_names())
+                .iter()
                 .filter(|name| !name.trim().is_empty())
+                .cloned()
                 .collect();
             names.sort_by_cached_key(|name| (name.to_lowercase(), name.clone()));
             names.dedup();
@@ -386,8 +388,11 @@ impl SettingsWindow {
             .child(label)
     }
 
+    /// Whether Herdr's shared settings can be edited at all. Busy is not part
+    /// of it: saves and loads refuse overlapping work themselves, and a control
+    /// that changes look for their few milliseconds flickers.
     fn controls_shared_ready(&self) -> bool {
-        cfg!(unix) && self.shared.is_some() && !self.busy() && self.error.is_none()
+        cfg!(unix) && self.shared.is_some() && self.error.is_none()
     }
 
     pub(super) fn render_controls(&self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -619,7 +624,7 @@ impl SettingsWindow {
                 }
                 Ok(())
             },
-            Self::loader(cx),
+            self.loader(cx),
             cx,
         );
     }
@@ -658,28 +663,20 @@ impl SettingsWindow {
         self.control_card("Browser skill")
             .child(self.control_row("Status", if installed { "Installed, kept up to date" } else { "Not installed" }))
             .child(self.control_note("Teaches local agents to use browser tabs and page notes. Installs in existing ~/.claude and ~/.agents directories; removal deletes only app-managed copies."))
-            .child(self.control_choice(id, label, false, !self.busy())
+            .child(self.control_choice(id, label, false, true)
                 .debug_selector(move || id.into())
-                .when(!self.busy(), |button| button.on_click(cx.listener(move |this, _, _, cx| this.save_skill(choice, cx)))))
+                .on_click(cx.listener(move |this, _, _, cx| this.save_skill(choice, cx))))
     }
 
     fn render_general_controls(&self, cx: &mut Context<Self>) -> Div {
-        let ready = !self.busy();
         let general = self
             .control_card("Interface")
             .child(
-                self.control_switch(
-                    "settings-usage",
-                    "Show usage",
-                    self.config.usage.show,
-                    ready,
-                )
-                .when(ready, |button| {
-                    button.on_click(cx.listener(|this, _, _, cx| {
+                self.control_switch("settings-usage", "Show usage", self.config.usage.show, true)
+                    .on_click(cx.listener(|this, _, _, cx| {
                         let show = !this.config.usage.show;
                         this.save_native(move || Config::save_usage_visibility(show), cx);
-                    }))
-                }),
+                    })),
             )
             .child(self.preference_switch(
                 "settings-system-load",
@@ -736,10 +733,8 @@ impl SettingsWindow {
                 .child(div().min_w_0().child(self.controls.local_path.clone()))
                 .child(self.control_note("Shared Herdr configuration"))
                 .child(div().min_w_0().child(self.shared.as_ref().map(|shared| shared.path.display().to_string()).unwrap_or_else(|| "Unavailable".into())))
-                .child(self.control_choice("settings-reload", "Reload configuration", false, ready)
-                    .when(ready, |button| button.on_click(cx.listener(|this, _, _, cx| {
-                        this.reload(cx);
-                    }))))
+                .child(self.control_choice("settings-reload", "Reload configuration", false, true)
+                    .on_click(cx.listener(|this, _, _, cx| this.reload(cx))))
                 .child(self.control_note("Saved file edits reload automatically. Reloading GUI settings does not reload the daemon.")))
     }
 
@@ -973,15 +968,13 @@ impl SettingsWindow {
                     "settings-show-agents",
                     "Show agents",
                     self.config.show_agents,
-                    !self.busy(),
+                    true,
                 )
                 .debug_selector(|| "settings-show-agents".into())
-                .when(!self.busy(), |button| {
-                    button.on_click(cx.listener(|this, _, _, cx| {
-                        let show = !this.config.show_agents;
-                        this.save_native(move || Config::save_show_agents(show), cx);
-                    }))
-                }),
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let show = !this.config.show_agents;
+                    this.save_native(move || Config::save_show_agents(show), cx);
+                })),
             )
             .child(self.sidebar_gap_control(cx))
     }

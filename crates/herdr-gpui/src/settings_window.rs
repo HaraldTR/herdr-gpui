@@ -199,6 +199,12 @@ struct SettingsWindow {
     _source: Option<Subscription>,
     _appearance: Option<Subscription>,
     _watch: Option<Task<()>>,
+    /// The config files as our last save left them, for the watcher to accept
+    /// so the save's own write does not trigger a second reload.
+    saved_sample: Option<persistence::Sample>,
+    /// Enumerating system fonts takes hundreds of milliseconds, so each
+    /// Settings window does it once rather than on every load.
+    installed_fonts: std::sync::Arc<std::sync::OnceLock<Vec<String>>>,
     load_revision: u64,
     theme_revision: u64,
     theme_intent: Option<themes::ThemeIntent>,
@@ -279,6 +285,8 @@ impl SettingsWindow {
             _source: subscription,
             _appearance: None,
             _watch: None,
+            saved_sample: None,
+            installed_fonts: Default::default(),
             load_revision: 0,
             theme_revision: 0,
             theme_intent: None,
@@ -726,7 +734,7 @@ impl Render for SettingsWindow {
                         ),
                     )
                     .child(
-                        self.control_choice("settings-footer-reload", "Reload", false, !self.busy())
+                        self.control_choice("settings-footer-reload", "Reload", false, true)
                             .debug_selector(|| "settings-footer-reload".into())
                             .flex_none()
                             .px(px(10.))
