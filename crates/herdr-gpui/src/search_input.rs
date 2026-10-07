@@ -10,7 +10,7 @@ use gpui::{
 
 use crate::config::{Config, FontConfig, Theme};
 use crate::fonts::StyledFont;
-use crate::{actions, input::ElementInputHandler};
+use crate::{actions, input::ViewInputHandler};
 
 pub struct Changed;
 
@@ -528,7 +528,7 @@ impl Render for SearchInput {
                             let origin = point(bounds.left() - input.scroll, bounds.top());
                             window.handle_input(
                                 &input.focus,
-                                ElementInputHandler::new(bounds, cx.entity()),
+                                ViewInputHandler::new(bounds, cx.entity()),
                                 cx,
                             );
                             window.with_content_mask(Some(ContentMask { bounds }), |window| {
