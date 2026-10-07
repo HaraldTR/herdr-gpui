@@ -19,6 +19,7 @@ use herdr_client::protocol::{
     AgentStatus, ClientShellAgent, ClientShellSnapshot, ClientShellWorkspace,
 };
 
+mod agent_order;
 mod hierarchy;
 mod row_text;
 mod statuses;

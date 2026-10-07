@@ -1691,7 +1691,12 @@ Windows setup) nothing is saved and the window says so.
   right-click for its menu.
 - Agents panel header ends with its sort, `grouped` or `priority`, which a
   click flips; an active agent view names itself there instead. Client-local
-  and persisted beside the sidebar width, as in the terminal client.
+  and persisted beside the sidebar width, as in the terminal client. With
+  several hosts listed, `grouped` lists each host's agents in turn, while
+  `priority` orders them all together as the terminal client does: a
+  disconnected host's after connected ones, then attention, then the most
+  recent change on any host. While any host shows an agent view, each host
+  keeps its own order.
 - Resizable sidebar with width persisted per local daemon socket, shared across
   host groups. Drag the divider between Spaces and Agents up or down to resize
   their sections; double-click it to restore an even split. The split is saved
@@ -1940,7 +1945,7 @@ Windows setup) nothing is saved and the window says so.
 - Cmd-Alt-N runs **Open Notification Target**, also available in Terminal and the
   command palette. It uses the visible card's safe click path; stale, targetless,
   queued, or menu-hidden cards do not navigate or change endpoint selection.
-- Cmd-1 through Cmd-9 focuses the corresponding numbered tab in the current
+- Cmd-1 through Cmd-9 focuses the tab at that position in the current
   workspace. Cmd-Alt-Left/Right/Up/Down focuses a pane in that direction;
   Cmd-Alt-] / Cmd-Alt-[ cycles next/previous pane within the current tab.
   Cmd-Shift-Enter toggles focused pane zoom. Cmd-K clears the focused pane's
@@ -2354,4 +2359,36 @@ inside the native paint callback. The first failure survives subsequent redraws.
 An intentionally wrong-width native fixture verifies exit code 1, useful diagnostics,
 and absence of an abort signal. Sidebar and notification drivers exit explicitly
 so AppKit termination cannot turn a failure into exit code 0.
+
+GPUI 0.3.6's Wayland window retains its platform input handler during deferred
+native cleanup. `ElementInputHandler` holds a strong entity reference, which can
+therefore outlive GPUI's shutdown leak check and cause an `Exited with leaked
+handles` panic in leak-detection builds. This was reproduced both before and
+after [PR #177](https://github.com/penso/herdr-gpui/pull/177#issuecomment-5998314856).
+
+On Linux, the client stores a weak reference in each terminal, dialog, and search
+input handler. GPUI picks Wayland or X11 at runtime, so this applies to both
+backends, although only Wayland shutdown has been observed to leak. The leak
+check exists only in test and `leak-detection` builds; release builds never
+panic, but they use the same handler so tests exercise what ships. The UI owner keeps the view alive; each input callback upgrades
+the weak reference for its duration and delegates to GPUI's existing handler.
+After the view is released, callbacks return an empty result or do nothing.
+This addresses the shutdown ownership problem within the client while keeping
+the pinned dependencies and leak detection intact. It avoids carrying a vendored
+platform implementation while an upstream teardown fix is unavailable. Windows
+and macOS keep GPUI's original handlers. Revisit the workaround when the pinned
+GPUI release drops its Wayland input handler before checking for leaked entities.
+
+With `WAYLAND_DISPLAY` pointing to the active compositor, exercise normal
+shutdown with terminal, dialog, and search focus:
+
+```sh
+cargo test --locked -p herdr-gpui --all-features --test live_gui native_input_shutdown_ -- --ignored --nocapture --test-threads=1
+```
+
+This daemon-free fixture leaves each handler installed and quits normally with
+leak detection enabled. Headless tests also cover Unicode composition, selection,
+paste, and callbacks after the view is released; they do not verify a desktop
+IME's candidate UI.
+
 See the root README for the full verification scope and remaining limitations.

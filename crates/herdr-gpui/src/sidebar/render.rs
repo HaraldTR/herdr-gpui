@@ -3,16 +3,16 @@
 //! caches only.
 
 use super::{
-    DEVICE_FOOTER_HEIGHT, STATUS_WIDTH, SidebarDrag, agent_name,
-    agents::{Indicators, agent_place, state_label, status_text},
+    DEVICE_FOOTER_HEIGHT, STATUS_WIDTH, SidebarDrag,
+    agents::Indicators,
     agents_sort,
-    cell::{AgentRow, Cell, Fold, RowContext, RowData, WorkspaceRow, layout_for},
+    cell::{Cell, Fold, RowContext, RowData, WorkspaceRow, layout_for},
     label_text,
     layout::{self, SidebarLook},
     line_height,
     reorder::{self, Plan},
     row::{RowIcon, RowLift, RowTree},
-    sidebar_width, sorted_agents, sticky,
+    sidebar_width, sticky,
     tokens::{self, SpaceContext},
     visible_workspace_entries,
     workspaces::{displayed_workspace_status, workspace_badge, workspace_label},
@@ -23,6 +23,8 @@ use crate::{
     fonts::StyledFont,
 };
 use gpui::{prelude::*, *};
+
+mod agent_rows;
 
 impl HerdrWindow {
     pub(crate) fn render_sidebar(
@@ -42,8 +44,6 @@ impl HerdrWindow {
         let content_x = look.content_x();
         let view = cx.entity().downgrade();
         let font = &self.config.sidebar;
-        let agents_custom = self.config.usage.inline
-            && self.config.sidebar_layout.agents != crate::config::AgentLayout::default();
         let spaces_custom = self.config.usage.inline
             && self.config.sidebar_layout.spaces != crate::config::SpaceLayout::default();
         let theme = &self.theme;
@@ -452,67 +452,15 @@ impl HerdrWindow {
                     spaces.child(element)
                 };
             }
-            if !self.config.show_agents {
-                continue;
+            // Agent rows come after every host: the panel interleaves them.
+            // Only a host the panel lists can make the view a filtered one.
+            if self.config.show_agents && endpoint.enabled {
+                filtered |= snapshot.agent_view_label.is_some();
             }
-            filtered |= snapshot.agent_view_label.is_some();
-            for agent in sorted_agents(snapshot, self.agent_sort) {
-                let lines = if agents_custom {
-                    let Some(lines) = tokens::agent_rows(
-                        &self.config.sidebar_layout.agents,
-                        agent,
-                        snapshot,
-                        row_cx.host,
-                    ) else {
-                        continue;
-                    };
-                    lines
-                } else {
-                    Vec::new()
-                };
-                if selected && agent.focused {
-                    highlighted[1] = Some(agent_count);
-                }
-                let gap = if agents_custom && agent_count > 0 {
-                    f32::from(self.config.sidebar_layout.agents.row_gap) * line_height(font)
-                } else {
-                    0.
-                };
-                agent_count += 1;
-                let id = agent.pane_id.clone();
-                let navigate_endpoint = endpoint_id.clone();
-                agents = agents.child(
-                    Cell::new(
-                        rows,
-                        RowData::Agent(AgentRow {
-                            key: format!("agent-{id}"),
-                            name: agent_name(agent),
-                            icon: crate::icons::AgentIcon::from_identity(agent.agent.as_deref()),
-                            status: agent.agent_status,
-                            place: agent_place(agent, snapshot),
-                            status_text: self
-                                .config
-                                .sidebar_layout
-                                .agents
-                                .shows_status_text(agent.agent.as_deref())
-                                .then(|| state_label(agent, status_text(agent.agent_status))),
-                            lines,
-                        }),
-                        &row_cx,
-                    )
-                    .selected(selected && agent.focused)
-                    .row()
-                    .when(gap > 0., |row| row.mt(px(gap)))
-                    .id(SharedString::from(format!("agent-{endpoint_id}-{id}")))
-                    .when(multi, |row| {
-                        row.debug_selector(|| format!("agent-{endpoint_id}-{id}"))
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.navigate_endpoint(&navigate_endpoint, NavigationTarget::Pane(&id), cx);
-                        window.focus(&this.focus, cx);
-                    })),
-                );
-            }
+        }
+        if self.config.show_agents {
+            (agents, agent_count, highlighted[1]) =
+                self.append_agent_rows(agents, indicators, look, width, cx);
         }
         if sliding {
             window.request_animation_frame();

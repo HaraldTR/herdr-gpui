@@ -212,17 +212,17 @@ impl Git {
     /// row shows nothing rather than claiming a clean tree. Pure cache read:
     /// rendering never schedules Git work.
     pub fn dirty(&self, repo_key: &str, branch: &str) -> Option<bool> {
-        if self
-            .input
-            .as_ref()
-            .is_some_and(|input| input.repo_key == repo_key && input.branch == branch)
-            && let Some(status) = self.status
+        if self.input.as_ref().is_some_and(|input| {
+            input.repo_key.as_deref() == Some(repo_key) && input.branch == branch
+        }) && let Some(status) = self.status
         {
             return Some(status.dirty());
         }
         self.probes
             .iter()
-            .find(|probe| probe.input.repo_key == repo_key && probe.input.branch == branch)
+            .find(|probe| {
+                probe.input.repo_key.as_deref() == Some(repo_key) && probe.input.branch == branch
+            })
             .and_then(|probe| probe.dirty)
     }
 

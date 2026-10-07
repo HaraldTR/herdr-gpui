@@ -1,7 +1,7 @@
 use super::{Page, WorkspaceMenuAction};
 use crate::{
     HerdrWindow,
-    pull_request::{Input, Origin, Outcome, ReviewDecision, repository_input},
+    pull_request::{Input, Origin, Outcome, ReviewDecision, workspace_input},
 };
 use gpui::{prelude::*, *};
 use herdr_client::protocol::*;
@@ -30,16 +30,22 @@ impl HerdrWindow {
                 .target
                 .as_ref()
                 .ok_or(crate::Error::StaleWorkspace)?;
-            if target.worktree.is_none() || target.branch.as_deref().is_none_or(str::is_empty) {
+            let origin = self.pr_origin();
+            // Only this machine can stand a workspace's directory in for
+            // missing daemon metadata; see `workspace_input`.
+            if target.branch.as_deref().is_none_or(str::is_empty)
+                || (target.worktree.is_none() && origin != Some(Origin::Local))
+            {
                 return Err(crate::Error::PrMetadata);
             }
-            if self.pr_origin().is_none() {
-                return Err(crate::Error::PrUntrustedEndpoint);
-            }
+            let origin = origin.ok_or(crate::Error::PrUntrustedEndpoint)?;
             if !self.workspace_pr_target_current() {
                 return Err(crate::Error::StaleWorkspace);
             }
-            repository_input(target.worktree.as_ref(), target.branch.as_deref())
+            let workspace = self
+                .menu_target_workspace()
+                .ok_or(crate::Error::StaleWorkspace)?;
+            workspace_input(workspace, &origin)
         })();
         match result {
             Ok(input) => {
@@ -91,16 +97,23 @@ impl HerdrWindow {
                     )
                 })
             })
-            && self.menu.target.as_ref().is_some_and(|target| {
-                self.live.snapshot.as_ref().is_some_and(|snapshot| {
-                    snapshot.boot_id == target.boot_id
-                        && snapshot.workspaces.iter().any(|workspace| {
-                            workspace.workspace_id == target.id
-                                && workspace.worktree == target.worktree
-                                && workspace.branch == target.branch
-                        })
-                })
-            })
+            && self.menu_target_workspace().is_some()
+    }
+
+    /// The menu's workspace as the live snapshot reports it, while it still
+    /// has the repository and branch the menu was opened with.
+    pub(super) fn menu_target_workspace(&self) -> Option<&ClientShellWorkspace> {
+        let target = self.menu.target.as_ref()?;
+        let snapshot = self
+            .live
+            .snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.boot_id == target.boot_id)?;
+        snapshot.workspaces.iter().find(|workspace| {
+            workspace.workspace_id == target.id
+                && workspace.worktree == target.worktree
+                && workspace.branch == target.branch
+        })
     }
 
     pub(crate) fn update_workspace_pr(&mut self) -> bool {
@@ -114,10 +127,10 @@ impl HerdrWindow {
             }
             return changed;
         }
-        let eligible = self.pr_origin().is_some()
-            && self.live.status.is_connected()
-            && self.live.snapshot.is_some();
-        if eligible {
+        let origin = self
+            .pr_origin()
+            .filter(|_| self.live.status.is_connected() && self.live.snapshot.is_some());
+        if let Some(origin) = origin {
             self.sync_pr_scope();
             let now = std::time::Instant::now();
             if let Some(snapshot) = &self.live.snapshot {
@@ -131,11 +144,8 @@ impl HerdrWindow {
                     self.menu.pr_snapshot = Some(Arc::downgrade(snapshot));
                     self.menu.pr_cache.retain(|input| {
                         snapshot.workspaces.iter().any(|workspace| {
-                            workspace
-                                .worktree
-                                .as_ref()
-                                .is_some_and(|tree| tree.key == input.repo_key)
-                                && workspace.branch.as_ref() == Some(&input.branch)
+                            workspace_input(workspace, &origin)
+                                .is_ok_and(|candidate| &candidate == input)
                         })
                     });
                 }
@@ -146,7 +156,8 @@ impl HerdrWindow {
                         .as_ref()
                         .filter(|_| self.menu.page == Some(Page::Workspace))
                         .map(|target| target.id.as_str());
-                    let inputs = workspace_pr_inputs(snapshot, priority, self.menu.pr_cache.cursor);
+                    let inputs =
+                        workspace_pr_inputs(snapshot, &origin, priority, self.menu.pr_cache.cursor);
                     self.menu.pr_cache.schedule(inputs, now);
                 }
             }
@@ -401,12 +412,10 @@ impl HerdrWindow {
         &mut self,
         value: crate::pull_request::PullRequest,
     ) -> crate::Result<()> {
-        let target = self
-            .menu
-            .target
-            .as_ref()
+        let workspace = self
+            .menu_target_workspace()
             .ok_or(crate::Error::StaleWorkspace)?;
-        let input = repository_input(target.worktree.as_ref(), target.branch.as_deref())?;
+        let input = workspace_input(workspace, &Origin::Local)?;
         self.menu.github = crate::github::Auth::connected_fixture();
         self.live.local_daemon_peer = true;
         self.sync_pr_scope();
@@ -433,6 +442,7 @@ impl HerdrWindow {
 
 fn workspace_pr_inputs<'a>(
     snapshot: &'a ClientShellSnapshot,
+    origin: &'a Origin,
     open: Option<&'a str>,
     cursor: usize,
 ) -> impl Iterator<Item = Input> + 'a {
@@ -448,9 +458,7 @@ fn workspace_pr_inputs<'a>(
             cursor.is_multiple_of(2) && Some(workspace.workspace_id.as_str()) == priority
         })
         .chain(snapshot.workspaces.iter().cycle().skip(start).take(count))
-        .filter_map(|workspace| {
-            repository_input(workspace.worktree.as_ref(), workspace.branch.as_deref()).ok()
-        })
+        .filter_map(|workspace| workspace_input(workspace, origin).ok())
 }
 
 #[cfg(test)]

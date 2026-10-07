@@ -6,6 +6,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+mod config_watch;
 mod layout_drafts;
 mod load_save;
 mod navigation_resize;
