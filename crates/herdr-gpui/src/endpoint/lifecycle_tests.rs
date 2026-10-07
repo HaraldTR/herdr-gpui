@@ -19,6 +19,7 @@ use std::{
 mod close_pane;
 mod endpoint_switch;
 mod focus_fences;
+mod horizontal_wheel;
 mod image_paste;
 mod image_paste_native;
 mod input_gap;
