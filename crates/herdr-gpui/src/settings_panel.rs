@@ -154,16 +154,23 @@ impl HerdrWindow {
     }
 
     /// Shows the side of a `light:…,dark:…` theme for the system appearance.
-    /// Theme files are read on the background executor; a result is dropped
-    /// when the theme or appearance changed while it loaded.
     pub(crate) fn apply_system_theme(&mut self, cx: &mut Context<Self>) {
-        if !ThemeName::follows_system(&self.config.theme)
-            || self.menu.page == Some(crate::menu::Page::Themes)
+        if ThemeName::follows_system(&self.config.theme) {
+            self.reload_theme(cx);
+        }
+    }
+
+    /// Reads the configured theme again, for the system appearance. Theme
+    /// files are read on the background executor; a result is dropped when
+    /// the theme or appearance changed while it loaded. Returns `false`
+    /// without reading while the picker or Settings owns the theme.
+    pub(crate) fn reload_theme(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.menu.page == Some(crate::menu::Page::Themes)
             || self.theme_save_in_flight()
             // Settings applies its own draft to every window.
             || crate::settings_window::theme_pending(cx)
         {
-            return;
+            return false;
         }
         let light = crate::app::light_appearance(cx);
         let config = self.config.clone();
@@ -176,8 +183,8 @@ impl HerdrWindow {
                 let (config, theme) = match result {
                     Ok(loaded) => loaded,
                     Err(error) => {
-                        tracing::warn!(%error, "Could not load the theme for the system appearance");
-                        this.local_error = Some(format!("Apply system appearance: {error}"));
+                        tracing::warn!(%error, "Could not reload the theme");
+                        this.local_error = Some(format!("Reload theme: {error}"));
                         cx.notify();
                         return;
                     }
@@ -204,6 +211,7 @@ impl HerdrWindow {
             });
         })
         .detach();
+        true
     }
 
     fn save_shared_settings(&mut self, edit: Edit, cx: &mut Context<Self>) {
