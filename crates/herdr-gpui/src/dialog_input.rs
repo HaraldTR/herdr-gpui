@@ -2,7 +2,7 @@ use gpui::{prelude::*, *};
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::HerdrWindow;
+use super::{HerdrWindow, input::ElementInputHandler};
 
 // Byte offsets internally; only the platform input boundary uses UTF-16.
 #[derive(Default)]

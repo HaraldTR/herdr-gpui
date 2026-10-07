@@ -2348,4 +2348,32 @@ inside the native paint callback. The first failure survives subsequent redraws.
 An intentionally wrong-width native fixture verifies exit code 1, useful diagnostics,
 and absence of an abort signal. Sidebar and notification drivers exit explicitly
 so AppKit termination cannot turn a failure into exit code 0.
+
+GPUI 0.3.6's Wayland window retains its platform input handler during deferred
+native cleanup. `ElementInputHandler` holds a strong entity reference, which can
+therefore outlive GPUI's shutdown leak check and cause an `Exited with leaked
+handles` panic in leak-detection builds. This was reproduced both before and
+after [PR #177](https://github.com/penso/herdr-gpui/pull/177#issuecomment-5998314856).
+
+On Linux, the client stores a weak reference in each terminal, dialog, and search
+input handler. The UI owner keeps the view alive; each input callback upgrades
+the weak reference for its duration and delegates to GPUI's existing handler.
+After the view is released, callbacks return an empty result or do nothing.
+This addresses the shutdown ownership problem within the client while keeping
+the pinned dependencies and leak detection intact. It avoids carrying a vendored
+platform implementation while an upstream teardown fix is unavailable. Windows
+and macOS keep GPUI's original handlers. Revisit the workaround when the pinned
+GPUI release drops its Wayland input handler before checking for leaked entities.
+
+With `WAYLAND_DISPLAY` pointing to the active compositor, exercise normal
+shutdown with terminal, dialog, and search focus:
+
+```sh
+cargo test --locked -p herdr-gpui --all-features --test live_gui native_input_shutdown -- --ignored --nocapture --test-threads=1
+```
+
+This daemon-free fixture leaves each handler installed and quits normally with
+leak detection enabled. Headless tests also cover Unicode composition, selection,
+paste, and callbacks after the view is released; they do not verify a desktop
+IME's candidate UI.
 See the root README for the full verification scope and remaining limitations.

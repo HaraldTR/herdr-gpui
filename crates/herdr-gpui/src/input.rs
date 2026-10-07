@@ -6,6 +6,13 @@ use gpui::*;
 use herdr_client::protocol::ClientPaneInputEvent;
 use std::ops::Range;
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(not(target_os = "linux"))]
+pub(crate) use gpui::ElementInputHandler;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::WeakInputHandler as ElementInputHandler;
+
 impl EntityInputHandler for HerdrWindow {
     fn text_for_range(
         &mut self,
