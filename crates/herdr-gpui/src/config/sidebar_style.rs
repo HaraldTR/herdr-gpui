@@ -7,7 +7,10 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 
 /// Spacing the config file sets over the active layout's numbers. Unset keys
-/// keep the preset's value, so a layout still looks like itself.
+/// keep the preset's value, so a layout still looks like itself. The card
+/// layouts, superset and orca, copy another app's rows and read only the keys
+/// that fit them: `row_padding` has no effect there, and orca keeps its own
+/// gap too.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SidebarOverrides {
     /// Pixels each nesting level steps in: workspaces under their host,

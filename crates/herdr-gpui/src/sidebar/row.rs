@@ -339,6 +339,11 @@ pub(super) fn row(
         } else {
             layout.child_indent() + extra_status_width
         };
+    // Room for tree lines between the parent's label column and this row's own
+    // dot: `child_indent - STATUS_WIDTH - gap`. A configured indent or gap can
+    // leave none, and then no lines are drawn rather than a box of negative width.
+    let tree_width = padding + indent - cx.nest - layout.tree_gutter() - extra_status_width;
+    let draw_tree = tree != RowTree::None && look.density.tree_lines && tree_width > 0.;
     let arrow_reserve = if reserve_arrow { ARROW_RESERVE } else { 0. };
     let arrow_absent = arrow.is_none();
     let status_gutter = if show_status { status_width + gap } else { 0. };
@@ -422,19 +427,15 @@ pub(super) fn row(
         .map(|row| look.mark(row, key, state, theme))
         // Tree lines run in the indent the row already reserves, so a child is
         // tied to its parent without box-drawing glyphs in the label.
-        .when(tree != RowTree::None && look.density.tree_lines, |row| {
+        .when(draw_tree, |row| {
             let (color, font) = (theme.muted, font.clone());
             let gutter = cx.nest + look.tree_gutter() + extra_status_width;
             row.child(
                 div()
                     .debug_selector(|| format!("tree-{key}"))
                     .absolute()
-                    // Between the parent's label column and this row's own dot.
                     .left(px(gutter))
-                    .w(px(padding + indent
-                        - cx.nest
-                        - layout.tree_gutter()
-                        - extra_status_width))
+                    .w(px(tree_width))
                     .top_0()
                     .bottom_0()
                     .child(
@@ -605,7 +606,9 @@ pub(super) fn row(
         // a reserved-but-empty column keeps every badge on the same right edge.
         .when_some(arrow, |row, arrow| row.child(arrow))
         .when(arrow_absent && reserve_arrow, |row| {
-            row.child(div().w(px(ARROW_RESERVE - gap)).flex_none())
+            // The row's gap already covers part of the reserve; a wide gap
+            // covers all of it.
+            row.child(div().w(px((ARROW_RESERVE - gap).max(0.))).flex_none())
         })
         .when_some(badge, |row, badge| {
             row.child(badge.element(key, badge_width, font, theme, &layout))

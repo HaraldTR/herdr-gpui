@@ -193,7 +193,9 @@ size = 12
 # left out keeps the layout's own value. The indent is how far each nesting
 # level steps in: workspaces under their host, worktrees under their
 # repository. Bands: indent 0..=48, row_padding 0..=16, gap 0..=32,
-# host_gap 0..=48.
+# host_gap 0..=48. The superset and orca layouts copy another app's rows,
+# so row_padding does not reach them: superset spaces its rows by gap, and
+# orca keeps its own gap and padding. Both take indent and host_gap.
 # indent = 14
 # row_padding = 2
 # gap = 6
